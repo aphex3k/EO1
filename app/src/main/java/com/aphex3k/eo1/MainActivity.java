@@ -488,7 +488,7 @@ public class MainActivity extends AppCompatActivity {
             if (!isInQuietHours) {
                 // Determine the desired brightness range
                 float maxBrightness = 1.0f; // Maximum brightness value (0 to 1)
-                float minBrightness = 0.0f; // Minimum brightness value (0 to 1)
+                float minBrightness = 0.5f; // Minimum brightness value (0 to 1)
 
                 // Map the light sensor value (0 to 25) to the desired brightness range (0 to 1)
                 float brightness = (lightValue / 30f) * (maxBrightness - minBrightness) + minBrightness;
