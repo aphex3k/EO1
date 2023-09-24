@@ -84,7 +84,6 @@ public class MainActivity extends AppCompatActivity {
     private SensorManager mSensorManager;
     private Sensor mLightSensor;
     private float lastLightLevel;
-    private int currentScreenBrightness;
     private boolean slideshowpaused = false;
     private ProgressBar progress;
     boolean screenon = true;
