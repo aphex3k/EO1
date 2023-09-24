@@ -19,7 +19,7 @@ public class ImmichApiServiceTest {
     private String userId;
     private String exampleImageId;
     private String exampleAlbumId;
-    private final String email = "aphex3k+***REMOVED***@gmail.com";
+    private final String email = "***REMOVED***";
     private final String password = "***REMOVED***";
     private ImmichApiService apiService;
 

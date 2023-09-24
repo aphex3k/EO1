@@ -372,7 +372,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showNextImage() {
-        if (immichAssets != null && !immichAssets.isEmpty() && slideshowpaused==false) {
+        if (immichAssets != null && !immichAssets.isEmpty() && !slideshowpaused) {
             try {
                 ImmichApiAssetResponse asset = immichAssets.remove(0);
                 ImmichType mediaType = asset.getType();

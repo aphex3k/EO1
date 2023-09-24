@@ -17,3 +17,5 @@ app/release
 app/debug
 *.aab
 *.apk
+passwords.txt
+..bfg-report/
