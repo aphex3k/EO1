@@ -68,7 +68,6 @@ import retrofit2.Response;
 public class MainActivity extends AppCompatActivity {
 
     public int interval = 5;
-
     private int millis = 60000;
     public int tempid = 0;
     private Handler handler = new Handler();
