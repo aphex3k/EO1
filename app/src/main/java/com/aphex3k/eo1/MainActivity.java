@@ -177,7 +177,7 @@ public class MainActivity extends AppCompatActivity {
             showNextImage();
         }
 
-        if (keyCode == 132) {
+        if (keyCode == KeyEvent.KEYCODE_F2) {
             //top button pushed
             WindowManager.LayoutParams params = getWindow().getAttributes();
             if (screenon) {
