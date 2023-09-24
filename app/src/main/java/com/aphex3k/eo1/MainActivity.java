@@ -1,11 +1,8 @@
 package com.aphex3k.eo1;
 
 import android.annotation.SuppressLint;
-import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.DialogInterface;
-import android.content.Intent;
-import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -17,7 +14,6 @@ import android.net.NetworkInfo;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.StrictMode;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -38,7 +34,6 @@ import android.widget.VideoView;
 
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
-import androidx.localbroadcastmanager.content.LocalBroadcastManager;
 
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichApiGetAlbumResponse;
@@ -133,8 +128,6 @@ public class MainActivity extends AppCompatActivity {
             }
         };
         mSensorManager.registerListener(listener, mLightSensor, SensorManager.SENSOR_DELAY_UI);
-
-        LocalBroadcastManager.getInstance(this).registerReceiver(messageReceiver, new IntentFilter("MSG_RECEIVED"));
     }
 
     @Override
@@ -640,86 +633,4 @@ public class MainActivity extends AppCompatActivity {
             }
         }
     }
-
-    private BroadcastReceiver messageReceiver = new BroadcastReceiver() {
-        @Override
-         public void onReceive(Context context, Intent intent) {
-        if (intent != null && intent.getAction() != null) {
-            if (intent.getAction().equals("MSG_RECEIVED")) {
-                String type = intent.getStringExtra("type");
-
-                if (type.equals("options")) {
-                    Toast.makeText(MainActivity.this, "Options received   level=" + intent.getFloatExtra("brightness", 1f), Toast.LENGTH_LONG).show();
-
-                    WindowManager.LayoutParams params = getWindow().getAttributes();
-                    float incomingbrightness = intent.getFloatExtra("brightness", 1f);
-                    if (incomingbrightness == -1.0f) {
-                        autobrightness = true;
-                        adjustScreenBrightness(lastLightLevel);
-                    } else {
-                        autobrightness = false;
-                        brightnesslevel = incomingbrightness;
-                        params.screenBrightness = incomingbrightness;
-                        getWindow().setAttributes(params);
-                    }
-
-                    int incominginterval = intent.getIntExtra("interval", 5);
-                    int incomingStartQuietHour = intent.getIntExtra("startQuietHour", -1);
-                    int incomingEndQuietHour = intent.getIntExtra("endQuietHour", -1);
-
-                    SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
-                    SharedPreferences.Editor editor = settings.edit();
-                    editor.putBoolean("autobrightness", autobrightness);
-                    editor.putFloat("brightnesslevel", incomingbrightness);
-                    editor.putInt("interval", incominginterval);
-                    editor.putInt("startQuietHour", incomingStartQuietHour);
-                    editor.putInt("startQuietHour", incomingEndQuietHour);
-                    editor.apply();
-
-                    if (incominginterval != interval || incomingStartQuietHour != startQuietHour || incomingEndQuietHour != endQuietHour) {
-                        interval = incominginterval;
-                        startQuietHour = incomingStartQuietHour;
-                        endQuietHour = incomingEndQuietHour;
-                        loadImagesFromImmich();
-                    }
-                }
-
-                if (type.equals("image") || type.equals("video")) {
-                    progress.setVisibility(View.VISIBLE);
-                    imageView.setVisibility(View.INVISIBLE);
-                    videoView.setVisibility(View.INVISIBLE);
-
-                    slideshowpaused = true;
-
-                    if (isInQuietHours) {
-                        isInQuietHours = false;
-                        WindowManager.LayoutParams params = getWindow().getAttributes();
-                        params.screenBrightness = 1f;
-                        getWindow().setAttributes(params);
-                    }
-
-                    loadImagesFromImmich();
-                }
-
-                if (type.equals("resume")) {
-                    progress.setVisibility(View.VISIBLE);
-                    imageView.setVisibility(View.INVISIBLE);
-                    videoView.setVisibility(View.INVISIBLE);
-
-                    slideshowpaused = false;
-                    showNextImage();
-                }
-
-                if (type.equals("tag")) {
-                    progress.setVisibility(View.VISIBLE);
-                    imageView.setVisibility(View.INVISIBLE);
-                    videoView.setVisibility(View.INVISIBLE);
-                    slideshowpaused = false;
-                    loadImagesFromImmich();
-                }
-
-            }
-        }
-        }
-    };
 }
