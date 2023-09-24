@@ -157,13 +157,16 @@ public class MainActivity extends AppCompatActivity {
     @SuppressLint("InvalidWakeLockTag")
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
-        if (keyCode == KeyEvent.KEYCODE_C) {
-            showSetupDialog();
-            return true;
-        }
 
         if (keyCode == KeyEvent.KEYCODE_A) {
             Toast.makeText(MainActivity.this, "sensor = " + lastLightLevel, Toast.LENGTH_SHORT).show();
+        } else if (BuildConfig.DEBUG) {
+            Toast.makeText(MainActivity.this, "keyCode = " + keyCode, Toast.LENGTH_SHORT).show();
+        }
+
+        if (keyCode == KeyEvent.KEYCODE_C) {
+            showSetupDialog();
+            return true;
         }
 
         if (keyCode == KeyEvent.KEYCODE_SPACE) {
