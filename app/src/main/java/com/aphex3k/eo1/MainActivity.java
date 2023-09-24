@@ -580,6 +580,7 @@ public class MainActivity extends AppCompatActivity {
                 if (BuildConfig.DEBUG) {
                     Toast.makeText(MainActivity.this, "" + file, Toast.LENGTH_SHORT).show();
                 }
+                showNextImage();
             }
             else {
                 final String extension = Files.getFileExtension(file).toLowerCase();
