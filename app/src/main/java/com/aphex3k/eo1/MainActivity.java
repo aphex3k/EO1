@@ -1,5 +1,7 @@
 package com.aphex3k.eo1;
 
+import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+
 import android.annotation.SuppressLint;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -17,8 +19,6 @@ import android.net.NetworkInfo;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.StrictMode;
-import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
@@ -68,8 +68,8 @@ import retrofit2.Response;
 public class MainActivity extends AppCompatActivity {
 
     public int interval = 5;
-    private int millis = 60000;
-    public int tempid = 0;
+    private final int millis = 60000;
+    public int tempId = 0;
     private Handler handler = new Handler();
     private ImageView imageView;
     private VideoView videoView;
@@ -83,11 +83,11 @@ public class MainActivity extends AppCompatActivity {
     private SensorManager mSensorManager;
     private Sensor mLightSensor;
     private float lastLightLevel;
-    private boolean slideshowpaused = false;
+    private boolean slideshowPaused = false;
     private ProgressBar progress;
-    boolean screenon = true;
-    boolean autobrightness = true;
-    float brightnesslevel = 0.5f;
+    boolean screenOn = true;
+    boolean autoBrightness = true;
+    float brightnessLevel = 0.5f;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -108,8 +108,8 @@ public class MainActivity extends AppCompatActivity {
         startQuietHour = settings.getInt("startQuietHour", -1);
         endQuietHour = settings.getInt("endQuietHour", -1);
         interval = settings.getInt("interval", 5);
-        autobrightness = settings.getBoolean("autobrightness", true);
-        brightnesslevel = settings.getFloat("brightnesslevel", 0.5f);
+        autoBrightness = settings.getBoolean("autoBrightness", true);
+        brightnessLevel = settings.getFloat("brightnessLevel", 0.5f);
 
         if (userid.isEmpty() || password.isEmpty()) {
             showSetupDialog();
@@ -154,7 +154,7 @@ public class MainActivity extends AppCompatActivity {
 
     @SuppressLint("InvalidWakeLockTag")
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
+    public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
 
         if (keyCode == KeyEvent.KEYCODE_A) {
             Toast.makeText(MainActivity.this, "sensor = " + lastLightLevel, Toast.LENGTH_SHORT).show();
@@ -171,21 +171,25 @@ public class MainActivity extends AppCompatActivity {
             progress.setVisibility(View.VISIBLE);
             imageView.setVisibility(View.INVISIBLE);
             videoView.setVisibility(View.INVISIBLE);
-            slideshowpaused = false;
+            slideshowPaused = false;
             showNextImage();
         }
 
-        if (keyCode == KeyEvent.KEYCODE_F2) {
-            //top button pushed
+        if (keyCode == KeyEvent.EO1_TOP_BUTTON) {
             WindowManager.LayoutParams params = getWindow().getAttributes();
-            if (screenon) {
-                params.screenBrightness = 0;
-                screenon = false;
-            } else {
-                params.screenBrightness = 10;
-                screenon = true;
-            }
+
+            screenOn = !screenOn;
+            params.screenBrightness = screenOn ? 10 : 0;
+            slideshowPaused = !screenOn;
+
             getWindow().setAttributes(params);
+
+            if (screenOn) {
+                getWindow().clearFlags(FLAG_KEEP_SCREEN_ON);
+            }
+            else {
+                getWindow().addFlags(FLAG_KEEP_SCREEN_ON);
+            }
         }
 
         return super.onKeyDown(keyCode, event);
@@ -210,7 +214,7 @@ public class MainActivity extends AppCompatActivity {
         passwordEditText.setText(password);
         hostEditText.setText(host);
         editTextInterval.setText(String.valueOf(interval));
-        if (autobrightness) {
+        if (autoBrightness) {
             cbAutoBrightness.setChecked(true);
             sbBrightness.setVisibility(View.GONE);
         }
@@ -218,9 +222,9 @@ public class MainActivity extends AppCompatActivity {
         sbBrightness.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int i, boolean b) {
-                brightnesslevel = i / 10f;
+                brightnessLevel = i / 10f;
                 WindowManager.LayoutParams params = getWindow().getAttributes();
-                params.screenBrightness = brightnesslevel;
+                params.screenBrightness = brightnessLevel;
                 getWindow().setAttributes(params);
             }
             @Override
@@ -230,12 +234,12 @@ public class MainActivity extends AppCompatActivity {
             public void onStopTrackingTouch(SeekBar seekBar) {
             }
         });
-        sbBrightness.setProgress((int) (brightnesslevel * 10));
+        sbBrightness.setProgress((int) (brightnessLevel * 10));
 
         cbAutoBrightness.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton compoundButton, boolean b) {
-                autobrightness = b;
+                autoBrightness = b;
                 if (b)
                     sbBrightness.setVisibility(View.GONE);
                 else
@@ -294,7 +298,7 @@ public class MainActivity extends AppCompatActivity {
                         startQuietHour = Integer.parseInt(startHourSpinner.getSelectedItem().toString());
                         endQuietHour = Integer.parseInt(endHourSpinner.getSelectedItem().toString());
                         interval = Integer.parseInt(editTextInterval.getText().toString().trim());
-                        autobrightness = cbAutoBrightness.isChecked();
+                        autoBrightness = cbAutoBrightness.isChecked();
 
                         if (!userid.isEmpty() && !password.isEmpty() && !host.isEmpty()) {
                             SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
@@ -305,8 +309,8 @@ public class MainActivity extends AppCompatActivity {
                             editor.putInt("startQuietHour", startQuietHour);
                             editor.putInt("endQuietHour", endQuietHour);
                             editor.putInt("interval", interval);
-                            editor.putBoolean("autobrightness", autobrightness);
-                            editor.putFloat("brightnesslevel", brightnesslevel);
+                            editor.putBoolean("autoBrightness", autoBrightness);
+                            editor.putFloat("brightnessLevel", brightnessLevel);
                             editor.apply();
 
                             Toast.makeText(MainActivity.this, "Saved!  Hit 'C' to come back here later.", Toast.LENGTH_SHORT).show();
@@ -342,7 +346,7 @@ public class MainActivity extends AppCompatActivity {
                 int normalizedStart = (startQuietHour + 24) % 24;
                 int normalizedEnd = (endQuietHour + 24) % 24;
                 if ((currentHour >= normalizedStart && currentHour < normalizedEnd) ||
-                   (normalizedStart > normalizedEnd && (currentHour >= normalizedStart || currentHour < normalizedEnd))) {
+                        (normalizedStart > normalizedEnd && (currentHour >= normalizedStart || currentHour < normalizedEnd))) {
                     if (!isInQuietHours) {
                         //entering quiet, turn off screen
                         WindowManager.LayoutParams params = getWindow().getAttributes();
@@ -372,7 +376,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showNextImage() {
-        if (immichAssets != null && !immichAssets.isEmpty() && !slideshowpaused) {
+        if (immichAssets != null && !immichAssets.isEmpty() && !slideshowPaused) {
             try {
                 ImmichApiAssetResponse asset = immichAssets.remove(0);
                 ImmichType mediaType = asset.getType();
@@ -387,7 +391,7 @@ public class MainActivity extends AppCompatActivity {
                     String extension = Files.getFileExtension(asset.getOriginalPath()).toLowerCase();
 
                     new DownloadTask().execute(uuid, extension);
-                 }
+                }
             } catch (Exception ex) {
                 progress.setVisibility(View.VISIBLE);
                 if (BuildConfig.DEBUG) {
@@ -482,7 +486,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void adjustScreenBrightness(float lightValue){
-        if (autobrightness) {
+        if (autoBrightness) {
             if (!isInQuietHours) {
                 // Determine the desired brightness range
                 float maxBrightness = 1.0f; // Maximum brightness value (0 to 1)
@@ -534,7 +538,7 @@ public class MainActivity extends AppCompatActivity {
 
                 if (!BuildConfig.DEBUG &&(
                         extension.equals("mov")
-                    )) {
+                )) {
                     // if the extension is unsupported, attempt to download a (high quality) thumbnail instead
                     downloadResponse = apiService.getAssetThumbnail(uuid, compatibleFormat, null).execute();
                     extension = compatibleFormat == ImmichThumbnailFormat.JPEG? "jpeg" : "webp";
@@ -550,8 +554,8 @@ public class MainActivity extends AppCompatActivity {
 
                 if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
-                    File tempFile = new File(getCacheDir(), "temp" + tempid + "." + extension);
-                    if (++tempid == 5) tempid=0;
+                    File tempFile = new File(getCacheDir(), "temp" + tempId + "." + extension);
+                    if (++tempId == 5) tempId =0;
                     FileOutputStream outputStream = new FileOutputStream(tempFile);
                     InputStream inputStream = downloadResponse.body().byteStream();
                     byte[] buffer = new byte[1024];
@@ -643,83 +647,83 @@ public class MainActivity extends AppCompatActivity {
 
     private BroadcastReceiver messageReceiver = new BroadcastReceiver() {
         @Override
-         public void onReceive(Context context, Intent intent) {
-        if (intent != null && intent.getAction() != null) {
-            if (intent.getAction().equals("MSG_RECEIVED")) {
-                String type = intent.getStringExtra("type");
+        public void onReceive(Context context, Intent intent) {
+            if (intent != null && intent.getAction() != null) {
+                if (intent.getAction().equals("MSG_RECEIVED")) {
+                    String type = intent.getStringExtra("type");
 
-                if (type.equals("options")) {
-                    Toast.makeText(MainActivity.this, "Options received   level=" + intent.getFloatExtra("brightness", 1f), Toast.LENGTH_LONG).show();
+                    if (type.equals("options")) {
+                        Toast.makeText(MainActivity.this, "Options received   level=" + intent.getFloatExtra("brightness", 1f), Toast.LENGTH_LONG).show();
 
-                    WindowManager.LayoutParams params = getWindow().getAttributes();
-                    float incomingbrightness = intent.getFloatExtra("brightness", 1f);
-                    if (incomingbrightness == -1.0f) {
-                        autobrightness = true;
-                        adjustScreenBrightness(lastLightLevel);
-                    } else {
-                        autobrightness = false;
-                        brightnesslevel = incomingbrightness;
-                        params.screenBrightness = incomingbrightness;
-                        getWindow().setAttributes(params);
+                        WindowManager.LayoutParams params = getWindow().getAttributes();
+                        float incomingbrightness = intent.getFloatExtra("brightness", 1f);
+                        if (incomingbrightness == -1.0f) {
+                            autoBrightness = true;
+                            adjustScreenBrightness(lastLightLevel);
+                        } else {
+                            autoBrightness = false;
+                            brightnessLevel = incomingbrightness;
+                            params.screenBrightness = incomingbrightness;
+                            getWindow().setAttributes(params);
+                        }
+
+                        int incominginterval = intent.getIntExtra("interval", 5);
+                        int incomingStartQuietHour = intent.getIntExtra("startQuietHour", -1);
+                        int incomingEndQuietHour = intent.getIntExtra("endQuietHour", -1);
+
+                        SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
+                        SharedPreferences.Editor editor = settings.edit();
+                        editor.putBoolean("autoBrightness", autoBrightness);
+                        editor.putFloat("brightnessLevel", incomingbrightness);
+                        editor.putInt("interval", incominginterval);
+                        editor.putInt("startQuietHour", incomingStartQuietHour);
+                        editor.putInt("startQuietHour", incomingEndQuietHour);
+                        editor.apply();
+
+                        if (incominginterval != interval || incomingStartQuietHour != startQuietHour || incomingEndQuietHour != endQuietHour) {
+                            interval = incominginterval;
+                            startQuietHour = incomingStartQuietHour;
+                            endQuietHour = incomingEndQuietHour;
+                            loadImagesFromImmich();
+                        }
                     }
 
-                    int incominginterval = intent.getIntExtra("interval", 5);
-                    int incomingStartQuietHour = intent.getIntExtra("startQuietHour", -1);
-                    int incomingEndQuietHour = intent.getIntExtra("endQuietHour", -1);
+                    if (type.equals("image") || type.equals("video")) {
+                        progress.setVisibility(View.VISIBLE);
+                        imageView.setVisibility(View.INVISIBLE);
+                        videoView.setVisibility(View.INVISIBLE);
 
-                    SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
-                    SharedPreferences.Editor editor = settings.edit();
-                    editor.putBoolean("autobrightness", autobrightness);
-                    editor.putFloat("brightnesslevel", incomingbrightness);
-                    editor.putInt("interval", incominginterval);
-                    editor.putInt("startQuietHour", incomingStartQuietHour);
-                    editor.putInt("startQuietHour", incomingEndQuietHour);
-                    editor.apply();
+                        slideshowPaused = true;
 
-                    if (incominginterval != interval || incomingStartQuietHour != startQuietHour || incomingEndQuietHour != endQuietHour) {
-                        interval = incominginterval;
-                        startQuietHour = incomingStartQuietHour;
-                        endQuietHour = incomingEndQuietHour;
+                        if (isInQuietHours) {
+                            isInQuietHours = false;
+                            WindowManager.LayoutParams params = getWindow().getAttributes();
+                            params.screenBrightness = 1f;
+                            getWindow().setAttributes(params);
+                        }
+
                         loadImagesFromImmich();
                     }
-                }
 
-                if (type.equals("image") || type.equals("video")) {
-                    progress.setVisibility(View.VISIBLE);
-                    imageView.setVisibility(View.INVISIBLE);
-                    videoView.setVisibility(View.INVISIBLE);
+                    if (type.equals("resume")) {
+                        progress.setVisibility(View.VISIBLE);
+                        imageView.setVisibility(View.INVISIBLE);
+                        videoView.setVisibility(View.INVISIBLE);
 
-                    slideshowpaused = true;
-
-                    if (isInQuietHours) {
-                        isInQuietHours = false;
-                        WindowManager.LayoutParams params = getWindow().getAttributes();
-                        params.screenBrightness = 1f;
-                        getWindow().setAttributes(params);
+                        slideshowPaused = false;
+                        showNextImage();
                     }
 
-                    loadImagesFromImmich();
+                    if (type.equals("tag")) {
+                        progress.setVisibility(View.VISIBLE);
+                        imageView.setVisibility(View.INVISIBLE);
+                        videoView.setVisibility(View.INVISIBLE);
+                        slideshowPaused = false;
+                        loadImagesFromImmich();
+                    }
+
                 }
-
-                if (type.equals("resume")) {
-                    progress.setVisibility(View.VISIBLE);
-                    imageView.setVisibility(View.INVISIBLE);
-                    videoView.setVisibility(View.INVISIBLE);
-
-                    slideshowpaused = false;
-                    showNextImage();
-                }
-
-                if (type.equals("tag")) {
-                    progress.setVisibility(View.VISIBLE);
-                    imageView.setVisibility(View.INVISIBLE);
-                    videoView.setVisibility(View.INVISIBLE);
-                    slideshowpaused = false;
-                    loadImagesFromImmich();
-                }
-
             }
-        }
         }
     };
 }
