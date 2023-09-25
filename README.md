@@ -41,11 +41,11 @@ EO1 has only one data port thus OTG and adb (via USB) can not be used at the sam
 - You need to tell your EO1 to allow side-loading. 
     1. Swipe down on the top right and go to **Settings > Security**
     2. Make sure "Unknown Sources" is checked
-- Go back to the browser and go to this URL: <http://gitea.codingmerc.com/michael/EO1/releases/download/v0.0.3/app-release.apk>
-    - You can build the app from this repository and host it yourself if you want to not use a precompiled APK
+- Go back to the browser and go to this URL: <http://gitea.codingmerc.com/michael/EO1/releases/download/v1.0-rc1/app-release.apk>
+  - You can build the app from this repository and host it yourself if you want to not use a precompiled APK
 - When it finished downloading, install the file by pulling down the notification bar on the top left and clicking it, then agreeing to the prompts
 - Restart/power cycle your EO1 by unplugging and plugging only the power cable
-    - At this point, the keyboard and mouse are still connected via OTG
+  - At this point, the keyboard and mouse are still connected via OTG
 - Because this APK is designated as a "Home screen replacement", when EO1 boots, it will ask if you want to load the Electric Object app or the EO1 app. Select EO1 and choose "Always".
 - The first time the EO1 is run you will need to specify the information listed above. Click OK to save and continue. **To get back to the configuration screen later, press C on your connected keyboard**
 - You can now unplug your mouse and keyboard and hang your EO1 back on the wall!
