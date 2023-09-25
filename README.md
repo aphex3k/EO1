@@ -18,7 +18,7 @@ self-hosted [immich.app](https://immich.app/) instance as backend instead of usi
 - Upload some EO art to your Immich account.
 - Once you boot up your EO1 and it hangs on the "Getting Art" dialog, hit **WINDOWS + B** to open a web browser
 - You need to tell your EO1 to allow side-loading.  Swipe down on the top right and go to Settings > Security.  In there make sure "Unknown Sources" is checked.
-- Go back to the browser and go to this URL: <http://gitea.codingmerc.com/michael/EO1/releases/download/v0.0.2/app-release.apk>
+- Go back to the browser and go to this URL: <http://gitea.codingmerc.com/michael/EO1/releases/download/v0.0.3/app-release.apk>
   - You can build the app from this repository and host it yourself, if you want to not use a precompiled apk
 - When it finishes, install the file by pulling down the notification bar and clicking it, then agreeing to the prompts.
 - Restart/power cycle your EO1
