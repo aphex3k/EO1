@@ -45,6 +45,7 @@ import com.aphex3k.immichApi.ImmichExifInfo;
 import com.aphex3k.immichApi.ImmichThumbnailFormat;
 import com.aphex3k.immichApi.ImmichType;
 import com.google.common.io.Files;
+import com.squareup.picasso.Callback;
 import com.squareup.picasso.Picasso;
 
 import java.io.BufferedReader;
@@ -55,6 +56,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
@@ -74,7 +76,7 @@ public class MainActivity extends AppCompatActivity {
     private String host = "";
     private int startQuietHour = -1;
     private int endQuietHour = -1;
-    private List<ImmichApiAssetResponse> immichAssets;
+    final private ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
     private boolean isInQuietHours = false;
     private SensorManager mSensorManager;
     private Sensor mLightSensor;
@@ -443,7 +445,7 @@ public class MainActivity extends AppCompatActivity {
 
                                 if (!assets.isEmpty()) {
                                     try {
-                                        immichAssets = assets;
+                                        immichAssets.addAll(assets);
                                         Collections.shuffle(immichAssets);
                                         startSlideshow();
                                     } catch (Exception ex) {
@@ -577,18 +579,18 @@ public class MainActivity extends AppCompatActivity {
         }
 
         @Override
-        protected void onPostExecute(String file) {
+        protected void onPostExecute(String fileName) {
 
             progress.setVisibility(View.INVISIBLE);
 
-            if (file.startsWith("ERR")) {
+            if (fileName.startsWith("ERR")) {
                 if (BuildConfig.DEBUG) {
-                    Toast.makeText(MainActivity.this, "" + file, Toast.LENGTH_SHORT).show();
+                    Toast.makeText(MainActivity.this, "Error loading " + fileName, Toast.LENGTH_LONG).show();
                 }
                 showNextImage();
             }
             else {
-                final String extension = Files.getFileExtension(file).toLowerCase();
+                final String extension = Files.getFileExtension(fileName).toLowerCase();
 
                 if (extension.equals("jpg")
                         || extension.equals("jpeg")
@@ -598,11 +600,26 @@ public class MainActivity extends AppCompatActivity {
                         || extension.equals("gif")
                 ) {
                     try {
-                        Picasso.get().load(new File(file)).fit().centerInside().into(imageView);
+                        final File file = new File(fileName);
+                        Picasso.get().load(file).fit().centerInside().into(imageView, new Callback() {
+                            @Override
+                            public void onSuccess() {
+                                removeFromCache(file);
+                            }
+
+                            @Override
+                            public void onError(Exception e) {
+                                if (BuildConfig.DEBUG) {
+                                    Toast.makeText(MainActivity.this, "Picasso: " + e, Toast.LENGTH_LONG).show();
+                                }
+                                removeFromCache(file);
+                                showNextImage();
+                            }
+                        });
                     }
                     catch (Exception e) {
                         if (BuildConfig.DEBUG) {
-                            Toast.makeText(MainActivity.this, "Picasso: " + file, Toast.LENGTH_SHORT).show();
+                            Toast.makeText(MainActivity.this, "Picasso: " + e, Toast.LENGTH_LONG).show();
                         }
                         showNextImage();
                     }
@@ -610,7 +627,7 @@ public class MainActivity extends AppCompatActivity {
                     imageView.setVisibility(View.VISIBLE);
                     progress.setVisibility(View.INVISIBLE);
 
-                } else if (file.endsWith("mp4") || file.endsWith("m4v") || file.endsWith("mov")) {
+                } else if (fileName.endsWith("mp4") || fileName.endsWith("m4v") || fileName.endsWith("mov")) {
 
                     MediaController mediaController = new MediaController(getApplicationContext());
                     mediaController.setAnchorView(videoView);
@@ -619,7 +636,7 @@ public class MainActivity extends AppCompatActivity {
                     videoView.setVisibility(View.VISIBLE);
                     imageView.setVisibility(View.INVISIBLE);
                     progress.setVisibility(View.INVISIBLE);
-                    videoView.setVideoPath(file);
+                    videoView.setVideoPath(fileName);
 
                     videoView.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
                         @Override
@@ -632,7 +649,8 @@ public class MainActivity extends AppCompatActivity {
                         @Override
                         public boolean onError(MediaPlayer mediaPlayer, int i, int i1) {
                             progress.setVisibility(View.VISIBLE);
-                            Toast.makeText(MainActivity.this, "mediaplayer ERR> ", Toast.LENGTH_SHORT).show();
+                            Toast.makeText(MainActivity.this, "media player ERR> ", Toast.LENGTH_LONG).show();
+                            removeFromCache(new File(fileName));
                             showNextImage();
                             return true;
                         }
@@ -644,5 +662,13 @@ public class MainActivity extends AppCompatActivity {
                 }
             }
         }
+    }
+
+    private boolean removeFromCache (File file) {
+        final File cacheDir = new File(getCacheDir(), "picasso-cache");
+        if (cacheDir.exists() && cacheDir.isDirectory()) {
+            return file.delete();
+        }
+        return false;
     }
 }
