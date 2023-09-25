@@ -53,6 +53,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 
 import okhttp3.ResponseBody;
 import retrofit2.Response;
@@ -61,7 +62,6 @@ public class MainActivity extends AppCompatActivity {
 
     public int interval = 5;
     private final long millis = 60000;
-    public int tempId = 0;
     private final Handler handler = new Handler();
     private ImageView imageView;
     private VideoView videoView;
@@ -88,7 +88,7 @@ public class MainActivity extends AppCompatActivity {
 
         File cacheDir = new File(getCacheDir(), "picasso-cache");
         if (cacheDir.exists() && cacheDir.isDirectory()) {
-            for (File file : cacheDir.listFiles()) {
+            for (File file : Objects.requireNonNull(cacheDir.listFiles())) {
                 file.delete();
             }
         }
@@ -329,6 +329,7 @@ public class MainActivity extends AppCompatActivity {
                         //entering quiet, turn off screen
                         WindowManager.LayoutParams params = getWindow().getAttributes();
                         params.screenBrightness = 0;
+                        getWindow().clearFlags(FLAG_KEEP_SCREEN_ON);
                         getWindow().setAttributes(params);
                         videoView.setVisibility(View.GONE);
                         imageView.setVisibility(View.GONE);
@@ -340,6 +341,7 @@ public class MainActivity extends AppCompatActivity {
                         //exiting quiet, turn on screen
                         WindowManager.LayoutParams params = getWindow().getAttributes();
                         params.screenBrightness = 1f;
+                        getWindow().addFlags(FLAG_KEEP_SCREEN_ON);
                         getWindow().setAttributes(params);
 
                         isInQuietHours = false;
@@ -355,6 +357,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void showNextImage() {
         if (immichAssets != null && !immichAssets.isEmpty() && !slideshowPaused) {
+            Collections.shuffle(immichAssets);
             try {
                 ImmichApiAssetResponse asset = immichAssets.remove(0);
                 ImmichType mediaType = asset.getType();
@@ -425,7 +428,6 @@ public class MainActivity extends AppCompatActivity {
                         }
                         if (!immichAssets.isEmpty()) {
                             try {
-                                Collections.shuffle(immichAssets);
                                 startSlideshow();
                             } catch (Exception ex) {
                                 Toast.makeText(MainActivity.this, "Immich failure :", Toast.LENGTH_SHORT).show();
@@ -514,8 +516,7 @@ public class MainActivity extends AppCompatActivity {
 
                 if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
-                    File tempFile = new File(getCacheDir(), "temp" + tempId + "." + extension);
-                    if (++tempId == 5) tempId =0;
+                    File tempFile = new File(getCacheDir(), "temp_" + uuid + "." + extension);
                     FileOutputStream outputStream = new FileOutputStream(tempFile);
                     InputStream inputStream = downloadResponse.body().byteStream();
                     byte[] buffer = new byte[1024];
@@ -548,6 +549,7 @@ public class MainActivity extends AppCompatActivity {
             }
             else {
                 final String extension = Files.getFileExtension(fileName).toLowerCase();
+                final File file = new File(fileName);
 
                 if (extension.equals("jpg")
                         || extension.equals("jpeg")
@@ -557,7 +559,6 @@ public class MainActivity extends AppCompatActivity {
                         || extension.equals("gif")
                 ) {
                     try {
-                        final File file = new File(fileName);
                         Picasso.get().load(file).fit().centerInside().into(imageView, new Callback() {
                             @Override
                             public void onSuccess() {
@@ -578,6 +579,7 @@ public class MainActivity extends AppCompatActivity {
                         if (BuildConfig.DEBUG) {
                             Toast.makeText(MainActivity.this, "Picasso: " + e, Toast.LENGTH_LONG).show();
                         }
+                        removeFromCache(file);
                         showNextImage();
                     }
                     videoView.setVisibility(View.INVISIBLE);
