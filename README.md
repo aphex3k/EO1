@@ -5,6 +5,8 @@ self-hosted [immich.app](https://immich.app/) instance as backend instead of usi
 
 ## Getting started
 
+<img src="_img/IMG_1451.jpg"/> <img src="_img/IMG_1452.jpg"/>
+
 ### Requirements
 
 - You need a way to connect a keyboard and mouse to your EO1.  You can get one of these [USB OTG Adapters](https://www.amazon.com/gp/product/B01C6032G0/?&_encoding=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=a2e10d0fcebbd4425ace19f040a24e27&camp=1789&creative=9325) and connected a USB keyboard to it, then a USB mouse to the keyboard. Alternatively you can get an [OTG Hub](https://www.amazon.com/dp/B01HYJLZH6?psc=1&ref=ppx_yo2ov_dt_b_product_details&_encoding=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=49938883224aa721262057e366759275&camp=1789&creative=9325) and connect mouse and keybord to it directly.
