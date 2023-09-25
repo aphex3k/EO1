@@ -79,6 +79,8 @@ public class MainActivity extends AppCompatActivity {
     private SensorManager mSensorManager;
     private Sensor mLightSensor;
     private float lastLightLevel;
+    private float brightnessMod = 0; // Modify auto-brightness minimum
+    private final float minBrightness = 0.5f; // Minimum brightness value (0 to 1)
     private boolean slideshowPaused = false;
     private ProgressBar progress;
     boolean screenOn = true;
@@ -184,6 +186,12 @@ public class MainActivity extends AppCompatActivity {
             else {
                 getWindow().addFlags(FLAG_KEEP_SCREEN_ON);
             }
+        }
+
+        if (keyCode == KeyEvent.EO1_BACK_BUTTON && screenOn) {
+            final float adjustedAmount = 0.1f;
+            brightnessMod = brightnessMod + adjustedAmount + minBrightness >= 1 ? 0 : brightnessMod + adjustedAmount;
+            adjustScreenBrightness(lastLightLevel);
         }
 
         return super.onKeyDown(keyCode, event);
@@ -484,10 +492,9 @@ public class MainActivity extends AppCompatActivity {
             if (!isInQuietHours) {
                 // Determine the desired brightness range
                 float maxBrightness = 1.0f; // Maximum brightness value (0 to 1)
-                float minBrightness = 0.5f; // Minimum brightness value (0 to 1)
 
                 // Map the light sensor value (0 to 25) to the desired brightness range (0 to 1)
-                float brightness = (lightValue / 30f) * (maxBrightness - minBrightness) + minBrightness;
+                float brightness = (lightValue / 30f) * (maxBrightness - minBrightness) + minBrightness + brightnessMod;
 
                 // Make sure brightness is within the valid range
                 brightness = Math.min(Math.max(brightness, minBrightness), maxBrightness);
