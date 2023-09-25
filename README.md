@@ -3,7 +3,7 @@
 This repository is a fork of [spalt/EO1](https://github.com/spalt/EO1). The goal is to use a
 self-hosted [immich.app](https://immich.app/) instance as a backend instead of using Flickr. This will allow **full self-custody** of the system.
 
-<img src="_img/IMG_1451.jpg"/> <img src="_img/IMG_1452.jpg"/>
+<img src="_img/IMG_1451.jpg" width=403/> <img src="_img/IMG_1452.jpg" width=403/>
 
 This concept guarantees that you control all aspects of the images displayed on your EO1 and they will never go offline or stop displaying art ever again, because someone else decided to do so!
 
@@ -14,7 +14,7 @@ On your smart device, you will run the immich app for your platform and device. 
 - A simple single-user configuration runs the same user credentials on the EO1 as well as on the smart device.
 - In a multi-user configuration, everyone can upload pictures to a shared album which is accessible from the account that is used on the EO1 frames.
 
-<img src="_img/single_user.png" width=320/> <img src="_img/multi_user.png" width=320/>
+<img src="_img/single_user.png" width=403/> <img src="_img/multi_user.png" width=403/>
 
 ## Getting started
 
