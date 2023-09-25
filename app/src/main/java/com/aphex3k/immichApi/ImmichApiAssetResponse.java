@@ -5,7 +5,7 @@ import com.google.gson.annotations.SerializedName;
 import java.util.Date;
 import java.util.List;
 
-public class ImmichApiAssetResponse extends ImmichApiResponse {
+public class ImmichApiAssetResponse extends ImmichApiResponse implements Comparable<ImmichApiAssetResponse> {
 
     @SerializedName("checksum")
     private String checksum;
@@ -152,5 +152,10 @@ public class ImmichApiAssetResponse extends ImmichApiResponse {
 
     public String getThumbHash() {
         return thumbHash;
+    }
+
+    @Override
+    public int compareTo(ImmichApiAssetResponse immichApiAssetResponse) {
+        return this.id.compareTo(immichApiAssetResponse.id);
     }
 }
