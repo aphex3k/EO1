@@ -4,13 +4,11 @@ import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.SharedPreferences;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
-import android.media.MediaPlayer;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.os.AsyncTask;
@@ -21,15 +19,12 @@ import android.view.WindowManager;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
-import android.widget.CompoundButton;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.MediaController;
 import android.widget.ProgressBar;
-import android.widget.RadioGroup;
 import android.widget.SeekBar;
 import android.widget.Spinner;
-import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.VideoView;
 
@@ -56,7 +51,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Calendar;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
@@ -66,9 +60,9 @@ import retrofit2.Response;
 public class MainActivity extends AppCompatActivity {
 
     public int interval = 5;
-    private final int millis = 60000;
+    private final long millis = 60000;
     public int tempId = 0;
-    private Handler handler = new Handler();
+    private final Handler handler = new Handler();
     private ImageView imageView;
     private VideoView videoView;
     private String userid = "";
@@ -78,8 +72,6 @@ public class MainActivity extends AppCompatActivity {
     private int endQuietHour = -1;
     final private ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
     private boolean isInQuietHours = false;
-    private SensorManager mSensorManager;
-    private Sensor mLightSensor;
     private float lastLightLevel;
     private float brightnessMod = 0; // Modify auto-brightness minimum
     private final float minBrightness = 0.5f; // Minimum brightness value (0 to 1)
@@ -119,8 +111,8 @@ public class MainActivity extends AppCompatActivity {
         videoView = findViewById(R.id.videoView);
         progress = findViewById(R.id.progressBar);
 
-        mSensorManager = (SensorManager)getSystemService(SENSOR_SERVICE);
-        mLightSensor = mSensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
+        SensorManager mSensorManager = (SensorManager) getSystemService(SENSOR_SERVICE);
+        Sensor mLightSensor = mSensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
         SensorEventListener listener = new SensorEventListener() {
             @Override
             public void onSensorChanged(SensorEvent event) {
@@ -240,15 +232,12 @@ public class MainActivity extends AppCompatActivity {
         });
         sbBrightness.setProgress((int) (brightnessLevel * 10));
 
-        cbAutoBrightness.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override
-            public void onCheckedChanged(CompoundButton compoundButton, boolean b) {
-                autoBrightness = b;
-                if (b)
-                    sbBrightness.setVisibility(View.GONE);
-                else
-                    sbBrightness.setVisibility(View.VISIBLE);
-            }
+        cbAutoBrightness.setOnCheckedChangeListener((compoundButton, b) -> {
+            autoBrightness = b;
+            if (b)
+                sbBrightness.setVisibility(View.GONE);
+            else
+                sbBrightness.setVisibility(View.VISIBLE);
         });
 
         // Set up the Spinners for start and end hour
@@ -263,83 +252,68 @@ public class MainActivity extends AppCompatActivity {
         endHourSpinner.setAdapter(hourAdapter);
         if (endQuietHour != -1) endHourSpinner.setSelection(endQuietHour);
 
-        btnLoadConfig.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                File downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS);
-                File file = new File(downloadsDir, "config.txt");
-                if (!file.exists()) {
-                    Toast.makeText(MainActivity.this, "Can't find config.txt", Toast.LENGTH_SHORT).show();
-                } else {
-                    StringBuilder sb = new StringBuilder();
-                    try {
-                        BufferedReader br = new BufferedReader(new FileReader(file));
-                        String line;
-                        while ((line = br.readLine()) != null) {
-                            sb.append(line).append('\n');
-                        }
-                        br.close();
-                    } catch (IOException e) {
-                        e.printStackTrace();
+        btnLoadConfig.setOnClickListener(view -> {
+            File downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS);
+            File file = new File(downloadsDir, "config.txt");
+            if (!file.exists()) {
+                Toast.makeText(MainActivity.this, "Can't find config.txt", Toast.LENGTH_SHORT).show();
+            } else {
+                StringBuilder sb = new StringBuilder();
+                try {
+                    BufferedReader br = new BufferedReader(new FileReader(file));
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        sb.append(line).append('\n');
                     }
-
-                    userIdEditText.setText(sb.toString().split("\n")[0]);
-                    passwordEditText.setText(sb.toString().split("\n")[1]);
-                    hostEditText.setText(sb.toString().split("\n")[2]);
+                    br.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
                 }
+
+                userIdEditText.setText(sb.toString().split("\n")[0]);
+                passwordEditText.setText(sb.toString().split("\n")[1]);
+                hostEditText.setText(sb.toString().split("\n")[2]);
             }
         });
 
         builder.setTitle("Setup")
                 .setCancelable(false)
                 .setView(customLayout)
-                .setPositiveButton("Save", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        userid = userIdEditText.getText().toString().trim();
-                        password = passwordEditText.getText().toString().trim();
-                        host = hostEditText.getText().toString().trim();
-                        startQuietHour = Integer.parseInt(startHourSpinner.getSelectedItem().toString());
-                        endQuietHour = Integer.parseInt(endHourSpinner.getSelectedItem().toString());
-                        interval = Integer.parseInt(editTextInterval.getText().toString().trim());
-                        autoBrightness = cbAutoBrightness.isChecked();
+                .setPositiveButton("Save", (dialog, which) -> {
+                    userid = userIdEditText.getText().toString().trim();
+                    password = passwordEditText.getText().toString().trim();
+                    host = hostEditText.getText().toString().trim();
+                    startQuietHour = Integer.parseInt(startHourSpinner.getSelectedItem().toString());
+                    endQuietHour = Integer.parseInt(endHourSpinner.getSelectedItem().toString());
+                    interval = Integer.parseInt(editTextInterval.getText().toString().trim());
+                    autoBrightness = cbAutoBrightness.isChecked();
 
-                        if (!userid.isEmpty() && !password.isEmpty() && !host.isEmpty()) {
-                            SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
-                            SharedPreferences.Editor editor = settings.edit();
-                            editor.putString("userid", userid);
-                            editor.putString("password", password);
-                            editor.putString("host", host);
-                            editor.putInt("startQuietHour", startQuietHour);
-                            editor.putInt("endQuietHour", endQuietHour);
-                            editor.putInt("interval", interval);
-                            editor.putBoolean("autoBrightness", autoBrightness);
-                            editor.putFloat("brightnessLevel", brightnessLevel);
-                            editor.apply();
+                    if (!userid.isEmpty() && !password.isEmpty() && !host.isEmpty()) {
+                        SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
+                        SharedPreferences.Editor editor = settings.edit();
+                        editor.putString("userid", userid);
+                        editor.putString("password", password);
+                        editor.putString("host", host);
+                        editor.putInt("startQuietHour", startQuietHour);
+                        editor.putInt("endQuietHour", endQuietHour);
+                        editor.putInt("interval", interval);
+                        editor.putBoolean("autoBrightness", autoBrightness);
+                        editor.putFloat("brightnessLevel", brightnessLevel);
+                        editor.apply();
 
-                            Toast.makeText(MainActivity.this, "Saved!  Hit 'C' to come back here later.", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(MainActivity.this, "Saved!  Hit 'C' to come back here later.", Toast.LENGTH_SHORT).show();
 
-                            loadImagesFromImmich();
-                        } else {
-                            Toast.makeText(MainActivity.this, "Please enter User ID and API Key", Toast.LENGTH_SHORT).show();
-                        }
+                        loadImagesFromImmich();
+                    } else {
+                        Toast.makeText(MainActivity.this, "Please enter User ID and API Key", Toast.LENGTH_SHORT).show();
                     }
                 })
-                .setNegativeButton("Cancel", new DialogInterface.OnClickListener() {
-                    @Override
-                    public void onClick(DialogInterface dialog, int which) {
-                        dialog.dismiss();
-                    }
-                });
+                .setNegativeButton("Cancel", (dialog, which) -> dialog.dismiss());
 
         builder.show();
     }
 
     private void startSlideshow() {
-
-//        if (BuildConfig.DEBUG) {
-//            millis = 1000;
-//        }
 
         handler.removeCallbacksAndMessages(null);
         handler.postDelayed(new Runnable() {
@@ -399,14 +373,9 @@ public class MainActivity extends AppCompatActivity {
             } catch (Exception ex) {
                 progress.setVisibility(View.VISIBLE);
                 if (BuildConfig.DEBUG) {
-                    Toast.makeText(MainActivity.this, "shownextimage err > " + ex.getMessage().toString(), Toast.LENGTH_SHORT).show();
+                    Toast.makeText(MainActivity.this, "showNextImage error > " + ex.getMessage(), Toast.LENGTH_SHORT).show();
                 }
-                new android.os.Handler().postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        showNextImage();
-                    }
-                }, 10000);
+                new android.os.Handler().postDelayed(this::showNextImage, 10000);
             }
         }
     }
@@ -420,60 +389,59 @@ public class MainActivity extends AppCompatActivity {
         {
             ImmichApiService apiService = ImmichApiServiceGenerator.createService(ImmichApiService.class, host);
 
-            new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        ImmichApiLoginResponse loginResponse = apiService.login(new ImmichApiLogin(userid, password)).execute().body();
+            new Thread(() -> {
+                try {
+                    ImmichApiLoginResponse loginResponse = apiService.login(new ImmichApiLogin(userid, password)).execute().body();
 
-                        String userId = loginResponse.getUserId();
+                    String userId = loginResponse.getUserId();
 
-                        if (userId != "") {
-                            Response<List<ImmichApiGetAlbumResponse>> albumsResponse = apiService.getAllAlbums(true, null).execute();
-                            if (albumsResponse.isSuccessful()) {
+                    if (!userId.equals("")) {
+                        Response<List<ImmichApiGetAlbumResponse>> sharedAlbumsResponse = apiService.getAllAlbums(true, null).execute();
+                        if (sharedAlbumsResponse.isSuccessful()) {
 
-                                List<ImmichApiAssetResponse> assets = new ArrayList<>();
-                                for (ImmichApiGetAlbumResponse r: albumsResponse.body()) {
-                                    List<ImmichApiAssetResponse> assetList = r.getAssets();
+                            for (ImmichApiGetAlbumResponse r : sharedAlbumsResponse.body()) {
+                                List<ImmichApiAssetResponse> assetList = r.getAssets();
 
-                                    if (assetList.isEmpty()) {
-                                        assetList = apiService.getAlbumInfo(r.getId(), false, null).execute().body().getAssets();
-                                    }
-                                    assets.addAll(assetList);
-
+                                if (assetList.isEmpty()) {
+                                    assetList = apiService.getAlbumInfo(r.getId(), false, null).execute().body().getAssets();
                                 }
+                                immichAssets.addAll(assetList);
 
-                                if (!assets.isEmpty()) {
-                                    try {
-                                        immichAssets.addAll(assets);
-                                        Collections.shuffle(immichAssets);
-                                        startSlideshow();
-                                    } catch (Exception ex) {
-                                        Toast.makeText(MainActivity.this, "Immich failure :", Toast.LENGTH_SHORT).show();
-                                        showSetupDialog();
-                                    }
+                            }
+                        }
+
+                        Response<List<ImmichApiGetAlbumResponse>> albumsResponse = apiService.getAllAlbums(false, null).execute();
+                        if (albumsResponse.isSuccessful()) {
+
+                            for (ImmichApiGetAlbumResponse r : albumsResponse.body()) {
+                                List<ImmichApiAssetResponse> assetList = r.getAssets();
+
+                                if (assetList.isEmpty()) {
+                                    assetList = apiService.getAlbumInfo(r.getId(), false, null).execute().body().getAssets();
                                 }
+                                immichAssets.addAll(assetList);
+
+                            }
+                        }
+                        if (!immichAssets.isEmpty()) {
+                            try {
+                                Collections.shuffle(immichAssets);
+                                startSlideshow();
+                            } catch (Exception ex) {
+                                Toast.makeText(MainActivity.this, "Immich failure :", Toast.LENGTH_SHORT).show();
+                                showSetupDialog();
                             }
                         }
                     }
-                    catch (Exception e)
-                    {
-                        runOnUiThread(new Runnable() {
-                            @Override
-                            public void run() {
-                                Toast.makeText(MainActivity.this, "Immich failure: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-                            }
-                        });
-                    }
+                }
+                catch (Exception e)
+                {
+                    runOnUiThread(() -> Toast.makeText(MainActivity.this, "Immich failure: " + e.getMessage(), Toast.LENGTH_SHORT).show());
                 }
             }).start();
         } else {
-            new android.os.Handler().postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    loadImagesFromImmich(); // Retry loading images after delay
-                }
-            }, 10000);
+            // Retry loading images after delay
+            new android.os.Handler().postDelayed(this::loadImagesFromImmich, 10000);
         }
     }
 
@@ -481,12 +449,6 @@ public class MainActivity extends AppCompatActivity {
         ConnectivityManager connectivityManager = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
         NetworkInfo activeNetworkInfo = connectivityManager.getActiveNetworkInfo();
         return activeNetworkInfo != null && activeNetworkInfo.isConnected();
-    }
-
-    private View getLabel(String text) {
-        TextView textView = new TextView(this);
-        textView.setText(text);
-        return textView;
     }
 
     private void adjustScreenBrightness(float lightValue){
@@ -498,6 +460,7 @@ public class MainActivity extends AppCompatActivity {
                 // Map the light sensor value (0 to 25) to the desired brightness range (0 to 1)
                 float brightness = (lightValue / 30f) * (maxBrightness - minBrightness) + minBrightness + brightnessMod;
 
+
                 // Make sure brightness is within the valid range
                 brightness = Math.min(Math.max(brightness, minBrightness), maxBrightness);
 
@@ -508,12 +471,6 @@ public class MainActivity extends AppCompatActivity {
             }
         }
         lastLightLevel = lightValue;
-    }
-
-    private int getSelectedOptionIndex(RadioGroup radioGroup) {
-        int checkedRadioButtonId = radioGroup.getCheckedRadioButtonId();
-        View checkedRadioButton = radioGroup.findViewById(checkedRadioButtonId);
-        return radioGroup.indexOfChild(checkedRadioButton);
     }
 
     public class DownloadTask extends AsyncTask<String, Void, String> {
@@ -532,11 +489,11 @@ public class MainActivity extends AppCompatActivity {
                 ImmichApiService apiService = ImmichApiServiceGenerator.createService(ImmichApiService.class, host);
 
                 // Login to get a current auth cookie
-                Response<ImmichApiLoginResponse> loginresponse = apiService.login(
+                apiService.login(
                         new ImmichApiLogin(userid, password)
                 ).execute();
 
-                Response<ResponseBody> downloadResponse = null;
+                Response<ResponseBody> downloadResponse;
                 ImmichThumbnailFormat compatibleFormat = ImmichThumbnailFormat.JPEG;
 
                 if (!BuildConfig.DEBUG &&(
@@ -638,22 +595,16 @@ public class MainActivity extends AppCompatActivity {
                     progress.setVisibility(View.INVISIBLE);
                     videoView.setVideoPath(fileName);
 
-                    videoView.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
-                        @Override
-                        public void onPrepared(MediaPlayer mediaPlayer) {
-                            mediaPlayer.setLooping(true);
-                            videoView.start();
-                        }
+                    videoView.setOnPreparedListener(mediaPlayer -> {
+                        mediaPlayer.setLooping(true);
+                        videoView.start();
                     });
-                    videoView.setOnErrorListener(new MediaPlayer.OnErrorListener() {
-                        @Override
-                        public boolean onError(MediaPlayer mediaPlayer, int i, int i1) {
-                            progress.setVisibility(View.VISIBLE);
-                            Toast.makeText(MainActivity.this, "media player ERR> ", Toast.LENGTH_LONG).show();
-                            removeFromCache(new File(fileName));
-                            showNextImage();
-                            return true;
-                        }
+                    videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
+                        progress.setVisibility(View.VISIBLE);
+                        Toast.makeText(MainActivity.this, "media player ERR> ", Toast.LENGTH_LONG).show();
+                        removeFromCache(new File(fileName));
+                        showNextImage();
+                        return true;
                     });
                 } else {
                     if (BuildConfig.DEBUG) {
@@ -664,11 +615,10 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private boolean removeFromCache (File file) {
+    private void removeFromCache (File file) {
         final File cacheDir = new File(getCacheDir(), "picasso-cache");
         if (cacheDir.exists() && cacheDir.isDirectory()) {
-            return file.delete();
+            file.delete();
         }
-        return false;
     }
 }
