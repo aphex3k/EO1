@@ -1,5 +1,7 @@
 package com.aphex3k.eo1;
 
+import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+
 import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.DialogInterface;
@@ -14,7 +16,6 @@ import android.net.NetworkInfo;
 import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
-import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
@@ -63,8 +64,8 @@ import retrofit2.Response;
 public class MainActivity extends AppCompatActivity {
 
     public int interval = 5;
-    private int millis = 60000;
-    public int tempid = 0;
+    private final int millis = 60000;
+    public int tempId = 0;
     private Handler handler = new Handler();
     private ImageView imageView;
     private VideoView videoView;
@@ -78,11 +79,13 @@ public class MainActivity extends AppCompatActivity {
     private SensorManager mSensorManager;
     private Sensor mLightSensor;
     private float lastLightLevel;
-    private boolean slideshowpaused = false;
+    private float brightnessMod = 0; // Modify auto-brightness minimum
+    private final float minBrightness = 0.5f; // Minimum brightness value (0 to 1)
+    private boolean slideshowPaused = false;
     private ProgressBar progress;
-    boolean screenon = true;
-    boolean autobrightness = true;
-    float brightnesslevel = 0.5f;
+    boolean screenOn = true;
+    boolean autoBrightness = true;
+    float brightnessLevel = 0.5f;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -103,8 +106,8 @@ public class MainActivity extends AppCompatActivity {
         startQuietHour = settings.getInt("startQuietHour", -1);
         endQuietHour = settings.getInt("endQuietHour", -1);
         interval = settings.getInt("interval", 5);
-        autobrightness = settings.getBoolean("autobrightness", true);
-        brightnesslevel = settings.getFloat("brightnesslevel", 0.5f);
+        autoBrightness = settings.getBoolean("autoBrightness", true);
+        brightnessLevel = settings.getFloat("brightnessLevel", 0.5f);
 
         if (userid.isEmpty() || password.isEmpty()) {
             showSetupDialog();
@@ -147,7 +150,7 @@ public class MainActivity extends AppCompatActivity {
 
     @SuppressLint("InvalidWakeLockTag")
     @Override
-    public boolean onKeyDown(int keyCode, KeyEvent event) {
+    public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
 
         if (keyCode == KeyEvent.KEYCODE_A) {
             Toast.makeText(MainActivity.this, "sensor = " + lastLightLevel, Toast.LENGTH_SHORT).show();
@@ -164,21 +167,31 @@ public class MainActivity extends AppCompatActivity {
             progress.setVisibility(View.VISIBLE);
             imageView.setVisibility(View.INVISIBLE);
             videoView.setVisibility(View.INVISIBLE);
-            slideshowpaused = false;
+            slideshowPaused = false;
             showNextImage();
         }
 
-        if (keyCode == KeyEvent.KEYCODE_F2) {
-            //top button pushed
+        if (keyCode == KeyEvent.EO1_TOP_BUTTON) {
             WindowManager.LayoutParams params = getWindow().getAttributes();
-            if (screenon) {
-                params.screenBrightness = 0;
-                screenon = false;
-            } else {
-                params.screenBrightness = 10;
-                screenon = true;
-            }
+
+            screenOn = !screenOn;
+            params.screenBrightness = screenOn ? 10 : 0;
+            slideshowPaused = !screenOn;
+
             getWindow().setAttributes(params);
+
+            if (screenOn) {
+                getWindow().clearFlags(FLAG_KEEP_SCREEN_ON);
+            }
+            else {
+                getWindow().addFlags(FLAG_KEEP_SCREEN_ON);
+            }
+        }
+
+        if (keyCode == KeyEvent.EO1_BACK_BUTTON && screenOn) {
+            final float adjustedAmount = 0.1f;
+            brightnessMod = brightnessMod + adjustedAmount + minBrightness >= 1 ? 0 : brightnessMod + adjustedAmount;
+            adjustScreenBrightness(lastLightLevel);
         }
 
         return super.onKeyDown(keyCode, event);
@@ -203,7 +216,7 @@ public class MainActivity extends AppCompatActivity {
         passwordEditText.setText(password);
         hostEditText.setText(host);
         editTextInterval.setText(String.valueOf(interval));
-        if (autobrightness) {
+        if (autoBrightness) {
             cbAutoBrightness.setChecked(true);
             sbBrightness.setVisibility(View.GONE);
         }
@@ -211,9 +224,9 @@ public class MainActivity extends AppCompatActivity {
         sbBrightness.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override
             public void onProgressChanged(SeekBar seekBar, int i, boolean b) {
-                brightnesslevel = i / 10f;
+                brightnessLevel = i / 10f;
                 WindowManager.LayoutParams params = getWindow().getAttributes();
-                params.screenBrightness = brightnesslevel;
+                params.screenBrightness = brightnessLevel;
                 getWindow().setAttributes(params);
             }
             @Override
@@ -223,12 +236,12 @@ public class MainActivity extends AppCompatActivity {
             public void onStopTrackingTouch(SeekBar seekBar) {
             }
         });
-        sbBrightness.setProgress((int) (brightnesslevel * 10));
+        sbBrightness.setProgress((int) (brightnessLevel * 10));
 
         cbAutoBrightness.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
             @Override
             public void onCheckedChanged(CompoundButton compoundButton, boolean b) {
-                autobrightness = b;
+                autoBrightness = b;
                 if (b)
                     sbBrightness.setVisibility(View.GONE);
                 else
@@ -287,7 +300,7 @@ public class MainActivity extends AppCompatActivity {
                         startQuietHour = Integer.parseInt(startHourSpinner.getSelectedItem().toString());
                         endQuietHour = Integer.parseInt(endHourSpinner.getSelectedItem().toString());
                         interval = Integer.parseInt(editTextInterval.getText().toString().trim());
-                        autobrightness = cbAutoBrightness.isChecked();
+                        autoBrightness = cbAutoBrightness.isChecked();
 
                         if (!userid.isEmpty() && !password.isEmpty() && !host.isEmpty()) {
                             SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
@@ -298,8 +311,8 @@ public class MainActivity extends AppCompatActivity {
                             editor.putInt("startQuietHour", startQuietHour);
                             editor.putInt("endQuietHour", endQuietHour);
                             editor.putInt("interval", interval);
-                            editor.putBoolean("autobrightness", autobrightness);
-                            editor.putFloat("brightnesslevel", brightnesslevel);
+                            editor.putBoolean("autoBrightness", autoBrightness);
+                            editor.putFloat("brightnessLevel", brightnessLevel);
                             editor.apply();
 
                             Toast.makeText(MainActivity.this, "Saved!  Hit 'C' to come back here later.", Toast.LENGTH_SHORT).show();
@@ -335,7 +348,7 @@ public class MainActivity extends AppCompatActivity {
                 int normalizedStart = (startQuietHour + 24) % 24;
                 int normalizedEnd = (endQuietHour + 24) % 24;
                 if ((currentHour >= normalizedStart && currentHour < normalizedEnd) ||
-                   (normalizedStart > normalizedEnd && (currentHour >= normalizedStart || currentHour < normalizedEnd))) {
+                        (normalizedStart > normalizedEnd && (currentHour >= normalizedStart || currentHour < normalizedEnd))) {
                     if (!isInQuietHours) {
                         //entering quiet, turn off screen
                         WindowManager.LayoutParams params = getWindow().getAttributes();
@@ -365,7 +378,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showNextImage() {
-        if (immichAssets != null && !immichAssets.isEmpty() && !slideshowpaused) {
+        if (immichAssets != null && !immichAssets.isEmpty() && !slideshowPaused) {
             try {
                 ImmichApiAssetResponse asset = immichAssets.remove(0);
                 ImmichType mediaType = asset.getType();
@@ -380,7 +393,7 @@ public class MainActivity extends AppCompatActivity {
                     String extension = Files.getFileExtension(asset.getOriginalPath()).toLowerCase();
 
                     new DownloadTask().execute(uuid, extension);
-                 }
+                }
             } catch (Exception ex) {
                 progress.setVisibility(View.VISIBLE);
                 if (BuildConfig.DEBUG) {
@@ -475,14 +488,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void adjustScreenBrightness(float lightValue){
-        if (autobrightness) {
+        if (autoBrightness) {
             if (!isInQuietHours) {
                 // Determine the desired brightness range
                 float maxBrightness = 1.0f; // Maximum brightness value (0 to 1)
-                float minBrightness = 0.5f; // Minimum brightness value (0 to 1)
 
                 // Map the light sensor value (0 to 25) to the desired brightness range (0 to 1)
-                float brightness = (lightValue / 30f) * (maxBrightness - minBrightness) + minBrightness;
+                float brightness = (lightValue / 30f) * (maxBrightness - minBrightness) + minBrightness + brightnessMod;
 
                 // Make sure brightness is within the valid range
                 brightness = Math.min(Math.max(brightness, minBrightness), maxBrightness);
@@ -527,7 +539,7 @@ public class MainActivity extends AppCompatActivity {
 
                 if (!BuildConfig.DEBUG &&(
                         extension.equals("mov")
-                    )) {
+                )) {
                     // if the extension is unsupported, attempt to download a (high quality) thumbnail instead
                     downloadResponse = apiService.getAssetThumbnail(uuid, compatibleFormat, null).execute();
                     extension = compatibleFormat == ImmichThumbnailFormat.JPEG? "jpeg" : "webp";
@@ -543,8 +555,8 @@ public class MainActivity extends AppCompatActivity {
 
                 if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
-                    File tempFile = new File(getCacheDir(), "temp" + tempid + "." + extension);
-                    if (++tempid == 5) tempid=0;
+                    File tempFile = new File(getCacheDir(), "temp" + tempId + "." + extension);
+                    if (++tempId == 5) tempId =0;
                     FileOutputStream outputStream = new FileOutputStream(tempFile);
                     InputStream inputStream = downloadResponse.body().byteStream();
                     byte[] buffer = new byte[1024];
