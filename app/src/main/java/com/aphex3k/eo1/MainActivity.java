@@ -2,8 +2,14 @@ package com.aphex3k.eo1;
 
 import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
 
+import static com.vdurmont.semver4j.Semver.SemverType;
+
 import android.annotation.SuppressLint;
+import android.app.DownloadManager;
+import android.content.BroadcastReceiver;
 import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
@@ -11,8 +17,10 @@ import android.hardware.SensorEventListener;
 import android.hardware.SensorManager;
 import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
+import android.net.Uri;
 import android.os.AsyncTask;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.view.View;
 import android.view.WindowManager;
@@ -30,7 +38,11 @@ import android.widget.VideoView;
 
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.content.FileProvider;
 
+import com.aphex3k.giteaApi.GiteaApiGetReleasesResponse;
+import com.aphex3k.giteaApi.GiteaApiService;
+import com.aphex3k.giteaApi.GiteaAsset;
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichApiGetAlbumResponse;
 import com.aphex3k.immichApi.ImmichApiLogin;
@@ -42,16 +54,23 @@ import com.aphex3k.immichApi.ImmichType;
 import com.google.common.io.Files;
 import com.squareup.picasso.Callback;
 import com.squareup.picasso.Picasso;
+import com.vdurmont.semver4j.Semver;
 
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.URL;
+import java.nio.channels.Channels;
+import java.nio.channels.FileChannel;
+import java.nio.channels.ReadableByteChannel;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 import java.util.Objects;
 
@@ -80,6 +99,9 @@ public class MainActivity extends AppCompatActivity {
     boolean screenOn = true;
     boolean autoBrightness = true;
     float brightnessLevel = 0.5f;
+
+    private int lastKeyCode = 0;
+    private Date lastKeyCodeDate = new Date();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -146,6 +168,19 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public boolean onKeyDown(int keyCode, android.view.KeyEvent event) {
 
+        // Trigger update check if both buttons have been pressed "at the same time"
+        if (
+                ((keyCode == KeyEvent.EO1_TOP_BUTTON && lastKeyCode == KeyEvent.EO1_BACK_BUTTON) ||
+                        (keyCode == KeyEvent.EO1_BACK_BUTTON && lastKeyCode == KeyEvent.EO1_TOP_BUTTON))
+                && ((new Date()).getTime() - lastKeyCodeDate.getTime() < 250))
+        {
+            checkForUpdates(false);
+            return true;
+        }
+
+        lastKeyCode = keyCode;
+        lastKeyCodeDate = new Date();
+
         if (keyCode == KeyEvent.KEYCODE_A) {
             Toast.makeText(MainActivity.this, "sensor = " + lastLightLevel, Toast.LENGTH_SHORT).show();
         } else if (BuildConfig.DEBUG) {
@@ -189,6 +224,73 @@ public class MainActivity extends AppCompatActivity {
         }
 
         return super.onKeyDown(keyCode, event);
+    }
+
+    private void checkForUpdates(boolean suppressUI) {
+        if (!suppressUI || BuildConfig.DEBUG) {
+            Toast.makeText(MainActivity.this, "Checking for app update...", Toast.LENGTH_SHORT).show();
+        }
+        new Thread(() -> {
+            try {
+                    final Semver currentVersion = new Semver(BuildConfig.VERSION_NAME);
+                    Semver latestVersion = currentVersion;
+                    GiteaApiGetReleasesResponse updateTo = null;
+
+                    GiteaApiService apiService = ApiServiceGenerator.createService(GiteaApiService.class, "https://gitea.codingmerc.com/");
+
+                    Response<List<GiteaApiGetReleasesResponse>> response = apiService.getReleases("michael", "EO1").execute();
+
+                    for (GiteaApiGetReleasesResponse release: response.body()) {
+                        boolean isHigher = release.version().isGreaterThan(latestVersion);
+                        boolean isStable = latestVersion.isStable();
+                        if (isHigher && (BuildConfig.DEBUG || isStable)) {
+                            latestVersion = release.version();
+                            updateTo = release;
+                        }
+                    }
+
+                    if (updateTo != null) {
+
+                        String downloadUrlString = null;
+
+                        for (GiteaAsset asset: updateTo.getAssets()) {
+                            if (BuildConfig.DEBUG && asset.getName().equals("app-debug.apk")) {
+                                downloadUrlString = asset.getBrowserDownloadUrl();
+                            }
+                            else if (!BuildConfig.DEBUG && asset.getName().equals("app-release.apk")) {
+                                downloadUrlString = asset.getBrowserDownloadUrl();
+                            }
+                        }
+
+                        if (downloadUrlString == null) {
+                            throw new FileNotFoundException("Couldn't find expected download url for asset.");
+                        }
+
+                        final String fileName = "app-" + latestVersion.toStrict() + ".apk";
+
+                        final String downloadedFilePath = Util.downloadFileSync(downloadUrlString, ApiServiceGenerator.getNewHttpClient(), fileName);
+
+                        if (downloadedFilePath == null) {
+                            throw new FileNotFoundException("File failed downloading...");
+                        }
+                        else {
+                            runOnUiThread(() -> {
+                                Uri apkUri = Uri.fromFile(new File(downloadedFilePath));
+                                Intent intent = new Intent(Intent.ACTION_VIEW);
+                                intent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+                                intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                                startActivity(intent);
+                            });
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    if (!suppressUI || BuildConfig.DEBUG) {
+                        runOnUiThread(() -> Toast.makeText(MainActivity.this, "Update check failure: " + e.getMessage(), Toast.LENGTH_LONG).show());
+                    }
+                }
+        }).start();
     }
 
     private void showSetupDialog() {
@@ -390,7 +492,7 @@ public class MainActivity extends AppCompatActivity {
 
         if (!host.isEmpty() && !userid.isEmpty() && !password.isEmpty() && isNetworkAvailable())
         {
-            ImmichApiService apiService = ImmichApiServiceGenerator.createService(ImmichApiService.class, host);
+            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, host);
 
             new Thread(() -> {
                 try {
@@ -488,7 +590,7 @@ public class MainActivity extends AppCompatActivity {
 
             try {
                 // Download the file with id
-                ImmichApiService apiService = ImmichApiServiceGenerator.createService(ImmichApiService.class, host);
+                ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, host);
 
                 // Login to get a current auth cookie
                 apiService.login(

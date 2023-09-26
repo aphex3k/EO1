@@ -3,7 +3,7 @@ package com.aphex3k.immichApi;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 
-import com.aphex3k.eo1.ImmichApiServiceGenerator;
+import com.aphex3k.eo1.ApiServiceGenerator;
 
 import org.junit.AssumptionViolatedException;
 import org.junit.Before;
@@ -28,7 +28,7 @@ public class ImmichApiServiceTest {
 
         if (userId == null) {
 
-            this.apiService = ImmichApiServiceGenerator.createService(ImmichApiService.class, "***REMOVED***");
+            this.apiService = ApiServiceGenerator.createService(ImmichApiService.class, "***REMOVED***");
 
             try {
                 Response<ImmichApiLoginResponse> response = apiService.login(
