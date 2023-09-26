@@ -1,17 +1,13 @@
 package com.aphex3k.eo1;
 
-import android.os.Build;
 import android.util.Log;
 
 import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLContext;
 
-import okhttp3.CipherSuite;
 import okhttp3.ConnectionSpec;
 import okhttp3.OkHttpClient;
 import okhttp3.TlsVersion;
@@ -19,7 +15,7 @@ import okhttp3.logging.HttpLoggingInterceptor;
 import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
 
-public class ImmichApiServiceGenerator {
+public class ApiServiceGenerator {
     public static <S> S createService(Class<S> serviceClass, String host) {
         return new Retrofit.Builder()
                 .baseUrl(host)
@@ -29,7 +25,7 @@ public class ImmichApiServiceGenerator {
                 .create(serviceClass);
     }
 
-    private static OkHttpClient getNewHttpClient() {
+    protected static OkHttpClient getNewHttpClient() {
 
         HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
 
