@@ -39,7 +39,22 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="16dp"
-        android:orientation="vertical"/>
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/textView2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Time Zone"
+            android:textSize="22sp" />
+
+        <Spinner
+            android:id="@+id/tzSpinner"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:spinnerMode="dialog" />
+
+    </RadioGroup>
 
     <TextView
         android:id="@+id/textView3"

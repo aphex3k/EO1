@@ -5,6 +5,7 @@ import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
 import static com.vdurmont.semver4j.Semver.SemverType;
 
 import android.annotation.SuppressLint;
+import android.app.AlarmManager;
 import android.app.DownloadManager;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -22,6 +23,7 @@ import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Environment;
 import android.os.Handler;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.ArrayAdapter;
@@ -68,11 +70,15 @@ import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
 import java.nio.channels.ReadableByteChannel;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
+import java.util.Set;
+import java.util.TimeZone;
 
 import okhttp3.ResponseBody;
 import retrofit2.Response;
@@ -89,6 +95,7 @@ public class MainActivity extends AppCompatActivity {
     private String host = "";
     private int startQuietHour = -1;
     private int endQuietHour = -1;
+    private String selectedTimeZoneId = "";
     final private ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
     private boolean isInQuietHours = false;
     private float lastLightLevel;
@@ -124,6 +131,7 @@ public class MainActivity extends AppCompatActivity {
         interval = settings.getInt("interval", 5);
         autoBrightness = settings.getBoolean("autoBrightness", true);
         brightnessLevel = settings.getFloat("brightnessLevel", 0.5f);
+        selectedTimeZoneId = settings.getString("selectedTimeZoneId", "");
 
         if (userid.isEmpty() || password.isEmpty()) {
             showSetupDialog();
@@ -147,6 +155,19 @@ public class MainActivity extends AppCompatActivity {
             }
         };
         mSensorManager.registerListener(listener, mLightSensor, SensorManager.SENSOR_DELAY_UI);
+
+        if (BuildConfig.DEBUG) {
+            View.OnTouchListener openSetup = new View.OnTouchListener() {
+                @Override
+                public boolean onTouch(View view, MotionEvent motionEvent) {
+                    showSetupDialog();
+                    return false;
+                }
+            };
+            imageView.setOnTouchListener(openSetup);
+            videoView.setOnTouchListener(openSetup);
+            progress.setOnTouchListener(openSetup);
+        }
     }
 
     @Override
@@ -306,6 +327,7 @@ public class MainActivity extends AppCompatActivity {
         final EditText editTextInterval = customLayout.findViewById(R.id.editTextInterval);
         final CheckBox cbAutoBrightness = customLayout.findViewById(R.id.cbBrightnessAuto);
         final SeekBar sbBrightness = customLayout.findViewById(R.id.sbBrightness);
+        final Spinner tzSpinner = customLayout.findViewById(R.id.tzSpinner);
 
         userIdEditText.setText(userid);
         passwordEditText.setText(password);
@@ -353,6 +375,12 @@ public class MainActivity extends AppCompatActivity {
         endHourSpinner.setAdapter(hourAdapter);
         if (endQuietHour != -1) endHourSpinner.setSelection(endQuietHour);
 
+        String[] allTimeZoneIds = TimeZone.getAvailableIDs();
+        ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_item, allTimeZoneIds);
+        tzAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        tzSpinner.setAdapter(tzAdapter);
+        if (!selectedTimeZoneId.isEmpty()) tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(selectedTimeZoneId));
+
         builder.setTitle("Setup")
                 .setCancelable(false)
                 .setView(customLayout)
@@ -364,6 +392,7 @@ public class MainActivity extends AppCompatActivity {
                     endQuietHour = Integer.parseInt(endHourSpinner.getSelectedItem().toString());
                     interval = Integer.parseInt(editTextInterval.getText().toString().trim());
                     autoBrightness = cbAutoBrightness.isChecked();
+                    selectedTimeZoneId = tzSpinner.getSelectedItem().toString();
 
                     if (!userid.isEmpty() && !password.isEmpty() && !host.isEmpty()) {
                         SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
@@ -376,11 +405,13 @@ public class MainActivity extends AppCompatActivity {
                         editor.putInt("interval", interval);
                         editor.putBoolean("autoBrightness", autoBrightness);
                         editor.putFloat("brightnessLevel", brightnessLevel);
+                        editor.putString("selectedTimeZoneId", selectedTimeZoneId);
                         editor.apply();
 
                         Toast.makeText(MainActivity.this, "Saved!  Hit 'C' to come back here later.", Toast.LENGTH_SHORT).show();
 
                         loadImagesFromImmich();
+                        updateTimeZone();
                     } else {
                         Toast.makeText(MainActivity.this, "Please enter User ID and API Key", Toast.LENGTH_SHORT).show();
                     }
@@ -388,6 +419,13 @@ public class MainActivity extends AppCompatActivity {
                 .setNegativeButton("Cancel", (dialog, which) -> dialog.dismiss());
 
         builder.show();
+    }
+
+    private void updateTimeZone() {
+        if (!selectedTimeZoneId.isEmpty()) {
+            AlarmManager alarmManager=(AlarmManager)this.getSystemService(Context.ALARM_SERVICE);
+            alarmManager.setTimeZone(selectedTimeZoneId);
+        }
     }
 
     private void startSlideshow() {
@@ -538,7 +576,6 @@ public class MainActivity extends AppCompatActivity {
 
                 // Map the light sensor value (0 to 25) to the desired brightness range (0 to 1)
                 float brightness = (lightValue / 30f) * (maxBrightness - minBrightness) + minBrightness + brightnessMod;
-
 
                 // Make sure brightness is within the valid range
                 brightness = Math.min(Math.max(brightness, minBrightness), maxBrightness);
