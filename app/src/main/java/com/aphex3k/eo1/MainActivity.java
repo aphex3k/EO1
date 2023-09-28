@@ -324,6 +324,7 @@ public class MainActivity extends AppCompatActivity {
         final EditText hostEditText = customLayout.findViewById(R.id.editTextHost);
         final Spinner startHourSpinner = customLayout.findViewById(R.id.startHourSpinner);
         final Spinner endHourSpinner = customLayout.findViewById(R.id.endHourSpinner);
+        final Button btnLoadConfig = customLayout.findViewById(R.id.btnLoadConfig);
         final EditText editTextInterval = customLayout.findViewById(R.id.editTextInterval);
         final CheckBox cbAutoBrightness = customLayout.findViewById(R.id.cbBrightnessAuto);
         final SeekBar sbBrightness = customLayout.findViewById(R.id.sbBrightness);
@@ -380,6 +381,30 @@ public class MainActivity extends AppCompatActivity {
         tzAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         tzSpinner.setAdapter(tzAdapter);
         if (!selectedTimeZoneId.isEmpty()) tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(selectedTimeZoneId));
+        
+        btnLoadConfig.setOnClickListener(view -> {
+            File downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS);
+            File file = new File(downloadsDir, "config.txt");
+            if (!file.exists()) {
+                Toast.makeText(MainActivity.this, "Can't find config.txt", Toast.LENGTH_SHORT).show();
+            } else {
+                StringBuilder sb = new StringBuilder();
+                try {
+                    BufferedReader br = new BufferedReader(new FileReader(file));
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        sb.append(line).append('\n');
+                    }
+                    br.close();
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+
+                userIdEditText.setText(sb.toString().split("\n")[0]);
+                passwordEditText.setText(sb.toString().split("\n")[1]);
+                hostEditText.setText(sb.toString().split("\n")[2]);
+            }
+        });
 
         builder.setTitle("Setup")
                 .setCancelable(false)

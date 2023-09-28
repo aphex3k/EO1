@@ -34,6 +34,12 @@
         android:layout_height="wrap_content"
         android:hint="Host" />
 
+    <Button
+        android:id="@+id/btnLoadConfig"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Load above settings from config.txt" />
+
     <RadioGroup
         android:id="@+id/optionsRadioGroup"
         android:layout_width="match_parent"
