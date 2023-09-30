@@ -1,3 +1,5 @@
+[![Build Status](https://jenkins.codingmerc.com/job/EO1/job/main/badge/icon)](https://jenkins.codingmerc.com/job/EO1/job/main/)
+
 # EO1 Replacement APK
 
 This repository is a fork of [spalt/EO1](https://github.com/spalt/EO1). The goal is to use a
@@ -9,7 +11,7 @@ This concept guarantees that you control all aspects of the images displayed on 
 
 ## Concept
 
-On your smart device, you will run the immich app for your platform and device. It supports phones and tablets running iOS or Android. The app connects to the cloud hosting an instance of the immich server. You need to host it yourself or have someone host it for you! 
+On your smart device, you will run the immich app for your platform and device. It supports phones and tablets running iOS or Android. The app connects to the cloud hosting an instance of the immich server. You need to host it yourself or have someone host it for you!
 
 - A simple single-user configuration runs the same user credentials on the EO1 as well as on the smart device.
 - In a multi-user configuration, everyone can upload pictures to a shared album which is accessible from the account that is used on the EO1 frames.
