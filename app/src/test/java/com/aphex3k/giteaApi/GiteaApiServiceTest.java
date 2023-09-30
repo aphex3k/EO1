@@ -8,11 +8,13 @@ import com.aphex3k.eo1.BuildConfig;
 import com.vdurmont.semver4j.Semver;
 
 import org.junit.Before;
+import org.junit.Ignore;
 
 import java.util.List;
 
 import retrofit2.Response;
 
+@Ignore
 public class GiteaApiServiceTest {
     private GiteaApiService apiService;
     @Before

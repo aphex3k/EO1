@@ -1,17 +1,14 @@
 package com.aphex3k.eo1;
 
+import static android.Manifest.permission.WRITE_EXTERNAL_STORAGE;
 import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
 
-import static com.vdurmont.semver4j.Semver.SemverType;
-
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.AlarmManager;
-import android.app.DownloadManager;
-import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.IntentFilter;
-import android.content.SharedPreferences;
+import android.content.pm.PackageManager;
 import android.hardware.Sensor;
 import android.hardware.SensorEvent;
 import android.hardware.SensorEventListener;
@@ -20,9 +17,10 @@ import android.net.ConnectivityManager;
 import android.net.NetworkInfo;
 import android.net.Uri;
 import android.os.AsyncTask;
+import android.os.Build;
 import android.os.Bundle;
-import android.os.Environment;
 import android.os.Handler;
+import android.util.Log;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.WindowManager;
@@ -40,6 +38,8 @@ import android.widget.VideoView;
 
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 import androidx.core.content.FileProvider;
 
 import com.aphex3k.giteaApi.GiteaApiGetReleasesResponse;
@@ -54,6 +54,8 @@ import com.aphex3k.immichApi.ImmichExifInfo;
 import com.aphex3k.immichApi.ImmichThumbnailFormat;
 import com.aphex3k.immichApi.ImmichType;
 import com.google.common.io.Files;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.squareup.picasso.Callback;
 import com.squareup.picasso.Picasso;
 import com.vdurmont.semver4j.Semver;
@@ -63,8 +65,10 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStreamWriter;
 import java.net.URL;
 import java.nio.channels.Channels;
 import java.nio.channels.FileChannel;
@@ -106,7 +110,7 @@ public class MainActivity extends AppCompatActivity {
     boolean screenOn = true;
     boolean autoBrightness = true;
     float brightnessLevel = 0.5f;
-
+    private final String configFilename = "configuration.json";
     private int lastKeyCode = 0;
     private Date lastKeyCodeDate = new Date();
 
@@ -122,16 +126,23 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
-        userid = settings.getString("userid", "");
-        password = settings.getString("password", "");
-        host = settings.getString("host", "");
-        startQuietHour = settings.getInt("startQuietHour", -1);
-        endQuietHour = settings.getInt("endQuietHour", -1);
-        interval = settings.getInt("interval", 5);
-        autoBrightness = settings.getBoolean("autoBrightness", true);
-        brightnessLevel = settings.getFloat("brightnessLevel", 0.5f);
-        selectedTimeZoneId = settings.getString("selectedTimeZoneId", "");
+        try {
+            Configuration configuration = loadConfiguration();
+
+            userid = configuration.userid != null ? configuration.userid : userid;
+            password = configuration.password != null ? configuration.password : password;
+            host = configuration.host != null ? configuration.host : host;
+            startQuietHour = configuration.startQuietHour >= 0 ? configuration.startQuietHour : startQuietHour;
+            endQuietHour = configuration.endQuietHour >= 0 ? configuration.endQuietHour : endQuietHour;
+            interval = configuration.interval != 0 ? configuration.interval : interval;
+            selectedTimeZoneId = configuration.selectedTimeZoneId != null ? configuration.selectedTimeZoneId : selectedTimeZoneId;
+            autoBrightness = configuration.autoBrightness;
+            brightnessLevel = configuration.brightnessLevel != 0 ? configuration.brightnessLevel : brightnessLevel;
+        }
+        catch (FileNotFoundException e)
+        {
+
+        }
 
         if (userid.isEmpty() || password.isEmpty()) {
             showSetupDialog();
@@ -176,6 +187,16 @@ public class MainActivity extends AppCompatActivity {
 
         if (!userid.isEmpty() && !password.isEmpty()) {
             loadImagesFromImmich();
+        }
+
+        int permissionCheckStorage = ContextCompat.checkSelfPermission(MainActivity.this, WRITE_EXTERNAL_STORAGE);
+        if (permissionCheckStorage != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions( MainActivity.this, new String[]{WRITE_EXTERNAL_STORAGE}, 0);
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                && ContextCompat.checkSelfPermission(MainActivity.this, Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(MainActivity.this, new String[]{Manifest.permission.READ_EXTERNAL_STORAGE},
+                    0);
         }
     }
 
@@ -381,30 +402,31 @@ public class MainActivity extends AppCompatActivity {
         tzAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
         tzSpinner.setAdapter(tzAdapter);
         if (!selectedTimeZoneId.isEmpty()) tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(selectedTimeZoneId));
-        
-        btnLoadConfig.setOnClickListener(view -> {
-            File downloadsDir = android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS);
-            File file = new File(downloadsDir, "config.txt");
-            if (!file.exists()) {
-                Toast.makeText(MainActivity.this, "Can't find config.txt", Toast.LENGTH_SHORT).show();
-            } else {
-                StringBuilder sb = new StringBuilder();
-                try {
-                    BufferedReader br = new BufferedReader(new FileReader(file));
-                    String line;
-                    while ((line = br.readLine()) != null) {
-                        sb.append(line).append('\n');
-                    }
-                    br.close();
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
 
-                userIdEditText.setText(sb.toString().split("\n")[0]);
-                passwordEditText.setText(sb.toString().split("\n")[1]);
-                hostEditText.setText(sb.toString().split("\n")[2]);
+        View.OnClickListener load = new View.OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                try {
+                    Configuration configuration = loadConfiguration();
+
+                    userIdEditText.setText(configuration.userid);
+                    passwordEditText.setText(configuration.password);
+                    hostEditText.setText(configuration.host);
+                    cbAutoBrightness.setActivated(configuration.autoBrightness);
+                    tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId), true);
+                    startHourSpinner.setSelection(configuration.startQuietHour, true);
+                    endHourSpinner.setSelection(configuration.endQuietHour, true);
+                    editTextInterval.setText(String.valueOf(configuration.interval));
+                    sbBrightness.setProgress((int) (configuration.brightnessLevel * 10));
+                }
+                catch (FileNotFoundException fne) {
+                    Toast.makeText(MainActivity.this, "Configuration file not found.", Toast.LENGTH_SHORT).show();
+                }
             }
-        });
+        };
+
+        btnLoadConfig.setOnClickListener(load);
+        btnLoadConfig.callOnClick();
 
         builder.setTitle("Setup")
                 .setCancelable(false)
@@ -420,23 +442,16 @@ public class MainActivity extends AppCompatActivity {
                     selectedTimeZoneId = tzSpinner.getSelectedItem().toString();
 
                     if (!userid.isEmpty() && !password.isEmpty() && !host.isEmpty()) {
-                        SharedPreferences settings = getSharedPreferences("prefs", MODE_PRIVATE);
-                        SharedPreferences.Editor editor = settings.edit();
-                        editor.putString("userid", userid);
-                        editor.putString("password", password);
-                        editor.putString("host", host);
-                        editor.putInt("startQuietHour", startQuietHour);
-                        editor.putInt("endQuietHour", endQuietHour);
-                        editor.putInt("interval", interval);
-                        editor.putBoolean("autoBrightness", autoBrightness);
-                        editor.putFloat("brightnessLevel", brightnessLevel);
-                        editor.putString("selectedTimeZoneId", selectedTimeZoneId);
-                        editor.apply();
+                        try {
+                            saveConfiguration();
+                            Toast.makeText(MainActivity.this, "Saved!  Hit 'C' to come back here later.", Toast.LENGTH_SHORT).show();
 
-                        Toast.makeText(MainActivity.this, "Saved!  Hit 'C' to come back here later.", Toast.LENGTH_SHORT).show();
-
-                        loadImagesFromImmich();
-                        updateTimeZone();
+                            loadImagesFromImmich();
+                            updateTimeZone();
+                        }
+                        catch (IOException e) {
+                            Toast.makeText(MainActivity.this, "Failed saving configuration", Toast.LENGTH_SHORT).show();
+                        }
                     } else {
                         Toast.makeText(MainActivity.this, "Please enter User ID and API Key", Toast.LENGTH_SHORT).show();
                     }
@@ -444,6 +459,54 @@ public class MainActivity extends AppCompatActivity {
                 .setNegativeButton("Cancel", (dialog, which) -> dialog.dismiss());
 
         builder.show();
+    }
+
+    protected Configuration loadConfiguration() throws FileNotFoundException {
+        File file = new File(this.getFilesDir(), configFilename);
+
+        return new Gson().fromJson(new FileReader(file), Configuration.class);
+    }
+
+    protected void saveConfiguration() throws IOException {
+        File file = new File(this.getFilesDir(), configFilename);
+
+        file.getParentFile().mkdirs();
+
+        Configuration configuration = new Configuration();
+
+        configuration.autoBrightness = autoBrightness;
+        configuration.brightnessLevel = brightnessLevel;
+        configuration.endQuietHour = endQuietHour;
+        configuration.startQuietHour = startQuietHour;
+        configuration.interval = interval;
+        configuration.host = host;
+        configuration.password = password;
+        configuration.selectedTimeZoneId = selectedTimeZoneId;
+        configuration.userid = userid;
+
+        Gson gson = new GsonBuilder()
+                .setPrettyPrinting()
+                .serializeNulls()
+                .create();
+
+        String jsonString = gson.toJson(configuration);
+
+        try
+        {
+            file.createNewFile();
+            FileOutputStream fOut = new FileOutputStream(file);
+            OutputStreamWriter myOutWriter = new OutputStreamWriter(fOut);
+            myOutWriter.append(jsonString);
+
+            myOutWriter.close();
+
+            fOut.flush();
+            fOut.close();
+        }
+        catch (IOException e)
+        {
+            Log.e("Exception", "File write failed: " + e.toString());
+        }
     }
 
     private void updateTimeZone() {

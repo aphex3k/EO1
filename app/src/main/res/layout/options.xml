@@ -38,7 +38,7 @@
         android:id="@+id/btnLoadConfig"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Load above settings from config.txt" />
+        android:text="Load settings from configuration.json" />
 
     <RadioGroup
         android:id="@+id/optionsRadioGroup"
