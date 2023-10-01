@@ -44,7 +44,14 @@ pipeline {
                     if (env.BRANCH_NAME == 'main') {
                         PBANDJELLY = "-PBUILD_NUMBER=${env.BUILD_NUMBER}"
                     }               
+                    
                     sh "./gradlew clean build test assembleDebug assembleRelease -s $PBANDJELLY -Pandroid.injected.signing.store.file=$KEYSTORE -Pandroid.injected.signing.store.password=$KEYSTORE_PASS -Pandroid.injected.signing.key.alias=$KEY_ALIAS -Pandroid.injected.signing.key.password=$KEY_PASS"
+                    
+                    script {
+                        if (env.BRANCH_NAME == 'main') {
+                            archiveArtifacts allowEmptyArchive: true, artifacts: 'app/build/outputs/apk/* app/build/outputs/logs/* app/build/reports/* app/build/test-results/*', excludes: '', fingerprint: true, onlyIfSuccessful: true
+                        }
+                    }
                 }       
             }         
         }
@@ -67,9 +74,7 @@ pipeline {
         }
         success {
             script {
-                if (env.BRANCH_NAME == 'main') {
-                    archiveArtifacts allowEmptyArchive: true, artifacts: 'app/debug/* app/release/* app/build/reports/lint-results-debug.html', excludes: '', fingerprint: true, onlyIfSuccessful: true
-                }
+                sh 'echo success...'
             }
         }
     }
