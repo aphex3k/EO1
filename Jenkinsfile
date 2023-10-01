@@ -49,7 +49,7 @@ pipeline {
                     
                     script {
                         if (env.BRANCH_NAME == 'main') {
-                            archiveArtifacts allowEmptyArchive: true, artifacts: 'app/build/outputs/apk/* app/build/outputs/logs/* app/build/reports/* app/build/test-results/*', excludes: '', fingerprint: true, onlyIfSuccessful: true
+                            archiveArtifacts allowEmptyArchive: true, artifacts: 'app/build/outputs/apk/**/*,app/build/outputs/logs/*,app/build/reports/**/*,app/build/test-results/**/*', excludes: '', fingerprint: true, onlyIfSuccessful: true
                         }
                     }
                 }       
