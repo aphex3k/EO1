@@ -1,0 +1,10 @@
+{
+    "host": "https://your host here/",
+    "userid": "test@test.test",
+    "password": "correct-horse-battery-staple",
+    "autoBrightness": true,
+    "selectedTimeZoneId": "America/Los_Angeles",
+    "startQuietHour": 23,
+    "endQuietHour": 14,
+    "interval": 15
+}

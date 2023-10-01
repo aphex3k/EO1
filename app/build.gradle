@@ -9,13 +9,17 @@ android {
     defaultConfig {
         applicationId "com.aphex3k.eo1"
         minSdk 19
-        targetSdk 34
+        targetSdk 33
         maxSdk 19
-        versionCode 7
+        if (project.hasProperty('BUILD_NUMBER')) {
+            versionCode = Integer.parseInt(project.BUILD_NUMBER)
+        }
+        else {
+            versionCode = 7
+        }
         versionName "1.0.0-rc3"
         multiDexEnabled true
     }
-
     buildTypes {
         release {
             minifyEnabled false
