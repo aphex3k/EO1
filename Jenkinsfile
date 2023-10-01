@@ -1,3 +1,5 @@
+def PBANDJELLY = ""
+
 pipeline {
     agent any
     environment { 
@@ -6,6 +8,21 @@ pipeline {
     }
 
     stages {
+        stage ('Description') {
+            steps {
+                script {
+                    currentBuild.displayName = "Electric Objects Replacement App (build #${env.BUILD_NUMBER})"
+
+                    def text = ""
+                    for (changeSetList in currentBuild.changeSets) {
+                        for (changeSet in changeSetList) {                            
+                            text += "- ${changeSet.msg}\n"
+                        }
+                    }
+                    currentBuild.description = text
+                }
+            }
+        }
         stage('Checkout') {
             steps {
                 withCredentials([gitUsernamePassword(credentialsId: 'gitea-jenkins', gitToolName: 'Default')]) {
@@ -16,22 +33,43 @@ pipeline {
             }
         }
         stage ('Building Android 🤖') {
+            environment {
+                KEYSTORE = credentials('keystore-eo1')
+                KEY_PASS = credentials('keystore-eo1-key-password')
+                KEYSTORE_PASS = credentials('keystore-eo1-key-store-password')
+                KEY_ALIAS = 'EO1'                
+            }
             steps {
                 script {
-                    sh "./gradlew assembleRelease assembleDebug bundleRelease bundleDebug -s"
-                }
+                    if (env.BRANCH_NAME == 'main') {
+                        PBANDJELLY = "-PBUILD_NUMBER=${env.BUILD_NUMBER}"
+                    }               
+                    sh "./gradlew clean build test assembleDebug assembleRelease -s $PBANDJELLY -Pandroid.injected.signing.store.file=$KEYSTORE -Pandroid.injected.signing.store.password=$KEYSTORE_PASS -Pandroid.injected.signing.key.alias=$KEY_ALIAS -Pandroid.injected.signing.key.password=$KEY_PASS"
+                }       
             }         
         }
-        stage('Test') {
-            steps {
-                script {
-                    sh "./gradlew test"
-                }
+    }
+    post {
+        cleanup {
+            script {
+                sh 'git clean -xdf'
             }
         }
-        stage('Deploy') {
-            steps {
-                echo 'Deploying....'
+        failure {
+            script {
+                sh 'echo failure...'
+            }
+        }
+        always {
+            script {
+                sh 'echo always...'
+            }
+        }
+        success {
+            script {
+                if (env.BRANCH_NAME == 'main') {
+                    archiveArtifacts allowEmptyArchive: true, artifacts: 'app/debug/* app/release/* app/build/reports/lint-results-debug.html', excludes: '', fingerprint: true, onlyIfSuccessful: true
+                }
             }
         }
     }
