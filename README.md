@@ -63,3 +63,9 @@ It seems like EO2 allows for adb access. If you push a [`configuration.json`](co
 If you configure multiple EO2 you can download a `configuration.json` from the EO2 after successfully configuring the first one. This file can be downloaded, optionally modified, and pushed to the next EO2.
 This might only work for EO2 frames as I'm unaware of enabling `adb` on EO1.
 (I do not have an EO2 available to test this, please [provide feedback](https://gitea.codingmerc.com/michael/EO1/issues)!)
+
+## Contribution
+
+1. You can provide feedback by opening [Issues](https://gitea.codingmerc.com/michael/EO1/issues) and describing an idea or problem.
+1. You can donate in Dollar via [PayPal](https://www.paypal.me/aphex3k) or in [Bitcoin](https://lnbits.vpn1.codingmerc.com/lnurlp/link/V6KUib).
+1. If you happen to have a working but no longer needed EO1/EO2 picture frame, please reach out via email!
