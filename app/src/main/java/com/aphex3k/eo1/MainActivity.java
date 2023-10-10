@@ -563,6 +563,13 @@ public class MainActivity extends AppCompatActivity {
             Collections.shuffle(immichAssets);
             try {
                 ImmichApiAssetResponse asset = immichAssets.remove(0);
+
+                if (BuildConfig.DEBUG) {
+                    while (immichAssets.size() > 0 && asset.getType() != ImmichType.VIDEO) {
+                        asset = immichAssets.remove(0);
+                    }
+                }
+
                 ImmichType mediaType = asset.getType();
                 ImmichExifInfo exif = asset.getExifInfo();
 
@@ -572,8 +579,8 @@ public class MainActivity extends AppCompatActivity {
                     showNextImage();
                 } else {
                     String uuid = asset.getId();
-                    String extension = Files.getFileExtension(asset.getOriginalPath()).toLowerCase();
-
+//                    String extension = Files.getFileExtension(asset.getOriginalPath()).toLowerCase();
+                    String extension = asset.getType() == ImmichType.VIDEO ? "mp4" : "jpeg";
                     new DownloadTask().execute(uuid, extension);
                 }
             } catch (Exception ex) {
@@ -697,24 +704,7 @@ public class MainActivity extends AppCompatActivity {
                         new ImmichApiLogin(userid, password)
                 ).execute();
 
-                Response<ResponseBody> downloadResponse;
-                ImmichThumbnailFormat compatibleFormat = ImmichThumbnailFormat.JPEG;
-
-                if (!BuildConfig.DEBUG &&(
-                        extension.equals("mov")
-                )) {
-                    // if the extension is unsupported, attempt to download a (high quality) thumbnail instead
-                    downloadResponse = apiService.getAssetThumbnail(uuid, compatibleFormat, null).execute();
-                    extension = compatibleFormat == ImmichThumbnailFormat.JPEG? "jpeg" : "webp";
-                }
-                else if (extension.equals("heic")) {
-                    // if the extension is unsupported, attempt to download a (high quality) thumbnail instead
-                    downloadResponse = apiService.getAssetThumbnail(uuid, compatibleFormat, null).execute();
-                    extension = compatibleFormat == ImmichThumbnailFormat.JPEG? "jpeg" : "webp";
-                }
-                else {
-                    downloadResponse = apiService.downloadFile(uuid).execute();
-                }
+                Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, true, false, null).execute();
 
                 if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
@@ -801,6 +791,7 @@ public class MainActivity extends AppCompatActivity {
 
                     videoView.setOnPreparedListener(mediaPlayer -> {
                         mediaPlayer.setLooping(true);
+                        mediaPlayer.setVolume(0f,0f);
                         videoView.start();
                     });
                     videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
