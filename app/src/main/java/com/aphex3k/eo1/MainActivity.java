@@ -643,10 +643,12 @@ public class MainActivity extends AppCompatActivity {
                         }
                         if (!immichAssets.isEmpty()) {
                             try {
-                                startSlideshow();
+                                runOnUiThread(() -> startSlideshow());
                             } catch (Exception ex) {
-                                Toast.makeText(MainActivity.this, "Immich failure :", Toast.LENGTH_SHORT).show();
-                                showSetupDialog();
+                                runOnUiThread(() -> {
+                                    Toast.makeText(MainActivity.this, "Immich failure :", Toast.LENGTH_SHORT).show();
+                                    showSetupDialog();
+                                });
                             }
                         }
                     }
