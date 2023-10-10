@@ -559,6 +559,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showNextImage() {
+        if (immichAssets.isEmpty()) {
+            loadImagesFromImmich();
+            return;
+        }
+
         if (immichAssets != null && !immichAssets.isEmpty() && !slideshowPaused) {
             Collections.shuffle(immichAssets);
             try {

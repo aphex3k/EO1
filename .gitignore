@@ -19,3 +19,4 @@ app/debug
 *.apk
 passwords.txt
 ..bfg-report/
+.idea/deploymentTargetDropDown.xml
