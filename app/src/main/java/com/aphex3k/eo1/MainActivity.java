@@ -89,7 +89,13 @@ import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity {
 
+    /**
+     * Amount of minutes to wait between displaying images
+     */
     public int interval = 5;
+    /**
+    Amount of milliseconds in a minute
+     */
     private final long millis = 60000;
     private final Handler handler = new Handler();
     private ImageView imageView;
@@ -564,17 +570,10 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        if (immichAssets != null && !immichAssets.isEmpty() && !slideshowPaused) {
+        if (!immichAssets.isEmpty() && !slideshowPaused) {
             Collections.shuffle(immichAssets);
             try {
                 ImmichApiAssetResponse asset = immichAssets.remove(0);
-
-                if (BuildConfig.DEBUG) {
-                    while (immichAssets.size() > 0 && asset.getType() != ImmichType.VIDEO) {
-                        asset = immichAssets.remove(0);
-                    }
-                }
-
                 ImmichType mediaType = asset.getType();
                 ImmichExifInfo exif = asset.getExifInfo();
 
@@ -584,7 +583,6 @@ public class MainActivity extends AppCompatActivity {
                     showNextImage();
                 } else {
                     String uuid = asset.getId();
-//                    String extension = Files.getFileExtension(asset.getOriginalPath()).toLowerCase();
                     String extension = asset.getType() == ImmichType.VIDEO ? "mp4" : "jpeg";
                     new DownloadTask().execute(uuid, extension);
                 }
@@ -593,7 +591,7 @@ public class MainActivity extends AppCompatActivity {
                 if (BuildConfig.DEBUG) {
                     Toast.makeText(MainActivity.this, "showNextImage error > " + ex.getMessage(), Toast.LENGTH_SHORT).show();
                 }
-                new android.os.Handler().postDelayed(this::showNextImage, 10000);
+                new android.os.Handler().postDelayed(this::showNextImage, millis / 60);
             }
         }
     }
@@ -660,7 +658,7 @@ public class MainActivity extends AppCompatActivity {
             }).start();
         } else {
             // Retry loading images after delay
-            new android.os.Handler().postDelayed(this::loadImagesFromImmich, 10000);
+            new android.os.Handler().postDelayed(this::loadImagesFromImmich, millis / 60);
         }
     }
 
@@ -711,7 +709,7 @@ public class MainActivity extends AppCompatActivity {
                         new ImmichApiLogin(userid, password)
                 ).execute();
 
-                Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, true, false, null).execute();
+                Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, false, false, null).execute();
 
                 if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
