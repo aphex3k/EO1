@@ -40,6 +40,15 @@ public interface ImmichApiService {
             @Path("id") String id
     );
 
+    @GET("/api/asset/file/{id}")
+    @Streaming
+    Call<ResponseBody> serveFile (
+            @Path("id") String id,
+            @Query("isThumb") boolean isThumb,
+            @Query("isWeb") boolean isWeb,
+            @Query("key") String key
+    );
+
     @GET("/api/asset/thumbnail/{id}")
     @Streaming
     Call<ResponseBody> getAssetThumbnail(

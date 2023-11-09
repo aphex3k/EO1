@@ -89,7 +89,13 @@ import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity {
 
+    /**
+     * Amount of minutes to wait between displaying images
+     */
     public int interval = 5;
+    /**
+    Amount of milliseconds in a minute
+     */
     private final long millis = 60000;
     private final Handler handler = new Handler();
     private ImageView imageView;
@@ -559,7 +565,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showNextImage() {
-        if (immichAssets != null && !immichAssets.isEmpty() && !slideshowPaused) {
+        if (immichAssets.isEmpty()) {
+            loadImagesFromImmich();
+            return;
+        }
+
+        if (!immichAssets.isEmpty() && !slideshowPaused) {
             Collections.shuffle(immichAssets);
             try {
                 ImmichApiAssetResponse asset = immichAssets.remove(0);
@@ -572,8 +583,7 @@ public class MainActivity extends AppCompatActivity {
                     showNextImage();
                 } else {
                     String uuid = asset.getId();
-                    String extension = Files.getFileExtension(asset.getOriginalPath()).toLowerCase();
-
+                    String extension = asset.getType() == ImmichType.VIDEO ? "mp4" : "jpeg";
                     new DownloadTask().execute(uuid, extension);
                 }
             } catch (Exception ex) {
@@ -581,7 +591,7 @@ public class MainActivity extends AppCompatActivity {
                 if (BuildConfig.DEBUG) {
                     Toast.makeText(MainActivity.this, "showNextImage error > " + ex.getMessage(), Toast.LENGTH_SHORT).show();
                 }
-                new android.os.Handler().postDelayed(this::showNextImage, 10000);
+                new android.os.Handler().postDelayed(this::showNextImage, millis / 60);
             }
         }
     }
@@ -631,10 +641,12 @@ public class MainActivity extends AppCompatActivity {
                         }
                         if (!immichAssets.isEmpty()) {
                             try {
-                                startSlideshow();
+                                runOnUiThread(() -> startSlideshow());
                             } catch (Exception ex) {
-                                Toast.makeText(MainActivity.this, "Immich failure :", Toast.LENGTH_SHORT).show();
-                                showSetupDialog();
+                                runOnUiThread(() -> {
+                                    Toast.makeText(MainActivity.this, "Immich failure :", Toast.LENGTH_SHORT).show();
+                                    showSetupDialog();
+                                });
                             }
                         }
                     }
@@ -646,7 +658,7 @@ public class MainActivity extends AppCompatActivity {
             }).start();
         } else {
             // Retry loading images after delay
-            new android.os.Handler().postDelayed(this::loadImagesFromImmich, 10000);
+            new android.os.Handler().postDelayed(this::loadImagesFromImmich, millis / 60);
         }
     }
 
@@ -697,24 +709,7 @@ public class MainActivity extends AppCompatActivity {
                         new ImmichApiLogin(userid, password)
                 ).execute();
 
-                Response<ResponseBody> downloadResponse;
-                ImmichThumbnailFormat compatibleFormat = ImmichThumbnailFormat.JPEG;
-
-                if (!BuildConfig.DEBUG &&(
-                        extension.equals("mov")
-                )) {
-                    // if the extension is unsupported, attempt to download a (high quality) thumbnail instead
-                    downloadResponse = apiService.getAssetThumbnail(uuid, compatibleFormat, null).execute();
-                    extension = compatibleFormat == ImmichThumbnailFormat.JPEG? "jpeg" : "webp";
-                }
-                else if (extension.equals("heic")) {
-                    // if the extension is unsupported, attempt to download a (high quality) thumbnail instead
-                    downloadResponse = apiService.getAssetThumbnail(uuid, compatibleFormat, null).execute();
-                    extension = compatibleFormat == ImmichThumbnailFormat.JPEG? "jpeg" : "webp";
-                }
-                else {
-                    downloadResponse = apiService.downloadFile(uuid).execute();
-                }
+                Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, false, false, null).execute();
 
                 if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
@@ -801,6 +796,7 @@ public class MainActivity extends AppCompatActivity {
 
                     videoView.setOnPreparedListener(mediaPlayer -> {
                         mediaPlayer.setLooping(true);
+                        mediaPlayer.setVolume(0f,0f);
                         videoView.start();
                     });
                     videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
