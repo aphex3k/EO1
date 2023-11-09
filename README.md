@@ -67,5 +67,5 @@ This might only work for EO2 frames as I'm unaware of enabling `adb` on EO1.
 ## Contribution
 
 1. You can provide feedback by opening [Issues](https://gitea.codingmerc.com/michael/EO1/issues) and describing an idea or problem.
-1. You can donate in Dollar via [PayPal](https://www.paypal.me/aphex3k) or in [Bitcoin](https://lnbits.vpn1.codingmerc.com/lnurlp/link/V6KUib).
+1. You can donate in Dollar via [PayPal](https://www.paypal.me/aphex3k) or in [Bitcoin](https://getalby.com/p/michaelhenke).
 1. If you happen to have a working but no longer needed EO1/EO2 picture frame, please reach out via email!
