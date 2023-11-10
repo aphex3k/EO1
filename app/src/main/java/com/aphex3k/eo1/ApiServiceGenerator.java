@@ -30,7 +30,7 @@ public class ApiServiceGenerator {
         HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
 
         if (BuildConfig.DEBUG) {
-            logging.setLevel(HttpLoggingInterceptor.Level.BODY);
+            logging.setLevel(HttpLoggingInterceptor.Level.HEADERS);
         }
         else {
             logging.setLevel(HttpLoggingInterceptor.Level.NONE);
