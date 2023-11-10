@@ -30,7 +30,7 @@ public class ApiServiceGenerator {
         HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
 
         if (BuildConfig.DEBUG) {
-            logging.setLevel(HttpLoggingInterceptor.Level.BODY);
+            logging.setLevel(HttpLoggingInterceptor.Level.HEADERS);
         }
         else {
             logging.setLevel(HttpLoggingInterceptor.Level.NONE);
@@ -44,8 +44,11 @@ public class ApiServiceGenerator {
                 .connectTimeout(5, TimeUnit.SECONDS)
                 .writeTimeout(5, TimeUnit.SECONDS)
                 .readTimeout(5, TimeUnit.SECONDS)
-                .addInterceptor(logging)
                 .cookieJar(new SessionCookieJar());
+
+        if (BuildConfig.DEBUG) {
+            client.addInterceptor(logging);
+        }
 
         return enableTls12OnPreLollipop(client).build();
     }

@@ -182,7 +182,6 @@ public class MainActivity extends AppCompatActivity {
                 }
             };
             imageView.setOnTouchListener(openSetup);
-            videoView.setOnTouchListener(openSetup);
             progress.setOnTouchListener(openSetup);
         }
     }
@@ -565,6 +564,9 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showNextImage() {
+
+        System.gc();
+
         if (immichAssets.isEmpty()) {
             loadImagesFromImmich();
             return;
@@ -801,7 +803,6 @@ public class MainActivity extends AppCompatActivity {
                     });
                     videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
                         progress.setVisibility(View.VISIBLE);
-                        Toast.makeText(MainActivity.this, "media player ERR> ", Toast.LENGTH_LONG).show();
                         removeFromCache(new File(fileName));
                         showNextImage();
                         return true;
