@@ -54,7 +54,7 @@ pipeline {
             steps {
                 script {
                     try {
-                        sh "./gradlew sonar -Dsonar.branch.name=${BRANCH_NAME} -Dsonar.branch.target=${CHANGE_TARGET}"
+                        sh "./gradlew sonar -Dsonar.pullrequest.base=${CHANGE_TARGET} -Dsonar.pullrequest.branch=${CHANGE_BRANCH} -Dsonar.pullrequest.key=${CHANGE_ID}"
                     } catch (Exception e) {
                         sh "./gradlew sonar -Dsonar.branch.name=${BRANCH_NAME}"
                     }
