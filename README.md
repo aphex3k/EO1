@@ -54,6 +54,13 @@ Amongst other things, I had to disable PFS as well as enable TLSv1.2 in addition
   - At this point, the keyboard and mouse are still connected via OTG
 - Because this APK is designated as a "Home screen replacement", when EO1 boots, it will ask if you want to load the Electric Object app or the EO1 app. Select EO1 and choose "Always".
 - The first time the EO1 is run you will need to specify the information listed above. Click OK to save and continue. **To get back to the configuration screen later, press C on your connected keyboard**
+  - Username: this is the same email address you would use to log in on the web-app or the native apps on iOS or Android
+    - Depending in how you set up your immich installation this is your own user or a shared user account dedicated for use with the frames
+  - Password: same as above
+    - Keep in mind that this password is stored in clear-text on the frame. Everyone with access to your device can recover the password!
+  - Server / Host: Insert the same server URL you use to to log in on the web-app or the native apps on iOS or Android
+    - If you connect to immich on your browser by using `http://immich.local`, that is what you want to use in the configuration window as well
+    - If you run immich on a different port than `80`, you need to include that in the server string like `http://immich.local:8080`
 - You can now unplug your mouse and keyboard and hang your EO1 back on the wall!
 
 This process should be fairly similar on an EO2.
