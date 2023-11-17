@@ -128,7 +128,7 @@ public class MainActivity extends AppCompatActivity {
         File cacheDir = new File(getCacheDir(), "picasso-cache");
         if (cacheDir.exists() && cacheDir.isDirectory()) {
             for (File file : Objects.requireNonNull(cacheDir.listFiles())) {
-                file.delete();
+                removeFromCache(file);
             }
         }
 
@@ -498,15 +498,15 @@ public class MainActivity extends AppCompatActivity {
 
         try
         {
-            file.createNewFile();
-            FileOutputStream fOut = new FileOutputStream(file);
-            OutputStreamWriter myOutWriter = new OutputStreamWriter(fOut);
-            myOutWriter.append(jsonString);
-
-            myOutWriter.close();
-
-            fOut.flush();
-            fOut.close();
+            if (!file.createNewFile() ) {
+                throw new IOException("failed to created file");
+            }
+            try (FileOutputStream fOut = new FileOutputStream(file)) {
+                try (OutputStreamWriter myOutWriter = new OutputStreamWriter(fOut)) {
+                    myOutWriter.append(jsonString);
+                }
+                fOut.flush();
+            }
         }
         catch (IOException e)
         {
@@ -716,16 +716,15 @@ public class MainActivity extends AppCompatActivity {
                 if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
                     File tempFile = new File(getCacheDir(), "temp_" + uuid + "." + extension);
-                    FileOutputStream outputStream = new FileOutputStream(tempFile);
-                    InputStream inputStream = downloadResponse.body().byteStream();
-                    byte[] buffer = new byte[1024];
-                    int bytesRead;
-                    while ((bytesRead = inputStream.read(buffer)) != -1) {
-                        outputStream.write(buffer, 0, bytesRead);
+                    try (FileOutputStream outputStream = new FileOutputStream(tempFile)) {
+                        try (InputStream inputStream = downloadResponse.body().byteStream()) {
+                            byte[] buffer = new byte[1024];
+                            int bytesRead;
+                            while ((bytesRead = inputStream.read(buffer)) != -1) {
+                                outputStream.write(buffer, 0, bytesRead);
+                            }
+                        }
                     }
-                    outputStream.close();
-                    inputStream.close();
-
                     return tempFile.getPath();
                 }
                 else throw new Exception("Failed downloading immich asset.");
@@ -818,8 +817,8 @@ public class MainActivity extends AppCompatActivity {
 
     private void removeFromCache (File file) {
         final File cacheDir = new File(getCacheDir(), "picasso-cache");
-        if (cacheDir.exists() && cacheDir.isDirectory()) {
-            file.delete();
+        if (cacheDir.exists() && cacheDir.isDirectory() && !file.delete()) {
+            Log.e("Error", "Failed to delete file: " + file.getName());
         }
     }
 }

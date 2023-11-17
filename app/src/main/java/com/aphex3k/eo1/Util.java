@@ -27,12 +27,9 @@ public class Util {
 
         File f = new File(filePath);
 
-        FileOutputStream output;
-        try {
-            output = new FileOutputStream(f);
+        try (FileOutputStream output = new FileOutputStream(f)) {
             output.write(response.body().bytes());
             output.flush();
-            output.close();
         } catch (IOException e) {
             e.printStackTrace();
             return null;
