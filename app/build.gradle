@@ -1,5 +1,17 @@
 plugins {
     id 'com.android.application'
+    id "org.sonarqube" version "4.4.1.3373"
+
+}
+
+sonar {
+    properties {
+        property "sonar.projectKey", "gitea_eo1"
+        property "sonar.organization", "gitea"
+        property "sonar.host.url", "https://sonarcloud.io"
+        // To avoid implicit compilation, set property 'sonar.gradle.skipCompile' to 'true' and make sure your project is compiled, before analysis has started.
+        property "sonar.gradle.skipCompile", true
+    }
 }
 
 android {

@@ -1,6 +1,7 @@
 # EO1 and EO2 Replacement APK
 
 [![Build Status](https://jenkins.codingmerc.com/job/EO1/job/main/badge/icon)](https://jenkins.codingmerc.com/job/EO1/job/main/)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=gitea_eo1&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=gitea_eo1)
 
 This repository is a fork of [spalt/EO1](https://github.com/spalt/EO1). The goal is to use a
 self-hosted [immich.app](https://immich.app/) instance as a backend instead of using Flickr. This will allow **full self-custody** of the system.
