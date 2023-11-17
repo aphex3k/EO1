@@ -14,7 +14,9 @@ public class Util {
         try {
             response = client.newCall(request).execute();
         } catch (IOException e) {
-            e.printStackTrace();
+            if (BuildConfig.DEBUG) {
+                e.printStackTrace();
+            }
             return null;
         }
 
@@ -31,7 +33,9 @@ public class Util {
             output.write(response.body().bytes());
             output.flush();
         } catch (IOException e) {
-            e.printStackTrace();
+            if (BuildConfig.DEBUG) {
+                e.printStackTrace();
+            }
             return null;
         }
 
