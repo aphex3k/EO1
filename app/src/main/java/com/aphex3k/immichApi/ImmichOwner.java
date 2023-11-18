@@ -1,9 +1,12 @@
 package com.aphex3k.immichApi;
 
+import androidx.annotation.Keep;
+
 import com.google.gson.annotations.SerializedName;
 
 import java.util.Date;
 
+@Keep
 public class ImmichOwner {
 
     @SerializedName("createdAt")

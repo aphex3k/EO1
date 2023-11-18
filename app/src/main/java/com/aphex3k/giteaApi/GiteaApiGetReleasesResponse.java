@@ -1,5 +1,7 @@
 package com.aphex3k.giteaApi;
 
+import androidx.annotation.Keep;
+
 import com.google.gson.annotations.SerializedName;
 import com.vdurmont.semver4j.Semver;
 import com.vdurmont.semver4j.SemverException;
@@ -7,6 +9,7 @@ import com.vdurmont.semver4j.SemverException;
 import java.util.Date;
 import java.util.List;
 
+@Keep
 public class GiteaApiGetReleasesResponse extends GiteaApiResponse {
     @SerializedName("id")
     private String id;

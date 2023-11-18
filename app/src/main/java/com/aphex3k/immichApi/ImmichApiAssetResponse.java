@@ -1,10 +1,13 @@
 package com.aphex3k.immichApi;
 
+import androidx.annotation.Keep;
+
 import com.google.gson.annotations.SerializedName;
 
 import java.util.Date;
 import java.util.List;
 
+@Keep
 public class ImmichApiAssetResponse extends ImmichApiResponse implements Comparable<ImmichApiAssetResponse> {
 
     @SerializedName("checksum")
