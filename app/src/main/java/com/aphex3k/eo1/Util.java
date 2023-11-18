@@ -1,12 +1,16 @@
 package com.aphex3k.eo1;
 import android.os.Environment;
 
+import androidx.annotation.Keep;
+
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+
+@Keep
 public class Util {
     public static String downloadFileSync(String downloadUrl, OkHttpClient client, String fileName) {
         Request request = new Request.Builder().url(downloadUrl).build();

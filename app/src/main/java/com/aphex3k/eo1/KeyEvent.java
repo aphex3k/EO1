@@ -2,6 +2,9 @@ package com.aphex3k.eo1;
 
 import android.view.InputEvent;
 
+import androidx.annotation.Keep;
+
+@Keep
 public class KeyEvent extends android.view.KeyEvent {
 
     public static final int EO1_TOP_BUTTON = 132;

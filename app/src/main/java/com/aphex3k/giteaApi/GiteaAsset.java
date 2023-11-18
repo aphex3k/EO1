@@ -1,9 +1,12 @@
 package com.aphex3k.giteaApi;
 
+import androidx.annotation.Keep;
+
 import com.google.gson.annotations.SerializedName;
 
 import java.util.Date;
 
+@Keep
 public class GiteaAsset {
     @SerializedName("id")
     private String id;

@@ -36,11 +36,11 @@ import android.widget.Spinner;
 import android.widget.Toast;
 import android.widget.VideoView;
 
+import androidx.annotation.Keep;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
-import androidx.core.content.FileProvider;
 
 import com.aphex3k.giteaApi.GiteaApiGetReleasesResponse;
 import com.aphex3k.giteaApi.GiteaApiService;
@@ -51,7 +51,6 @@ import com.aphex3k.immichApi.ImmichApiLogin;
 import com.aphex3k.immichApi.ImmichApiLoginResponse;
 import com.aphex3k.immichApi.ImmichApiService;
 import com.aphex3k.immichApi.ImmichExifInfo;
-import com.aphex3k.immichApi.ImmichThumbnailFormat;
 import com.aphex3k.immichApi.ImmichType;
 import com.google.common.io.Files;
 import com.google.gson.Gson;
@@ -60,28 +59,20 @@ import com.squareup.picasso.Callback;
 import com.squareup.picasso.Picasso;
 import com.vdurmont.semver4j.Semver;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.FileReader;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStreamWriter;
-import java.net.URL;
-import java.nio.channels.Channels;
-import java.nio.channels.FileChannel;
-import java.nio.channels.ReadableByteChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.Date;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
-import java.util.Set;
 import java.util.TimeZone;
 
 import okhttp3.ResponseBody;
@@ -466,12 +457,14 @@ public class MainActivity extends AppCompatActivity {
         builder.show();
     }
 
+    @Keep
     protected Configuration loadConfiguration() throws FileNotFoundException {
         File file = new File(this.getFilesDir(), configFilename);
 
         return new Gson().fromJson(new FileReader(file), Configuration.class);
     }
 
+    @Keep
     protected void saveConfiguration() throws IOException {
         File file = new File(this.getFilesDir(), configFilename);
 
@@ -514,6 +507,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    @Keep
     private void updateTimeZone() {
         if (!selectedTimeZoneId.isEmpty()) {
             AlarmManager alarmManager=(AlarmManager)this.getSystemService(Context.ALARM_SERVICE);
@@ -691,8 +685,10 @@ public class MainActivity extends AppCompatActivity {
         lastLightLevel = lightValue;
     }
 
+    @Keep
     public class DownloadTask extends AsyncTask<String, Void, String> {
 
+        @Keep
         @Override
         protected String doInBackground(String... params) {
             String uuid = params[0];
@@ -734,6 +730,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
+        @Keep
         @Override
         protected void onPostExecute(String fileName) {
 
