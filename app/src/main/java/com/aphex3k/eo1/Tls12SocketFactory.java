@@ -1,5 +1,7 @@
 package com.aphex3k.eo1;
 
+import androidx.annotation.Keep;
+
 import java.io.IOException;
 import java.net.InetAddress;
 import java.net.Socket;
@@ -16,6 +18,8 @@ import javax.net.ssl.SSLSocketFactory;
  * @link https://developer.android.com/reference/javax/net/ssl/SSLSocket.html
  * @see SSLSocketFactory
  */
+
+@Keep
 public class Tls12SocketFactory extends SSLSocketFactory {
     private static final String[] TLS_V12_ONLY = {"TLSv1.2"};
 

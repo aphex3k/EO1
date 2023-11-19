@@ -1,10 +1,13 @@
 package com.aphex3k.immichApi;
 
+import androidx.annotation.Keep;
+
 import com.google.gson.annotations.SerializedName;
 
 import java.util.Date;
 import java.util.List;
 
+@Keep
 public class ImmichApiGetAlbumResponse extends ImmichApiResponse {
 
     @SerializedName("albumName")

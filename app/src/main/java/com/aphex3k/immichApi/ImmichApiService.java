@@ -1,5 +1,7 @@
 package com.aphex3k.immichApi;
 
+import androidx.annotation.Keep;
+
 import java.util.Date;
 import java.util.List;
 
@@ -12,19 +14,23 @@ import retrofit2.http.Path;
 import retrofit2.http.Query;
 import retrofit2.http.Streaming;
 
+@Keep
 public interface ImmichApiService {
 
+    @Keep
     @POST("/api/auth/login")
     Call<ImmichApiLoginResponse> login(
             @Body ImmichApiLogin params
     );
 
+    @Keep
     @GET("/api/album")
     Call<List<ImmichApiGetAlbumResponse>> getAllAlbums (
             @Query("shared") Boolean shared,
             @Query("assetId") String assetId
     );
 
+    @Keep
     @GET("/api/asset")
     Call<List<ImmichApiAssetResponse>> getAllAssets (
             @Query("userId") String userId,
@@ -34,12 +40,14 @@ public interface ImmichApiService {
             @Query("updatedAfter") Date updatedAfter
     );
 
+    @Keep
     @POST("/api/asset/download/{id}")
     @Streaming
     Call<ResponseBody> downloadFile (
             @Path("id") String id
     );
 
+    @Keep
     @GET("/api/asset/file/{id}")
     @Streaming
     Call<ResponseBody> serveFile (
@@ -49,6 +57,7 @@ public interface ImmichApiService {
             @Query("key") String key
     );
 
+    @Keep
     @GET("/api/asset/thumbnail/{id}")
     @Streaming
     Call<ResponseBody> getAssetThumbnail(
@@ -57,6 +66,7 @@ public interface ImmichApiService {
             @Query("key") String key
     );
 
+    @Keep
     @GET("/api/album/{id}")
     Call<ImmichApiGetAlbumResponse> getAlbumInfo (
             @Path("id") String id,

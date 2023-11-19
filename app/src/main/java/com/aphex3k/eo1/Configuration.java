@@ -1,7 +1,10 @@
 package com.aphex3k.eo1;
 
+import androidx.annotation.Keep;
+
 import javax.annotation.Nullable;
 
+@Keep
 public class Configuration {
     @Nullable
     public String host;

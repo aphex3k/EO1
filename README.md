@@ -15,7 +15,10 @@ This concept guarantees that you control all aspects of the images displayed on 
 On your smart device, you will run the immich app for your platform and device. It supports phones and tablets running iOS or Android. The app connects to the cloud hosting an instance of the immich server. You need to host it yourself or have someone host it for you!
 
 - A simple single-user configuration runs the same user credentials on the picture frame as well as on the smart device.
-- In a multi-user configuration, everyone can upload pictures to a shared album which is accessible from the account that is used on the frames.
+- In a multi-user configuration, everyone can upload pictures to one shared album or several shared albums which is accessible from the account that is used on the frames.
+- The client app on the frames will select a random picture from the pool of all available pictures in shared or non-shared albums.
+- A new picutre is chosen every interval.
+- A best effort is made that once every picture had been displayed once, the cycle starts anew.
 
 <img src="_img/single_user.png" width=403/> <img src="_img/multi_user.png" width=403/>
 

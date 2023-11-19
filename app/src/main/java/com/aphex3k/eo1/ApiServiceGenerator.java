@@ -2,6 +2,8 @@ package com.aphex3k.eo1;
 
 import android.util.Log;
 
+import androidx.annotation.Keep;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -15,7 +17,9 @@ import okhttp3.logging.HttpLoggingInterceptor;
 import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
 
+@Keep
 public class ApiServiceGenerator {
+
     public static <S> S createService(Class<S> serviceClass, String host) {
         return new Retrofit.Builder()
                 .baseUrl(host)
