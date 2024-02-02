@@ -20,3 +20,4 @@ app/debug
 passwords.txt
 ..bfg-report/
 .idea/deploymentTargetDropDown.xml
+.vscode

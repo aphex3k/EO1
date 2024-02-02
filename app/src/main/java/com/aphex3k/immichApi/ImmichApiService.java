@@ -73,4 +73,10 @@ public interface ImmichApiService {
             @Query("withoutAssets") Boolean withoutAssets,
             @Query("key") String key
     );
+
+    @Keep
+    @GET("/api/asset/random")
+    Call<List<ImmichApiAssetResponse>> getRandom (
+            @Query("count") Integer count
+    );
 }

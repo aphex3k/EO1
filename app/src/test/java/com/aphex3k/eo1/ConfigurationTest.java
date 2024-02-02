@@ -14,6 +14,6 @@ public class ConfigurationTest {
         Configuration configuration = new Gson().fromJson(testString, Configuration.class);
 
         assertTrue(!configuration.host.isEmpty());
-        assertNull(configuration.userid);
+        assertTrue(configuration.userid.isEmpty());
     }
 }
