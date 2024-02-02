@@ -27,9 +27,9 @@ android {
             versionCode = Integer.parseInt(project.BUILD_NUMBER)
         }
         else {
-            versionCode = 8
+            versionCode = 9
         }
-        versionName "1.0.0-rc5"
+        versionName "1.1.0-rc1"
         multiDexEnabled true
     }
     buildTypes {
@@ -61,6 +61,7 @@ android {
 }
 
 dependencies {
+
     // https://developer.android.com/build/multidex#groovy
     def multidex_version = "2.0.1"
     implementation "androidx.multidex:multidex:$multidex_version"
@@ -82,4 +83,9 @@ dependencies {
     implementation 'com.vdurmont:semver4j:3.1.0'
 
     testImplementation 'junit:junit:4.13.2'
+    testImplementation "org.mockito:mockito-core:5.10.0"
+
+    // debugImplementation because LeakCanary should only run in debug builds.
+    // https://square.github.io/leakcanary/getting_started/
+    debugImplementation 'com.squareup.leakcanary:leakcanary-android:2.13'
 }

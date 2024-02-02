@@ -1,33 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
 <RelativeLayout xmlns:android="http://schemas.android.com/apk/res/android"
+
+    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/black">
 
     <ImageView
         android:id="@+id/imageView"
+        android:layout_width="fill_parent"
+        android:layout_height="fill_parent"
+        android:contentDescription="@string/app_name"
+        android:scaleType="centerCrop"
         android:visibility="invisible"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:scaleType="centerCrop" />
+        tools:ignore="Deprecated" />
 
     <VideoView
         android:id="@+id/videoView"
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:layout_alignParentLeft="false"
+        android:layout_width="fill_parent"
+        android:layout_height="fill_parent"
+        android:layout_alignParentStart="true"
         android:layout_alignParentTop="true"
-        android:layout_alignParentRight="false"
+        android:layout_alignParentEnd="true"
         android:layout_alignParentBottom="true"
         android:scaleType="centerCrop"
-        android:visibility="invisible" />
+        android:visibility="invisible"
+        tools:ignore="Deprecated" />
 
-    <ProgressBar
-        android:id="@+id/progressBar"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_centerInParent="true"
-        android:indeterminate="true"
-        android:visibility="invisible" />
+    <EditText
+        android:id="@+id/debugOverlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:accessibilityLiveRegion="none"
+        android:clickable="false"
+        android:cursorVisible="false"
+        android:editable="false"
+        android:ems="10"
+        android:focusable="false"
+        android:focusableInTouchMode="false"
+        android:gravity="bottom|start"
+        android:hint="@string/debug_information_will_show_here"
+        android:importantForAutofill="no"
+        android:inputType="text|textMultiLine|textNoSuggestions"
+        android:lineSpacingExtra="8sp"
+        android:scrollbars="none"
+        android:selectAllOnFocus="false"
+        android:singleLine="false"
+        android:textColor="@color/purple_700"
+        android:textIsSelectable="false"
+        android:textSize="24sp"
+        tools:ignore="Deprecated" />
 
 </RelativeLayout>

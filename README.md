@@ -3,8 +3,8 @@
 [![Build Status](https://jenkins.codingmerc.com/buildStatus/icon?job=EO1%2Fmain)](https://jenkins.codingmerc.com/job/EO1/)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=gitea_eo1&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=gitea_eo1)
 
-This repository is a fork of [spalt/EO1](https://github.com/spalt/EO1). The goal is to use a
-self-hosted [immich.app](https://immich.app/) instance as a backend instead of using Flickr. This will allow **full self-custody** of the system.
+This repository is a [rewrite](https://gitea.codingmerc.com/michael/EO1/issues/26) of [spalt/EO1](https://github.com/spalt/EO1). The goal is to ideally use a
+self-hosted [immich.app](https://immich.app/) instance as a backend. This will allow **full self-custody** of the system.
 
 ![photo of eo1 custom app development](_img/IMG_1451.jpg) ![photo of eo1 running custom app](_img/IMG_1452.jpg)
 

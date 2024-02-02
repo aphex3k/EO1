@@ -42,9 +42,7 @@ pipeline {
             }
             steps {
                 script {
-                    if (env.BRANCH_NAME == 'main') {
-                        PBANDJELLY = "-PBUILD_NUMBER=${env.BUILD_NUMBER}"
-                    }               
+                    PBANDJELLY = "-PBUILD_NUMBER=${env.BUILD_NUMBER}"
                     
                     sh "./gradlew clean build test assembleDebug assembleRelease -s $PBANDJELLY -Pandroid.injected.signing.store.file=$KEYSTORE -Pandroid.injected.signing.store.password=$KEYSTORE_PASS -Pandroid.injected.signing.key.alias=$KEY_ALIAS -Pandroid.injected.signing.key.password=$KEY_PASS"
                 }
@@ -65,9 +63,7 @@ pipeline {
         stage ('Archiving') {
             steps {
                 script {
-                    if (env.BRANCH_NAME == 'main') {
-                        archiveArtifacts allowEmptyArchive: false, artifacts: 'app/build/outputs/apk/**/*,app/build/outputs/logs/*,app/build/reports/**/*,app/build/test-results/**/*', excludes: '', fingerprint: true, onlyIfSuccessful: true
-                    }                
+                    archiveArtifacts allowEmptyArchive: false, artifacts: 'app/build/outputs/apk/**/*,app/build/outputs/logs/*,app/build/reports/**/*,app/build/test-results/**/*', excludes: '', fingerprint: true, onlyIfSuccessful: true                
                 }       
             }         
         }
