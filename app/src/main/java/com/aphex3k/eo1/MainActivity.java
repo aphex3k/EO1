@@ -198,6 +198,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
+    public void openSystemSettings() {
+        //noinspection deprecation
+        startActivityForResult(new Intent(android.provider.Settings.ACTION_SETTINGS), 0);
+    }
+
+    @Override
     public void settingsChanged() {
         handler.removeCallbacks(this::runOnTimer);
         handler.post(this::runOnTimer);

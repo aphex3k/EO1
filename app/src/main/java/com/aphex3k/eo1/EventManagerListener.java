@@ -6,4 +6,5 @@ public interface EventManagerListener extends ListenerInterface {
     void showConfigurationUI();
     void adjustBrightness();
     void showNextImage();
+    void openSystemSettings();
 }

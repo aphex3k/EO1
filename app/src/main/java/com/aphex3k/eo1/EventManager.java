@@ -21,29 +21,37 @@ public class EventManager {
     @SuppressLint("InvalidWakeLockTag")
     public void onKeyDown(int keyCode) {
 
+        EventManagerListener eventManagerListener = this.listener.get();
+
+        if (eventManagerListener == null) {
+            return;
+        }
+
         // Trigger update check if both buttons have been pressed "at the same time"
         if (
                 ((keyCode == KeyEvent.EO1_TOP_BUTTON && lastKeyCode == KeyEvent.EO1_BACK_BUTTON) ||
                         (keyCode == KeyEvent.EO1_BACK_BUTTON && lastKeyCode == KeyEvent.EO1_TOP_BUTTON))
                         && ((new Date()).getTime() - lastKeyCodeDate.getTime() < 250))
         {
-            listener.get().checkForUpdates();
+            eventManagerListener.checkForUpdates();
         }
 
         lastKeyCode = keyCode;
         lastKeyCodeDate = new Date();
 
         if (keyCode == KeyEvent.KEYCODE_C) {
-            listener.get().showConfigurationUI();
+            eventManagerListener.showConfigurationUI();
         }
         else if (keyCode == KeyEvent.KEYCODE_SPACE) {
-            listener.get().showNextImage();
+            eventManagerListener.showNextImage();
         }
         else if (keyCode == KeyEvent.EO1_TOP_BUTTON) {
-            listener.get().toggleScreenOn();
+            eventManagerListener.toggleScreenOn();
         }
         else if (keyCode == KeyEvent.EO1_BACK_BUTTON) {
-            listener.get().adjustBrightness();
+            eventManagerListener.adjustBrightness();
+        } else if (keyCode == android.view.KeyEvent.KEYCODE_S) {
+            eventManagerListener.openSystemSettings();
         }
     }
 }

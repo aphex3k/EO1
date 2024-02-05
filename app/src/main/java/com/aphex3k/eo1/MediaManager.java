@@ -183,7 +183,7 @@ public class MediaManager implements MediaManagerInterface {
                 if (directoryListing != null) {
                     for (File child : directoryListing) {
                         // Only delete the file that is not supposed to get displayed this moment
-                        if (!child.getAbsolutePath().equals(finalTempFile.getAbsolutePath())) {
+                        if (!child.getAbsolutePath().equals(finalTempFile.getAbsolutePath()) && child.getAbsolutePath().endsWith(".dat")) {
                             removeFromCache(child);
                         }
                     }
