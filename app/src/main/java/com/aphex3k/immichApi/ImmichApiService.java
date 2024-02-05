@@ -79,4 +79,8 @@ public interface ImmichApiService {
     Call<List<ImmichApiAssetResponse>> getRandom (
             @Query("count") Integer count
     );
+
+    @Keep
+    @GET("/api/server-info/ping")
+    Call<ImmichApiPingResponse> ping ();
 }

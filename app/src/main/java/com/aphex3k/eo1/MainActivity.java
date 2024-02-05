@@ -20,6 +20,7 @@ import android.view.WindowManager;
 import android.widget.ImageView;
 import android.widget.MediaController;
 import android.widget.TextView;
+import android.widget.Toast;
 import android.widget.VideoView;
 
 import androidx.annotation.NonNull;
@@ -27,6 +28,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.google.gson.stream.MalformedJsonException;
 import com.squareup.picasso.Callback;
 import com.squareup.picasso.MemoryPolicy;
 import com.squareup.picasso.Picasso;
@@ -210,6 +212,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (e.getClass() == IOException.class && Objects.requireNonNull(e.getMessage()).contains("decode")) {
             showNextImage();
         }
+        if (e.getClass() == MalformedJsonException.class) {
+            Toast.makeText(MainActivity.this, "It appears there is an issue with the format of the configuration file: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+        }
 
         Log.e(e.getClass().toString(), e.getMessage() != null ? e.getMessage() : "");
 
@@ -229,7 +234,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 debugText.append(info.getKey()).append(": ").append(info.getValue()).append("\n");
             }
 
-            this.debugOverlay.setText(debugText.toString());
+            this.debugOverlay.setText(debugText.toString().trim());
         }
     }
 

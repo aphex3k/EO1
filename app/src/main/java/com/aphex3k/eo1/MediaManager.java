@@ -35,19 +35,19 @@ public class MediaManager implements MediaManagerInterface {
 
     public void showNextImage(Activity activity) {
 
-        MediaManagerListener listener = this.listener.get();
+        MediaManagerListener mediaManagerListener = this.listener.get();
 
-        if (listener == null) {
+        if (mediaManagerListener == null) {
             return;
         }
 
         new Thread(() -> {
-            SettingsManager settingsManager = this.settingsManager.get();
-            Configuration configuration = settingsManager.getConfiguration();
+            SettingsManager settings = this.settingsManager.get();
+            Configuration configuration = settings.getConfiguration();
 
             ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host);
 
-            String userId = null;
+            String userId;
 
             try {
                 ImmichApiLoginResponse loginResponse = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute().body();
@@ -55,12 +55,12 @@ public class MediaManager implements MediaManagerInterface {
                 userId = loginResponse.getUserId();
 
             } catch (Exception e) {
-                activity.runOnUiThread(() -> listener.handleException(e));
+                activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 return;
             }
 
             if (userId == null || userId.equals("")) {
-                activity.runOnUiThread(() ->  listener.handleException(new InvalidCredentialsException()));
+                activity.runOnUiThread(() ->  mediaManagerListener.handleException(new InvalidCredentialsException()));
                 return;
             }
 
@@ -121,7 +121,7 @@ public class MediaManager implements MediaManagerInterface {
                     }
 
                 } catch (Exception e) {
-                    activity.runOnUiThread(() -> listener.handleException(e));
+                    activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                     return;
                 }
             }
@@ -149,9 +149,9 @@ public class MediaManager implements MediaManagerInterface {
                             }
                         }
                         tempFile = cacheFile;
-                    } else throw new Exception("Failed downloading immich asset.");
+                    } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
                 } catch (Exception e) {
-                    activity.runOnUiThread(() -> listener.handleException(e));
+                    activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 }
 
             } while (!immichAssets.isEmpty() && (tempFile == null));
@@ -162,10 +162,10 @@ public class MediaManager implements MediaManagerInterface {
             if (finalTempFile != null) {
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
-                        listener.displayPicture(finalTempFile);
+                        mediaManagerListener.displayPicture(finalTempFile);
                     }
                     else if (finalAssetResponse.getType() == ImmichType.VIDEO) {
-                        listener.displayVideo(finalTempFile);
+                        mediaManagerListener.displayVideo(finalTempFile);
                     }
                 });
 
@@ -175,7 +175,7 @@ public class MediaManager implements MediaManagerInterface {
                     for (File child : directoryListing) {
                         // Only delete the file that is not supposed to get displayed this moment
                         if (!child.getAbsolutePath().equals(finalTempFile.getAbsolutePath())) {
-                            child.delete();
+                            removeFromCache(child);
                         }
                     }
                 }
@@ -187,8 +187,11 @@ public class MediaManager implements MediaManagerInterface {
         }).start();
     }
 
-    /** @noinspection ResultOfMethodCallIgnored*/
     public void removeFromCache(File file) {
-        file.delete();
+        if (!file.delete()) {
+            MediaManagerListener mediaManagerListener = this.listener.get();
+
+            mediaManagerListener.debugInformationProvided(new DebugInformation("MediaManager.removeFromCache", "Unable to delete file "+file.getAbsolutePath()));
+        }
     }
 }

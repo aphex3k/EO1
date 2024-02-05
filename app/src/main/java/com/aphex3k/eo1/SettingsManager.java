@@ -1,5 +1,6 @@
 package com.aphex3k.eo1;
 
+import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.content.Context;
 import android.view.View;
@@ -15,7 +16,6 @@ import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.FileReader;
 import java.io.IOException;
@@ -43,15 +43,15 @@ public class SettingsManager {
 
     protected void loadConfiguration() {
 
-        SettingsManagerListener listener = this.listener.get();
+        SettingsManagerListener settingsManagerListener = this.listener.get();
 
-        if (listener != null) {
+        if (settingsManagerListener != null) {
             try {
-                File file = new File(listener.getFilesDir(), CONFIG_FILENAME);
+                File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 
                 this.configuration = new Gson().fromJson(new FileReader(file), Configuration.class);
-            } catch (FileNotFoundException e) {
-                listener.handleException(e);
+            } catch (Exception e) {
+                settingsManagerListener.handleException(e);
             }
         }
     }
@@ -73,10 +73,10 @@ public class SettingsManager {
 
     /** @noinspection ResultOfMethodCallIgnored*/
     protected void saveConfiguration() throws IOException {
-        SettingsManagerListener listener = this.listener.get();
+        SettingsManagerListener settingsManagerListener = this.listener.get();
 
-        if (listener != null) {
-            File file = new File(listener.getFilesDir(), CONFIG_FILENAME);
+        if (settingsManagerListener != null) {
+            File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 
             Objects.requireNonNull(file.getParentFile()).mkdirs();
 
@@ -88,8 +88,8 @@ public class SettingsManager {
             String jsonString = gson.toJson(configuration);
 
             try {
-                if (file.exists()) {
-                    file.delete();
+                if (file.exists() && !file.delete()) {
+                    settingsManagerListener.debugInformationProvided(new DebugInformation("Failed to delete outdated configuration file: ", "file.getAbsolutePath()"));
                 }
                 if (!file.createNewFile()) {
                     throw new IOException("Failed to create file: "+ file.getAbsolutePath());
@@ -101,28 +101,29 @@ public class SettingsManager {
                     fOut.flush();
                 }
             } catch (IOException e) {
-                listener.handleException(e);
+                settingsManagerListener.handleException(e);
             }
         }
     }
 
     private void updateTimeZone() {
-        SettingsManagerListener listener = this.listener.get();
-        if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty() && listener != null) {
+        SettingsManagerListener settingsManagerListener = this.listener.get();
+        if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty() && settingsManagerListener != null) {
 
-            AlarmManager alarmManager=(AlarmManager)listener.getSystemService(Context.ALARM_SERVICE);
+            AlarmManager alarmManager=(AlarmManager)settingsManagerListener.getSystemService(Context.ALARM_SERVICE);
             alarmManager.setTimeZone(configuration.selectedTimeZoneId);
         }
     }
 
+    @SuppressLint("DefaultLocale")
     protected void showSetupDialog(Context context) {
 
-        SettingsManagerListener listener = this.listener.get();
+        SettingsManagerListener settingsManagerListener = this.listener.get();
 
-        if (listener != null) {
+        if (settingsManagerListener != null) {
 
             AlertDialog.Builder builder = new AlertDialog.Builder(context);
-            View customLayout = listener.getLayoutInflater().inflate(R.layout.options, null);
+            View customLayout = settingsManagerListener.getLayoutInflater().inflate(R.layout.options, null);
             builder.setView(customLayout);
 
             final EditText userIdEditText = customLayout.findViewById(R.id.editTextUserId);
@@ -190,9 +191,9 @@ public class SettingsManager {
                             try {
                                 saveConfiguration();
                                 updateTimeZone();
-                                listener.settingsChanged();
+                                settingsManagerListener.settingsChanged();
                             } catch (IOException e) {
-                                listener.handleException(e);
+                                settingsManagerListener.handleException(e);
                             }
                         }
                     })
