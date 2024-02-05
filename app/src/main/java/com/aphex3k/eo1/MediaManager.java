@@ -171,7 +171,7 @@ public class MediaManager implements MediaManagerInterface {
             if (finalTempFile != null) {
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
-                        mediaManagerListener.displayPicture(finalTempFile);
+                        mediaManagerListener.displayPicture(finalTempFile, finalAssetResponse.getOriginalPath());
                     }
                     else if (finalAssetResponse.getType() == ImmichType.VIDEO) {
                         mediaManagerListener.displayVideo(finalTempFile);

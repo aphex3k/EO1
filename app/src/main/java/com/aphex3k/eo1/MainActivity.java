@@ -148,6 +148,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 layoutParams.screenBrightness += adjustment;
             else
                 layoutParams.screenBrightness -= adjustment;
+
+            if (this.brightnessManager.minBrightness > layoutParams.screenBrightness) {
+                layoutParams.screenBrightness = this.brightnessManager.minBrightness;
+            }
         }
         else {
             layoutParams.screenBrightness = 0;
@@ -229,6 +233,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void debugInformationProvided(DebugInformation debugInformation) {
+
+        Log.d(debugInformation.getKey(), debugInformation.getValue());
+
         if (BuildConfig.DEBUG) {
             this.debugInformation.put(debugInformation.getKey(), debugInformation.getValue());
 
@@ -245,7 +252,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
-    public void displayPicture(File file) {
+    public void displayPicture(File file, String assetInfo) {
 
         if (videoView.isPlaying()) {
             videoView.stopPlayback();
@@ -268,6 +275,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 @Override
                 public void onError(Exception e) {
                     handleException(e);
+                    debugInformationProvided(new DebugInformation("PicassoError", assetInfo));
                     mediaManager.removeFromCache(file);
                 }
             });
