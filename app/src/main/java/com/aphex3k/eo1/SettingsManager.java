@@ -29,7 +29,7 @@ import java.util.TimeZone;
 public class SettingsManager {
 
     private final WeakReference<SettingsManagerListener> listener;
-    private final String configFilename = "configuration.json";
+    private static final String CONFIG_FILENAME = "configuration.json";
     private Configuration configuration = new Configuration();
     public Configuration getConfiguration() {
         return this.configuration;
@@ -47,7 +47,7 @@ public class SettingsManager {
 
         if (listener != null) {
             try {
-                File file = new File(listener.getFilesDir(), configFilename);
+                File file = new File(listener.getFilesDir(), CONFIG_FILENAME);
 
                 this.configuration = new Gson().fromJson(new FileReader(file), Configuration.class);
             } catch (FileNotFoundException e) {
@@ -76,7 +76,7 @@ public class SettingsManager {
         SettingsManagerListener listener = this.listener.get();
 
         if (listener != null) {
-            File file = new File(listener.getFilesDir(), configFilename);
+            File file = new File(listener.getFilesDir(), CONFIG_FILENAME);
 
             Objects.requireNonNull(file.getParentFile()).mkdirs();
 

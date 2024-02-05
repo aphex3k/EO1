@@ -1,8 +1,6 @@
 package com.aphex3k.eo1;
 
 import android.app.Activity;
-import android.net.ConnectivityManager;
-import android.net.NetworkInfo;
 
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichApiGetAlbumResponse;
@@ -28,7 +26,6 @@ public class MediaManager implements MediaManagerInterface {
 
     private final WeakReference<SettingsManager> settingsManager;
     private final WeakReference<MediaManagerListener> listener;
-    private Integer rollingCache = 0;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager) {
@@ -70,7 +67,7 @@ public class MediaManager implements MediaManagerInterface {
             ImmichApiAssetResponse assetResponse;
             File tempFile = null;
 
-            if (immichAssets.size() == 0) {
+            if (immichAssets.isEmpty()) {
 
                 try {
 
@@ -141,7 +138,7 @@ public class MediaManager implements MediaManagerInterface {
 
                     if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
-                        File cacheFile = new File(activity.getCacheDir(), "asset-" + rollingCache + ".dat");
+                        File cacheFile = new File(activity.getCacheDir(), uuid + ".dat");
                         try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
                             try (InputStream inputStream = downloadResponse.body().byteStream()) {
                                 byte[] buffer = new byte[1024];
@@ -157,12 +154,10 @@ public class MediaManager implements MediaManagerInterface {
                     activity.runOnUiThread(() -> listener.handleException(e));
                 }
 
-            } while (immichAssets.size() > 0 && (tempFile == null));
+            } while (!immichAssets.isEmpty() && (tempFile == null));
 
             ImmichApiAssetResponse finalAssetResponse = assetResponse;
             File finalTempFile = tempFile;
-
-            rollingCache = rollingCache >= 5 ? 0 : rollingCache + 1;
 
             if (finalTempFile != null) {
                 activity.runOnUiThread(() -> {
@@ -173,6 +168,17 @@ public class MediaManager implements MediaManagerInterface {
                         listener.displayVideo(finalTempFile);
                     }
                 });
+
+                // Clean all files from the cache directory we have already downloaded
+                File[] directoryListing = activity.getCacheDir().listFiles();
+                if (directoryListing != null) {
+                    for (File child : directoryListing) {
+                        // Only delete the file that is not supposed to get displayed this moment
+                        if (!child.getAbsolutePath().equals(finalTempFile.getAbsolutePath())) {
+                            child.delete();
+                        }
+                    }
+                }
             }
             else {
                 showNextImage(activity);

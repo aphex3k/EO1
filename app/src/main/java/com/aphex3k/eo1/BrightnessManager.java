@@ -17,7 +17,7 @@ public class BrightnessManager {
     /**
      * Maximum brightness value (0 to 1)
      */
-    protected final static float maxBrightness = 1.0f; //
+    protected static final float maxBrightness = 1.0f; //
     /**
      * Minimum brightness value (0 to 1)
      */
@@ -26,12 +26,12 @@ public class BrightnessManager {
      * At what sensor value do we want to reach the maximum screen brightness? Any value equal
      * or higher to maxLux results in maxBrightness returned from this function.
      */
-    protected final static Lux maxLux = Lux.OFFICE;
+    protected static final Lux maxLux = Lux.OFFICE;
     /**
      * At what sensor value do we want to reach the minimum screen brightness? Any value equal
      * or lower to minLux results in minBrightness returned from this function.
      */
-    protected final static Lux minLux = Lux.FULL_MOON;
+    protected static final Lux minLux = Lux.FULL_MOON;
 
     private final WeakReference<BrightnessManagerListener> brightnessListener;
 

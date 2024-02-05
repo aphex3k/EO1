@@ -21,3 +21,5 @@ passwords.txt
 ..bfg-report/
 .idea/deploymentTargetDropDown.xml
 .vscode
+.idea/sonarlint/issuestore/
+.idea/sonarlint/securityhotspotstore/

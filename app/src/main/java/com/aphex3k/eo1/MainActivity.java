@@ -28,6 +28,7 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.squareup.picasso.Callback;
+import com.squareup.picasso.MemoryPolicy;
 import com.squareup.picasso.Picasso;
 
 import java.io.File;
@@ -42,7 +43,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /**
     Amount of milliseconds in a minute
      */
-    private final static long millis = 60000;
+    private static final long MILLIS = 60000;
     private ImageView imageView;
     private VideoView videoView;
     private BrightnessManager brightnessManager;
@@ -86,7 +87,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private void runOnTimer() {
         mediaManager.showNextImage(this);
-        handler.postDelayed(this::runOnTimer, millis * settingsManager.getConfiguration().interval);
+        handler.postDelayed(this::runOnTimer, MILLIS * settingsManager.getConfiguration().interval);
     }
 
     @Override
@@ -242,7 +243,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView.setVisibility(View.VISIBLE);
 
         try {
-            Picasso.get().load(file).fit().centerInside().into(imageView, new Callback() {
+            Picasso.get()
+                    .load(file)
+                    .fit()
+                    .centerInside()
+                    .memoryPolicy(MemoryPolicy.NO_CACHE, MemoryPolicy.NO_STORE)
+                    .into(imageView, new Callback() {
                 @Override
                 public void onSuccess() {
                     mediaManager.removeFromCache(file);
