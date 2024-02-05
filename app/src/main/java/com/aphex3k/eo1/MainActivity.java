@@ -215,6 +215,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (e.getClass() == MalformedJsonException.class) {
             Toast.makeText(MainActivity.this, "It appears there is an issue with the format of the configuration file: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
+        if (e.getClass() == AuthenticationFailedException.class) {
+            Toast.makeText(MainActivity.this, "Immich server failed authentication: Invalid username or password.", Toast.LENGTH_SHORT).show();
+        }
 
         Log.e(e.getClass().toString(), e.getMessage() != null ? e.getMessage() : "");
 

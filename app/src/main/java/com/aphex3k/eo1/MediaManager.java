@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Objects;
 
 import okhttp3.ResponseBody;
+import retrofit2.Call;
 import retrofit2.Response;
 
 public class MediaManager implements MediaManagerInterface {
@@ -50,7 +51,12 @@ public class MediaManager implements MediaManagerInterface {
             String userId;
 
             try {
-                ImmichApiLoginResponse loginResponse = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute().body();
+                Call<ImmichApiLoginResponse> service = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password));
+                Response<ImmichApiLoginResponse> call = service.execute();
+                ImmichApiLoginResponse loginResponse = call.body();
+                if (call.code() == 401) {
+                    throw new AuthenticationFailedException(call.code());
+                }
                 assert loginResponse != null;
                 userId = loginResponse.getUserId();
 
