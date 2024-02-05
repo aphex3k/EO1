@@ -57,6 +57,9 @@ public class MediaManager implements MediaManagerInterface {
                 if (call.code() == 401) {
                     throw new AuthenticationFailedException(call.code());
                 }
+                if (call.code() == 404) {
+                    throw new AuthenticationUnavailableException(call.code());
+                }
                 assert loginResponse != null;
                 userId = loginResponse.getUserId();
 
@@ -194,7 +197,7 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     public void removeFromCache(File file) {
-        if (!file.delete()) {
+        if (file.exists() && !file.delete()) {
             MediaManagerListener mediaManagerListener = this.listener.get();
 
             mediaManagerListener.debugInformationProvided(new DebugInformation("MediaManager.removeFromCache", "Unable to delete file "+file.getAbsolutePath()));

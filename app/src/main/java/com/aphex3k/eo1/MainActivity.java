@@ -216,7 +216,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             Toast.makeText(MainActivity.this, "It appears there is an issue with the format of the configuration file: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
         if (e.getClass() == AuthenticationFailedException.class) {
-            Toast.makeText(MainActivity.this, "Immich server failed authentication: Invalid username or password.", Toast.LENGTH_SHORT).show();
+            Toast.makeText(MainActivity.this, "Server failed authentication: Invalid username or password.", Toast.LENGTH_SHORT).show();
+        }
+        if (e.getClass() == AuthenticationUnavailableException.class) {
+            Toast.makeText(MainActivity.this, "Server authentication unavailable. Check your server setup.", Toast.LENGTH_SHORT).show();
         }
 
         Log.e(e.getClass().toString(), e.getMessage() != null ? e.getMessage() : "");
