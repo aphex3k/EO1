@@ -60,6 +60,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private final Handler handler = new Handler();
     private MediaController mediaController;
     private PendingIntent pendingIntent;
+    private Runnable adjustBrightnessOnTimer = null;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -137,11 +138,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void brightnessChanged(float toBrightness) {
 
+        if (adjustBrightnessOnTimer != null) {
+            handler.removeCallbacks(adjustBrightnessOnTimer);
+            adjustBrightnessOnTimer = null;
+        }
+
         WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
-        final float currentBrightness = layoutParams.screenBrightness;
-        final float delta = Math.abs(currentBrightness - toBrightness);
 
         if (this.brightnessManager.getShouldTheScreenBeOn()) {
+            final float currentBrightness = layoutParams.screenBrightness;
+            final float delta = Math.abs(currentBrightness - toBrightness);
 
             final float maxDelta = 0.1f;
             final float adjustment = Math.min(delta, maxDelta);
@@ -153,6 +159,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
             if (this.brightnessManager.minBrightness > layoutParams.screenBrightness) {
                 layoutParams.screenBrightness = this.brightnessManager.minBrightness;
+            }
+            else if (adjustment >= maxDelta) {
+                    adjustBrightnessOnTimer = () -> brightnessChanged(toBrightness);
+                    handler.postDelayed(adjustBrightnessOnTimer, 250);
             }
         }
         else {
