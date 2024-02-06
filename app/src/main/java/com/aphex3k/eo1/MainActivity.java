@@ -217,19 +217,21 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void handleException(Exception e) {
-        if (e.getClass() == InvalidCredentialsException.class) {
-            settingsManager.showSetupDialog(this);
-        }
-        if (e.getClass() == MalformedJsonException.class) {
-            Toast.makeText(MainActivity.this, "It appears there is an issue with the format of the configuration file: " + e.getMessage(), Toast.LENGTH_SHORT).show();
-        }
-        if (e.getClass() == AuthenticationFailedException.class) {
-            Toast.makeText(MainActivity.this, "Server failed authentication: Invalid username or password.", Toast.LENGTH_SHORT).show();
-        }
-        if (e.getClass() == AuthenticationUnavailableException.class) {
-            Toast.makeText(MainActivity.this, "Server authentication unavailable. Check your server setup.", Toast.LENGTH_SHORT).show();
-        }
 
+        this.runOnUiThread(() -> {
+            if (e.getClass() == InvalidCredentialsException.class) {
+                settingsManager.showSetupDialog(this);
+            }
+            if (e.getClass() == MalformedJsonException.class) {
+                Toast.makeText(MainActivity.this, "It appears there is an issue with the format of the configuration file: " + e.getMessage(), Toast.LENGTH_SHORT).show();
+            }
+            if (e.getClass() == AuthenticationFailedException.class) {
+                Toast.makeText(MainActivity.this, "Server failed authentication: Invalid username or password.", Toast.LENGTH_SHORT).show();
+            }
+            if (e.getClass() == AuthenticationUnavailableException.class) {
+                Toast.makeText(MainActivity.this, "Server authentication unavailable. Check your server setup.", Toast.LENGTH_SHORT).show();
+            }
+        });
         Log.e(e.getClass().toString(), e.getMessage() != null ? e.getMessage() : "");
 
         debugInformationProvided(new DebugInformation("Last Exception", e.toString()));
@@ -238,105 +240,109 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void debugInformationProvided(DebugInformation debugInformation) {
 
-        Log.d(debugInformation.getKey(), debugInformation.getValue());
+        this.runOnUiThread(() -> {
+            if (BuildConfig.DEBUG) {
+                this.debugInformation.put(debugInformation.getKey(), debugInformation.getValue());
 
-        if (BuildConfig.DEBUG) {
-            this.debugInformation.put(debugInformation.getKey(), debugInformation.getValue());
+                StringBuilder debugText = new StringBuilder();
 
-            StringBuilder debugText = new StringBuilder();
+                Set<Map.Entry<String, String>> set = this.debugInformation.entrySet();
 
-            Set<Map.Entry<String, String>> set = this.debugInformation.entrySet();
+                for (Map.Entry<String, String> info : set) {
+                    debugText.append(info.getKey()).append(": ").append(info.getValue()).append("\n");
+                }
 
-            for (Map.Entry<String, String> info : set) {
-                debugText.append(info.getKey()).append(": ").append(info.getValue()).append("\n");
+                this.debugOverlay.setText(debugText.toString().trim());
             }
-
-            this.debugOverlay.setText(debugText.toString().trim());
-        }
+        });
+        Log.d(debugInformation.getKey(), debugInformation.getValue());
     }
 
     @Override
     public void displayPicture(File file, String assetId) {
 
-        if (videoView.isPlaying()) {
-            videoView.stopPlayback();
-        }
-        videoView.setVisibility(View.INVISIBLE);
-        imageView.setVisibility(View.VISIBLE);
+        this.runOnUiThread(() -> {
+            if (videoView.isPlaying()) {
+                videoView.stopPlayback();
+            }
+            videoView.setVisibility(View.INVISIBLE);
+            imageView.setVisibility(View.VISIBLE);
 
-        try {
-            Activity activity = this;
+            try {
+                Activity activity = this;
 
-            Picasso.get()
-                    .load(file)
-                    .fit()
-                    .centerInside()
-                    .memoryPolicy(MemoryPolicy.NO_CACHE, MemoryPolicy.NO_STORE)
-                    .into(imageView, new Callback() {
-                @Override
-                public void onSuccess() {
-                    mediaManager.removeFromCache(file);
-                }
-
-                @Override
-                public void onError(Exception e) {
-                    handleException(e);
-                    if (assetId != null) {
-                        mediaManager.tagAssetAsIncompatible(assetId);
-                        mediaManager.displayThumbnailAsset(activity, assetId);
+                Picasso.get()
+                        .load(file)
+                        .fit()
+                        .centerInside()
+                        .memoryPolicy(MemoryPolicy.NO_CACHE, MemoryPolicy.NO_STORE)
+                        .into(imageView, new Callback() {
+                    @Override
+                    public void onSuccess() {
+                        mediaManager.removeFromCache(file);
                     }
-                    else {
-                        showNextImage();
+
+                    @Override
+                    public void onError(Exception e) {
+                        handleException(e);
+                        if (assetId != null) {
+                            mediaManager.tagAssetAsIncompatible(assetId);
+                            mediaManager.displayThumbnailAsset(activity, assetId);
+                        }
+                        else {
+                            showNextImage();
+                        }
+                        mediaManager.removeFromCache(file);
                     }
-                    mediaManager.removeFromCache(file);
-                }
-            });
-        }
-        catch (Exception e) {
-            handleException(e);
-        }
+                });
+            }
+            catch (Exception e) {
+                handleException(e);
+            }
+        });
     }
 
     @Override
     public void displayVideo(File file) {
 
-        if (mediaController == null) {
-            mediaController = new MediaController(MainActivity.this);
-            mediaController.setAnchorView(videoView);
-            mediaController.setVisibility(View.INVISIBLE);
-            videoView.setMediaController(mediaController);
+        this.runOnUiThread(() -> {
+            if (mediaController == null) {
+                mediaController = new MediaController(MainActivity.this);
+                mediaController.setAnchorView(videoView);
+                mediaController.setVisibility(View.INVISIBLE);
+                videoView.setMediaController(mediaController);
 
-            videoView.setOnPreparedListener(mediaPlayer -> {
-                try {
-                    mediaPlayer.setLooping(true);
-                    mediaPlayer.setVolume(0f, 0f);
-                } catch (Exception e) {
-                    handleException(new VideoPlaybackPreparedException(e));
-                }
-            });
-            videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
-                try {
-                    mediaManager.removeFromCache(file);
-                    showNextImage();
-                } catch (Exception e) {
-                    handleException(new VideoPlaybackErrorException(e));
-                }
-                return true;
-            });
-        }
-
-        try {
-            videoView.setVisibility(View.VISIBLE);
-            imageView.setVisibility(View.INVISIBLE);
-            if (videoView.isPlaying()) {
-                videoView.stopPlayback();
+                videoView.setOnPreparedListener(mediaPlayer -> {
+                    try {
+                        mediaPlayer.setLooping(true);
+                        mediaPlayer.setVolume(0f, 0f);
+                    } catch (Exception e) {
+                        handleException(new VideoPlaybackPreparedException(e));
+                    }
+                });
+                videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
+                    try {
+                        mediaManager.removeFromCache(file);
+                        showNextImage();
+                    } catch (Exception e) {
+                        handleException(new VideoPlaybackErrorException(e));
+                    }
+                    return true;
+                });
             }
-            videoView.setVideoPath(file.getPath());
-            videoView.start();
-        }
-        catch (Exception e) {
-            handleException(new VideoPlaybackPreparationException(e));
-        }
+
+            try {
+                videoView.setVisibility(View.VISIBLE);
+                imageView.setVisibility(View.INVISIBLE);
+                if (videoView.isPlaying()) {
+                    videoView.stopPlayback();
+                }
+                videoView.setVideoPath(file.getPath());
+                videoView.start();
+            } catch (Exception e) {
+                handleException(new VideoPlaybackPreparationException(e));
+            }
+        });
     }
 
     @Override

@@ -184,7 +184,7 @@ public class MediaManager implements MediaManagerInterface {
                 }
             }
             else {
-                showNextImage(activity);
+                activity.runOnUiThread(() -> showNextImage(activity));
             }
 
         }).start();
@@ -294,14 +294,7 @@ public class MediaManager implements MediaManagerInterface {
                         if (incompatibleTagId != null) {
                             Call<List<ImmichApiTagAssetResponse>> service = apiService.tagAssets(incompatibleTagId, new ImmichApiTagAssetBody(Collections.singletonList(assetId)));
                             Response<List<ImmichApiTagAssetResponse>> addTag = service.execute();
-                            if (addTag.isSuccessful()) {
-                                MediaManagerListener mediaManagerListener = this.listener.get();
-
-                                if (mediaManagerListener != null) {
-                                    mediaManagerListener.debugInformationProvided(new DebugInformation("Incompatible", "Asset tagged as incompatible: " + assetId));
-                                }
-                            }
-                            else {
+                            if (!addTag.isSuccessful()) {
                                 throw new ImmichApiTagException();
                             }
                         }

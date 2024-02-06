@@ -1,5 +1,8 @@
 package com.aphex3k.eo1;
 
+import static android.view.KeyEvent.KEYCODE_C;
+import static android.view.KeyEvent.KEYCODE_SPACE;
+
 import android.annotation.SuppressLint;
 
 import androidx.annotation.Keep;
@@ -39,10 +42,10 @@ public class EventManager {
         lastKeyCode = keyCode;
         lastKeyCodeDate = new Date();
 
-        if (keyCode == KeyEvent.KEYCODE_C) {
+        if (keyCode == KEYCODE_C) {
             eventManagerListener.showConfigurationUI();
         }
-        else if (keyCode == KeyEvent.KEYCODE_SPACE) {
+        else if (keyCode == KEYCODE_SPACE) {
             eventManagerListener.showNextImage();
         }
         else if (keyCode == KeyEvent.EO1_TOP_BUTTON) {
