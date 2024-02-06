@@ -36,6 +36,7 @@ import com.squareup.picasso.Picasso;
 
 import java.io.File;
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -220,7 +221,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             if (e.getClass() == InvalidCredentialsException.class) {
-                settingsManager.showSetupDialog(this);
+                settingsManager.showSetupDialogIfNeeded(this);
+                Toast.makeText(MainActivity.this, "User authentication failure. Check your configuration.", Toast.LENGTH_SHORT).show();
             }
             if (e.getClass() == MalformedJsonException.class) {
                 Toast.makeText(MainActivity.this, "It appears there is an issue with the format of the configuration file: " + e.getMessage(), Toast.LENGTH_SHORT).show();
@@ -269,7 +271,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             imageView.setVisibility(View.VISIBLE);
 
             try {
-                Activity activity = this;
+                WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
                 Picasso.get()
                         .load(file)
@@ -287,7 +289,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         handleException(e);
                         if (assetId != null) {
                             mediaManager.tagAssetAsIncompatible(assetId);
-                            mediaManager.displayThumbnailAsset(activity, assetId);
+                            MainActivity activity = activityReference.get();
+                            if (activity != null) {
+                                mediaManager.displayThumbnailAsset(activity, assetId, false);
+                            }
                         }
                         else {
                             showNextImage();
@@ -303,7 +308,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
-    public void displayVideo(File file) {
+    public void displayVideo(File file, String assetId) {
+
+        WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
         this.runOnUiThread(() -> {
             if (mediaController == null) {
@@ -323,7 +330,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
                     try {
                         mediaManager.removeFromCache(file);
-                        showNextImage();
+                        MainActivity activity = activityReference.get();
+                        if (activity != null) {
+                            mediaManager.displayThumbnailAsset(activity, assetId, true);
+                        }
                     } catch (Exception e) {
                         handleException(new VideoPlaybackErrorException(e));
                     }
@@ -341,6 +351,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 videoView.start();
             } catch (Exception e) {
                 handleException(new VideoPlaybackPreparationException(e));
+                MainActivity activity = activityReference.get();
+                if (activity != null) {
+                    mediaManager.displayThumbnailAsset(activity, assetId, true);
+                }
             }
         });
     }

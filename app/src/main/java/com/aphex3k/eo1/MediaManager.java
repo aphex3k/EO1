@@ -168,7 +168,7 @@ public class MediaManager implements MediaManagerInterface {
                         mediaManagerListener.displayPicture(finalTempFile, finalAssetResponse.getId());
                     }
                     else if (finalAssetResponse.getType() == ImmichType.VIDEO) {
-                        mediaManagerListener.displayVideo(finalTempFile);
+                        mediaManagerListener.displayVideo(finalTempFile, finalAssetResponse.getId());
                     }
                 });
 
@@ -221,16 +221,22 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     @Override
-    public  void displayThumbnailAsset(Activity activity, String assetId) {
+    public  void displayThumbnailAsset(Activity activity, String assetId, Boolean isVideo) {
 
         new Thread(() -> {
             try {
+
                 File thumbnail = downloadAsset(assetId, true, activity, null);
 
                 activity.runOnUiThread(() -> {
                     MediaManagerListener mediaManagerListener = this.listener.get();
                     if (mediaManagerListener != null) {
-                        mediaManagerListener.displayPicture(thumbnail, null);
+                        if (isVideo) {
+                            mediaManagerListener.displayVideo(thumbnail, null);
+                        }
+                        else {
+                            mediaManagerListener.displayPicture(thumbnail, null);
+                        }
                     }
                 });
             }

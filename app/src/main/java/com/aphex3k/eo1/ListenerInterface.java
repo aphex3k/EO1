@@ -6,5 +6,5 @@ public interface ListenerInterface {
     void handleException(Exception e);
     void debugInformationProvided(DebugInformation debugInformation);
     void displayPicture(File finalTempFile, String assetId);
-    void displayVideo(File finalTempFile);
+    void displayVideo(File finalTempFile, String assetId);
 }

@@ -57,6 +57,9 @@ public class SettingsManager {
     }
 
     protected boolean showSetupDialogIfNeeded(Context context) {
+
+        loadConfiguration();
+
         if (this.configuration == null ||
             this.configuration.userid == null ||
             this.configuration.userid.isEmpty() ||
