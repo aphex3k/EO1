@@ -5,6 +5,7 @@ import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
+import android.app.Activity;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.Context;
@@ -219,9 +220,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (e.getClass() == InvalidCredentialsException.class) {
             settingsManager.showSetupDialog(this);
         }
-        if (e.getClass() == IOException.class && Objects.requireNonNull(e.getMessage()).contains("decode")) {
-            showNextImage();
-        }
         if (e.getClass() == MalformedJsonException.class) {
             Toast.makeText(MainActivity.this, "It appears there is an issue with the format of the configuration file: " + e.getMessage(), Toast.LENGTH_SHORT).show();
         }
@@ -258,7 +256,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
-    public void displayPicture(File file, String assetInfo) {
+    public void displayPicture(File file, String assetId) {
 
         if (videoView.isPlaying()) {
             videoView.stopPlayback();
@@ -267,6 +265,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView.setVisibility(View.VISIBLE);
 
         try {
+            Activity activity = this;
+
             Picasso.get()
                     .load(file)
                     .fit()
@@ -281,7 +281,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 @Override
                 public void onError(Exception e) {
                     handleException(e);
-                    debugInformationProvided(new DebugInformation("PicassoError", assetInfo));
+                    if (assetId != null) {
+                        mediaManager.tagAssetAsIncompatible(assetId);
+                        mediaManager.displayThumbnailAsset(activity, assetId);
+                    }
+                    else {
+                        showNextImage();
+                    }
                     mediaManager.removeFromCache(file);
                 }
             });

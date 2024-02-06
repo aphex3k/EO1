@@ -2,13 +2,22 @@ package com.aphex3k.eo1;
 
 import android.app.Activity;
 
+import androidx.annotation.Nullable;
+
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichApiGetAlbumResponse;
 import com.aphex3k.immichApi.ImmichApiLogin;
 import com.aphex3k.immichApi.ImmichApiLoginResponse;
 import com.aphex3k.immichApi.ImmichApiService;
+import com.aphex3k.immichApi.ImmichApiTag;
+import com.aphex3k.immichApi.ImmichApiTagAssetBody;
+import com.aphex3k.immichApi.ImmichApiTagAssetResponse;
+import com.aphex3k.immichApi.ImmichApiTagResponse;
 import com.aphex3k.immichApi.ImmichExifInfo;
+import com.aphex3k.immichApi.ImmichTagType;
 import com.aphex3k.immichApi.ImmichType;
+
+import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -25,6 +34,7 @@ import retrofit2.Response;
 
 public class MediaManager implements MediaManagerInterface {
 
+    private static final String INCOMPATIBLE_TAG_NAME = "EO1_INCOMPATIBLE";
     private final WeakReference<SettingsManager> settingsManager;
     private final WeakReference<MediaManagerListener> listener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
@@ -79,7 +89,6 @@ public class MediaManager implements MediaManagerInterface {
             if (immichAssets.isEmpty()) {
 
                 try {
-
                     Response<List<ImmichApiGetAlbumResponse>> sharedAlbumsResponse = apiService.getAllAlbums(true, null).execute();
 
                     List<ImmichApiGetAlbumResponse> responseBody = sharedAlbumsResponse.body();
@@ -143,22 +152,7 @@ public class MediaManager implements MediaManagerInterface {
                 String uuid = assetResponse.getId();
 
                 try {
-                    Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, false, false, null).execute();
-
-                    if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
-
-                        File cacheFile = new File(activity.getCacheDir(), uuid + ".dat");
-                        try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
-                            try (InputStream inputStream = downloadResponse.body().byteStream()) {
-                                byte[] buffer = new byte[1024];
-                                int bytesRead;
-                                while ((bytesRead = inputStream.read(buffer)) != -1) {
-                                    outputStream.write(buffer, 0, bytesRead);
-                                }
-                            }
-                        }
-                        tempFile = cacheFile;
-                    } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
+                    tempFile = downloadAsset(uuid, false, activity, apiService);
                 } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 }
@@ -171,7 +165,7 @@ public class MediaManager implements MediaManagerInterface {
             if (finalTempFile != null) {
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
-                        mediaManagerListener.displayPicture(finalTempFile, finalAssetResponse.getOriginalPath());
+                        mediaManagerListener.displayPicture(finalTempFile, finalAssetResponse.getId());
                     }
                     else if (finalAssetResponse.getType() == ImmichType.VIDEO) {
                         mediaManagerListener.displayVideo(finalTempFile);
@@ -193,6 +187,134 @@ public class MediaManager implements MediaManagerInterface {
                 showNextImage(activity);
             }
 
+        }).start();
+    }
+
+    private File downloadAsset(String uuid, boolean thumbnail, Activity activity, @Nullable ImmichApiService apiService) throws Exception {
+
+        if (apiService == null) {
+            SettingsManager settings = this.settingsManager.get();
+            if (settings != null) {
+                Configuration configuration = settings.getConfiguration();
+                apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host);
+                Response<ImmichApiLoginResponse> service = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute();
+            }
+        }
+
+        Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, thumbnail, false, null).execute();
+
+        if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
+
+            File cacheFile = new File(activity.getCacheDir(), uuid + (thumbnail ? "-thumb.dat" : ".dat"));
+            try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
+                try (InputStream inputStream = downloadResponse.body().byteStream()) {
+                    byte[] buffer = new byte[1024];
+                    int bytesRead;
+                    while ((bytesRead = inputStream.read(buffer)) != -1) {
+                        outputStream.write(buffer, 0, bytesRead);
+                    }
+                }
+            }
+            return cacheFile;
+        } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
+
+    }
+
+    @Override
+    public  void displayThumbnailAsset(Activity activity, String assetId) {
+
+        new Thread(() -> {
+            try {
+                File thumbnail = downloadAsset(assetId, true, activity, null);
+
+                activity.runOnUiThread(() -> {
+                    MediaManagerListener mediaManagerListener = this.listener.get();
+                    if (mediaManagerListener != null) {
+                        mediaManagerListener.displayPicture(thumbnail, null);
+                    }
+                });
+            }
+            catch (Exception e) {
+                activity.runOnUiThread(() -> {
+                    MediaManagerListener mediaManagerListener = this.listener.get();
+
+                    if (mediaManagerListener != null) {
+                        mediaManagerListener.debugInformationProvided(new DebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + assetId));
+                    }
+                });
+            }
+        }).start();
+    }
+    @Override
+    public void tagAssetAsIncompatible(@NotNull String assetId) {
+        new Thread(() -> {
+
+            String incompatibleTagId = null;
+
+            SettingsManager settings = this.settingsManager.get();
+
+            if (settings == null) {
+                return;
+            }
+
+            Configuration configuration = settings.getConfiguration();
+
+            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host);
+
+            try {
+                Response<ImmichApiLoginResponse> login = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute();
+
+                if (login.isSuccessful()) {
+                    Response<List<ImmichApiTagResponse>> allTagsResponse = apiService.getAllTags().execute();
+
+                    if (allTagsResponse.isSuccessful()) {
+
+                        List<ImmichApiTagResponse> allTags = allTagsResponse.body();
+
+                        if (allTags != null) {
+
+                            for (ImmichApiTagResponse tag : allTags) {
+                                if (INCOMPATIBLE_TAG_NAME.equals(tag.getName())) {
+                                    incompatibleTagId = tag.getId();
+                                    break;
+                                }
+                            }
+                        }
+
+                        if (incompatibleTagId == null) {
+                            Response<ImmichApiTagResponse> createTag = apiService.createTag(new ImmichApiTag(INCOMPATIBLE_TAG_NAME, ImmichTagType.CUSTOM)).execute();
+
+                            if (createTag.isSuccessful()) {
+
+                                assert createTag.body() != null;
+                                incompatibleTagId = createTag.body().getId();
+                            }
+                        }
+
+                        if (incompatibleTagId != null) {
+                            Call<List<ImmichApiTagAssetResponse>> service = apiService.tagAssets(incompatibleTagId, new ImmichApiTagAssetBody(Collections.singletonList(assetId)));
+                            Response<List<ImmichApiTagAssetResponse>> addTag = service.execute();
+                            if (addTag.isSuccessful()) {
+                                MediaManagerListener mediaManagerListener = this.listener.get();
+
+                                if (mediaManagerListener != null) {
+                                    mediaManagerListener.debugInformationProvided(new DebugInformation("Incompatible", "Asset tagged as incompatible: " + assetId));
+                                }
+                            }
+                            else {
+                                throw new ImmichApiTagException();
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception e) {
+                MediaManagerListener mediaManagerListener = this.listener.get();
+
+                if (mediaManagerListener != null) {
+                    mediaManagerListener.debugInformationProvided(new DebugInformation("Incompatible", "Failed to tag asset as incompatible: " + assetId));
+                }
+            }
         }).start();
     }
 

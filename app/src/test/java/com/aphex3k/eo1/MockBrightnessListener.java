@@ -21,7 +21,7 @@ class MockBrightnessListener implements BrightnessManagerListener {
     }
 
     @Override
-    public void displayPicture(File finalTempFile, String assetInfo) {
+    public void displayPicture(File finalTempFile, String assetId) {
 
     }
 
