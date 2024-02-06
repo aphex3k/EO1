@@ -4,7 +4,7 @@ public interface EventManagerListener extends ListenerInterface {
     void checkForUpdates();
     void toggleScreenOn();
     void showConfigurationUI();
-    void adjustBrightness();
+    void adjustMinimumBrightness();
     void showNextImage();
     void openSystemSettings();
 }

@@ -52,7 +52,7 @@ public class EventManager {
             eventManagerListener.toggleScreenOn();
         }
         else if (keyCode == KeyEvent.EO1_BACK_BUTTON) {
-            eventManagerListener.adjustBrightness();
+            eventManagerListener.adjustMinimumBrightness();
         } else if (keyCode == android.view.KeyEvent.KEYCODE_S) {
             eventManagerListener.openSystemSettings();
         }
