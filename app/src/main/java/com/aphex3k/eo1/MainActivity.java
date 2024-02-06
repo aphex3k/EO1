@@ -189,8 +189,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public void adjustBrightness() {
         this.brightnessManager.adjustMinimumBrightness();
         WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
-        final float currentBrightness = layoutParams.screenBrightness;
-        brightnessChanged(currentBrightness);
+        layoutParams.screenBrightness = this.brightnessManager.minBrightness;
+        getWindow().setAttributes(layoutParams);
     }
 
     @Override
