@@ -5,7 +5,6 @@ import static android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
-import android.app.Activity;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
 import android.content.Context;
@@ -35,12 +34,14 @@ import com.squareup.picasso.MemoryPolicy;
 import com.squareup.picasso.Picasso;
 
 import java.io.File;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
+import java.util.Calendar;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.Objects;
 import java.util.Set;
+import java.util.Timer;
+import java.util.TimerTask;
 
 public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler {
 
@@ -58,8 +59,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private SettingsManager settingsManager;
     private final Map<String, String> debugInformation = new HashMap<>();
     private final Handler handler = new Handler();
-    private MediaController mediaController;
     private PendingIntent pendingIntent;
+    private final Timer quietHoursTimer = new Timer(true);
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -125,6 +126,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     protected void onPause() {
         handler.removeCallbacks(this::runOnTimer);
+        this.quietHoursTimer.cancel();
+        this.quietHoursTimer.purge();
         super.onPause();
     }
 
@@ -191,6 +194,65 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public void settingsChanged() {
         handler.removeCallbacks(this::runOnTimer);
         handler.post(this::runOnTimer);
+        setupQuietHours();
+    }
+
+    private void setupQuietHours() {
+
+        if (this.settingsManager == null) {
+            return;
+        }
+
+        try {
+            quietHoursTimer.cancel();
+            quietHoursTimer.purge();
+        }
+        catch (Exception e) {
+            handleException(e);
+        }
+
+        final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
+        final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
+
+        final Calendar calendar = Calendar.getInstance();
+        final Date time = calendar.getTime();
+
+        final Calendar startCalendar = Calendar.getInstance();
+        startCalendar.set(Calendar.HOUR_OF_DAY, startQuietHour);
+        startCalendar.set(Calendar.MINUTE, 0);
+        startCalendar.set(Calendar.SECOND, 0);
+
+        if (startCalendar.getTime().before(time)) {
+            startCalendar.add(Calendar.DAY_OF_YEAR, 1);
+        }
+
+        final Calendar endCalendar = Calendar.getInstance();
+        endCalendar.set(Calendar.HOUR_OF_DAY, endQuietHour);
+        endCalendar.set(Calendar.MINUTE, 0);
+        endCalendar.set(Calendar.SECOND, 0);
+
+        if (endCalendar.getTime().before(time)) {
+            endCalendar.add(Calendar.DAY_OF_YEAR, 1);
+        }
+
+        final long period = 24 * 60 * MILLIS;
+        quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                if (brightnessManager != null) {
+                    brightnessManager.setShouldTheScreenBeOn(false);
+                }
+            }
+        }, startCalendar.getTime(), period);
+
+        quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
+            @Override
+            public void run() {
+                if (brightnessManager != null) {
+                    brightnessManager.setShouldTheScreenBeOn(true);
+                }
+            }
+        }, endCalendar.getTime(), period);
     }
 
     @Override
@@ -258,6 +320,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 Picasso.get()
                         .load(file)
                         .fit()
+                        .noPlaceholder()
                         .centerInside()
                         .memoryPolicy(MemoryPolicy.NO_CACHE, MemoryPolicy.NO_STORE)
                         .into(imageView, new Callback() {
@@ -270,11 +333,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     public void onError(Exception e) {
                         handleException(e);
                         if (assetId != null) {
-                            mediaManager.tagAssetAsIncompatible(assetId);
                             MainActivity activity = activityReference.get();
                             if (activity != null) {
                                 mediaManager.displayThumbnailAsset(activity, assetId, false);
                             }
+                            mediaManager.tagAssetAsIncompatible(assetId);
                         }
                         else {
                             showNextImage();
@@ -295,43 +358,42 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
         this.runOnUiThread(() -> {
-            if (mediaController == null) {
-                mediaController = new MediaController(MainActivity.this);
-                mediaController.setAnchorView(videoView);
-                mediaController.setVisibility(View.INVISIBLE);
-                videoView.setMediaController(mediaController);
 
-                videoView.setOnPreparedListener(mediaPlayer -> {
-                    try {
-                        mediaPlayer.setLooping(true);
-                        mediaPlayer.setVolume(0f, 0f);
-                    } catch (Exception e) {
-                        handleException(new VideoPlaybackPreparedException(e));
+            videoView.setOnPreparedListener(mediaPlayer -> {
+                try {
+                    mediaPlayer.setLooping(true);
+                    mediaPlayer.setVolume(0f, 0f);
+                } catch (Exception e) {
+                    handleException(new VideoPlaybackPreparedException(e));
+                }
+            });
+
+            videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
+                try {
+                    mediaManager.removeFromCache(file);
+                    MainActivity activity = activityReference.get();
+                    if (activity != null && assetId != null) {
+                        videoView.setVisibility(View.INVISIBLE);
+                        mediaManager.displayThumbnailAsset(activity, assetId, true);
                     }
-                });
-                videoView.setOnErrorListener((mediaPlayer, i, i1) -> {
-                    try {
-                        mediaManager.removeFromCache(file);
-                        MainActivity activity = activityReference.get();
-                        if (activity != null) {
-                            mediaManager.displayThumbnailAsset(activity, assetId, true);
-                        }
-                    } catch (Exception e) {
-                        handleException(new VideoPlaybackErrorException(e));
+                    else {
+                        showNextImage();
                     }
-                    return true;
-                });
-            }
+                } catch (Exception e) {
+                    handleException(new VideoPlaybackErrorException(e));
+                }
+                return true;
+            });
 
             try {
                 videoView.setVisibility(View.VISIBLE);
                 imageView.setVisibility(View.INVISIBLE);
-                if (videoView.isPlaying()) {
-                    videoView.stopPlayback();
-                }
                 videoView.setVideoPath(file.getPath());
                 videoView.start();
             } catch (Exception e) {
+                if (videoView.isPlaying()) {
+                    videoView.stopPlayback();
+                }
                 handleException(new VideoPlaybackPreparationException(e));
                 MainActivity activity = activityReference.get();
                 if (activity != null) {

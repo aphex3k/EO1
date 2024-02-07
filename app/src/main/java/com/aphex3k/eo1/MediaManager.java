@@ -2,6 +2,7 @@ package com.aphex3k.eo1;
 
 import android.app.Activity;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
@@ -190,6 +191,7 @@ public class MediaManager implements MediaManagerInterface {
         }).start();
     }
 
+    @NonNull
     private File downloadAsset(String uuid, boolean thumbnail, Activity activity, @Nullable ImmichApiService apiService) throws Exception {
 
         if (apiService == null) {
