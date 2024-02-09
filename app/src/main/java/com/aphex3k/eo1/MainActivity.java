@@ -18,7 +18,6 @@ import android.util.Log;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.ImageView;
-import android.widget.MediaController;
 import android.widget.TextView;
 import android.widget.Toast;
 import android.widget.VideoView;
@@ -35,9 +34,13 @@ import com.squareup.picasso.Picasso;
 
 import java.io.File;
 import java.lang.ref.WeakReference;
+import java.text.DateFormat;
+import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.Timer;
@@ -236,11 +239,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         final long period = 24 * 60 * MILLIS;
+        final DateFormat debugDateFormatter = new SimpleDateFormat("MMM d, yyyy HH:mm a", Locale.US);
+
         quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
                 if (brightnessManager != null) {
                     brightnessManager.setShouldTheScreenBeOn(false);
+                    debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
                 }
             }
         }, startCalendar.getTime(), period);
@@ -250,10 +256,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             public void run() {
                 if (brightnessManager != null) {
                     brightnessManager.setShouldTheScreenBeOn(true);
+                    debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
                 }
             }
         }, endCalendar.getTime(), period);
+
+        debugInformationProvided(new DebugInformation("startCalendar", "Start of quiet hours scheduled for " + debugDateFormatter.format(startCalendar)));
+        debugInformationProvided(new DebugInformation("endCalendar", "End of quiet hours scheduled for " + debugDateFormatter.format(endCalendar)));
     }
+
 
     @Override
     public void updateChecked(Boolean updateAvailable) {
@@ -290,12 +301,29 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (BuildConfig.DEBUG) {
                 this.debugInformation.put(debugInformation.getKey(), debugInformation.getValue());
 
-                StringBuilder debugText = new StringBuilder();
-
                 Set<Map.Entry<String, String>> set = this.debugInformation.entrySet();
 
+                ArrayList<String> debugList = new ArrayList<>();
+
                 for (Map.Entry<String, String> info : set) {
-                    debugText.append(info.getKey()).append(": ").append(info.getValue()).append("\n");
+                    StringBuilder text = new StringBuilder();
+
+                    text = text.append(info.getKey()).append(": ").append(info.getValue()).append("\n");
+
+                    int index = debugList.size();
+
+                    for (String s : debugList) {
+                        if (s.length() > text.length()) {
+                            index = debugList.indexOf(s);
+                        }
+                    }
+                    debugList.add(index, text.toString());
+                }
+
+                StringBuilder debugText = new StringBuilder();
+
+                for (String text : debugList) {
+                    debugText.append(text);
                 }
 
                 this.debugOverlay.setText(debugText.toString().trim());
