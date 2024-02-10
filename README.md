@@ -3,8 +3,8 @@
 [![Build Status](https://jenkins.codingmerc.com/buildStatus/icon?job=EO1%2Fmain)](https://jenkins.codingmerc.com/job/EO1/)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=gitea_eo1&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=gitea_eo1)
 
-This repository is a fork of [spalt/EO1](https://github.com/spalt/EO1). The goal is to use a
-self-hosted [immich.app](https://immich.app/) instance as a backend instead of using Flickr. This will allow **full self-custody** of the system.
+This repository is a [rewrite](https://gitea.codingmerc.com/michael/EO1/issues/26) of [spalt/EO1](https://github.com/spalt/EO1). The goal is to ideally use a
+self-hosted [immich.app](https://immich.app/) instance as a backend. This will allow **full self-custody** of the system.
 
 ![photo of eo1 custom app development](_img/IMG_1451.jpg) ![photo of eo1 running custom app](_img/IMG_1452.jpg)
 
@@ -50,7 +50,7 @@ Amongst other things, I had to disable PFS as well as enable TLSv1.2 in addition
 - You need to tell your EO1 to allow side-loading.
     1. Swipe down on the top right and go to **Settings > Security**
     2. Make sure "Unknown Sources" is checked
-- Go back to the browser and go to this URL: <http://gitea.codingmerc.com/michael/EO1/releases/download/v1.0.0-rc4/app-release.apk>
+- Go back to the browser and go to this URL: <http://gitea.codingmerc.com/michael/EO1/releases/download/v1.1.0-rc1/app-release.apk>
   - You can build the app from this repository and host it yourself if you want to not use a precompiled APK
 - When it finished downloading, install the file by pulling down the notification bar on the top left and clicking it, then agreeing to the prompts
 - Restart/power cycle your EO1 by unplugging and plugging only the power cable
@@ -74,6 +74,10 @@ It seems like EO2 allows for adb access. If you push a [`configuration.json`](co
 If you configure multiple EO2 you can download a `configuration.json` from the EO2 after successfully configuring the first one. This file can be downloaded, optionally modified, and pushed to the next EO2.
 This might only work for EO2 frames as I'm unaware of enabling `adb` on EO1.
 (I do not have an EO2 available to test this, please [provide feedback](https://gitea.codingmerc.com/michael/EO1/issues)!)
+
+## Further Reading
+
+1. [EO1 Hardware specifications](EO1-specs.md)
 
 ## Contribution
 

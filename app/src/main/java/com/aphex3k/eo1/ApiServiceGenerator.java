@@ -45,9 +45,9 @@ public class ApiServiceGenerator {
                 .followSslRedirects(true)
                 .retryOnConnectionFailure(true)
                 .cache(null)
-                .connectTimeout(5, TimeUnit.SECONDS)
-                .writeTimeout(5, TimeUnit.SECONDS)
-                .readTimeout(5, TimeUnit.SECONDS)
+                .connectTimeout(15, TimeUnit.SECONDS)
+                .writeTimeout(15, TimeUnit.SECONDS)
+                .readTimeout(15, TimeUnit.SECONDS)
                 .cookieJar(new SessionCookieJar());
 
         if (BuildConfig.DEBUG) {

@@ -10,6 +10,7 @@ import retrofit2.Call;
 import retrofit2.http.Body;
 import retrofit2.http.GET;
 import retrofit2.http.POST;
+import retrofit2.http.PUT;
 import retrofit2.http.Path;
 import retrofit2.http.Query;
 import retrofit2.http.Streaming;
@@ -72,5 +73,32 @@ public interface ImmichApiService {
             @Path("id") String id,
             @Query("withoutAssets") Boolean withoutAssets,
             @Query("key") String key
+    );
+
+    @Keep
+    @GET("/api/asset/random")
+    Call<List<ImmichApiAssetResponse>> getRandom (
+            @Query("count") Integer count
+    );
+
+    @Keep
+    @GET("/api/server-info/ping")
+    Call<ImmichApiPingResponse> ping ();
+
+    @Keep
+    @POST("/api/tag")
+    Call<ImmichApiTagResponse> createTag (
+            @Body ImmichApiTag tag
+    );
+
+    @Keep
+    @GET("/api/tag")
+    Call<List<ImmichApiTagResponse>> getAllTags ();
+
+    @Keep
+    @PUT("/api/tag/{id}/assets")
+    Call<List<ImmichApiTagAssetResponse>> tagAssets (
+            @Path("id") String tagId,
+            @Body ImmichApiTagAssetBody body
     );
 }

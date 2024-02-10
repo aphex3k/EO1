@@ -53,7 +53,7 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
     private String ownerId;
 
     @SerializedName("people")
-    private ImmichPerson people;
+    private List<ImmichPerson> people;
 
     @SerializedName("resized")
     private Boolean resized;
@@ -121,7 +121,7 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
         return updatedAt;
     }
 
-    public ImmichPerson getPeople() {
+    public List<ImmichPerson> getPeople() {
         return people;
     }
 
