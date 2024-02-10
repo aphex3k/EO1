@@ -75,6 +75,10 @@ If you configure multiple EO2 you can download a `configuration.json` from the E
 This might only work for EO2 frames as I'm unaware of enabling `adb` on EO1.
 (I do not have an EO2 available to test this, please [provide feedback](https://gitea.codingmerc.com/michael/EO1/issues)!)
 
+## Further Reading
+
+1. [EO1 Hardware specifications](EO1-specs.md)
+
 ## Contribution
 
 1. You can provide feedback by opening [Issues](https://gitea.codingmerc.com/michael/EO1/issues) and describing an idea or problem.

@@ -24,6 +24,9 @@ PLEASE DON'T POST ANY PRIVATE USER CREDENTIALS OR PUBLIC NETWORK INFORMATION!!!
 
 -->
 
+<!-- If you are having an issue with the picture frame, please state wether you are working with an EO1 or EO2 -->
+I am using an:
+
 <!-- Please mention the name of apk you have an issue with (e.g. app-release.apk, app-debug.apk) -->
 I installed the apk named:
 
