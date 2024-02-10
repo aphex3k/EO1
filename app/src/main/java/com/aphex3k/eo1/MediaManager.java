@@ -22,6 +22,7 @@ import org.jetbrains.annotations.NotNull;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
@@ -192,7 +193,7 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     @NonNull
-    private File downloadAsset(String uuid, boolean thumbnail, Activity activity, @Nullable ImmichApiService apiService) throws Exception {
+    private File downloadAsset(String uuid, boolean thumbnail, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
 
         if (apiService == null) {
             SettingsManager settings = this.settingsManager.get();
