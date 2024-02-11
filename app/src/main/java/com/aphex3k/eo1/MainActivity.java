@@ -138,6 +138,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         handler.removeCallbacks(this::runOnTimer);
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
+        this.connectionManager.unregisterListener(this);
         super.onPause();
     }
 
@@ -459,6 +460,5 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void disconnected() {
-
     }
 }
