@@ -63,7 +63,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private final Map<String, String> debugInformation = new HashMap<>();
     private final Handler handler = new Handler();
     private PendingIntent pendingIntent;
-    private final Timer quietHoursTimer = new Timer(true);
+    private Timer quietHoursTimer = new Timer(true);
+    private float lastScreenBrightness = 0.3f;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -96,6 +97,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void runOnTimer() {
         mediaManager.showNextImage(this);
         handler.postDelayed(this::runOnTimer, MILLIS * settingsManager.getConfiguration().interval);
+        brightnessChanged(lastScreenBrightness);
     }
 
     @Override
@@ -123,6 +125,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (!this.settingsManager.showSetupDialogIfNeeded(this)) {
             handler.removeCallbacks(this::runOnTimer);
             handler.post(this::runOnTimer);
+            setupQuietHours();
         }
     }
 
@@ -146,6 +149,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         else {
             layoutParams.screenBrightness = 0;
         }
+
+        lastScreenBrightness = layoutParams.screenBrightness;
 
         getWindow().setAttributes(layoutParams);
     }
@@ -214,6 +219,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             handleException(e);
         }
 
+        quietHoursTimer = new Timer(true);
+
         final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
         final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
 
@@ -241,6 +248,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         final long period = 24 * 60 * MILLIS;
         final DateFormat debugDateFormatter = new SimpleDateFormat("MMM d, yyyy HH:mm a", Locale.US);
 
+        final Date startTime = startCalendar.getTime();
+        final Date endTime = endCalendar.getTime();
+
         quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
@@ -249,7 +259,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
                 }
             }
-        }, startCalendar.getTime(), period);
+        }, startTime, period);
 
         quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
@@ -259,10 +269,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
                 }
             }
-        }, endCalendar.getTime(), period);
+        }, endTime, period);
 
-        debugInformationProvided(new DebugInformation("startCalendar", "Start of quiet hours scheduled for " + debugDateFormatter.format(startCalendar)));
-        debugInformationProvided(new DebugInformation("endCalendar", "End of quiet hours scheduled for " + debugDateFormatter.format(endCalendar)));
+        debugInformationProvided(new DebugInformation("startCalendar", "Start of quiet hours scheduled for " + debugDateFormatter.format(startTime)));
+        debugInformationProvided(new DebugInformation("endCalendar", "End of quiet hours scheduled for " + debugDateFormatter.format(endTime)));
     }
 
 

@@ -204,6 +204,10 @@ public class MediaManager implements MediaManagerInterface {
             }
         }
 
+        if (apiService == null) {
+            throw new MediaDownloadFailedException("Unable to create Immich service");
+        }
+
         Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, thumbnail, false, null).execute();
 
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
