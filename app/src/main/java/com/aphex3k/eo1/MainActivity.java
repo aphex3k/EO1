@@ -46,7 +46,7 @@ import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 
-public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler {
+public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener {
 
     /**
     Amount of milliseconds in a minute
@@ -65,6 +65,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private PendingIntent pendingIntent;
     private Timer quietHoursTimer = new Timer(true);
     private float lastScreenBrightness = 0.3f;
+    private ConnectionManager connectionManager;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -81,6 +82,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.updateManager = new UpdateManager(this);
         this.settingsManager = new SettingsManager(this);
         this.mediaManager = new MediaManager(this, this.settingsManager);
+        this.connectionManager = new ConnectionManager(this);
 
         Thread.setDefaultUncaughtExceptionHandler(this);
 
@@ -127,6 +129,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             handler.post(this::runOnTimer);
             setupQuietHours();
         }
+
+        this.connectionManager.registerListener(this);
     }
 
     @Override
@@ -446,5 +450,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         AlarmManager mgr = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
         mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 2000, pendingIntent);
         System.exit(2);
+    }
+
+    @Override
+    public void connected() {
+        showNextImage();
+    }
+
+    @Override
+    public void disconnected() {
+
     }
 }
