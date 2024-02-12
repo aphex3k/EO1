@@ -2,7 +2,7 @@
 
 name: "Issue Template"
 about: "This template is for reporting issues!"
-title: ""
+title: "New Issue"
 ref: "main"
 
 ---
@@ -32,6 +32,12 @@ I installed the apk named:
 
 <!-- Please mention the version of apk you have an issue with (e.g. 1.1.0-rc1) -->
 The version I installed is:
+
+<!-- Please describe your setup: Are you using a single-user setup or shared-album setup? -->
+The setup is:
+
+<!-- Please provide an indication of the type of assets you are sharing with your picture frames -->
+I'm hosting: mostly/only pictures/videos???
 
 The issue I am facing is the following:
 

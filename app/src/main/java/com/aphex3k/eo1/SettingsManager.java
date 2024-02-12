@@ -92,7 +92,7 @@ public class SettingsManager {
 
             try {
                 if (file.exists() && !file.delete()) {
-                    settingsManagerListener.debugInformationProvided(new DebugInformation("Failed to delete outdated configuration file: ", "file.getAbsolutePath()"));
+                    settingsManagerListener.debugInformationProvided(new DebugInformation("Failed to delete outdated configuration file", file.getAbsolutePath()));
                 }
                 if (!file.createNewFile()) {
                     throw new IOException("Failed to create file: "+ file.getAbsolutePath());

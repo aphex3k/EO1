@@ -86,8 +86,8 @@ public class BrightnessManager {
 
         if (listener != null) {
 
-            listener.debugInformationProvided(new DebugInformation("Reported Light Value: ", String.valueOf(lightValue)));
-            listener.debugInformationProvided(new DebugInformation("Min Brightness: ", String.valueOf(this.minBrightness)));
+            listener.debugInformationProvided(new DebugInformation("Reported Light Value", String.valueOf(lightValue)));
+            listener.debugInformationProvided(new DebugInformation("Min Brightness", String.valueOf(this.minBrightness)));
 
             if (!shouldTheScreenBeOn) {
                 listener.brightnessChanged(0.0f);
@@ -96,7 +96,7 @@ public class BrightnessManager {
                 // See: https://stackoverflow.com/a/51494556/1117968
                 final float brightness = (maxBrightness - minBrightness) * (lightValue - minLux.value) / (maxLux.value - minLux.value) + minBrightness;
 
-                listener.debugInformationProvided(new DebugInformation("Calculated Brightness Value: ", String.valueOf(brightness)));
+                listener.debugInformationProvided(new DebugInformation("Calculated Brightness Value", String.valueOf(brightness)));
 
                 listener.brightnessChanged(brightness);
             }

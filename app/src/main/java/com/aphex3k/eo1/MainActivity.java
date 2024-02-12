@@ -131,6 +131,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         this.connectionManager.registerListener(this);
+
+        debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), this.connectionManager.isNetworkAvailable() ? "connected" : "disconnected"));
     }
 
     @Override
@@ -186,6 +189,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void adjustMinimumBrightness() {
+        this.brightnessManager.setShouldTheScreenBeOn(true);
         this.brightnessManager.adjustMinimumBrightness();
         WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
         layoutParams.screenBrightness = this.brightnessManager.minBrightness;
@@ -309,8 +313,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("Last Exception", e.toString()));
     }
 
-    @Override
-    public void debugInformationProvided(DebugInformation debugInformation) {
+    public void debugInformationProvided(@NonNull DebugInformation debugInformation) {
 
         this.runOnUiThread(() -> {
             if (BuildConfig.DEBUG) {
@@ -323,7 +326,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 for (Map.Entry<String, String> info : set) {
                     StringBuilder text = new StringBuilder();
 
-                    text = text.append(info.getKey()).append(": ").append(info.getValue()).append("\n");
+                    text = text.append(info.getKey().trim()).append(": ").append(info.getValue().trim()).append("\n");
 
                     int index = debugList.size();
 
@@ -349,6 +352,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void displayPicture(File file, String assetId) {
+
+        debugInformationProvided(new DebugInformation("displayPictures", file.getAbsolutePath()));
 
         this.runOnUiThread(() -> {
             if (videoView.isPlaying()) {
@@ -397,6 +402,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void displayVideo(File file, String assetId) {
+
+        debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
         WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
@@ -455,10 +462,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void connected() {
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "connected"));
         showNextImage();
     }
 
     @Override
     public void disconnected() {
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "disconnected"));
     }
 }
