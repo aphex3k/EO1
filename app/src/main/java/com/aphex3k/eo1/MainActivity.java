@@ -46,7 +46,7 @@ import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 
-public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler {
+public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener {
 
     /**
     Amount of milliseconds in a minute
@@ -65,6 +65,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private PendingIntent pendingIntent;
     private Timer quietHoursTimer = new Timer(true);
     private float lastScreenBrightness = 0.3f;
+    private ConnectionManager connectionManager;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -81,6 +82,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.updateManager = new UpdateManager(this);
         this.settingsManager = new SettingsManager(this);
         this.mediaManager = new MediaManager(this, this.settingsManager);
+        this.connectionManager = new ConnectionManager(this);
 
         Thread.setDefaultUncaughtExceptionHandler(this);
 
@@ -127,6 +129,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             handler.post(this::runOnTimer);
             setupQuietHours();
         }
+
+        this.connectionManager.registerListener(this);
+
+        debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), this.connectionManager.isNetworkAvailable() ? "connected" : "disconnected"));
     }
 
     @Override
@@ -134,6 +141,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         handler.removeCallbacks(this::runOnTimer);
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
+        this.connectionManager.unregisterListener(this);
         super.onPause();
     }
 
@@ -181,6 +189,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void adjustMinimumBrightness() {
+        this.brightnessManager.setShouldTheScreenBeOn(true);
         this.brightnessManager.adjustMinimumBrightness();
         WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
         layoutParams.screenBrightness = this.brightnessManager.minBrightness;
@@ -304,8 +313,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("Last Exception", e.toString()));
     }
 
-    @Override
-    public void debugInformationProvided(DebugInformation debugInformation) {
+    public void debugInformationProvided(@NonNull DebugInformation debugInformation) {
 
         this.runOnUiThread(() -> {
             if (BuildConfig.DEBUG) {
@@ -318,7 +326,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 for (Map.Entry<String, String> info : set) {
                     StringBuilder text = new StringBuilder();
 
-                    text = text.append(info.getKey()).append(": ").append(info.getValue()).append("\n");
+                    text = text.append(info.getKey().trim()).append(": ").append(info.getValue().trim()).append("\n");
 
                     int index = debugList.size();
 
@@ -344,6 +352,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void displayPicture(File file, String assetId) {
+
+        debugInformationProvided(new DebugInformation("displayPictures", file.getAbsolutePath()));
 
         this.runOnUiThread(() -> {
             if (videoView.isPlaying()) {
@@ -392,6 +402,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void displayVideo(File file, String assetId) {
+
+        debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
         WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
@@ -446,5 +458,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         AlarmManager mgr = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
         mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 2000, pendingIntent);
         System.exit(2);
+    }
+
+    @Override
+    public void connected() {
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "connected"));
+        showNextImage();
+    }
+
+    @Override
+    public void disconnected() {
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "disconnected"));
     }
 }

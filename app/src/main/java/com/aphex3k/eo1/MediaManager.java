@@ -88,62 +88,82 @@ public class MediaManager implements MediaManagerInterface {
             ImmichApiAssetResponse assetResponse;
             File tempFile = null;
 
-            if (immichAssets.isEmpty()) {
+            try {
+                Response<List<ImmichApiGetAlbumResponse>> sharedAlbumsResponse = apiService.getAllAlbums(true, null).execute();
 
-                try {
-                    Response<List<ImmichApiGetAlbumResponse>> sharedAlbumsResponse = apiService.getAllAlbums(true, null).execute();
+                List<ImmichApiGetAlbumResponse> responseBody = sharedAlbumsResponse.body();
 
-                    List<ImmichApiGetAlbumResponse> responseBody = sharedAlbumsResponse.body();
+                if (sharedAlbumsResponse.isSuccessful() && responseBody != null) {
 
-                    if (sharedAlbumsResponse.isSuccessful() && responseBody != null) {
+                    for (ImmichApiGetAlbumResponse r : responseBody) {
+                        List<ImmichApiAssetResponse> assetList = r.getAssets();
 
-                        for (ImmichApiGetAlbumResponse r : responseBody) {
-                            List<ImmichApiAssetResponse> assetList = r.getAssets();
+                        if (assetList.isEmpty()) {
+                            assetList = Objects.requireNonNull(apiService.getAlbumInfo(r.getId(), false, null).execute().body()).getAssets();
+                        }
 
-                            if (assetList.isEmpty()) {
-                                assetList = Objects.requireNonNull(apiService.getAlbumInfo(r.getId(), false, null).execute().body()).getAssets();
+                        for (ImmichApiAssetResponse asset : assetList) {
+                            ImmichExifInfo exif = asset.getExifInfo();
+                            if (exif == null || exif.getFileSizeInByte() > 1073741824) {
+                                continue;
                             }
-
-                            for (ImmichApiAssetResponse asset : assetList) {
-                                ImmichExifInfo exif = asset.getExifInfo();
-                                if (exif == null || exif.getFileSizeInByte() > 1073741824) {
-                                    continue;
-                                }
-                                if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
-                                    immichAssets.add(asset);
-                                }
+                            if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
+                                immichAssets.add(asset);
                             }
                         }
                     }
-
-                    Response<List<ImmichApiGetAlbumResponse>> albumsResponse = apiService.getAllAlbums(false, null).execute();
-
-                    responseBody = albumsResponse.body();
-
-                    if (albumsResponse.isSuccessful() && responseBody != null) {
-
-                        for (ImmichApiGetAlbumResponse r : responseBody) {
-                            List<ImmichApiAssetResponse> assetList = r.getAssets();
-
-                            if (assetList.isEmpty()) {
-                                assetList = Objects.requireNonNull(apiService.getAlbumInfo(r.getId(), false, null).execute().body()).getAssets();
-                            }
-                            for (ImmichApiAssetResponse asset : assetList) {
-                                ImmichExifInfo exif = asset.getExifInfo();
-                                if (exif == null || exif.getFileSizeInByte() > 1073741824) {
-                                    continue;
-                                }
-                                if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
-                                    immichAssets.add(asset);
-                                }
-                            }
-                        }
-                    }
-
-                } catch (Exception e) {
-                    activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
-                    return;
                 }
+
+                Response<List<ImmichApiGetAlbumResponse>> albumsResponse = apiService.getAllAlbums(false, null).execute();
+
+                responseBody = albumsResponse.body();
+
+                if (albumsResponse.isSuccessful() && responseBody != null) {
+
+                    for (ImmichApiGetAlbumResponse r : responseBody) {
+                        List<ImmichApiAssetResponse> assetList = r.getAssets();
+
+                        if (assetList.isEmpty()) {
+                            assetList = Objects.requireNonNull(apiService.getAlbumInfo(r.getId(), false, null).execute().body()).getAssets();
+                        }
+                        for (ImmichApiAssetResponse asset : assetList) {
+                            ImmichExifInfo exif = asset.getExifInfo();
+                            if (exif == null || exif.getFileSizeInByte() > 1073741824) {
+                                continue;
+                            }
+                            if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
+                                immichAssets.add(asset);
+                            }
+                        }
+                    }
+                }
+
+                Response<List<ImmichApiAssetResponse>> assetsResponse = apiService.getAllAssets(
+                        userId, null, null, null, null
+                ).execute();
+
+                List<ImmichApiAssetResponse> assetsResponseBody = assetsResponse.body();
+
+                if (assetsResponse.isSuccessful() && assetsResponseBody != null && !assetsResponseBody.isEmpty()) {
+
+                    for (ImmichApiAssetResponse asset : assetsResponseBody) {
+                        ImmichExifInfo exif = asset.getExifInfo();
+                        if (exif == null || exif.getFileSizeInByte() > 1073741824) {
+                            continue;
+                        }
+                        if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
+                            immichAssets.add(asset);
+                        }
+                    }
+                }
+
+            } catch (Exception e) {
+                activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
+                return;
+            }
+
+            if (immichAssets.isEmpty()) {
+                activity.runOnUiThread(() -> mediaManagerListener.handleException(new NoMediaFoundException()));
             }
 
             Collections.shuffle(immichAssets);

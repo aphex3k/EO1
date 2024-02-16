@@ -16,7 +16,6 @@ local.properties
 app/release
 app/debug
 *.aab
-*.apk
 passwords.txt
 ..bfg-report/
 .idea/deploymentTargetDropDown.xml
