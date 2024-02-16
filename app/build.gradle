@@ -16,12 +16,12 @@ sonar {
 
 android {
     namespace 'com.aphex3k.eo1'
-    compileSdk 33
+    compileSdk 34
 
     defaultConfig {
         applicationId "com.aphex3k.eo1"
         minSdk 19
-        targetSdk 33
+        targetSdk 34
         maxSdk 19
         if (project.hasProperty('BUILD_NUMBER')) {
             versionCode = Integer.parseInt(project.BUILD_NUMBER)
@@ -29,7 +29,7 @@ android {
         else {
             versionCode = 9
         }
-        versionName "1.1.0-rc2"
+        versionName "1.1.0-rc3"
         multiDexEnabled true
     }
     buildTypes {
@@ -84,8 +84,4 @@ dependencies {
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation "org.mockito:mockito-core:5.10.0"
-
-    // debugImplementation because LeakCanary should only run in debug builds.
-    // https://square.github.io/leakcanary/getting_started/
-    debugImplementation 'com.squareup.leakcanary:leakcanary-android:2.13'
 }
