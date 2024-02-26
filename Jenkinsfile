@@ -63,7 +63,7 @@ pipeline {
         stage ('Archiving') {
             steps {
                 script {
-                    archiveArtifacts allowEmptyArchive: false, artifacts: 'app/build/outputs/apk/**/*,app/build/outputs/logs/*,app/build/reports/**/*,app/build/test-results/**/*', excludes: '', fingerprint: true, onlyIfSuccessful: true                
+                    archiveArtifacts allowEmptyArchive: false, artifacts: 'app/build/**/*', excludes: '', fingerprint: true, onlyIfSuccessful: false
                 }       
             }         
         }

@@ -1,7 +1,7 @@
 plugins {
     id 'com.android.application'
+    id "jacoco"
     id "org.sonarqube" version "4.4.1.3373"
-
 }
 
 sonar {
@@ -11,6 +11,9 @@ sonar {
         property "sonar.host.url", "https://sonarcloud.io"
         // To avoid implicit compilation, set property 'sonar.gradle.skipCompile' to 'true' and make sure your project is compiled, before analysis has started.
         property "sonar.gradle.skipCompile", true
+        property "sonar.sources", "src/main/java"
+        property "sonar.junit.reportsPath", "build/test-results/*/TEST-*.xml"
+        property "sonar.tests", "src/test/java"
     }
 }
 
@@ -27,9 +30,9 @@ android {
             versionCode = Integer.parseInt(project.BUILD_NUMBER)
         }
         else {
-            versionCode = 9
+            versionCode = 1
         }
-        versionName "1.1.0-rc3"
+        versionName "1.1.0"
         multiDexEnabled true
     }
     buildTypes {
@@ -48,6 +51,9 @@ android {
             // the Android Gradle plugin. To learn more, go to the section about
             // R8 configuration files.
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            testCoverageEnabled true
         }
     }
     compileOptions {
@@ -74,13 +80,14 @@ dependencies {
     implementation 'com.squareup.retrofit2:retrofit:2.6.0'
     implementation 'com.squareup.retrofit2:converter-gson:2.6.0'
     implementation 'com.squareup.okhttp3:okhttp:3.12.13'
-    implementation 'com.squareup.picasso:picasso:2.71828'
     // https://mvnrepository.com/artifact/com.google.guava/guava
     implementation 'com.google.guava:guava:32.1.2-jre'
     // https://howtodoinjava.com/retrofit2/logging-with-retrofit2/
     implementation("com.squareup.okhttp3:logging-interceptor:3.9.0")
     // https://github.com/vdurmont/semver4j
     implementation 'com.vdurmont:semver4j:3.1.0'
+    // Support GIF Playback
+    implementation 'com.github.bumptech.glide:glide:4.16.0'
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation "org.mockito:mockito-core:5.10.0"

@@ -31,7 +31,7 @@ public class ImmichApiServiceTest {
 
         if (userId == null) {
 
-            this.apiService = ApiServiceGenerator.createService(ImmichApiService.class, "https://demo.immich.app/");
+            this.apiService = ApiServiceGenerator.createService(ImmichApiService.class, "https://demo.immich.app/", null);
 
             try {
                 Response<ImmichApiLoginResponse> response = apiService.login(

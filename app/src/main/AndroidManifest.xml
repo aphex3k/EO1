@@ -15,7 +15,7 @@
     
     <application
         android:requestLegacyExternalStorage="true"
-        android:enableOnBackInvokedCallback="false"
+        android:hardwareAccelerated="true"
         android:name="androidx.multidex.MultiDexApplication"
         android:allowBackup="true"
         android:largeHeap="true"
@@ -24,14 +24,14 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true">
         <activity android:name=".MainActivity"
+            android:launchMode="singleTask"
             android:exported="true"
-            android:theme="@style/Theme.EO1">
+            android:theme="@style/Theme.EO1"
+            android:configChanges="screenLayout|screenSize|orientation"
+            >
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
@@ -45,6 +45,17 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/provider_paths" />
         </provider>
+        <receiver android:name=".AdminManager"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_DEVICE_ADMIN"
+            android:exported="false"
+            tools:ignore="IntentFilterExportedReceiver">
+            <meta-data android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

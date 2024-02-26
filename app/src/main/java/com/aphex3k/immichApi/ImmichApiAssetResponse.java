@@ -39,6 +39,8 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
 
     @SerializedName("isFavorite")
     private Boolean isFavorite;
+    @SerializedName("isTrashed")
+    private Boolean isTrashed;
 
     @SerializedName("livePhotoVideoId")
     private String livePhotoVideoId;
@@ -103,6 +105,14 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
 
     public Boolean getFavorite() {
         return isFavorite;
+    }
+
+    /**
+     * Asset has been moved to trash
+     * @return <em>true</em> if asset has been moved to trash, <em>false</em> otherwise
+     */
+    public Boolean getIsTrashed() {
+        return isTrashed;
     }
 
     public Boolean getResized() {

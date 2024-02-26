@@ -26,7 +26,7 @@ public class BrightnessManager {
      * At what sensor value do we want to reach the maximum screen brightness? Any value equal
      * or higher to maxLux results in maxBrightness returned from this function.
      */
-    protected static final Lux maxLux = Lux.OFFICE;
+    protected static final Lux maxLux = Lux.TRAIN_STATION;
     /**
      * At what sensor value do we want to reach the minimum screen brightness? Any value equal
      * or lower to minLux results in minBrightness returned from this function.

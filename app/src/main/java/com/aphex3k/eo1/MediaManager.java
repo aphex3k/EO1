@@ -3,7 +3,6 @@ package com.aphex3k.eo1;
 import android.app.Activity;
 
 import androidx.annotation.NonNull;
-import androidx.annotation.Nullable;
 
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichApiGetAlbumResponse;
@@ -58,7 +57,7 @@ public class MediaManager implements MediaManagerInterface {
             SettingsManager settings = this.settingsManager.get();
             Configuration configuration = settings.getConfiguration();
 
-            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host);
+            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity);
 
             String userId;
 
@@ -148,7 +147,7 @@ public class MediaManager implements MediaManagerInterface {
 
                     for (ImmichApiAssetResponse asset : assetsResponseBody) {
                         ImmichExifInfo exif = asset.getExifInfo();
-                        if (exif == null || exif.getFileSizeInByte() > 1073741824) {
+                        if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
                             continue;
                         }
                         if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
@@ -188,6 +187,7 @@ public class MediaManager implements MediaManagerInterface {
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
                         mediaManagerListener.displayPicture(finalTempFile, finalAssetResponse.getId());
+
                     }
                     else if (finalAssetResponse.getType() == ImmichType.VIDEO) {
                         mediaManagerListener.displayVideo(finalTempFile, finalAssetResponse.getId());
@@ -219,8 +219,8 @@ public class MediaManager implements MediaManagerInterface {
             SettingsManager settings = this.settingsManager.get();
             if (settings != null) {
                 Configuration configuration = settings.getConfiguration();
-                apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host);
-                Response<ImmichApiLoginResponse> service = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute();
+                apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity);
+                apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute();
             }
         }
 
@@ -228,14 +228,13 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
-        Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, thumbnail, false, null).execute();
-
+        Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, thumbnail, true, null).execute();
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
             File cacheFile = new File(activity.getCacheDir(), uuid + (thumbnail ? "-thumb.dat" : ".dat"));
             try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
                 try (InputStream inputStream = downloadResponse.body().byteStream()) {
-                    byte[] buffer = new byte[1024];
+                    byte[] buffer = new byte[4096];
                     int bytesRead;
                     while ((bytesRead = inputStream.read(buffer)) != -1) {
                         outputStream.write(buffer, 0, bytesRead);
@@ -248,7 +247,7 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     @Override
-    public  void displayThumbnailAsset(Activity activity, String assetId, Boolean isVideo) {
+    public  void displayThumbnailAsset(@NotNull Activity activity, @NotNull String assetId, boolean isVideo) {
 
         new Thread(() -> {
             try {
@@ -258,7 +257,7 @@ public class MediaManager implements MediaManagerInterface {
                 activity.runOnUiThread(() -> {
                     MediaManagerListener mediaManagerListener = this.listener.get();
                     if (mediaManagerListener != null) {
-                        if (isVideo) {
+                        if (Boolean.TRUE.equals(isVideo)) {
                             mediaManagerListener.displayVideo(thumbnail, null);
                         }
                         else {
@@ -292,7 +291,7 @@ public class MediaManager implements MediaManagerInterface {
 
             Configuration configuration = settings.getConfiguration();
 
-            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host);
+            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, null);
 
             try {
                 Response<ImmichApiLoginResponse> login = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute();
