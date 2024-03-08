@@ -520,6 +520,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             try {
                 videoView.stop();
                 videoView.setDataSource(file.getPath());
+                videoView.setLooping(true);
                 videoView.setListener(new TextureVideoView.MediaPlayerListener() {
                     @Override
                     public void onVideoPrepared() {
@@ -546,6 +547,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
                     public boolean onError() {
                         assetFallback(assetId, activityReference, true, file);
+                        return false;
+                    }
+
+                    public boolean onInfo(int what, int extra) {
+                        // https://developer.android.com/reference/android/media/MediaPlayer.OnInfoListener
+
                         return false;
                     }
                 });

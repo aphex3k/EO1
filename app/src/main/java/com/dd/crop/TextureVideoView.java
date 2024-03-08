@@ -225,10 +225,6 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                 }
             });
 
-            // don't forget to call MediaPlayer.prepareAsync() method when you use constructor for
-            // creating MediaPlayer
-            mMediaPlayer.prepareAsync();
-
             // Play video when the media source is ready for playback.
             mMediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
                 @Override
@@ -254,6 +250,19 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                     return false;
                 }
             });
+            mMediaPlayer.setOnInfoListener(new MediaPlayer.OnInfoListener() {
+                @Override
+                public boolean onInfo(MediaPlayer mediaPlayer, int i, int i1) {
+                    if (mListener != null) {
+                        return mListener.onInfo(i, i1);
+                    }
+                    return false;
+                }
+            });
+
+            // don't forget to call MediaPlayer.prepareAsync() method when you use constructor for
+            // creating MediaPlayer
+            mMediaPlayer.prepareAsync();
 
         } catch (IllegalArgumentException e) {
             Log.d(TAG, e.getMessage());
@@ -402,6 +411,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         public void onVideoEnd();
 
         public boolean onError();
+
+        public boolean onInfo(int what, int extra);
     }
 
     @Override
