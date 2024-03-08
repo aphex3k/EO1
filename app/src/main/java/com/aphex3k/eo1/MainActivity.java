@@ -8,11 +8,10 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
-import android.app.admin.DevicePolicyManager;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.Drawable;
 import android.hardware.SensorManager;
 import android.net.Uri;
 import android.os.Build;
@@ -28,12 +27,17 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
 import com.bumptech.glide.Glide;
+import com.bumptech.glide.load.DataSource;
 import com.bumptech.glide.load.engine.DiskCacheStrategy;
+import com.bumptech.glide.load.engine.GlideException;
+import com.bumptech.glide.request.RequestListener;
+import com.bumptech.glide.request.target.Target;
 import com.dd.crop.TextureVideoView;
 import com.google.gson.stream.MalformedJsonException;
 
@@ -58,6 +62,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private static final long MILLIS = 60000;
     private View lastVisibleView;
+    private String lastVisibleAsset = "";
     private ImageView imageView;
     private TextureVideoView videoView;
     private BrightnessManager brightnessManager;
@@ -73,8 +78,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private float lastScreenBrightness = 0.3f;
     private ConnectionManager connectionManager;
     private PowerManager.WakeLock screenOffWakeLock;
-    DevicePolicyManager deviceManger;
-    ComponentName compName;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -100,14 +103,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 0,
                 new Intent(getIntent()),
                 getIntent().getFlags());
-
-        compName = new ComponentName(this, AdminManager.class);
-        deviceManger = (DevicePolicyManager) getSystemService(
-                Context.DEVICE_POLICY_SERVICE);
-
-        if(!deviceManger.isDeviceOwnerApp(getPackageName())) {
-            Log.e("DeviceAdmin","This application not whitelisted");
-        }
     }
 
     /**
@@ -115,8 +110,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private void runOnTimer() {
         handler.postDelayed(this::runOnTimer, MILLIS * settingsManager.getConfiguration().interval);
-        brightnessChanged(lastScreenBrightness);
         if (brightnessManager.getShouldTheScreenBeOn()) {
+            brightnessChanged(lastScreenBrightness);
             mediaManager.showNextImage(this);
         }
     }
@@ -159,13 +154,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), this.connectionManager.isNetworkAvailable() ? "connected" : "disconnected"));
 
-        // This will disable the decor view in the emulator or non EO test devices during testing
-        if (BuildConfig.DEBUG) {
-            int uiOptions = View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_FULLSCREEN;
-            getWindow().getDecorView().setSystemUiVisibility(uiOptions);
-        }
+        final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
+        final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
+        final int now = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
 
-        turnScreenOn();
+        if (startQuietHour < now && endQuietHour > now) {
+            turnScreenOff();
+        }
+        else {
+            turnScreenOn();
+        }
     }
 
     @Override
@@ -442,13 +440,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void displayPicture(File file, String assetId) {
 
+        if (file.getAbsolutePath().equals(lastVisibleAsset)) {
+            return;
+        }
+
         debugInformationProvided(new DebugInformation("displayPictures", file.getAbsolutePath()));
 
         this.runOnUiThread(() -> {
-            videoView.stop();
-            videoView.setVisibility(View.INVISIBLE);
-            imageView.setVisibility(View.VISIBLE);
-            lastVisibleView = imageView;
+
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
             try {
@@ -457,28 +456,61 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         .optionalCenterCrop()
                         .skipMemoryCache(true)
                         .diskCacheStrategy(DiskCacheStrategy.NONE)
-                        .into(imageView);
+                        .listener(new RequestListener<Drawable>() {
+                            @Override
+                            public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
+                                assetFallback(assetId, activityReference, false, file);
+                                return false;
+                            }
 
+                            @Override
+                            public boolean onResourceReady(@NonNull Drawable resource, @NonNull Object model, Target<Drawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
+                                if (lastVisibleView == videoView || lastVisibleView == null) {
+                                    videoView.stop();
+                                    videoView.setVisibility(View.INVISIBLE);
+                                    imageView.setVisibility(View.VISIBLE);
+                                    lastVisibleView = imageView;
+                                }
+                                lastVisibleAsset = file.getAbsolutePath();
+                                return false;
+                            }
+                        })
+                        .into(imageView);
             }
             catch (Exception e) {
                 handleException(e);
-                if (assetId != null) {
-                    MainActivity activity = activityReference.get();
-                    if (activity != null) {
-                        mediaManager.displayThumbnailAsset(activity, assetId, false);
-                    }
-                    mediaManager.tagAssetAsIncompatible(assetId);
-                }
-                else {
-                    showNextImage();
-                }
-                mediaManager.removeFromCache(file);
+                assetFallback(assetId, activityReference, false, file);
             }
         });
     }
 
+    /**
+     * If the image produces an error of any kind during playback attempt, try to switch to the
+     * thumbnail. If that fails as well, load the next asset instead
+     * @param assetId the asset in question
+     * @param activityReference weak reference to the calling activity
+     * @param isVideo true if it is a video
+     * @param file file to load
+     */
+    private void assetFallback(String assetId, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+        if (assetId != null) {
+            MainActivity activity = activityReference.get();
+            if (activity != null) {
+                mediaManager.displayThumbnailAsset(activity, assetId, isVideo);
+            }
+            mediaManager.tagAssetAsIncompatible(assetId);
+        } else {
+            showNextImage();
+        }
+        mediaManager.removeFromCache(file);
+    }
+
     @Override
     public void displayVideo(File file, String assetId) {
+
+        if (file.getAbsolutePath().equals(lastVisibleAsset)) {
+            return;
+        }
 
         debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
@@ -486,53 +518,40 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             try {
-                lastVisibleView = videoView;
                 videoView.stop();
-                videoView.setVisibility(View.VISIBLE);
-                imageView.setVisibility(View.INVISIBLE);
                 videoView.setDataSource(file.getPath());
-                videoView.setLooping(true);
                 videoView.setListener(new TextureVideoView.MediaPlayerListener() {
                     @Override
                     public void onVideoPrepared() {
                         try {
+                            if (lastVisibleView == imageView || lastVisibleView == null) {
+                                videoView.setVisibility(View.VISIBLE);
+                                imageView.setVisibility(View.INVISIBLE);
+                                lastVisibleView = videoView;
+                            }
+                            lastVisibleAsset = file.getAbsolutePath();
                             videoView.setLooping(true);
+                            videoView.setFocusable(false);
+                            videoView.setVolume(0,0);
                             videoView.play();
                         } catch (Exception e) {
+                            assetFallback(assetId, activityReference, true, file);
                             handleException(e);
-                            if (assetId != null) {
-                                MainActivity activity = activityReference.get();
-                                if (activity != null) {
-                                    mediaManager.displayThumbnailAsset(activity, assetId, true);
-                                }
-                                mediaManager.tagAssetAsIncompatible(assetId);
-                            }
-                            else {
-                                showNextImage();
-                            }
-                            mediaManager.removeFromCache(file);
                         }
                     }
 
                     @Override
                     public void onVideoEnd() {
-                        showNextImage();
-                        mediaManager.removeFromCache(file);
+                    }
+
+                    public boolean onError() {
+                        assetFallback(assetId, activityReference, true, file);
+                        return false;
                     }
                 });
             } catch (Exception e) {
+                assetFallback(assetId, activityReference, true, file);
                 handleException(e);
-                if (assetId != null) {
-                    MainActivity activity = activityReference.get();
-                    if (activity != null) {
-                        mediaManager.displayThumbnailAsset(activity, assetId, true);
-                    }
-                    mediaManager.tagAssetAsIncompatible(assetId);
-                }
-                else {
-                    showNextImage();
-                }
-                mediaManager.removeFromCache(file);
             }
         });
     }
@@ -540,7 +559,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void uncaughtException(@NonNull Thread thread, @NonNull Throwable throwable) {
         AlarmManager mgr = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-        mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 2000, pendingIntent);
+        mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 120000, pendingIntent);
         System.exit(2);
     }
 

@@ -90,52 +90,11 @@ public class MediaManager implements MediaManagerInterface {
             try {
                 Response<List<ImmichApiGetAlbumResponse>> sharedAlbumsResponse = apiService.getAllAlbums(true, null).execute();
 
-                List<ImmichApiGetAlbumResponse> responseBody = sharedAlbumsResponse.body();
-
-                if (sharedAlbumsResponse.isSuccessful() && responseBody != null) {
-
-                    for (ImmichApiGetAlbumResponse r : responseBody) {
-                        List<ImmichApiAssetResponse> assetList = r.getAssets();
-
-                        if (assetList.isEmpty()) {
-                            assetList = Objects.requireNonNull(apiService.getAlbumInfo(r.getId(), false, null).execute().body()).getAssets();
-                        }
-
-                        for (ImmichApiAssetResponse asset : assetList) {
-                            ImmichExifInfo exif = asset.getExifInfo();
-                            if (exif == null || exif.getFileSizeInByte() > 1073741824) {
-                                continue;
-                            }
-                            if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
-                                immichAssets.add(asset);
-                            }
-                        }
-                    }
-                }
+                addAssetsFromAlbumResponse(apiService, sharedAlbumsResponse.body(), sharedAlbumsResponse);
 
                 Response<List<ImmichApiGetAlbumResponse>> albumsResponse = apiService.getAllAlbums(false, null).execute();
 
-                responseBody = albumsResponse.body();
-
-                if (albumsResponse.isSuccessful() && responseBody != null) {
-
-                    for (ImmichApiGetAlbumResponse r : responseBody) {
-                        List<ImmichApiAssetResponse> assetList = r.getAssets();
-
-                        if (assetList.isEmpty()) {
-                            assetList = Objects.requireNonNull(apiService.getAlbumInfo(r.getId(), false, null).execute().body()).getAssets();
-                        }
-                        for (ImmichApiAssetResponse asset : assetList) {
-                            ImmichExifInfo exif = asset.getExifInfo();
-                            if (exif == null || exif.getFileSizeInByte() > 1073741824) {
-                                continue;
-                            }
-                            if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
-                                immichAssets.add(asset);
-                            }
-                        }
-                    }
-                }
+                addAssetsFromAlbumResponse(apiService, albumsResponse.body(), albumsResponse);
 
                 Response<List<ImmichApiAssetResponse>> assetsResponse = apiService.getAllAssets(
                         userId, null, null, null, null
@@ -212,6 +171,35 @@ public class MediaManager implements MediaManagerInterface {
         }).start();
     }
 
+    /**
+     * Add all assets with supported ImmichType from the response body to the asset list.
+     * @param apiService the configured (logged in) api service
+     * @param responseBody the received album response body
+     * @param albumsResponse the received album response
+     * @throws IOException
+     */
+    private void addAssetsFromAlbumResponse(ImmichApiService apiService, List<ImmichApiGetAlbumResponse> responseBody, Response<List<ImmichApiGetAlbumResponse>> albumsResponse) throws IOException {
+        if (albumsResponse.isSuccessful() && responseBody != null) {
+
+            for (ImmichApiGetAlbumResponse r : responseBody) {
+                List<ImmichApiAssetResponse> assetList = r.getAssets();
+
+                if (assetList.isEmpty()) {
+                    assetList = Objects.requireNonNull(apiService.getAlbumInfo(r.getId(), false, null).execute().body()).getAssets();
+                }
+                for (ImmichApiAssetResponse asset : assetList) {
+                    ImmichExifInfo exif = asset.getExifInfo();
+                    if (exif == null || exif.getFileSizeInByte() > 1073741824) {
+                        continue;
+                    }
+                    if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
+                        immichAssets.add(asset);
+                    }
+                }
+            }
+        }
+    }
+
     @NonNull
     private File downloadAsset(String uuid, boolean thumbnail, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
 
@@ -228,7 +216,7 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
-        Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, thumbnail, true, null).execute();
+        Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, thumbnail, false, null).execute();
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
             File cacheFile = new File(activity.getCacheDir(), uuid + (thumbnail ? "-thumb.dat" : ".dat"));

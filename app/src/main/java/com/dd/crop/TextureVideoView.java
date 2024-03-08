@@ -165,6 +165,10 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         }
     }
 
+    public void setVolume (int leftVolume, int rightVolume) {
+        mMediaPlayer.setVolume(leftVolume, rightVolume);
+    }
+
     /**
      * @see android.media.MediaPlayer#setDataSource(android.content.Context, android.net.Uri)
      */
@@ -238,6 +242,16 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                     if (mListener != null) {
                         mListener.onVideoPrepared();
                     }
+                }
+            });
+
+            mMediaPlayer.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                @Override
+                public boolean onError(MediaPlayer mediaPlayer, int i, int i1) {
+                    if (mListener != null) {
+                        return mListener.onError();
+                    }
+                    return false;
                 }
             });
 
@@ -386,6 +400,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         public void onVideoPrepared();
 
         public void onVideoEnd();
+
+        public boolean onError();
     }
 
     @Override
