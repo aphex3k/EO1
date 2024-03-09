@@ -165,6 +165,10 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         }
     }
 
+    public void setVolume (int leftVolume, int rightVolume) {
+        mMediaPlayer.setVolume(leftVolume, rightVolume);
+    }
+
     /**
      * @see android.media.MediaPlayer#setDataSource(android.content.Context, android.net.Uri)
      */
@@ -221,10 +225,6 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                 }
             });
 
-            // don't forget to call MediaPlayer.prepareAsync() method when you use constructor for
-            // creating MediaPlayer
-            mMediaPlayer.prepareAsync();
-
             // Play video when the media source is ready for playback.
             mMediaPlayer.setOnPreparedListener(new MediaPlayer.OnPreparedListener() {
                 @Override
@@ -240,6 +240,29 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                     }
                 }
             });
+
+            mMediaPlayer.setOnErrorListener(new MediaPlayer.OnErrorListener() {
+                @Override
+                public boolean onError(MediaPlayer mediaPlayer, int i, int i1) {
+                    if (mListener != null) {
+                        return mListener.onError();
+                    }
+                    return false;
+                }
+            });
+            mMediaPlayer.setOnInfoListener(new MediaPlayer.OnInfoListener() {
+                @Override
+                public boolean onInfo(MediaPlayer mediaPlayer, int i, int i1) {
+                    if (mListener != null) {
+                        return mListener.onInfo(i, i1);
+                    }
+                    return false;
+                }
+            });
+
+            // don't forget to call MediaPlayer.prepareAsync() method when you use constructor for
+            // creating MediaPlayer
+            mMediaPlayer.prepareAsync();
 
         } catch (IllegalArgumentException e) {
             Log.d(TAG, e.getMessage());
@@ -386,6 +409,10 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         public void onVideoPrepared();
 
         public void onVideoEnd();
+
+        public boolean onError();
+
+        public boolean onInfo(int what, int extra);
     }
 
     @Override
