@@ -13,7 +13,7 @@ Before filing an issue, please try to install the latest debug variant of the ap
 
   http://gitea.codingmerc.com/michael/EO1/releases/download/<version>/app-<variant>.apk
 
-  <version> can be 1.1.0-rc1 for example
+  <version> can be 1.1.1 for example
   <variant> is always one of the two values: release, debug
 
 The debug variant will print additional information on the screen at runtime that may help identify the issue you are facing.
@@ -30,7 +30,7 @@ I am using an:
 <!-- Please mention the name of apk you have an issue with (e.g. app-release.apk, app-debug.apk) -->
 I installed the apk named:
 
-<!-- Please mention the version of apk you have an issue with (e.g. 1.1.0-rc1) -->
+<!-- Please mention the version of apk you have an issue with (e.g. 1.1.1) -->
 The version I installed is:
 
 <!-- Please describe your setup: Are you using a single-user setup or shared-album setup? -->
