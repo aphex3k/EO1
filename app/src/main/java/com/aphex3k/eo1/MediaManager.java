@@ -71,8 +71,12 @@ public class MediaManager implements MediaManagerInterface {
                 if (call.code() == 404) {
                     throw new AuthenticationUnavailableException(call.code());
                 }
-                assert loginResponse != null;
-                userId = loginResponse.getUserId();
+                if (call.isSuccessful() && loginResponse == null) {
+                    throw new AuthenticationUnavailableException(call.code());
+                }
+                else {
+                    userId = loginResponse.getUserId();
+                }
 
             } catch (Exception e) {
                 activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
@@ -304,9 +308,7 @@ public class MediaManager implements MediaManagerInterface {
                         if (incompatibleTagId == null) {
                             Response<ImmichApiTagResponse> createTag = apiService.createTag(new ImmichApiTag(INCOMPATIBLE_TAG_NAME, ImmichTagType.CUSTOM)).execute();
 
-                            if (createTag.isSuccessful()) {
-
-                                assert createTag.body() != null;
+                            if (createTag.isSuccessful() && createTag.body() != null) {
                                 incompatibleTagId = createTag.body().getId();
                             }
                         }
