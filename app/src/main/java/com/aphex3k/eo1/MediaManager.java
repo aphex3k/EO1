@@ -308,9 +308,7 @@ public class MediaManager implements MediaManagerInterface {
                         if (incompatibleTagId == null) {
                             Response<ImmichApiTagResponse> createTag = apiService.createTag(new ImmichApiTag(INCOMPATIBLE_TAG_NAME, ImmichTagType.CUSTOM)).execute();
 
-                            if (createTag.isSuccessful()) {
-
-                                assert createTag.body() != null;
+                            if (createTag.isSuccessful() && createTag.body() != null) {
                                 incompatibleTagId = createTag.body().getId();
                             }
                         }
