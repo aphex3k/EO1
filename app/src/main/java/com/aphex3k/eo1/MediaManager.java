@@ -8,6 +8,7 @@ import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichApiGetAlbumResponse;
 import com.aphex3k.immichApi.ImmichApiLogin;
 import com.aphex3k.immichApi.ImmichApiLoginResponse;
+import com.aphex3k.immichApi.ImmichApiMetadataSearchResponse;
 import com.aphex3k.immichApi.ImmichApiService;
 import com.aphex3k.immichApi.ImmichApiTag;
 import com.aphex3k.immichApi.ImmichApiTagAssetBody;
@@ -88,31 +89,33 @@ public class MediaManager implements MediaManagerInterface {
             File tempFile = null;
 
             try {
-                Response<List<ImmichApiGetAlbumResponse>> sharedAlbumsResponse = apiService.getAllAlbums(true, null).execute();
 
-                addAssetsFromAlbumResponse(apiService, sharedAlbumsResponse.body(), sharedAlbumsResponse);
+                int count = 1000;
+                int page = 1;
 
-                Response<List<ImmichApiGetAlbumResponse>> albumsResponse = apiService.getAllAlbums(false, null).execute();
+                while (count == 1000) {
 
-                addAssetsFromAlbumResponse(apiService, albumsResponse.body(), albumsResponse);
+                    Response<ImmichApiMetadataSearchResponse> assetsResponse = apiService.getAllAssets(
+                            null, false, null, count, page
+                    ).execute();
 
-                Response<List<ImmichApiAssetResponse>> assetsResponse = apiService.getAllAssets(
-                        userId, null, null, null, null
-                ).execute();
+                    List<ImmichApiAssetResponse> assetsResponseBody = assetsResponse.body() != null ? assetsResponse.body().getAssets().getItems() : null;
 
-                List<ImmichApiAssetResponse> assetsResponseBody = assetsResponse.body();
+                    if (assetsResponse.isSuccessful() && assetsResponseBody != null && !assetsResponseBody.isEmpty()) {
 
-                if (assetsResponse.isSuccessful() && assetsResponseBody != null && !assetsResponseBody.isEmpty()) {
-
-                    for (ImmichApiAssetResponse asset : assetsResponseBody) {
-                        ImmichExifInfo exif = asset.getExifInfo();
-                        if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
-                            continue;
-                        }
-                        if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
-                            immichAssets.add(asset);
+                        for (ImmichApiAssetResponse asset : assetsResponseBody) {
+                            ImmichExifInfo exif = asset.getExifInfo();
+                            if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
+                                continue;
+                            }
+                            if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
+                                immichAssets.add(asset);
+                            }
                         }
                     }
+
+                    page++;
+                    count = assetsResponseBody != null ? assetsResponseBody.size() : 0;
                 }
 
             } catch (Exception e) {

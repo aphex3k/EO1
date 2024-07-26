@@ -25,31 +25,31 @@ public interface ImmichApiService {
     );
 
     @Keep
-    @GET("/api/album")
+    @GET("/api/albums")
     Call<List<ImmichApiGetAlbumResponse>> getAllAlbums (
             @Query("shared") Boolean shared,
             @Query("assetId") String assetId
     );
 
     @Keep
-    @GET("/api/asset")
-    Call<List<ImmichApiAssetResponse>> getAllAssets (
-            @Query("userId") String userId,
+    @POST("/api/search/metadata/ ")
+    Call<ImmichApiMetadataSearchResponse> getAllAssets (
             @Query("isFavorite") Boolean isFavorite,
             @Query("isArchived") Boolean isArchived,
-            @Query("skip") Integer skip,
-            @Query("updatedAfter") Date updatedAfter
+            @Query("isNotInAlbum") Boolean isNotInAlbum,
+            @Query("count") Integer count,
+            @Query("page") Integer page
     );
 
     @Keep
-    @POST("/api/asset/download/{id}")
+    @GET("/api/assets/{id}/original")
     @Streaming
     Call<ResponseBody> downloadFile (
             @Path("id") String id
     );
 
     @Keep
-    @GET("/api/asset/file/{id}")
+    @GET("/api/assets/file/{id}")
     @Streaming
     Call<ResponseBody> serveFile (
             @Path("id") String id,
@@ -59,16 +59,16 @@ public interface ImmichApiService {
     );
 
     @Keep
-    @GET("/api/asset/thumbnail/{id}")
+    @GET("/api/assets/{id}/thumbnail")
     @Streaming
     Call<ResponseBody> getAssetThumbnail(
             @Path("id") String id,
-            @Query("format") ImmichThumbnailFormat format,
+            @Query("size") ImmichSizeFormat sizeFormat,
             @Query("key") String key
     );
 
     @Keep
-    @GET("/api/album/{id}")
+    @GET("/api/albums/{id}")
     Call<ImmichApiGetAlbumResponse> getAlbumInfo (
             @Path("id") String id,
             @Query("withoutAssets") Boolean withoutAssets,
@@ -76,14 +76,10 @@ public interface ImmichApiService {
     );
 
     @Keep
-    @GET("/api/asset/random")
+    @GET("/api/assets/random")
     Call<List<ImmichApiAssetResponse>> getRandom (
             @Query("count") Integer count
     );
-
-    @Keep
-    @GET("/api/server-info/ping")
-    Call<ImmichApiPingResponse> ping ();
 
     @Keep
     @POST("/api/tag")

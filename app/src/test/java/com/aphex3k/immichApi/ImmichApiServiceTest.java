@@ -16,7 +16,7 @@ import java.util.List;
 import okhttp3.ResponseBody;
 import retrofit2.Response;
 
-@Ignore
+
 public class ImmichApiServiceTest {
 
     private String userId;
@@ -49,42 +49,43 @@ public class ImmichApiServiceTest {
                 throw new AssumptionViolatedException(e.getMessage());
             }
 
-            Response<List<ImmichApiAssetResponse>> response = apiService.getAllAssets(
-                    userId, null, null, null, null
+            Response<ImmichApiMetadataSearchResponse> response = apiService.getAllAssets(
+                    null, null, true, 3, 1
             ).execute();
 
-            for (ImmichApiAssetResponse asset: response.body()) {
+            assert response.body() != null;
+
+            for (ImmichApiAssetResponse asset: response.body().getAssets().getItems()) {
                 if (asset.getType() == ImmichType.IMAGE) {
                     exampleImageId = asset.getId();
                     break;
                 }
             }
 
-            if (exampleImageId == null) {
-                Response<List<ImmichApiGetAlbumResponse>> shared = apiService.getAllAlbums(
-                        true, null
-                ).execute();
+            Response<List<ImmichApiGetAlbumResponse>> shared = apiService.getAllAlbums(
+                    true, null
+            ).execute();
 
-                for (ImmichApiGetAlbumResponse r: shared.body()) {
-                    List<ImmichApiAssetResponse> assets = r.getAssets();
+            for (ImmichApiGetAlbumResponse r: shared.body()) {
+                List<ImmichApiAssetResponse> assets = r.getAssets();
 
-                    if (assets.isEmpty()) {
-                        Response<ImmichApiGetAlbumResponse> infoResponse = apiService.getAlbumInfo(
-                                r.getId(), false, null
-                        ).execute();
+                if (assets.isEmpty()) {
+                    Response<ImmichApiGetAlbumResponse> infoResponse = apiService.getAlbumInfo(
+                            r.getId(), false, null
+                    ).execute();
 
-                        assets = infoResponse.body().getAssets();
-                    }
+                    assets = infoResponse.body().getAssets();
+                }
 
-                    for (ImmichApiAssetResponse asset : assets) {
-                        if (asset.getType() == ImmichType.IMAGE) {
-                            exampleImageId = asset.getId();
-                            exampleAlbumId = r.getId();
-                            break;
-                        }
+                for (ImmichApiAssetResponse asset : assets) {
+                    if (asset.getType() == ImmichType.IMAGE) {
+                        exampleImageId = asset.getId();
+                        exampleAlbumId = r.getId();
+                        break;
                     }
                 }
             }
+
         }
     }
 
@@ -163,18 +164,18 @@ public class ImmichApiServiceTest {
 
     @org.junit.Test
     public void getAllAssets() throws Exception {
-        Response<List<ImmichApiAssetResponse>> response = apiService.getAllAssets(
-            userId, null, null, null, null
+        Response<ImmichApiMetadataSearchResponse> response = apiService.getAllAssets(
+            null, null, true, 3, 1
         ).execute();
 
         assertNotNull(response);
         assertEquals(response.code(), 200);
 
-        List<ImmichApiAssetResponse> body = response.body();
+        ImmichApiMetadataSearchResponse body = response.body();
 
         assertNotNull(body);
 
-        if (body.isEmpty()) {
+        if (body.getAssets().getItems().isEmpty()) {
             throw new AssumptionViolatedException("The demo album should contain images unless someone removed them...");
         }
     }
@@ -204,7 +205,7 @@ public class ImmichApiServiceTest {
 
         Response<ResponseBody> response = apiService.getAssetThumbnail(
                 exampleImageId,
-                ImmichThumbnailFormat.JPEG,
+                ImmichSizeFormat.thumbnail,
                 null
         ).execute();
 
