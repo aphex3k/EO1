@@ -188,7 +188,7 @@ public class ImmichApiServiceTest {
         }
 
         Response<ResponseBody> response = apiService.downloadFile(
-            exampleImageId
+            exampleImageId, null
         ).execute();
 
         assertNotNull(response);

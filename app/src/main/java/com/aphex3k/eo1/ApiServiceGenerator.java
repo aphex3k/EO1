@@ -48,18 +48,13 @@ public class ApiServiceGenerator {
             logging.setLevel(HttpLoggingInterceptor.Level.NONE);
         }
 
-        final long cacheSize = (500 * 1024 * 1024);
-
-        final Cache cache = context == null ? null : new Cache(context.getCacheDir(), cacheSize);
-
         OkHttpClient.Builder client = new OkHttpClient.Builder()
                 .followRedirects(true)
                 .followSslRedirects(true)
                 .retryOnConnectionFailure(true)
-                .cache(cache)
-                .connectTimeout(15, TimeUnit.SECONDS)
-                .writeTimeout(15, TimeUnit.SECONDS)
-                .readTimeout(15, TimeUnit.SECONDS)
+                .connectTimeout(25, TimeUnit.SECONDS)
+                .writeTimeout(25, TimeUnit.SECONDS)
+                .readTimeout(25, TimeUnit.SECONDS)
                 .cookieJar(new SessionCookieJar())
                 .addInterceptor(new Interceptor() {
                     @NonNull

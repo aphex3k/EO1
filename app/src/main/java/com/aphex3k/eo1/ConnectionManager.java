@@ -12,6 +12,9 @@ import java.util.Set;
 
 import javax.annotation.Nullable;
 
+/**
+ * This should rely be the connectivity manager...
+ */
 public class ConnectionManager {
 
     private final Set<WeakReference<ConnectionManagerListener>> listeners = new HashSet<>();
