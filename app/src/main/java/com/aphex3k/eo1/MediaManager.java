@@ -15,6 +15,7 @@ import com.aphex3k.immichApi.ImmichApiTagAssetBody;
 import com.aphex3k.immichApi.ImmichApiTagAssetResponse;
 import com.aphex3k.immichApi.ImmichApiTagResponse;
 import com.aphex3k.immichApi.ImmichExifInfo;
+import com.aphex3k.immichApi.ImmichSizeFormat;
 import com.aphex3k.immichApi.ImmichTagType;
 import com.aphex3k.immichApi.ImmichType;
 
@@ -88,6 +89,42 @@ public class MediaManager implements MediaManagerInterface {
             ImmichApiAssetResponse assetResponse;
             File tempFile = null;
 
+            for (int i = 0; i < 2; i++) {
+
+                Response<List<ImmichApiGetAlbumResponse>> assetsResponse = null;
+                try {
+                    assetsResponse = apiService.getAllAlbums(i == 1, null).execute();
+
+                    List<ImmichApiGetAlbumResponse> assetsResponseBody = assetsResponse.body() != null ? assetsResponse.body() : new ArrayList<>(0);
+
+                    for (ImmichApiGetAlbumResponse response: assetsResponseBody) {
+
+                        Response<ImmichApiGetAlbumResponse> albumResponse = apiService.getAlbumInfo(response.getId(), false, null).execute();
+
+                        ImmichApiGetAlbumResponse albumResponseBody = albumResponse.body();
+
+                        if (albumResponse.isSuccessful() && albumResponseBody != null && !albumResponseBody.getAssets().isEmpty()) {
+
+                            for (ImmichApiAssetResponse asset : albumResponseBody.getAssets()) {
+                                ImmichExifInfo exif = asset.getExifInfo();
+                                if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
+                                    continue;
+                                }
+                                if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
+                                    immichAssets.add(asset);
+                                }
+                            }
+                        }
+                    }
+
+
+
+                } catch (IOException e) {
+                    activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
+                    return;
+                }
+            }
+
             try {
 
                 int count = 1000;
@@ -132,10 +169,8 @@ public class MediaManager implements MediaManagerInterface {
             do {
                 assetResponse = immichAssets.remove(0);
 
-                String uuid = assetResponse.getId();
-
                 try {
-                    tempFile = downloadAsset(uuid, false, activity, apiService);
+                    tempFile = downloadAsset(assetResponse.getId(), assetResponse.getType(), activity, apiService);
                 } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 }
@@ -204,7 +239,7 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     @NonNull
-    private File downloadAsset(String uuid, boolean thumbnail, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
+    private File downloadAsset(String uuid, ImmichType type, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
 
         if (apiService == null) {
             SettingsManager settings = this.settingsManager.get();
@@ -219,31 +254,36 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
-        Response<ResponseBody> downloadResponse = apiService.serveFile(uuid, thumbnail, false, null).execute();
+        Response<ResponseBody> downloadResponse = type == ImmichType.IMAGE
+                ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.thumbnail, null).execute()
+                : apiService.playAssetVideo(uuid, null).execute();
+
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
 
-            File cacheFile = new File(activity.getCacheDir(), uuid + (thumbnail ? "-thumb.dat" : ".dat"));
+            File cacheFile = new File(activity.getCacheDir(), uuid + ".dat");
+
             try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
                 try (InputStream inputStream = downloadResponse.body().byteStream()) {
-                    byte[] buffer = new byte[4096];
+                    byte[] buffer = new byte[32768];
                     int bytesRead;
                     while ((bytesRead = inputStream.read(buffer)) != -1) {
                         outputStream.write(buffer, 0, bytesRead);
                     }
                 }
             }
+
             return cacheFile;
         } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
 
     }
 
     @Override
-    public  void displayThumbnailAsset(@NotNull Activity activity, @NotNull String assetId, boolean isVideo) {
+    public  void displayThumbnailAsset(@NotNull Activity activity, @NotNull String assetId, @NotNull ImmichType type, boolean isVideo) {
 
         new Thread(() -> {
             try {
 
-                File thumbnail = downloadAsset(assetId, true, activity, null);
+                File thumbnail = downloadAsset(assetId, type, activity, null);
 
                 activity.runOnUiThread(() -> {
                     MediaManagerListener mediaManagerListener = this.listener.get();

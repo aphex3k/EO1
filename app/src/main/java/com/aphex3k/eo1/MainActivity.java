@@ -32,6 +32,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.aphex3k.immichApi.ImmichType;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.DataSource;
 import com.bumptech.glide.load.engine.DiskCacheStrategy;
@@ -393,6 +394,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (e.getClass() == AuthenticationUnavailableException.class) {
                 Toast.makeText(MainActivity.this, "Server authentication unavailable. Check your server setup.", Toast.LENGTH_SHORT).show();
             }
+            if (e.getClass() == NoMediaFoundException.class) {
+                Toast.makeText(MainActivity.this, "No Media found", Toast.LENGTH_LONG).show();
+            }
         });
         Log.e(e.getClass().toString(), e.getMessage() != null ? e.getMessage() : "");
 
@@ -459,7 +463,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         .listener(new RequestListener<Drawable>() {
                             @Override
                             public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
-                                assetFallback(assetId, activityReference, false, file);
+                                assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
                                 return false;
                             }
 
@@ -479,7 +483,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
             catch (Exception e) {
                 handleException(e);
-                assetFallback(assetId, activityReference, false, file);
+                assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
             }
         });
     }
@@ -492,11 +496,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * @param isVideo true if it is a video
      * @param file file to load
      */
-    private void assetFallback(String assetId, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+    private void assetFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
         if (assetId != null) {
             MainActivity activity = activityReference.get();
             if (activity != null) {
-                mediaManager.displayThumbnailAsset(activity, assetId, isVideo);
+                mediaManager.displayThumbnailAsset(activity, assetId, type, isVideo);
             }
             mediaManager.tagAssetAsIncompatible(assetId);
         } else {
@@ -536,7 +540,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                             videoView.setVolume(0,0);
                             videoView.play();
                         } catch (Exception e) {
-                            assetFallback(assetId, activityReference, true, file);
+                            assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                             handleException(e);
                         }
                     }
@@ -546,7 +550,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     }
 
                     public boolean onError() {
-                        assetFallback(assetId, activityReference, true, file);
+                        assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                         return false;
                     }
 
@@ -557,7 +561,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     }
                 });
             } catch (Exception e) {
-                assetFallback(assetId, activityReference, true, file);
+                assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                 handleException(e);
             }
         });

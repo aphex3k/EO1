@@ -45,16 +45,7 @@ public interface ImmichApiService {
     @GET("/api/assets/{id}/original")
     @Streaming
     Call<ResponseBody> downloadFile (
-            @Path("id") String id
-    );
-
-    @Keep
-    @GET("/api/assets/file/{id}")
-    @Streaming
-    Call<ResponseBody> serveFile (
             @Path("id") String id,
-            @Query("isThumb") boolean isThumb,
-            @Query("isWeb") boolean isWeb,
             @Query("key") String key
     );
 
@@ -68,17 +59,19 @@ public interface ImmichApiService {
     );
 
     @Keep
+    @GET("/api/assets/{id}/video/playback")
+    @Streaming
+    Call<ResponseBody> playAssetVideo(
+            @Path("id") String id,
+            @Query("key") String key
+    );
+
+    @Keep
     @GET("/api/albums/{id}")
     Call<ImmichApiGetAlbumResponse> getAlbumInfo (
             @Path("id") String id,
             @Query("withoutAssets") Boolean withoutAssets,
             @Query("key") String key
-    );
-
-    @Keep
-    @GET("/api/assets/random")
-    Call<List<ImmichApiAssetResponse>> getRandom (
-            @Query("count") Integer count
     );
 
     @Keep
