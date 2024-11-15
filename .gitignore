@@ -14,3 +14,4 @@ app/debug
 passwords.txt
 ..bfg-report/
 .vscode
+/app/.idea

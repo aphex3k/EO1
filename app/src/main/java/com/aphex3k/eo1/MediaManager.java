@@ -121,8 +121,6 @@ public class MediaManager implements MediaManagerInterface {
                         }
                     }
 
-
-
                 } catch (IOException e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                     return;
