@@ -1,8 +1,11 @@
 package com.aphex3k.eo1;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.content.Context;
+import android.content.pm.PackageManager;
+import android.os.Build;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -109,12 +112,14 @@ public class SettingsManager {
         }
     }
 
-    private void updateTimeZone() {
-        SettingsManagerListener settingsManagerListener = this.listener.get();
-        if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty() && settingsManagerListener != null) {
+    private void updateTimeZone(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            SettingsManagerListener settingsManagerListener = this.listener.get();
+            if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty() && settingsManagerListener != null) {
 
-            AlarmManager alarmManager=(AlarmManager)settingsManagerListener.getSystemService(Context.ALARM_SERVICE);
-            alarmManager.setTimeZone(configuration.selectedTimeZoneId);
+                AlarmManager alarmManager = (AlarmManager) settingsManagerListener.getSystemService(Context.ALARM_SERVICE);
+                alarmManager.setTimeZone(configuration.selectedTimeZoneId);
+            }
         }
     }
 
@@ -193,7 +198,7 @@ public class SettingsManager {
                         if (!configuration.userid.isEmpty() && !configuration.password.isEmpty() && !configuration.host.isEmpty()) {
                             try {
                                 saveConfiguration();
-                                updateTimeZone();
+                                updateTimeZone(context);
                                 settingsManagerListener.settingsChanged();
                             } catch (IOException e) {
                                 settingsManagerListener.handleException(e);

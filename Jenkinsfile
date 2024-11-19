@@ -42,9 +42,12 @@ pipeline {
             }
             steps {
                 script {
+                    sh "java --version"
+                    sh "./gradlew --version"
+                }
+                script {
                     PBANDJELLY = "-PBUILD_NUMBER=${env.BUILD_NUMBER}"
-                    
-                    sh "./gradlew clean build test assembleDebug assembleRelease -s $PBANDJELLY -Pandroid.injected.signing.store.file=$KEYSTORE -Pandroid.injected.signing.store.password=$KEYSTORE_PASS -Pandroid.injected.signing.key.alias=$KEY_ALIAS -Pandroid.injected.signing.key.password=$KEY_PASS"
+                    sh "./gradlew --build-cache clean build test assembleDebug assembleRelease -s $PBANDJELLY -Pandroid.injected.signing.store.file=$KEYSTORE -Pandroid.injected.signing.store.password=$KEYSTORE_PASS -Pandroid.injected.signing.key.alias=$KEY_ALIAS -Pandroid.injected.signing.key.password=$KEY_PASS"
                 }
             }
         }
