@@ -1,7 +1,9 @@
 package com.aphex3k.immichApi;
 
+import androidx.annotation.Keep;
 import com.google.gson.annotations.SerializedName;
 
+@Keep
 public class ImmichApiPingResponse extends ImmichApiResponse {
     @SerializedName("res")
     private String res;
