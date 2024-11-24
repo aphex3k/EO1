@@ -5,6 +5,7 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 
 import com.aphex3k.eo1.ApiServiceGenerator;
+import com.aphex3k.eo1.TestConfiguration;
 
 import org.junit.AssumptionViolatedException;
 import org.junit.Before;
@@ -29,6 +30,10 @@ public class ImmichApiServiceTest {
 
     @Before
     public void authorize() throws Exception {
+
+        if (!TestConfiguration.RunImmichTests) {
+            throw new AssumptionViolatedException("Skipping ImmichTest...");
+        }
 
         if (userId == null) {
 

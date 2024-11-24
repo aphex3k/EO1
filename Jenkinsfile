@@ -46,6 +46,9 @@ pipeline {
                     sh "./gradlew --version"
                 }
                 script {
+                    sh "sed -i 's/RunImmichTests = true/RunImmichTests = false/g' app/src/test/java/com/aphex3k/eo1/TestConfiguration.java"
+                }
+                script {
                     PBANDJELLY = "-PBUILD_NUMBER=${env.BUILD_NUMBER}"
                     sh "./gradlew --build-cache clean build test assembleDebug assembleRelease -s $PBANDJELLY -Pandroid.injected.signing.store.file=$KEYSTORE -Pandroid.injected.signing.store.password=$KEYSTORE_PASS -Pandroid.injected.signing.key.alias=$KEY_ALIAS -Pandroid.injected.signing.key.password=$KEY_PASS"
                 }
@@ -66,7 +69,7 @@ pipeline {
         stage ('Archiving') {
             steps {
                 script {
-                    archiveArtifacts allowEmptyArchive: false, artifacts: 'app/build/**/*', excludes: '', fingerprint: true, onlyIfSuccessful: false
+                    archiveArtifacts allowEmptyArchive: false, artifacts: 'app/build/**/*, app/src/test/java/com/aphex3k/eo1/TestConfiguration.java', excludes: '', fingerprint: true, onlyIfSuccessful: false
                 }       
             }         
         }
