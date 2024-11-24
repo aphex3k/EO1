@@ -21,6 +21,7 @@ public class ImmichApiServiceTest {
 
     private String userId;
     private String exampleImageId;
+    private String exampleVideoId;
     private String exampleAlbumId;
     private final String email = "demo@immich.app";
     private final String password = "demo";
@@ -78,6 +79,9 @@ public class ImmichApiServiceTest {
                 }
 
                 for (ImmichApiAssetResponse asset : assets) {
+                    if (asset.getType() == ImmichType.VIDEO) {
+                        exampleVideoId = asset.getId();
+                    }
                     if (asset.getType() == ImmichType.IMAGE) {
                         exampleImageId = asset.getId();
                         exampleAlbumId = r.getId();
@@ -189,6 +193,22 @@ public class ImmichApiServiceTest {
 
         Response<ResponseBody> response = apiService.downloadFile(
             exampleImageId, null
+        ).execute();
+
+        assertNotNull(response);
+        assertEquals(response.code(), 200);
+
+    }
+
+    @org.junit.Test
+    public void downloadVideo() throws Exception {
+
+        if (exampleVideoId == null) {
+            throw new AssumptionViolatedException("The @Before function failed to find a valid example video id.");
+        }
+
+        Response<ResponseBody> response = apiService.playAssetVideo(
+                exampleVideoId, null
         ).execute();
 
         assertNotNull(response);

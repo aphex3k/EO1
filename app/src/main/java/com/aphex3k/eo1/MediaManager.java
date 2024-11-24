@@ -58,8 +58,14 @@ public class MediaManager implements MediaManagerInterface {
         new Thread(() -> {
             SettingsManager settings = this.settingsManager.get();
             Configuration configuration = settings.getConfiguration();
-
-            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity);
+            ImmichApiService apiService = null;
+            try {
+                apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity);
+            }
+            catch (Exception e) {
+                activity.runOnUiThread(() -> mediaManagerListener.handleException(new MediaDownloadFailedException(e)));
+                return;
+            }
 
             String userId;
 
