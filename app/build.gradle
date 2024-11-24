@@ -33,7 +33,7 @@ android {
         else {
             versionCode = 1
         }
-        versionName "1.1.3"
+        versionName "1.1.4"
         multiDexEnabled true
     }
     buildTypes {
