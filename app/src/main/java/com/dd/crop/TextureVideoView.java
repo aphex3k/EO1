@@ -11,6 +11,8 @@ import android.util.Log;
 import android.view.Surface;
 import android.view.TextureView;
 
+import androidx.annotation.NonNull;
+
 import java.io.IOException;
 
 /*
@@ -55,12 +57,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     private boolean mIsVideoPrepared;
     private boolean mIsPlayCalled;
 
-    private ScaleType mScaleType;
     private State mState;
-
-    public enum ScaleType {
-        CENTER_CROP, TOP, BOTTOM
-    }
 
     public enum State {
         UNINITIALIZED, PLAY, STOP, PAUSE, END
@@ -83,60 +80,35 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     private void initView() {
         initPlayer();
-        setScaleType(ScaleType.CENTER_CROP);
         setSurfaceTextureListener(this);
     }
 
-    public void setScaleType(ScaleType scaleType) {
-        mScaleType = scaleType;
+    private void updateTextureViewSize() {
+
+        if (mVideoWidth <= 0 || mVideoHeight <= 0) {
+            return;
+        }
+
+        float scale = aspectScale(getWidth(), getHeight(), mVideoWidth, mVideoHeight);
+        Matrix transformMatrix = new Matrix();
+        transformMatrix.setScale(scale, scale, (float) getWidth() / 2, (float) getHeight() / 2);
+        setTransform(transformMatrix);
     }
 
-    private void updateTextureViewSize() {
-        float viewWidth = getWidth();
-        float viewHeight = getHeight();
+    /**
+     * Calculate the aspect-ratio correct scale matrix to display the video with center-crop
+     * @param viewWidth The width of the target view
+     * @param viewHeight The height of the target view
+     * @param videoWidth The width of the video to play
+     * @param videoHeight The height of the video to play
+     * @return The matrix that displays the video content scaled and translated to the correct dimensions
+     */
+    public static float aspectScale(float viewWidth, float viewHeight, float videoWidth, float videoHeight) {
+        // Calculate scale factors to fit image within view dimensions while maintaining aspect ratio
+        float scaleX = viewWidth / videoWidth;
+        float scaleY = viewHeight / videoHeight;
 
-        float scaleX = 1.0f;
-        float scaleY = 1.0f;
-
-        if (mVideoWidth > viewWidth && mVideoHeight > viewHeight) {
-            scaleX = mVideoWidth / viewWidth;
-            scaleY = mVideoHeight / viewHeight;
-        } else if (mVideoWidth < viewWidth && mVideoHeight < viewHeight) {
-            scaleY = viewWidth / mVideoWidth;
-            scaleX = viewHeight / mVideoHeight;
-        } else if (viewWidth > mVideoWidth) {
-            scaleY = (viewWidth / mVideoWidth) / (viewHeight / mVideoHeight);
-        } else if (viewHeight > mVideoHeight) {
-            scaleX = (viewHeight / mVideoHeight) / (viewWidth / mVideoWidth);
-        }
-
-        // Calculate pivot points, in our case crop from center
-        int pivotPointX;
-        int pivotPointY;
-
-        switch (mScaleType) {
-            case TOP:
-                pivotPointX = 0;
-                pivotPointY = 0;
-                break;
-            case BOTTOM:
-                pivotPointX = (int) (viewWidth);
-                pivotPointY = (int) (viewHeight);
-                break;
-            case CENTER_CROP:
-                pivotPointX = (int) (viewWidth / 2);
-                pivotPointY = (int) (viewHeight / 2);
-                break;
-            default:
-                pivotPointX = (int) (viewWidth / 2);
-                pivotPointY = (int) (viewHeight / 2);
-                break;
-        }
-
-        Matrix matrix = new Matrix();
-        matrix.setScale(scaleX, scaleY, pivotPointX, pivotPointY);
-
-        setTransform(matrix);
+        return Math.max(scaleX, scaleY);
     }
 
     private void initPlayer() {
@@ -161,7 +133,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
             mIsDataSourceSet = true;
             prepare();
         } catch (IOException e) {
-            Log.d(TAG, e.getMessage());
+            if (e.getMessage() != null)
+                Log.d(TAG, e.getMessage());
         }
     }
 
@@ -180,7 +153,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
             mIsDataSourceSet = true;
             prepare();
         } catch (IOException e) {
-            Log.d(TAG, e.getMessage());
+            if (e.getMessage() != null)
+                Log.d(TAG, e.getMessage());
         }
     }
 
@@ -197,7 +171,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
             mIsDataSourceSet = true;
             prepare();
         } catch (IOException e) {
-            Log.d(TAG, e.getMessage());
+            if (e.getMessage() != null)
+                Log.d(TAG, e.getMessage());
         }
     }
 
@@ -264,12 +239,9 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
             // creating MediaPlayer
             mMediaPlayer.prepareAsync();
 
-        } catch (IllegalArgumentException e) {
-            Log.d(TAG, e.getMessage());
-        } catch (SecurityException e) {
-            Log.d(TAG, e.getMessage());
-        } catch (IllegalStateException e) {
-            Log.d(TAG, e.toString());
+        } catch (Exception e) {
+            if (e.getMessage() != null)
+                Log.d(TAG, e.getMessage());
         }
     }
 
@@ -416,7 +388,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     }
 
     @Override
-    public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int width, int height) {
+    public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture, int width, int height) {
         Surface surface = new Surface(surfaceTexture);
         mMediaPlayer.setSurface(surface);
         mIsViewAvailable = true;
@@ -427,17 +399,17 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     }
 
     @Override
-    public void onSurfaceTextureSizeChanged(SurfaceTexture surface, int width, int height) {
+    public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture surface, int width, int height) {
 
     }
 
     @Override
-    public boolean onSurfaceTextureDestroyed(SurfaceTexture surface) {
+    public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surface) {
         return false;
     }
 
     @Override
-    public void onSurfaceTextureUpdated(SurfaceTexture surface) {
+    public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surface) {
 
     }
 }

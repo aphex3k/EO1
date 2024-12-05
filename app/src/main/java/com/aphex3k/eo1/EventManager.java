@@ -3,6 +3,7 @@ package com.aphex3k.eo1;
 import static android.view.KeyEvent.KEYCODE_C;
 import static android.view.KeyEvent.KEYCODE_SPACE;
 import static android.view.KeyEvent.KEYCODE_U;
+import static com.aphex3k.eo1.KeyEvent.PS4_CIRCLE;
 
 import android.annotation.SuppressLint;
 
@@ -45,7 +46,7 @@ public class EventManager {
         if (keyCode == KEYCODE_C) {
             eventManagerListener.showConfigurationUI();
         }
-        else if (keyCode == KEYCODE_SPACE) {
+        else if (keyCode == KEYCODE_SPACE || keyCode == PS4_CIRCLE) {
             eventManagerListener.showNextImage();
         }
         else if (keyCode == KeyEvent.EO1_TOP_BUTTON) {

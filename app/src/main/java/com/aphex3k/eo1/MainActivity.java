@@ -37,9 +37,15 @@ import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.DataSource;
 import com.bumptech.glide.load.engine.DiskCacheStrategy;
 import com.bumptech.glide.load.engine.GlideException;
+import com.bumptech.glide.load.resource.bitmap.DownsampleStrategy;
+import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions;
 import com.bumptech.glide.request.RequestListener;
+import com.bumptech.glide.request.target.CustomViewTarget;
+import com.bumptech.glide.request.target.ImageViewTarget;
 import com.bumptech.glide.request.target.Target;
+import com.bumptech.glide.request.target.ViewTarget;
 import com.dd.crop.TextureVideoView;
+import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.gson.stream.MalformedJsonException;
 
 import java.io.File;
@@ -56,7 +62,9 @@ import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 
-public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener {
+import okhttp3.HttpUrl;
+
+public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener, ApiServiceGenerator.ProgressListener {
 
     /**
     Amount of milliseconds in a minute
@@ -66,6 +74,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String lastVisibleAsset = "";
     private ImageView imageView;
     private TextureVideoView videoView;
+    private LinearProgressIndicator progressIndicator;
     private BrightnessManager brightnessManager;
     private TextView debugOverlay;
     private EventManager eventManager;
@@ -89,12 +98,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView = findViewById(R.id.imageView);
         videoView = findViewById(R.id.videoView);
         debugOverlay = findViewById(R.id.debugOverlay);
+        progressIndicator = findViewById(R.id.progressIndicator);
+
+        progressIndicator.setVisibility(View.INVISIBLE);
 
         this.brightnessManager = new BrightnessManager(this, (SensorManager) getSystemService(SENSOR_SERVICE));
         this.eventManager = new EventManager(this);
         this.updateManager = new UpdateManager(this);
         this.settingsManager = new SettingsManager(this);
-        this.mediaManager = new MediaManager(this, this.settingsManager);
+        this.mediaManager = new MediaManager(this, this.settingsManager, this);
         this.connectionManager = new ConnectionManager(this);
 
         Thread.setDefaultUncaughtExceptionHandler(this);
@@ -131,6 +143,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     protected void onResume() {
         super.onResume();
+
+        if (BuildConfig.DEBUG) { hideSystemUI(); }
 
         debugOverlay.setVisibility(BuildConfig.DEBUG ? View.VISIBLE : View.GONE);
 
@@ -275,7 +289,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void showNextImage() {
-        this.mediaManager.showNextImage(this);
+        if (this.brightnessManager.getShouldTheScreenBeOn()) {
+            this.mediaManager.showNextImage(this);
+        }
     }
 
     @Override
@@ -448,6 +464,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
+        if (!this.brightnessManager.getShouldTheScreenBeOn()) {
+            return;
+        }
+
         debugInformationProvided(new DebugInformation("displayPictures", file.getAbsolutePath()));
 
         this.runOnUiThread(() -> {
@@ -457,9 +477,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             try {
                 Glide.with(this)
                         .load(file)
-                        .optionalCenterCrop()
-                        .skipMemoryCache(true)
-                        .diskCacheStrategy(DiskCacheStrategy.NONE)
+                        .centerCrop()
                         .listener(new RequestListener<Drawable>() {
                             @Override
                             public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
@@ -479,6 +497,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                 return false;
                             }
                         })
+                        .dontAnimate()
+                        .dontTransform()
                         .into(imageView);
             }
             catch (Exception e) {
@@ -513,6 +533,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public void displayVideo(File file, String assetId) {
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
+            return;
+        }
+
+        if (!this.brightnessManager.getShouldTheScreenBeOn()) {
             return;
         }
 
@@ -583,5 +607,62 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void disconnected() {
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "disconnected"));
+    }
+
+    @Override
+    public void clientProgressUpdates(long bytesRead, long contentLength, boolean done, @Nullable HttpUrl url) {
+
+        long percent =  Math.round((100.0 * bytesRead) / contentLength);
+
+        if (done) {
+            Log.i("download", "completed");
+        } else if (percent == 0.0) {
+            if (contentLength == -1) {
+                Log.i("download", "content-length: unknown");
+            } else {
+                Log.i("download", "content-length: " + contentLength);
+            }
+        }
+
+        if (contentLength != -1 && !done) {
+            Log.d("download", String.format("%d%% downloaded...\n",percent));
+        }
+
+        if (url != null && (url.toString().endsWith("video/playback") || url.toString().contains("/thumbnail"))) {
+
+            this.runOnUiThread(() -> {
+                if (done) {
+                    //reset update progress indicator UI
+                    progressIndicator.setProgressCompat(0, false);
+                    progressIndicator.setVisibility(View.INVISIBLE);
+                } else {
+                    //Update progress indicator UI percent
+                    progressIndicator.setMax(Math.toIntExact(contentLength));
+                    progressIndicator.setProgressCompat(Math.toIntExact(bytesRead), true);
+                    progressIndicator.setVisibility(View.VISIBLE);
+                }
+            });
+        }
+    }
+
+    private void hideSystemUI() {
+
+        Window window = this.getWindow();
+        // Enables regular immersive mode.
+        // For "lean back" mode, remove SYSTEM_UI_FLAG_IMMERSIVE.
+        // Or for "sticky immersive," replace it with SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+
+        window.getDecorView().setSystemUiVisibility(
+        // Do not let system steal touches for showing the navigation bar
+        View.SYSTEM_UI_FLAG_IMMERSIVE
+                // Hide the nav bar and status bar
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                // Keep the app content behind the bars even if user swipes them up
+                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN);
+        // make navbar translucent - do this already in hideSystemUI() so that the bar
+        // is translucent if user swipes it up
+        window.addFlags(WindowManager.LayoutParams.FLAG_TRANSLUCENT_NAVIGATION);
     }
 }

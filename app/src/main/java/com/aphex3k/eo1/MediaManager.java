@@ -29,7 +29,7 @@ import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.Objects;
+import java.util.concurrent.locks.ReentrantLock;
 
 import okhttp3.ResponseBody;
 import retrofit2.Call;
@@ -38,13 +38,16 @@ import retrofit2.Response;
 public class MediaManager implements MediaManagerInterface {
 
     private static final String INCOMPATIBLE_TAG_NAME = "EO1_INCOMPATIBLE";
+    private static final ReentrantLock downloadMutex = new ReentrantLock();
     private final WeakReference<SettingsManager> settingsManager;
     private final WeakReference<MediaManagerListener> listener;
+    private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
 
-    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager) {
+    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager, ApiServiceGenerator.ProgressListener downloadProgressListener) {
         this.listener = new WeakReference<>(listener);
         this.settingsManager = new WeakReference<>(settingsManager);
+        this.downloadProgressListener = new WeakReference<>(downloadProgressListener);
     }
 
     public void showNextImage(Activity activity) {
@@ -56,123 +59,126 @@ public class MediaManager implements MediaManagerInterface {
         }
 
         new Thread(() -> {
-            SettingsManager settings = this.settingsManager.get();
-            Configuration configuration = settings.getConfiguration();
             ImmichApiService apiService = null;
-            try {
-                apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity);
-            }
-            catch (Exception e) {
-                activity.runOnUiThread(() -> mediaManagerListener.handleException(new MediaDownloadFailedException(e)));
-                return;
-            }
-
-            String userId;
-
-            try {
-                Call<ImmichApiLoginResponse> service = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password));
-                Response<ImmichApiLoginResponse> call = service.execute();
-                ImmichApiLoginResponse loginResponse = call.body();
-                if (call.code() == 401) {
-                    throw new AuthenticationFailedException(call.code());
-                }
-                if (call.code() == 404) {
-                    throw new AuthenticationUnavailableException(call.code());
-                }
-                if (call.isSuccessful() && loginResponse == null) {
-                    throw new AuthenticationUnavailableException(call.code());
-                }
-                else {
-                    userId = loginResponse.getUserId();
-                }
-
-            } catch (Exception e) {
-                activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
-                return;
-            }
-
-            if (userId == null || userId.equals("")) {
-                activity.runOnUiThread(() ->  mediaManagerListener.handleException(new InvalidCredentialsException()));
-                return;
-            }
-
             ImmichApiAssetResponse assetResponse;
             File tempFile = null;
 
-            for (int i = 0; i < 2; i++) {
+            if (immichAssets.isEmpty()) {
 
-                Response<List<ImmichApiGetAlbumResponse>> assetsResponse = null;
+                SettingsManager settings = this.settingsManager.get();
+                Configuration configuration = settings.getConfiguration();
+
                 try {
-                    assetsResponse = apiService.getAllAlbums(i == 1, null).execute();
+                    apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity, this.downloadProgressListener.get());
+                }
+                catch (Exception e) {
+                    activity.runOnUiThread(() -> mediaManagerListener.handleException(new MediaDownloadFailedException(e)));
+                    return;
+                }
 
-                    List<ImmichApiGetAlbumResponse> assetsResponseBody = assetsResponse.body() != null ? assetsResponse.body() : new ArrayList<>(0);
+                String userId;
 
-                    for (ImmichApiGetAlbumResponse response: assetsResponseBody) {
+                try {
+                    Call<ImmichApiLoginResponse> service = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password));
+                    Response<ImmichApiLoginResponse> call = service.execute();
+                    ImmichApiLoginResponse loginResponse = call.body();
+                    if (call.code() == 401) {
+                        throw new AuthenticationFailedException(call.code());
+                    }
+                    if (call.code() == 404) {
+                        throw new AuthenticationUnavailableException(call.code());
+                    }
+                    if (call.isSuccessful() && loginResponse == null) {
+                        throw new AuthenticationUnavailableException(call.code());
+                    }
+                    else if (loginResponse != null && !loginResponse.getUserId().isEmpty()){
+                        userId = loginResponse.getUserId();
+                    }
+                    else {
+                        throw new AuthenticationFailedException(-1);
+                    }
 
-                        Response<ImmichApiGetAlbumResponse> albumResponse = apiService.getAlbumInfo(response.getId(), false, null).execute();
+                } catch (Exception e) {
+                    activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
+                    return;
+                }
 
-                        ImmichApiGetAlbumResponse albumResponseBody = albumResponse.body();
+                if (userId == null || userId.isEmpty()) {
+                    activity.runOnUiThread(() ->  mediaManagerListener.handleException(new InvalidCredentialsException()));
+                    return;
+                }
 
-                        if (albumResponse.isSuccessful() && albumResponseBody != null && !albumResponseBody.getAssets().isEmpty()) {
+                for (int i = 0; i < 2; i++) {
 
-                            for (ImmichApiAssetResponse asset : albumResponseBody.getAssets()) {
+                    Response<List<ImmichApiGetAlbumResponse>> assetsResponse;
+                    try {
+                        assetsResponse = apiService.getAllAlbums(i == 1, null).execute();
+
+                        List<ImmichApiGetAlbumResponse> assetsResponseBody = assetsResponse.body() != null ? assetsResponse.body() : new ArrayList<>(0);
+
+                        for (ImmichApiGetAlbumResponse response: assetsResponseBody) {
+
+                            Response<ImmichApiGetAlbumResponse> albumResponse = apiService.getAlbumInfo(response.getId(), false, null).execute();
+
+                            ImmichApiGetAlbumResponse albumResponseBody = albumResponse.body();
+
+                            if (albumResponse.isSuccessful() && albumResponseBody != null && !albumResponseBody.getAssets().isEmpty()) {
+
+                                for (ImmichApiAssetResponse asset : albumResponseBody.getAssets()) {
+                                    ImmichExifInfo exif = asset.getExifInfo();
+                                    if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
+                                        continue;
+                                    }
+                                    addCompatibleAsset(asset);
+                                }
+                            }
+                        }
+
+                    } catch (IOException e) {
+                        activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
+                        return;
+                    }
+                }
+
+                try {
+
+                    int count = 1000;
+                    int page = 1;
+
+                    while (count == 1000) {
+
+                        Response<ImmichApiMetadataSearchResponse> assetsResponse = apiService.getAllAssets(
+                                null, false, null, count, page
+                        ).execute();
+
+                        List<ImmichApiAssetResponse> assetsResponseBody = assetsResponse.body() != null ? assetsResponse.body().getAssets().getItems() : null;
+
+                        if (assetsResponse.isSuccessful() && assetsResponseBody != null && !assetsResponseBody.isEmpty()) {
+
+                            for (ImmichApiAssetResponse asset : assetsResponseBody) {
                                 ImmichExifInfo exif = asset.getExifInfo();
                                 if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
                                     continue;
                                 }
-                                if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
-                                    immichAssets.add(asset);
-                                }
+                                addCompatibleAsset(asset);
                             }
                         }
+
+                        page++;
+                        count = assetsResponseBody != null ? assetsResponseBody.size() : 0;
                     }
 
-                } catch (IOException e) {
+                } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                     return;
                 }
-            }
 
-            try {
-
-                int count = 1000;
-                int page = 1;
-
-                while (count == 1000) {
-
-                    Response<ImmichApiMetadataSearchResponse> assetsResponse = apiService.getAllAssets(
-                            null, false, null, count, page
-                    ).execute();
-
-                    List<ImmichApiAssetResponse> assetsResponseBody = assetsResponse.body() != null ? assetsResponse.body().getAssets().getItems() : null;
-
-                    if (assetsResponse.isSuccessful() && assetsResponseBody != null && !assetsResponseBody.isEmpty()) {
-
-                        for (ImmichApiAssetResponse asset : assetsResponseBody) {
-                            ImmichExifInfo exif = asset.getExifInfo();
-                            if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
-                                continue;
-                            }
-                            if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
-                                immichAssets.add(asset);
-                            }
-                        }
-                    }
-
-                    page++;
-                    count = assetsResponseBody != null ? assetsResponseBody.size() : 0;
+                if (immichAssets.isEmpty()) {
+                    activity.runOnUiThread(() -> mediaManagerListener.handleException(new NoMediaFoundException()));
                 }
 
-            } catch (Exception e) {
-                activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
-                return;
+                Collections.shuffle(immichAssets);
             }
-
-            if (immichAssets.isEmpty()) {
-                activity.runOnUiThread(() -> mediaManagerListener.handleException(new NoMediaFoundException()));
-            }
-
-            Collections.shuffle(immichAssets);
 
             do {
                 assetResponse = immichAssets.remove(0);
@@ -217,43 +223,23 @@ public class MediaManager implements MediaManagerInterface {
         }).start();
     }
 
-    /**
-     * Add all assets with supported ImmichType from the response body to the asset list.
-     * @param apiService the configured (logged in) api service
-     * @param responseBody the received album response body
-     * @param albumsResponse the received album response
-     * @throws IOException
-     */
-    private void addAssetsFromAlbumResponse(ImmichApiService apiService, List<ImmichApiGetAlbumResponse> responseBody, Response<List<ImmichApiGetAlbumResponse>> albumsResponse) throws IOException {
-        if (albumsResponse.isSuccessful() && responseBody != null) {
-
-            for (ImmichApiGetAlbumResponse r : responseBody) {
-                List<ImmichApiAssetResponse> assetList = r.getAssets();
-
-                if (assetList.isEmpty()) {
-                    assetList = Objects.requireNonNull(apiService.getAlbumInfo(r.getId(), false, null).execute().body()).getAssets();
-                }
-                for (ImmichApiAssetResponse asset : assetList) {
-                    ImmichExifInfo exif = asset.getExifInfo();
-                    if (exif == null || exif.getFileSizeInByte() > 1073741824) {
-                        continue;
-                    }
-                    if (asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO) {
-                        immichAssets.add(asset);
-                    }
-                }
-            }
+    private void addCompatibleAsset(@NonNull ImmichApiAssetResponse asset) {
+        if (asset.getType() == ImmichType.VIDEO) {
+            immichAssets.add(asset);
+        }
+        if (asset.getType() == ImmichType.IMAGE) {
+            immichAssets.add(asset);
         }
     }
 
     @NonNull
-    private File downloadAsset(String uuid, ImmichType type, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
+    private synchronized File downloadAsset(String uuid, ImmichType type, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
 
         if (apiService == null) {
             SettingsManager settings = this.settingsManager.get();
             if (settings != null) {
                 Configuration configuration = settings.getConfiguration();
-                apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity);
+                apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity, this.downloadProgressListener.get());
                 apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute();
             }
         }
@@ -262,12 +248,14 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
+
+
         Response<ResponseBody> downloadResponse = type == ImmichType.IMAGE
                 ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.thumbnail, null).execute()
                 : apiService.playAssetVideo(uuid, null).execute();
 
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
-
+            downloadMutex.lock();
             File cacheFile = new File(activity.getCacheDir(), uuid + ".dat");
 
             try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
@@ -280,7 +268,9 @@ public class MediaManager implements MediaManagerInterface {
                 }
             }
 
+            downloadMutex.unlock();
             return cacheFile;
+
         } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
 
     }
@@ -330,7 +320,7 @@ public class MediaManager implements MediaManagerInterface {
 
             Configuration configuration = settings.getConfiguration();
 
-            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, null);
+            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, null, null);
 
             try {
                 Response<ImmichApiLoginResponse> login = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password)).execute();
