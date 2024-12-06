@@ -90,4 +90,8 @@ public interface ImmichApiService {
             @Path("id") String tagId,
             @Body ImmichApiTagAssetBody body
     );
+
+    @Keep
+    @GET("/api/server/version")
+    Call<ImmichApiServerVersionResponse> getServerVersion ();
 }

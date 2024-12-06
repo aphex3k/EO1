@@ -8,36 +8,44 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import java.io.IOException;
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import javax.net.ssl.SSLContext;
 
-import okhttp3.Cache;
 import okhttp3.ConnectionSpec;
+import okhttp3.HttpUrl;
 import okhttp3.Interceptor;
+import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.ResponseBody;
 import okhttp3.TlsVersion;
 import okhttp3.logging.HttpLoggingInterceptor;
 import okhttp3.Response;
+import okio.Buffer;
+import okio.BufferedSource;
+import okio.ForwardingSource;
+import okio.Okio;
+import okio.Source;
 import retrofit2.Retrofit;
 import retrofit2.converter.gson.GsonConverterFactory;
 
 @Keep
 public class ApiServiceGenerator {
 
-    public static <S> S createService(Class<S> serviceClass, String host, @Nullable Context context) {
+    public static <S> S createService(Class<S> serviceClass, String host, @Nullable Context context, @Nullable ProgressListener progressListener) {
         return new Retrofit.Builder()
                 .baseUrl(host)
                 .addConverterFactory(GsonConverterFactory.create())
-                .client(getNewHttpClient(context))
+                .client(getNewHttpClient(context, progressListener))
                 .build()
                 .create(serviceClass);
     }
 
-    protected static OkHttpClient getNewHttpClient(@Nullable Context context) {
+    protected static OkHttpClient getNewHttpClient(@Nullable Context context, ProgressListener progressListener) {
 
         HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
 
@@ -70,6 +78,15 @@ public class ApiServiceGenerator {
                     }
                 });
 
+        if (progressListener != null) {
+            client.addNetworkInterceptor(chain -> {
+                Response originalResponse = chain.proceed(chain.request());
+                return originalResponse.newBuilder()
+                        .body(new ProgressResponseBody(originalResponse.body(), chain.request(), progressListener))
+                        .build();
+            });
+        }
+
         if (BuildConfig.DEBUG) {
             client.addInterceptor(logging);
         }
@@ -99,5 +116,57 @@ public class ApiServiceGenerator {
         }
 
         return client;
+    }
+
+    private static class ProgressResponseBody extends ResponseBody {
+
+        private final ResponseBody responseBody;
+        private final ProgressListener progressListener;
+        private BufferedSource bufferedSource;
+        private final WeakReference<Request> request;
+
+        ProgressResponseBody(ResponseBody responseBody, Request request, ProgressListener progressListener) {
+            this.responseBody = responseBody;
+            this.progressListener = progressListener;
+            this.request = new WeakReference<>(request);
+        }
+
+        @Override public MediaType contentType() {
+            return responseBody.contentType();
+        }
+
+        @Override public long contentLength() {
+            return responseBody.contentLength();
+        }
+
+        @Override public BufferedSource source() {
+            if (bufferedSource == null) {
+                bufferedSource = Okio.buffer(source(responseBody.source()));
+            }
+            return bufferedSource;
+        }
+
+        private Source source(Source source) {
+            return new ForwardingSource(source) {
+                long totalBytesRead = 0L;
+
+                @Override public long read(Buffer sink, long byteCount) throws IOException {
+                    long bytesRead = super.read(sink, byteCount);
+                    // read() returns the number of bytes read, or -1 if this source is exhausted.
+                    totalBytesRead += bytesRead != -1 ? bytesRead : 0;
+                    HttpUrl url = null;
+                    Request r = request.get();
+                    if (r != null) {
+                        url = r.url();
+                    }
+                    progressListener.clientProgressUpdates(totalBytesRead, responseBody.contentLength(), bytesRead == -1, url);
+                    return bytesRead;
+                }
+            };
+        }
+    }
+
+    public interface ProgressListener {
+        void clientProgressUpdates(long bytesRead, long contentLength, boolean done, @Nullable HttpUrl url);
     }
 }

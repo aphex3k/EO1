@@ -33,7 +33,7 @@ android {
         else {
             versionCode = 1
         }
-        versionName "1.1.4"
+        versionName "1.2.0"
         multiDexEnabled true
     }
     buildTypes {
@@ -52,6 +52,8 @@ android {
             // the Android Gradle plugin. To learn more, go to the section about
             // R8 configuration files.
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+            debuggable = false
         }
         debug {
             enableUnitTestCoverage true
@@ -91,6 +93,7 @@ dependencies {
     implementation 'com.vdurmont:semver4j:3.1.0'
     // Support GIF Playback
     implementation 'com.github.bumptech.glide:glide:4.16.0'
+    annotationProcessor 'com.github.bumptech.glide:compiler:4.16.0'
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation "org.mockito:mockito-core:5.10.0"
