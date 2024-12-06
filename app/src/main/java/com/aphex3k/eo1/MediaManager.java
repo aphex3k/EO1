@@ -248,8 +248,6 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
-
-
         Response<ResponseBody> downloadResponse = type == ImmichType.IMAGE
                 ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.thumbnail, null).execute()
                 : apiService.playAssetVideo(uuid, null).execute();
@@ -260,7 +258,7 @@ public class MediaManager implements MediaManagerInterface {
 
             try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
                 try (InputStream inputStream = downloadResponse.body().byteStream()) {
-                    byte[] buffer = new byte[32768];
+                    byte[] buffer = new byte[1024*32];
                     int bytesRead;
                     while ((bytesRead = inputStream.read(buffer)) != -1) {
                         outputStream.write(buffer, 0, bytesRead);
@@ -373,8 +371,9 @@ public class MediaManager implements MediaManagerInterface {
     public void removeFromCache(File file) {
         if (file.exists() && !file.delete()) {
             MediaManagerListener mediaManagerListener = this.listener.get();
-
-            mediaManagerListener.debugInformationProvided(new DebugInformation("MediaManager.removeFromCache", "Unable to delete file "+file.getAbsolutePath()));
+            if (mediaManagerListener != null) {
+                mediaManagerListener.debugInformationProvided(new DebugInformation("MediaManager.removeFromCache", "Unable to delete file "+file.getAbsolutePath()));
+            }
         }
     }
 }

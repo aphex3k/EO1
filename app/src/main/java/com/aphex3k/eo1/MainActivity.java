@@ -11,6 +11,7 @@ import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.hardware.SensorManager;
 import android.net.Uri;
@@ -31,24 +32,23 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.ViewCompat;
 
+import com.aphex3k.immichApi.ImmichApiServerVersionResponse;
+import com.aphex3k.immichApi.ImmichApiService;
 import com.aphex3k.immichApi.ImmichType;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.DataSource;
-import com.bumptech.glide.load.engine.DiskCacheStrategy;
 import com.bumptech.glide.load.engine.GlideException;
-import com.bumptech.glide.load.resource.bitmap.DownsampleStrategy;
-import com.bumptech.glide.load.resource.drawable.DrawableTransitionOptions;
 import com.bumptech.glide.request.RequestListener;
-import com.bumptech.glide.request.target.CustomViewTarget;
-import com.bumptech.glide.request.target.ImageViewTarget;
 import com.bumptech.glide.request.target.Target;
-import com.bumptech.glide.request.target.ViewTarget;
 import com.dd.crop.TextureVideoView;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.gson.stream.MalformedJsonException;
+import com.vdurmont.semver4j.Semver;
 
 import java.io.File;
+import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -63,6 +63,7 @@ import java.util.Timer;
 import java.util.TimerTask;
 
 import okhttp3.HttpUrl;
+import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener, ApiServiceGenerator.ProgressListener {
 
@@ -101,6 +102,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         progressIndicator = findViewById(R.id.progressIndicator);
 
         progressIndicator.setVisibility(View.INVISIBLE);
+        progressIndicator.setTrackColor(Color.argb(80,255,255,255));
+        progressIndicator.setIndicatorColor(Color.argb(144,255,255,255));
+
+        ViewCompat.setElevation(progressIndicator, ViewCompat.getElevation(imageView)+1);
+
+        if (BuildConfig.DEBUG) {
+            progressIndicator.setBackgroundColor(Color.blue(200));
+            progressIndicator.setDrawingCacheBackgroundColor(Color.green(255));
+        }
 
         this.brightnessManager = new BrightnessManager(this, (SensorManager) getSystemService(SENSOR_SERVICE));
         this.eventManager = new EventManager(this);
@@ -179,6 +189,40 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         else {
             turnScreenOn();
         }
+
+        checkServerCompatibility();
+    }
+
+    private void checkServerCompatibility() {
+        new Thread(() -> {
+
+            Configuration configuration = settingsManager.getConfiguration();
+            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, this, null);
+            try {
+                Response<ImmichApiServerVersionResponse> serverVersionResponse = apiService.getServerVersion().execute();
+
+                if (serverVersionResponse.body() != null) {
+                    Semver serverVersion = serverVersionResponse.body().getVersion();
+
+                    runOnUiThread(() -> {
+                        String message = null;
+                        if (serverVersion.isLowerThan("1.118.0")) {
+                            message = String.format(Locale.US, "Immich server version %s is incompatible!", serverVersion);
+                        } else if (serverVersion.isGreaterThan("1.119.1")) {
+                            message = String.format(Locale.US, "Immich server version %s is unsupported.", serverVersion);
+                        }
+
+                        if (message != null) {
+                            Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
+                            debugInformationProvided(new DebugInformation("serverVersion", message));
+                        }
+                    });
+                }
+            } catch (IOException e) {
+                handleException(e);
+            }
+
+        }).start();
     }
 
     @Override
@@ -362,11 +406,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
-                if (brightnessManager != null) {
-                    if (Boolean.TRUE.equals(brightnessManager.getShouldTheScreenBeOn())) {
-                        toggleScreenOn();
+                try {
+                    if (brightnessManager != null) {
+                        if (Boolean.TRUE.equals(brightnessManager.getShouldTheScreenBeOn())) {
+                            toggleScreenOn();
+                        }
+                        debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
                     }
-                    debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
+                }
+                catch (Exception e) {
+                    handleException(e);
                 }
             }
         }, startTime, period);
@@ -374,11 +423,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
             @Override
             public void run() {
-                if (brightnessManager != null) {
-                    if (Boolean.FALSE.equals(brightnessManager.getShouldTheScreenBeOn())) {
-                        toggleScreenOn();
+                try {
+                    if (brightnessManager != null) {
+                        if (Boolean.FALSE.equals(brightnessManager.getShouldTheScreenBeOn())) {
+                            toggleScreenOn();
+                        }
+                        debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
                     }
-                    debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
+                }
+                catch (Exception e) {
+                    handleException(e);
                 }
             }
         }, endTime, period);

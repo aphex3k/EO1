@@ -52,6 +52,8 @@ android {
             // the Android Gradle plugin. To learn more, go to the section about
             // R8 configuration files.
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+
+            debuggable = false
         }
         debug {
             enableUnitTestCoverage true
