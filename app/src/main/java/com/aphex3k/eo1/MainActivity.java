@@ -409,7 +409,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 try {
                     if (brightnessManager != null) {
                         if (Boolean.TRUE.equals(brightnessManager.getShouldTheScreenBeOn())) {
-                            toggleScreenOn();
+                            eventManager.onKeyDown(KeyEvent.EO1_TOP_BUTTON);
                         }
                         debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
                     }
@@ -426,7 +426,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 try {
                     if (brightnessManager != null) {
                         if (Boolean.FALSE.equals(brightnessManager.getShouldTheScreenBeOn())) {
-                            toggleScreenOn();
+                            eventManager.onKeyDown(KeyEvent.EO1_TOP_BUTTON);
                         }
                         debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
                     }
