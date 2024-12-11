@@ -403,7 +403,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         final Date startTime = startCalendar.getTime();
         final Date endTime = endCalendar.getTime();
 
-        quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
+        quietHoursTimer.schedule(new TimerTask() {
             @Override
             public void run() {
                 try {
@@ -420,7 +420,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
         }, startTime, period);
 
-        quietHoursTimer.scheduleAtFixedRate(new TimerTask() {
+        quietHoursTimer.schedule(new TimerTask() {
             @Override
             public void run() {
                 try {
