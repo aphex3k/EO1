@@ -40,8 +40,6 @@ public class SettingsManager {
 
     protected SettingsManager (SettingsManagerListener listener) {
         this.listener = new WeakReference<>(listener);
-
-        loadConfiguration();
     }
 
     protected void loadConfiguration() {
@@ -206,6 +204,7 @@ public class SettingsManager {
                         }
                     })
                     .setNegativeButton("Cancel", (dialog, which) -> dialog.dismiss());
+
 
             builder.show();
         }

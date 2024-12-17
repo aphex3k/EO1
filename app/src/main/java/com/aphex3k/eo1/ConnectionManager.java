@@ -113,7 +113,7 @@ public class ConnectionManager {
             }
         }
         lastConnectionStatus = newStatus;
-        pollingHandler.postDelayed(this::runOnTimer, 2 * 1000);
+        pollingHandler.postDelayed(this::runOnTimer, 10 * 1000);
     }
 
     protected boolean isNetworkAvailable() {
