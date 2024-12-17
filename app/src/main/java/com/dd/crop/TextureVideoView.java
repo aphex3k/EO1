@@ -129,6 +129,10 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         initPlayer();
 
         try {
+            Matrix transformMatrix = new Matrix();
+            transformMatrix.setScale(1, 1, 0, 0);
+            setTransform(transformMatrix);
+
             mMediaPlayer.setDataSource(path);
             mIsDataSourceSet = true;
             prepare();
@@ -186,6 +190,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                             mVideoHeight = height;
                             updateTextureViewSize();
                         }
+
+
                     }
             );
             mMediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {

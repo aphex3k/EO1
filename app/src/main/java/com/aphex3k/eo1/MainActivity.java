@@ -172,33 +172,34 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             handler.removeCallbacks(this::runOnTimer);
             handler.post(this::runOnTimer);
             setupQuietHours();
+
+            final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
+            final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
+            final int now = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+
+            if (startQuietHour < now && endQuietHour > now) {
+                turnScreenOff();
+            }
+            else {
+                turnScreenOn();
+            }
+
+            checkServerCompatibility();
         }
 
         this.connectionManager.registerListener(this);
 
         debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), this.connectionManager.isNetworkAvailable() ? "connected" : "disconnected"));
-
-        final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
-        final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
-        final int now = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
-
-        if (startQuietHour < now && endQuietHour > now) {
-            turnScreenOff();
-        }
-        else {
-            turnScreenOn();
-        }
-
-        checkServerCompatibility();
     }
 
     private void checkServerCompatibility() {
         new Thread(() -> {
 
-            Configuration configuration = settingsManager.getConfiguration();
-            ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, this, null);
             try {
+                Configuration configuration = settingsManager.getConfiguration();
+                ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, this, null);
+
                 Response<ImmichApiServerVersionResponse> serverVersionResponse = apiService.getServerVersion().execute();
 
                 if (serverVersionResponse.body() != null) {
@@ -218,7 +219,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         }
                     });
                 }
-            } catch (IOException e) {
+            } catch (Exception e) {
                 handleException(e);
             }
 
@@ -319,7 +320,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void showConfigurationUI() {
-        this.settingsManager.showSetupDialog(this);
+        this.runOnUiThread(() -> {
+            this.settingsManager.showSetupDialog(this);
+        });
     }
 
     @Override
@@ -355,6 +358,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         handler.removeCallbacks(this::runOnTimer);
         handler.post(this::runOnTimer);
         setupQuietHours();
+        checkServerCompatibility();
     }
 
     private void setupQuietHours() {
@@ -601,8 +605,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.runOnUiThread(() -> {
             try {
                 videoView.stop();
-                videoView.setDataSource(file.getPath());
-                videoView.setLooping(true);
                 videoView.setListener(new TextureVideoView.MediaPlayerListener() {
                     @Override
                     public void onVideoPrepared() {
@@ -638,6 +640,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         return false;
                     }
                 });
+                videoView.setDataSource(file.getPath());
+                videoView.setLooping(true);
             } catch (Exception e) {
                 assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                 handleException(e);
