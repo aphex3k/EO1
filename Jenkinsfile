@@ -1,7 +1,7 @@
 def PBANDJELLY = ""
 
 pipeline {
-    agent any
+    agent { label "android-sdk && emulator" }
     environment { 
         SONAR_TOKEN = credentials('sonar_token_gitea_eo1')
         ANDROID_HOME = '/var/android-sdk'
