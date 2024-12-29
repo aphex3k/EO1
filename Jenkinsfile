@@ -2,7 +2,8 @@ def PBANDJELLY = ""
 
 pipeline {
     agent { label "android-sdk && emulator" }
-    environment { 
+    environment {
+        EMULATOR_PORT = "${Math.abs(new Random().nextInt(60000+5001))}"
         SONAR_TOKEN = credentials('sonar_token_gitea_eo1')
         ANDROID_HOME = '/var/android-sdk'
         PATH = "${ANDROID_HOME}/tools:${ANDROID_HOME}/tools/bin:${ANDROID_HOME}/platform-tools:${PATH}"
@@ -33,6 +34,14 @@ pipeline {
                 }                
             }
         }
+        stage ('Checks') {
+            steps {
+                script {
+                    sh "emulator -accel-check"
+                    sh "emulator -list-avds"
+                }
+            }
+        }
         stage ('Building Android 🤖') {
             environment {
                 KEYSTORE = credentials('keystore-eo1')
@@ -43,41 +52,60 @@ pipeline {
             steps {
                 script {
                     sh "java --version"
-                    sh "./gradlew --version"
+                    sh "./gradlew --no-daemon --version"
                 }
                 script {
                     sh "sed -i 's/RunImmichTests = true/RunImmichTests = false/g' app/src/test/java/com/aphex3k/eo1/TestConfiguration.java"
                 }
                 script {
                     PBANDJELLY = "-PBUILD_NUMBER=${env.BUILD_NUMBER}"
-                    sh "./gradlew --build-cache clean build test assembleDebug assembleRelease -s $PBANDJELLY -Pandroid.injected.signing.store.file=$KEYSTORE -Pandroid.injected.signing.store.password=$KEYSTORE_PASS -Pandroid.injected.signing.key.alias=$KEY_ALIAS -Pandroid.injected.signing.key.password=$KEY_PASS"
+                    sh "./gradlew --no-daemon --build-cache clean build test assembleDebug assembleRelease -s $PBANDJELLY -Pandroid.injected.signing.store.file=$KEYSTORE -Pandroid.injected.signing.store.password=$KEYSTORE_PASS -Pandroid.injected.signing.key.alias=$KEY_ALIAS -Pandroid.injected.signing.key.password=$KEY_PASS"
                 }
             }
         }
-        stage ('Scanning') {
-            steps {
-                script {
-                    try {
-                        sh "./gradlew sonar -Dsonar.pullrequest.base=${CHANGE_TARGET} -Dsonar.pullrequest.branch=${CHANGE_BRANCH} -Dsonar.pullrequest.key=${CHANGE_ID}"
-                    } catch (Exception e) {
-                        sh "./gradlew sonar -Dsonar.branch.name=${BRANCH_NAME}"
+        stage ('Post Build') {
+            parallel {
+                stage ('Emulator 📱') {
+                    steps {
+                        script {
+                            sh '''
+                            #!/bin/bash
+                            adb devices -l
+                            emulator -verbose -avd EO1 -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port ${EMULATOR_PORT} -no-metrics -selinux permissive -accel on -gpu off 1>/dev/null &
+                            sleep 45
+                            export TID=$(adb devices -l | grep ${EMULATOR_PORT} | tr -s " " | cut -d " " -f 6 | cut -d ":" -f 2)
+                            adb -t $TID shell wm size 1080x1920
+                            adb -t $TID shell screencap -p /data/data/screenshot_00_before_app_start.png && adb pull /data/data/screenshot_00_before_app_start.png
+                            adb -t $TID install app/build/outputs/apk/release/app-release.apk
+                            adb -t $TID shell am start -n com.aphex3k.eo1/com.aphex3k.eo1.MainActivity
+                            sleep 15
+                            adb -t $TID shell screencap -p /data/data/screenshot_01_app_start.png && adb pull /data/data/screenshot_01_app_start.png
+                            compare -metric AE .jenkins/reference/screenshot_01_app_start.png screenshot_01_app_start.png screenshot_01_app_start_difference.png
+                            adb -t $TID shell monkey -p com.aphex3k.eo1 -v 500 && sleep 5
+                            adb -t $TID shell screencap -p /data/data/screenshot_02_post_monkey.png && adb pull /data/data/screenshot_02_post_monkey.png
+                            '''
+                        }   
                     }
-                    
+                }
+                stage ('Scanning') {
+                    steps {
+                        script {
+                            try {
+                                sh "./gradlew --no-daemon sonar -Dsonar.pullrequest.base=${CHANGE_TARGET} -Dsonar.pullrequest.branch=${CHANGE_BRANCH} -Dsonar.pullrequest.key=${CHANGE_ID}"
+                            } catch (Exception e) {
+                                sh "./gradlew --no-daemon sonar -Dsonar.branch.name=${BRANCH_NAME}"
+                            }
+                            
+                        }
+                    }
                 }
             }
-        }
-        stage ('Archiving') {
-            steps {
-                script {
-                    archiveArtifacts allowEmptyArchive: false, artifacts: 'app/build/**/*, app/src/test/java/com/aphex3k/eo1/TestConfiguration.java', excludes: '', fingerprint: true, onlyIfSuccessful: false
-                }       
-            }         
         }
     }
     post {
-        cleanup {
+        always {
             script {
-                sh 'git clean -xdf'
+                archiveArtifacts allowEmptyArchive: false, artifacts: 'app/build/**/*, app/src/test/java/com/aphex3k/eo1/TestConfiguration.java, screenshot*.png', excludes: '', fingerprint: true, onlyIfSuccessful: false
             }
         }
         failure {
@@ -85,14 +113,14 @@ pipeline {
                 sh 'echo failure...'
             }
         }
-        always {
-            script {
-                sh 'echo always...'
-            }
-        }
         success {
             script {
                 sh 'echo success...'
+            }
+        }
+        cleanup {
+            script {
+                sh 'git clean -xdf'
             }
         }
     }
