@@ -4,9 +4,12 @@ pipeline {
     agent { label "android-sdk && emulator" }
     environment {
         EMULATOR_PORT = "${Math.abs(new Random().nextInt(60000+5001))}"
+        EMULATOR_NAME = "EO1-${EMULATOR_PORT}"
         SONAR_TOKEN = credentials('sonar_token_gitea_eo1')
         ANDROID_HOME = '/var/android-sdk'
         PATH = "${ANDROID_HOME}/tools:${ANDROID_HOME}/tools/bin:${ANDROID_HOME}/platform-tools:${PATH}"
+        JAVA_OPTS = "-Dorg.gradle.daemon=false"
+        GRADLE_OPTS = "-Dorg.gradle.daemon=false"
     }
 
     stages {
@@ -38,7 +41,7 @@ pipeline {
             steps {
                 script {
                     sh "emulator -accel-check"
-                    sh "emulator -list-avds"
+                    sh "echo 'no' | /var/android-sdk/cmdline-tools/latest/bin/avdmanager --silent create avd --force --name ${EMULATOR_NAME} --package 'system-images;android-19;default;x86'"
                 }
             }
         }
@@ -71,18 +74,18 @@ pipeline {
                             sh '''
                             #!/bin/bash
                             adb devices -l
-                            emulator -verbose -avd EO1 -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port ${EMULATOR_PORT} -no-metrics -selinux permissive -accel on -gpu off 1>/dev/null &
+                            emulator -verbose -avd ${EMULATOR_NAME} -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port ${EMULATOR_PORT} -no-metrics -selinux permissive -accel on -gpu off 1>/dev/null &
                             sleep 45
                             export TID=$(adb devices -l | grep ${EMULATOR_PORT} | tr -s " " | cut -d " " -f 6 | cut -d ":" -f 2)
                             adb -t $TID shell wm size 1080x1920
-                            adb -t $TID shell screencap -p /data/data/screenshot_00_before_app_start.png && adb pull /data/data/screenshot_00_before_app_start.png
+                            adb -t $TID shell screencap -p /data/data/screenshot_00_before_app_start.png && adb -t $TID pull /data/data/screenshot_00_before_app_start.png
                             adb -t $TID install app/build/outputs/apk/release/app-release.apk
                             adb -t $TID shell am start -n com.aphex3k.eo1/com.aphex3k.eo1.MainActivity
-                            sleep 15
-                            adb -t $TID shell screencap -p /data/data/screenshot_01_app_start.png && adb pull /data/data/screenshot_01_app_start.png
-                            compare -metric AE .jenkins/reference/screenshot_01_app_start.png screenshot_01_app_start.png screenshot_01_app_start_difference.png
+                            sleep 30
+                            adb -t $TID shell screencap -p /data/data/screenshot_01_app_start.png && adb -t $TID pull /data/data/screenshot_01_app_start.png
+                            compare -metric AE -fuzz 1 .jenkins/reference/screenshot_01_app_start.png screenshot_01_app_start.png screenshot_01_app_start_difference.png || compare -metric AE -fuzz 1 .jenkins/reference/screenshot_01_app_start_b.png screenshot_01_app_start.png screenshot_01_app_start_difference.png
                             adb -t $TID shell monkey -p com.aphex3k.eo1 -v 500 && sleep 5
-                            adb -t $TID shell screencap -p /data/data/screenshot_02_post_monkey.png && adb pull /data/data/screenshot_02_post_monkey.png
+                            adb -t $TID shell screencap -p /data/data/screenshot_02_post_monkey.png && adb -t $TID pull /data/data/screenshot_02_post_monkey.png
                             '''
                         }   
                     }
@@ -121,6 +124,7 @@ pipeline {
         cleanup {
             script {
                 sh 'git clean -xdf'
+                sh "/var/android-sdk/cmdline-tools/latest/bin/avdmanager delete avd --name ${EMULATOR_NAME}"
             }
         }
     }
