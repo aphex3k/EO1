@@ -147,7 +147,7 @@ public class MediaManager implements MediaManagerInterface {
                 assetResponse = immichAssets.remove(0);
 
                 try {
-                    tempFile = downloadAsset(assetResponse.getId(), assetResponse.getType(), activity, apiService);
+                    tempFile = downloadAsset(assetResponse.getId(), assetResponse.getType(), false, activity, apiService);
                 } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 }
@@ -237,7 +237,7 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     @NonNull
-    private synchronized File downloadAsset(String uuid, ImmichType type, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
+    private synchronized File downloadAsset(String uuid, ImmichType type, Boolean fallback, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
 
         if (apiService == null) {
             SettingsManager settings = this.settingsManager.get();
@@ -252,7 +252,8 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
-        Response<ResponseBody> downloadResponse = type == ImmichType.IMAGE
+        Response<ResponseBody> downloadResponse = Boolean.FALSE.equals(fallback) ? apiService.downloadFile(uuid, null).execute() :
+                type == ImmichType.IMAGE
                 ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.thumbnail, null).execute()
                 : apiService.playAssetVideo(uuid, null).execute();
 
@@ -283,7 +284,7 @@ public class MediaManager implements MediaManagerInterface {
         new Thread(() -> {
             try {
 
-                File thumbnail = downloadAsset(assetId, type, activity, null);
+                File thumbnail = downloadAsset(assetId, type, true, activity, null);
 
                 activity.runOnUiThread(() -> {
                     MediaManagerListener mediaManagerListener = this.listener.get();

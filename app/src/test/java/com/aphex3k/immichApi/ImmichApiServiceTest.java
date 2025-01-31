@@ -203,7 +203,7 @@ public class ImmichApiServiceTest {
             throw new AssumptionViolatedException("The @Before function failed to find a valid example video id.");
         }
 
-        Response<ResponseBody> response = apiService.playAssetVideo(
+        Response<ResponseBody> response = apiService.downloadFile(
                 exampleVideoId, null
         ).execute();
 
