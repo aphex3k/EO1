@@ -3,149 +3,18 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:gravity="bottom"
     android:orientation="vertical"
-    android:padding="16dp">
+    android:padding="0dp">
 
-
-    <TextView
-        android:id="@+id/textView1"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Basic configuration"
-        android:layout_marginTop="20sp"
-        android:textAppearance="@style/TextAppearance.AppCompat.Large" />
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="horizontal">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Username"
-            android:textSize="22sp" />
-        <EditText
-            android:id="@+id/editTextUserId"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-    </LinearLayout>
-
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="horizontal">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Password"
-            android:textSize="22sp" />
-
-        <EditText
-            android:id="@+id/editTextPassword"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:ems="10"
-            android:inputType="textPassword" />
-
-    </LinearLayout>
-
-    <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:orientation="horizontal">
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="Server"
-            android:textSize="22sp" />
-
-        <EditText
-            android:id="@+id/editTextHost"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content" />
-
-    </LinearLayout>
-
-    <Button
-        android:id="@+id/btnLoadConfig"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Load settings from configuration.json" />
-
-    <RadioGroup
-        android:id="@+id/optionsRadioGroup"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
-        android:orientation="vertical">
-
-        <TextView
-            android:id="@+id/textView2"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Time Zone"
-            android:textSize="22sp" />
-
-        <Spinner
-            android:id="@+id/tzSpinner"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:spinnerMode="dialog" />
-
-    </RadioGroup>
-
-    <TextView
-        android:id="@+id/textView3"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Quiet hours:"
-        android:layout_marginTop="20sp"
-        android:textAppearance="@style/TextAppearance.AppCompat.Large" />
-
-    <TextView
-        android:id="@+id/startHourLabel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Start Hour"
-        android:textAppearance="?android:attr/textAppearanceMedium" />
-
-    <Spinner
-        android:id="@+id/startHourSpinner"
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/optionsTabLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content" />
 
-    <TextView
-        android:id="@+id/endHourLabel"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="End Hour"
-        android:textAppearance="?android:attr/textAppearanceMedium" />
-
-    <Spinner
-        android:id="@+id/endHourSpinner"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content" />
-
-    <TextView
-        android:id="@+id/textView4"
+    <androidx.viewpager2.widget.ViewPager2
+        android:id="@+id/optionsViewPager"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Slideshow interval (in minutes):"
-        android:layout_marginTop="20sp"
-        android:textAppearance="@style/TextAppearance.AppCompat.Large" />
-
-    <EditText
-        android:id="@+id/editTextInterval"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:inputType="number"
-        android:hint="5" />
-
+        android:layout_weight="1" />
 
 </LinearLayout>

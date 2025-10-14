@@ -18,12 +18,15 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.animation.AlphaAnimation;
 import android.widget.ImageView;
+import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -34,6 +37,9 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewCompat;
 
+import com.aphex3k.eo1.mqtt.MqttManager;
+import com.aphex3k.eo1.mqtt.Payload;
+import com.aphex3k.eo1.mqtt.PlaybackListener;
 import com.aphex3k.immichApi.ImmichApiServerVersionResponse;
 import com.aphex3k.immichApi.ImmichApiService;
 import com.aphex3k.immichApi.ImmichType;
@@ -48,7 +54,6 @@ import com.google.gson.stream.MalformedJsonException;
 import com.vdurmont.semver4j.Semver;
 
 import java.io.File;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -81,6 +86,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private ImageView imageView;
     private TextureVideoView videoView;
     private LinearProgressIndicator progressIndicator;
+    private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
     private TextView debugOverlay;
     private EventManager eventManager;
@@ -94,6 +100,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private float lastScreenBrightness = 0.3f;
     private ConnectionManager connectionManager;
     private PowerManager.WakeLock screenOffWakeLock;
+    private Handler bannerHandler = new Handler(Looper.getMainLooper());
+    private Runnable bannerFadeRunnable;
+    private String currentTrackId = null;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -131,6 +140,103 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 0,
                 new Intent(getIntent()),
                 getIntent().getFlags());
+
+        configureMqttManager();
+    }
+
+    private void configureMqttManager() {
+        try {
+            // Construct MQTT broker string from settings
+            settingsManager.loadConfiguration();
+            String mqttProtocol = settingsManager.getConfiguration().mqttProtocol;
+            String mqttHost = settingsManager.getConfiguration().mqttHost;
+            int mqttPort = settingsManager.getConfiguration().mqttPort;
+            if (mqttProtocol == null || mqttProtocol.isEmpty()) mqttProtocol = "tcp";
+            if (mqttPort <= 0) mqttPort = 1883;
+
+            if (mqttHost != null && !mqttHost.isEmpty()) {
+
+                String mqttBroker = String.format("%s://%s:%d", mqttProtocol, mqttHost, mqttPort);
+
+                this.mqttManager = new MqttManager(mqttBroker, new PlaybackListener() {
+
+                    @Override
+                    public void onPlaybackStarted(Payload payload) {
+                        runOnUiThread(() -> {
+                            var duration = payload.currentTrack.duration;
+                            var title = payload.currentTrack.title;
+                            var artist = payload.currentTrack.artist;
+                            var groupName = payload.groupName;
+                            var trackId = groupName + "_" + title + "_" + artist + "_" + duration; // crude unique id
+
+                            var titleView = (TextView) findViewById(R.id.songTitleLabel);
+                            var artistView = (TextView) findViewById(R.id.songArtistLabel);
+                            var deviceLabel = (TextView) findViewById(R.id.deviceLabel);
+                            var bannerView = (RelativeLayout) findViewById(R.id.sonosBannerView);
+
+                            titleView.setText(title);
+                            artistView.setText(artist);
+                            deviceLabel.setText(groupName);
+                            bannerView.setVisibility(View.VISIBLE);
+                            bannerView.setAlpha(1f);
+
+                            // Cancel previous timer if track changed
+                            if (bannerFadeRunnable != null) {
+                                bannerHandler.removeCallbacks(bannerFadeRunnable);
+                            }
+                            currentTrackId = trackId;
+
+                            // Parse duration string (e.g., "03:45")
+                            long durationMs = 120 * 1000L;
+                            if (duration != null && duration.matches("\\d{1,2}:\\d{2}:\\d{2}")) {
+                                String[] parts = duration.split(":");
+                                int hours = Integer.parseInt(parts[0]);
+                                int min = Integer.parseInt(parts[1]);
+                                int sec = Integer.parseInt(parts[2]);
+                                durationMs = (hours * 360L + min * 60L + sec) * 1000L;
+                            }
+                            if (durationMs > 0) {
+                                bannerFadeRunnable = () -> {
+                                    // Only fade if the same track is still displayed
+                                    if (currentTrackId != null && currentTrackId.equals(trackId)) {
+                                        AlphaAnimation fadeOut = new AlphaAnimation(1f, 0f);
+                                        fadeOut.setDuration(1000);
+                                        fadeOut.setFillAfter(true);
+                                        bannerView.startAnimation(fadeOut);
+                                        bannerView.setVisibility(View.GONE);
+                                    }
+                                };
+                                bannerHandler.postDelayed(bannerFadeRunnable, durationMs);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onPlaybackStopped(Payload payload) {
+                        runOnUiThread(() -> {
+                            if (payload == null || payload.currentTrack == null) {
+                                return;
+                            }
+                            var duration = payload.currentTrack.duration;
+                            var title = payload.currentTrack.title;
+                            var artist = payload.currentTrack.artist;
+                            var groupName = payload.groupName;
+                            var trackId = groupName + "_" + title + "_" + artist + "_" + duration; // crude unique id
+
+                            // Cancel previous timer if track changed
+                            if (bannerFadeRunnable != null && currentTrackId.equals(trackId)) {
+                                bannerHandler.removeCallbacks(bannerFadeRunnable);
+                                bannerHandler.post(bannerFadeRunnable);
+                            }
+                        });
+                    }
+
+                });
+            }
+        }
+        catch (Exception e) {
+            handleException(e);
+        }
     }
 
     /**
@@ -173,7 +279,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     0);
         }
 
-        if (!this.settingsManager.showSetupDialogIfNeeded(this)) {
+        if (this.settingsManager.isSetupDialogIfNeeded())
+        {
+            showConfigurationUI();
+        }
+        else if (!this.settingsManager.isSetupDialogIfNeeded()) {
             handler.removeCallbacks(this::runOnTimer);
             handler.post(this::runOnTimer);
             setupQuietHours();
@@ -193,6 +303,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         this.connectionManager.registerListener(this);
+
+        if (this.mqttManager != null)
+            try {
+                String mqttUser = settingsManager.getConfiguration().mqttUser;
+                String mqttPassword = settingsManager.getConfiguration().mqttPassword;
+    //            if (mqttUser == null || mqttUser.isEmpty()) mqttUser = "eos1";
+    //            if (mqttPassword == null) mqttPassword = "eos12345";
+                if (mqttPassword == null) mqttPassword = "";
+                this.mqttManager.connect(mqttUser, mqttPassword);
+            }
+            catch (Exception e) {
+                handleException(e);
+            }
 
         debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), this.connectionManager.isNetworkAvailable() ? "connected" : "disconnected"));
@@ -239,6 +362,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
         this.connectionManager.unregisterListener(this);
+        try {
+            this.mqttManager.disconnect();
+        }
+        catch (Exception e) {
+            handleException(e);
+        }
         super.onPause();
     }
 
@@ -328,7 +457,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void showConfigurationUI() {
         this.runOnUiThread(() -> {
-            this.settingsManager.showSetupDialog(this);
+            OptionsDialogFragment dialog = new OptionsDialogFragment(this.settingsManager);
+            dialog.show(getSupportFragmentManager(), "OptionsDialog");
         });
     }
 
@@ -463,7 +593,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             if (e.getClass() == InvalidCredentialsException.class) {
-                settingsManager.showSetupDialogIfNeeded(this);
+                if (settingsManager.isSetupDialogIfNeeded()) {
+                    showConfigurationUI();
+                }
                 Toast.makeText(MainActivity.this, "User authentication failure. Check your configuration.", Toast.LENGTH_LONG).show();
             }
             if (e.getClass() == MalformedJsonException.class) {
