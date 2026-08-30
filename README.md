@@ -100,6 +100,16 @@ Create separate albums for your pictures - either organized as previously on the
 Choose the album you want to show on each device, click the Share icon in the up-right of the immich app, and choose the account associated with the device.
 The app will only be able to see content from your immich database that is shared with it.
 
+### Local debug (emulator)
+
+Modern Android Studio no longer supports the Gradle/SDK pins this project needs for IDE debugging. On a host that can run an **API 19** emulator (x86_64 Linux or Intel Mac; not typically Apple Silicon), use:
+
+```bash
+./debug.sh
+```
+
+That builds the debug APK, creates or reuses an AVD named `EO1` constrained like the real hardware / Jenkins CI, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator.
+
 ## Further Reading
 
 1. [EO1 Hardware specifications](EO1-specs.md)
