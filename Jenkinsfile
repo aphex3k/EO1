@@ -3,8 +3,8 @@ def PBANDJELLY = ""
 pipeline {
     agent { label "android-sdk && emulator" }
     environment {
-        // Even console ports 5554..5682 (64 slots); adb only discovers emulators in this range.
-        EMULATOR_PORT = "${5554 + 2 * (Math.abs(Integer.parseInt(env.BUILD_NUMBER) % 64))}"
+        // Even console ports 5554..5584 (16 slots). ADB's usable adb-port range is ~5555-5586.
+        EMULATOR_PORT = "${5554 + 2 * (Math.abs(Integer.parseInt(env.BUILD_NUMBER) % 16))}"
         EMULATOR_NAME = "EO1-${EMULATOR_PORT}"
         SONAR_TOKEN = credentials('sonar_token_gitea_eo1')
         ANDROID_HOME = '/var/android-sdk'
@@ -79,37 +79,43 @@ pipeline {
                             EMU_LOG="emulator.log"
                             adb devices -l
                             : >"${EMU_LOG}"
-                            emulator -verbose -avd "${EMULATOR_NAME}" -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port "${EMULATOR_PORT}" -no-metrics -selinux permissive -accel on -gpu off >"${EMU_LOG}" 2>&1 &
+                            emulator -verbose -avd "${EMULATOR_NAME}" -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port "${EMULATOR_PORT}" -no-metrics -selinux permissive -accel on -gpu swiftshader_indirect >"${EMU_LOG}" 2>&1 &
                             EMU_PID=$!
+                            device_online() {
+                              adb devices | grep -qE "^${SERIAL}[[:space:]]+device$"
+                            }
                             echo "Waiting for ${SERIAL} (timeout ${BOOT_TIMEOUT_SEC}s)..."
                             i=0
                             while [ "${i}" -lt "${BOOT_TIMEOUT_SEC}" ]; do
-                              if ! kill -0 "${EMU_PID}" 2>/dev/null; then
+                              if device_online; then
+                                break
+                              fi
+                              if ! kill -0 "${EMU_PID}" 2>/dev/null && ! device_online; then
                                 echo "Emulator process exited early; log:"
                                 tail -n 100 "${EMU_LOG}" || true
                                 exit 1
                               fi
-                              if adb devices | grep -qE "^${SERIAL}[[:space:]]+device$"; then
-                                break
-                              fi
                               i=$((i + 1))
                               sleep 1
                             done
-                            if ! adb devices | grep -qE "^${SERIAL}[[:space:]]+device$"; then
+                            if ! device_online; then
                               echo "Emulator ${SERIAL} did not appear within ${BOOT_TIMEOUT_SEC}s; log:"
                               tail -n 100 "${EMU_LOG}" || true
                               exit 1
                             fi
                             echo "Waiting for boot completed on ${SERIAL}..."
                             while [ "${i}" -lt "${BOOT_TIMEOUT_SEC}" ]; do
-                              if ! kill -0 "${EMU_PID}" 2>/dev/null; then
-                                echo "Emulator process exited during boot; log:"
-                                tail -n 100 "${EMU_LOG}" || true
-                                exit 1
-                              fi
-                              boot="$(adb -s "${SERIAL}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
-                              if [ "${boot}" = "1" ]; then
-                                break
+                              if ! device_online; then
+                                if ! kill -0 "${EMU_PID}" 2>/dev/null; then
+                                  echo "Emulator disappeared during boot; log:"
+                                  tail -n 100 "${EMU_LOG}" || true
+                                  exit 1
+                                fi
+                              else
+                                boot="$(adb -s "${SERIAL}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+                                if [ "${boot}" = "1" ]; then
+                                  break
+                                fi
                               fi
                               i=$((i + 1))
                               sleep 1
