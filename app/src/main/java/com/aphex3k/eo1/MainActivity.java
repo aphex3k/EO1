@@ -695,7 +695,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                             }
                         })
                         .dontAnimate()
-                        .dontTransform()
                         .into(imageView);
             }
             catch (Exception e) {

@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.res.AssetFileDescriptor;
 import android.graphics.Matrix;
 import android.graphics.SurfaceTexture;
+import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
 import android.net.Uri;
 import android.util.AttributeSet;
@@ -51,6 +52,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     private float mVideoHeight;
     private float mVideoWidth;
+    private int mVideoRotation;
 
     private boolean mIsDataSourceSet;
     private boolean mIsViewAvailable;
@@ -84,14 +86,19 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     }
 
     private void updateTextureViewSize() {
-
-        if (mVideoWidth <= 0 || mVideoHeight <= 0) {
+        if (mVideoWidth <= 0 || mVideoHeight <= 0 || getWidth() <= 0 || getHeight() <= 0) {
             return;
         }
 
-        float scale = aspectScale(getWidth(), getHeight(), mVideoWidth, mVideoHeight);
+        float viewWidth = getWidth();
+        float viewHeight = getHeight();
+        float pivotX = viewWidth / 2f;
+        float pivotY = viewHeight / 2f;
+        float scale = rotationAwareAspectScale(viewWidth, viewHeight, mVideoWidth, mVideoHeight, mVideoRotation);
+
         Matrix transformMatrix = new Matrix();
-        transformMatrix.setScale(scale, scale, (float) getWidth() / 2, (float) getHeight() / 2);
+        transformMatrix.setScale(scale, scale, pivotX, pivotY);
+        transformMatrix.postRotate(mVideoRotation, pivotX, pivotY);
         setTransform(transformMatrix);
     }
 
@@ -104,11 +111,48 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
      * @return The matrix that displays the video content scaled and translated to the correct dimensions
      */
     public static float aspectScale(float viewWidth, float viewHeight, float videoWidth, float videoHeight) {
-        // Calculate scale factors to fit image within view dimensions while maintaining aspect ratio
-        float scaleX = viewWidth / videoWidth;
-        float scaleY = viewHeight / videoHeight;
+        return rotationAwareAspectScale(viewWidth, viewHeight, videoWidth, videoHeight, 0);
+    }
+
+    /**
+     * Center-crop scale for a video, swapping coded dimensions when rotation is 90 or 270 degrees.
+     */
+    public static float rotationAwareAspectScale(float viewWidth, float viewHeight, float videoWidth, float videoHeight, int rotation) {
+        float contentWidth = videoWidth;
+        float contentHeight = videoHeight;
+        if (rotation == 90 || rotation == 270) {
+            contentWidth = videoHeight;
+            contentHeight = videoWidth;
+        }
+
+        float scaleX = viewWidth / contentWidth;
+        float scaleY = viewHeight / contentHeight;
 
         return Math.max(scaleX, scaleY);
+    }
+
+    private int readVideoRotation(String path) {
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(path);
+            String rotation = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION);
+            if (rotation != null) {
+                return Integer.parseInt(rotation);
+            }
+        } catch (Exception e) {
+            if (e.getMessage() != null) {
+                Log.d(TAG, e.getMessage());
+            }
+        } finally {
+            try {
+                retriever.release();
+            } catch (IOException e) {
+                if (e.getMessage() != null) {
+                    Log.d(TAG, e.getMessage());
+                }
+            }
+        }
+        return 0;
     }
 
     private void initPlayer() {
@@ -119,6 +163,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         }
         mIsVideoPrepared = false;
         mIsPlayCalled = false;
+        mVideoRotation = 0;
         mState = State.UNINITIALIZED;
     }
 
@@ -133,6 +178,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
             transformMatrix.setScale(1, 1, 0, 0);
             setTransform(transformMatrix);
 
+            mVideoRotation = readVideoRotation(path);
             mMediaPlayer.setDataSource(path);
             mIsDataSourceSet = true;
             prepare();
@@ -406,7 +452,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     @Override
     public void onSurfaceTextureSizeChanged(@NonNull SurfaceTexture surface, int width, int height) {
-
+        updateTextureViewSize();
     }
 
     @Override
