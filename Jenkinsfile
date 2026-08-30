@@ -92,13 +92,14 @@ pipeline {
                 }
                 stage ('Scanning') {
                     steps {
-                        script {
-                            try {
-                                sh "./gradlew --no-daemon sonar -Dsonar.pullrequest.base=${CHANGE_TARGET} -Dsonar.pullrequest.branch=${CHANGE_BRANCH} -Dsonar.pullrequest.key=${CHANGE_ID}"
-                            } catch (Exception e) {
-                                sh "./gradlew --no-daemon sonar -Dsonar.branch.name=${BRANCH_NAME}"
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            script {
+                                if (env.CHANGE_ID) {
+                                    sh "./gradlew --no-daemon sonar -Dsonar.pullrequest.base=${CHANGE_TARGET} -Dsonar.pullrequest.branch=${CHANGE_BRANCH} -Dsonar.pullrequest.key=${CHANGE_ID}"
+                                } else {
+                                    sh "./gradlew --no-daemon sonar -Dsonar.branch.name=${BRANCH_NAME}"
+                                }
                             }
-                            
                         }
                     }
                 }
