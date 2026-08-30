@@ -1,6 +1,8 @@
 #!/bin/bash
-# Build the debug APK, ensure/start an API 19 AVD named EO1 (EO1-like constraints),
-# install the app, and stream logcat until Ctrl+C.
+# Build the debug APK, deploy to a connected physical device when available
+# (preferring PREFERRED_PHYSICAL_SERIAL, default 20061229), otherwise ensure/start
+# an API 19 AVD named EO1 (EO1-like constraints), install the app, and stream
+# logcat until Ctrl+C.
 # On Apple Silicon, if API 19 cannot boot, fall back to EO1_API21 (API 21 arm64-v8a).
 set -euo pipefail
 
@@ -17,10 +19,12 @@ EMU_LOG="/tmp/eo1-emulator.log"
 FALLBACK_AVD_NAME="EO1_API21"
 FALLBACK_SYSTEM_IMAGE="system-images;android-21;default;arm64-v8a"
 FALLBACK_API=21
+PREFERRED_PHYSICAL_SERIAL="${PREFERRED_PHYSICAL_SERIAL:-20061229}"
 
 EMU_PID=""
 SERIAL=""
 CLEANED_UP=0
+USING_EMULATOR=0
 SYSTEM_IMAGE=""
 
 die() {
@@ -295,6 +299,10 @@ cleanup() {
   fi
   CLEANED_UP=1
 
+  if [[ "$USING_EMULATOR" -eq 0 ]]; then
+    return
+  fi
+
   if [[ -z "$EMU_PID" && -z "$SERIAL" ]]; then
     return
   fi
@@ -306,6 +314,59 @@ cleanup() {
 
 list_emulator_serials() {
   "${ADB}" devices 2>/dev/null | awk '/^emulator-[0-9]+\tdevice$/ { print $1 }'
+}
+
+list_physical_serials() {
+  "${ADB}" devices 2>/dev/null | awk '!/^List of devices/ && !/^$/ && !/^emulator-/ && $2 == "device" { print $1 }'
+}
+
+list_attached_physical_serials() {
+  "${ADB}" devices 2>/dev/null | awk '!/^List of devices/ && !/^$/ && !/^emulator-/ { print $1 }'
+}
+
+physical_device_state() {
+  local serial="$1"
+  "${ADB}" devices 2>/dev/null | awk -v s="$serial" '$1 == s { print $2; exit }'
+}
+
+select_physical_serial() {
+  local ready_serials=""
+  local attached_serials=""
+  local preferred_state=""
+  local serial state count_ready count_attached
+
+  ready_serials="$(list_physical_serials)"
+  attached_serials="$(list_attached_physical_serials)"
+
+  preferred_state="$(physical_device_state "$PREFERRED_PHYSICAL_SERIAL")"
+  if [[ -n "$preferred_state" && "$preferred_state" != "device" ]]; then
+    die "Preferred physical device ${PREFERRED_PHYSICAL_SERIAL} is attached but not ready (state: ${preferred_state}). Fix adb authorization or connection."
+  fi
+
+  count_attached="$(printf '%s\n' "$attached_serials" | sed '/^$/d' | wc -l | tr -d ' ')"
+  count_ready="$(printf '%s\n' "$ready_serials" | sed '/^$/d' | wc -l | tr -d ' ')"
+
+  if [[ "$count_attached" -eq 1 && "$count_ready" -eq 0 ]]; then
+    serial="$(printf '%s\n' "$attached_serials" | sed '/^$/d' | head -1)"
+    state="$(physical_device_state "$serial")"
+    die "Physical device ${serial} is attached but not ready (state: ${state}). Fix adb authorization or connection."
+  fi
+
+  if [[ "$count_ready" -eq 0 ]]; then
+    return 1
+  fi
+
+  if printf '%s\n' "$ready_serials" | grep -qx "$PREFERRED_PHYSICAL_SERIAL"; then
+    echo "$PREFERRED_PHYSICAL_SERIAL"
+    return 0
+  fi
+
+  if [[ "$count_ready" -eq 1 ]]; then
+    printf '%s\n' "$ready_serials" | sed '/^$/d' | head -1
+    return 0
+  fi
+
+  die "Multiple physical devices connected ($(printf '%s\n' "$ready_serials" | sed '/^$/d' | tr '\n' ' ')) but preferred serial ${PREFERRED_PHYSICAL_SERIAL} is not among them. Disconnect extras or attach the preferred device."
 }
 
 wait_for_boot() {
@@ -361,6 +422,7 @@ launch_avd() {
   local preexisting
   preexisting="$(list_emulator_serials | tr '\n' ' ')"
   : >"$EMU_LOG"
+  USING_EMULATOR=1
 
   log "Launching emulator ${AVD_NAME}..."
   "${EMULATOR}" -avd "${AVD_NAME}" \
@@ -404,7 +466,11 @@ app_pid_on_device() {
 }
 
 follow_logcat() {
-  log "Attaching to logcat for ${PACKAGE_ID} (Ctrl+C to stop and quit the AVD)..."
+  if [[ "$USING_EMULATOR" -eq 1 ]]; then
+    log "Attaching to logcat for ${PACKAGE_ID} (Ctrl+C to stop and quit the AVD)..."
+  else
+    log "Attaching to logcat for ${PACKAGE_ID} (Ctrl+C to stop)..."
+  fi
   "${ADB}" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
 
   local app_pid=""
@@ -434,16 +500,16 @@ push_configuration_if_present() {
     return
   fi
 
-  log "Copying ${local_cfg} to AVD at ${remote_cfg}"
-  # Emulator images allow adb root; needed so we can write into the app data dir before first launch.
+  log "Copying ${local_cfg} to device at ${remote_cfg}"
+  # adb root may work on emulators; needed so we can write into the app data dir before first launch.
   "${ADB}" -s "$SERIAL" root >/dev/null 2>&1 || true
   "${ADB}" -s "$SERIAL" wait-for-device >/dev/null 2>&1 || true
 
   "${ADB}" -s "$SERIAL" shell "mkdir -p '${remote_dir}'" \
-    || die "Failed to create ${remote_dir} on AVD"
+    || die "Failed to create ${remote_dir} on device"
 
   "${ADB}" -s "$SERIAL" push "$local_cfg" "$remote_cfg" \
-    || die "Failed to push ${local_cfg} to AVD"
+    || die "Failed to push ${local_cfg} to device"
 
   local uid=""
   uid="$("${ADB}" -s "$SERIAL" shell "stat -c %u /data/data/${PACKAGE_ID}" 2>/dev/null | tr -d '\r' || true)"
@@ -510,6 +576,14 @@ trap cleanup INT TERM EXIT
 log "Building debug APK..."
 ./gradlew assembleDebug
 [[ -f "$APK_PATH" ]] || die "Debug APK missing at ${APK_PATH}"
+
+if selected="$(select_physical_serial)"; then
+  SERIAL="$selected"
+  log "Physical device ${SERIAL} detected; skipping emulator"
+  install_and_start
+  follow_logcat
+  exit 0
+fi
 
 # Primary: API 19 AVD EO1
 AVD_NAME="EO1"
