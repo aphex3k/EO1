@@ -2,6 +2,7 @@ package com.aphex3k.immichApi;
 
 import androidx.annotation.Keep;
 import com.google.gson.annotations.SerializedName;
+import java.util.Collections;
 import java.util.List;
 
 @Keep
@@ -18,6 +19,6 @@ public class ImmichApiMetadataSearchResponseAssets {
     }
     
     public List<ImmichApiAssetResponse> getItems() {
-        return items;
+        return items != null ? items : Collections.<ImmichApiAssetResponse>emptyList();
     }
 }

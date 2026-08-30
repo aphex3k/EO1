@@ -9,9 +9,9 @@ import com.aphex3k.eo1.TestConfiguration;
 
 import org.junit.AssumptionViolatedException;
 import org.junit.Before;
-import org.junit.Ignore;
 
 import java.net.UnknownHostException;
+import java.util.Collections;
 import java.util.List;
 
 import okhttp3.ResponseBody;
@@ -56,7 +56,7 @@ public class ImmichApiServiceTest {
             }
 
             Response<ImmichApiMetadataSearchResponse> response = apiService.getAllAssets(
-                    null, null, true, 3, 1
+                    new ImmichApiMetadataSearchBody(1, 3)
             ).execute();
 
             assert response.body() != null;
@@ -73,15 +73,15 @@ public class ImmichApiServiceTest {
             ).execute();
 
             for (ImmichApiGetAlbumResponse r: shared.body()) {
-                List<ImmichApiAssetResponse> assets = r.getAssets();
+                Response<ImmichApiMetadataSearchResponse> albumAssets = apiService.getAllAssets(
+                        new ImmichApiMetadataSearchBody(1, 50)
+                                .withAlbumIds(Collections.singletonList(r.getId()))
+                ).execute();
 
-                if (assets.isEmpty()) {
-                    Response<ImmichApiGetAlbumResponse> infoResponse = apiService.getAlbumInfo(
-                            r.getId(), false, null
-                    ).execute();
-
-                    assets = infoResponse.body().getAssets();
-                }
+                List<ImmichApiAssetResponse> assets =
+                        albumAssets.body() != null && albumAssets.body().getAssets() != null
+                                ? albumAssets.body().getAssets().getItems()
+                                : Collections.<ImmichApiAssetResponse>emptyList();
 
                 for (ImmichApiAssetResponse asset : assets) {
                     if (asset.getType() == ImmichType.VIDEO) {
@@ -127,11 +127,8 @@ public class ImmichApiServiceTest {
         assertEquals(response.code(), 200);
 
         for (ImmichApiGetAlbumResponse r: response.body()) {
-            if (r.getAssetCount() != r.getAssets().size()) {
-                throw new AssumptionViolatedException("???");
-            } else {
-                assertEquals(r.getAssetCount(), r.getAssets().size());
-            }
+            assertTrue(r.getAssetCount() >= 0);
+            assertNotNull(r.getAssets());
         }
     }
 
@@ -145,12 +142,8 @@ public class ImmichApiServiceTest {
         assertEquals(response.code(), 200);
 
         for (ImmichApiGetAlbumResponse r: response.body()) {
-            if (r.getAssetCount() != r.getAssets().size()) {
-                throw new AssumptionViolatedException("???");
-            }
-            else {
-                assertEquals(r.getAssetCount(), r.getAssets().size());
-            }
+            assertTrue(r.getAssetCount() >= 0);
+            assertNotNull(r.getAssets());
         }
     }
 
@@ -161,20 +154,18 @@ public class ImmichApiServiceTest {
             throw new AssumptionViolatedException("The @Before function failed to find a valid album containing at least one image.");
         }
 
-        Response<ImmichApiGetAlbumResponse> response = apiService.getAlbumInfo(exampleAlbumId, false, null).execute();
+        Response<ImmichApiGetAlbumResponse> response = apiService.getAlbumInfo(exampleAlbumId, true, null).execute();
 
         assertNotNull(response);
         assertEquals(response.code(), 200);
-
-        if (response.body().getAssets().isEmpty()) {
-            throw new AssumptionViolatedException("We ended up with an example album that does not contain any image?!");
-        }
+        assertNotNull(response.body());
+        assertTrue(response.body().getAssetCount() > 0);
     }
 
     @org.junit.Test
     public void getAllAssets() throws Exception {
         Response<ImmichApiMetadataSearchResponse> response = apiService.getAllAssets(
-            null, null, true, 3, 1
+            new ImmichApiMetadataSearchBody(1, 3)
         ).execute();
 
         assertNotNull(response);

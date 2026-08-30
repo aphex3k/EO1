@@ -71,6 +71,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     Amount of milliseconds in a minute
      */
     private static final long MILLIS = 60000;
+
+    /** Inclusive lower bound for Immich server versions this APK is tested against. */
+    public static final String IMMICH_MIN_VERSION = "3.0.0";
+    /** Inclusive upper bound for Immich server versions this APK is tested against. */
+    public static final String IMMICH_MAX_VERSION = "3.1.0";
     private View lastVisibleView;
     private String lastVisibleAsset = "";
     private ImageView imageView;
@@ -207,9 +212,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
                     runOnUiThread(() -> {
                         String message = null;
-                        if (serverVersion.isLowerThan("1.118.0")) {
+                        if (serverVersion == null) {
+                            message = "Unable to parse Immich server version.";
+                        } else if (serverVersion.isLowerThan(IMMICH_MIN_VERSION)) {
                             message = String.format(Locale.US, "Immich server version %s is incompatible!", serverVersion);
-                        } else if (serverVersion.isGreaterThan("1.119.1")) {
+                        } else if (serverVersion.isGreaterThan(IMMICH_MAX_VERSION)) {
                             message = String.format(Locale.US, "Immich server version %s is unsupported.", serverVersion);
                         }
 

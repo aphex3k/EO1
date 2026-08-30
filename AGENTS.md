@@ -27,6 +27,7 @@ Gitignored (do not commit): `configuration.json`, `ffmpeg/`, large parts of `EO2
 - **SDK:** `minSdk` / `targetSdk` / `maxSdk` = **19** (KitKat 4.4.2); `compileSdk` 34
 - **Build:** Gradle + Android Gradle Plugin; CI via Jenkins (build, tests, Sonar, signed APKs)
 - **Networking:** Retrofit + OkHttp + Gson; hand-rolled Immich client; Gitea client for OTA
+- **Immich server:** supported range **3.0.0–3.1.0** (tested against 3.1.0). Bounds live in `MainActivity.IMMICH_MIN_VERSION` / `IMMICH_MAX_VERSION`. Immich’s API is not stable across releases — when bumping support, re-check OpenAPI and update types under `immichApi/`.
 - **TLS:** EO1 needs TLS 1.2 and weaker ciphers — see `Tls12SocketFactory.java` and `ApiServiceGenerator.java`
 - **Secrets:** Immich password is stored cleartext in device `configuration.json` — never commit a real config
 

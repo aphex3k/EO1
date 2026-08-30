@@ -6,16 +6,16 @@ import javax.annotation.Nullable;
 
 @Keep
 public class ImmichApiTagAssetResponse {
-    @SerializedName("assetId ")
-    private String assetId ;
+    @SerializedName("id")
+    private String id;
     @SerializedName("success")
     private Boolean success;
     @SerializedName("error")
     @Nullable
     private ImmichTagError error;
 
-    public String getAssetId() {
-        return assetId ;
+    public String getId() {
+        return id;
     }
 
     public Boolean getSuccess() {
@@ -24,6 +24,6 @@ public class ImmichApiTagAssetResponse {
 
     @Nullable
     public ImmichTagError getError() {
-        return error ;
+        return error;
     }
 }

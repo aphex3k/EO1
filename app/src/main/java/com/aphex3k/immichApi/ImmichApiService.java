@@ -2,7 +2,6 @@ package com.aphex3k.immichApi;
 
 import androidx.annotation.Keep;
 
-import java.util.Date;
 import java.util.List;
 
 import okhttp3.ResponseBody;
@@ -27,18 +26,14 @@ public interface ImmichApiService {
     @Keep
     @GET("/api/albums")
     Call<List<ImmichApiGetAlbumResponse>> getAllAlbums (
-            @Query("shared") Boolean shared,
+            @Query("isShared") Boolean isShared,
             @Query("assetId") String assetId
     );
 
     @Keep
-    @POST("/api/search/metadata/ ")
+    @POST("/api/search/metadata")
     Call<ImmichApiMetadataSearchResponse> getAllAssets (
-            @Query("isFavorite") Boolean isFavorite,
-            @Query("isArchived") Boolean isArchived,
-            @Query("isNotInAlbum") Boolean isNotInAlbum,
-            @Query("count") Integer count,
-            @Query("page") Integer page
+            @Body ImmichApiMetadataSearchBody body
     );
 
     @Keep
@@ -75,17 +70,17 @@ public interface ImmichApiService {
     );
 
     @Keep
-    @POST("/api/tag")
+    @POST("/api/tags")
     Call<ImmichApiTagResponse> createTag (
             @Body ImmichApiTag tag
     );
 
     @Keep
-    @GET("/api/tag")
+    @GET("/api/tags")
     Call<List<ImmichApiTagResponse>> getAllTags ();
 
     @Keep
-    @PUT("/api/tag/{id}/assets")
+    @PUT("/api/tags/{id}/assets")
     Call<List<ImmichApiTagAssetResponse>> tagAssets (
             @Path("id") String tagId,
             @Body ImmichApiTagAssetBody body

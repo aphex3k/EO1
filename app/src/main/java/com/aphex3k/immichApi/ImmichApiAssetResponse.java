@@ -20,7 +20,7 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
     private String deviceId;
 
     @SerializedName("duration")
-    private String duration;
+    private Integer duration;
 
     @SerializedName("exifInfo")
     private ImmichExifInfo exifInfo;
@@ -87,7 +87,7 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
         return deviceId;
     }
 
-    public String getDuration() {
+    public Integer getDuration() {
         return duration;
     }
 

@@ -8,6 +8,7 @@ import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichApiGetAlbumResponse;
 import com.aphex3k.immichApi.ImmichApiLogin;
 import com.aphex3k.immichApi.ImmichApiLoginResponse;
+import com.aphex3k.immichApi.ImmichApiMetadataSearchBody;
 import com.aphex3k.immichApi.ImmichApiMetadataSearchResponse;
 import com.aphex3k.immichApi.ImmichApiService;
 import com.aphex3k.immichApi.ImmichApiTag;
@@ -16,7 +17,6 @@ import com.aphex3k.immichApi.ImmichApiTagAssetResponse;
 import com.aphex3k.immichApi.ImmichApiTagResponse;
 import com.aphex3k.immichApi.ImmichExifInfo;
 import com.aphex3k.immichApi.ImmichSizeFormat;
-import com.aphex3k.immichApi.ImmichTagType;
 import com.aphex3k.immichApi.ImmichType;
 
 import org.jetbrains.annotations.NotNull;
@@ -38,6 +38,8 @@ import retrofit2.Response;
 public class MediaManager implements MediaManagerInterface {
 
     private static final String INCOMPATIBLE_TAG_NAME = "EO1_INCOMPATIBLE";
+    private static final long MAX_ASSET_BYTES = 1073741824L;
+    private static final int SEARCH_PAGE_SIZE = 1000;
     private static final ReentrantLock downloadMutex = new ReentrantLock();
     private final WeakReference<SettingsManager> settingsManager;
     private final WeakReference<MediaManagerListener> listener;
@@ -108,66 +110,26 @@ public class MediaManager implements MediaManagerInterface {
                     return;
                 }
 
-                for (int i = 0; i < 2; i++) {
-
-                    Response<List<ImmichApiGetAlbumResponse>> assetsResponse;
-                    try {
-                        assetsResponse = apiService.getAllAlbums(i == 1, null).execute();
-
-                        List<ImmichApiGetAlbumResponse> assetsResponseBody = assetsResponse.body() != null ? assetsResponse.body() : new ArrayList<>(0);
-
-                        for (ImmichApiGetAlbumResponse response: assetsResponseBody) {
-
-                            Response<ImmichApiGetAlbumResponse> albumResponse = apiService.getAlbumInfo(response.getId(), false, null).execute();
-
-                            ImmichApiGetAlbumResponse albumResponseBody = albumResponse.body();
-
-                            if (albumResponse.isSuccessful() && albumResponseBody != null && !albumResponseBody.getAssets().isEmpty()) {
-
-                                for (ImmichApiAssetResponse asset : albumResponseBody.getAssets()) {
-                                    ImmichExifInfo exif = asset.getExifInfo();
-                                    if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
-                                        continue;
-                                    }
-                                    addCompatibleAsset(asset);
-                                }
-                            }
-                        }
-
-                    } catch (IOException e) {
-                        activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
-                        return;
-                    }
-                }
-
                 try {
+                    // Owned albums (isShared=false) and shared albums (isShared=true)
+                    for (int i = 0; i < 2; i++) {
+                        Response<List<ImmichApiGetAlbumResponse>> albumsResponse =
+                                apiService.getAllAlbums(i == 1, null).execute();
 
-                    int count = 1000;
-                    int page = 1;
+                        List<ImmichApiGetAlbumResponse> albums =
+                                albumsResponse.body() != null ? albumsResponse.body() : new ArrayList<ImmichApiGetAlbumResponse>(0);
 
-                    while (count == 1000) {
-
-                        Response<ImmichApiMetadataSearchResponse> assetsResponse = apiService.getAllAssets(
-                                null, false, null, count, page
-                        ).execute();
-
-                        List<ImmichApiAssetResponse> assetsResponseBody = assetsResponse.body() != null ? assetsResponse.body().getAssets().getItems() : null;
-
-                        if (assetsResponse.isSuccessful() && assetsResponseBody != null && !assetsResponseBody.isEmpty()) {
-
-                            for (ImmichApiAssetResponse asset : assetsResponseBody) {
-                                ImmichExifInfo exif = asset.getExifInfo();
-                                if (exif == null || exif.getFileSizeInByte() > 1073741824 || Boolean.TRUE.equals(asset.getIsTrashed())) {
-                                    continue;
-                                }
-                                addCompatibleAsset(asset);
+                        for (ImmichApiGetAlbumResponse album : albums) {
+                            if (album.getId() == null || album.getAssetCount() == 0) {
+                                continue;
                             }
+                            addAssetsFromSearch(apiService, new ImmichApiMetadataSearchBody(1, SEARCH_PAGE_SIZE)
+                                    .withAlbumIds(Collections.singletonList(album.getId())));
                         }
-
-                        page++;
-                        count = assetsResponseBody != null ? assetsResponseBody.size() : 0;
                     }
 
+                    // All timeline assets visible to this account
+                    addAssetsFromSearch(apiService, new ImmichApiMetadataSearchBody(1, SEARCH_PAGE_SIZE));
                 } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                     return;
@@ -175,6 +137,7 @@ public class MediaManager implements MediaManagerInterface {
 
                 if (immichAssets.isEmpty()) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(new NoMediaFoundException()));
+                    return;
                 }
 
                 Collections.shuffle(immichAssets);
@@ -223,11 +186,52 @@ public class MediaManager implements MediaManagerInterface {
         }).start();
     }
 
-    private void addCompatibleAsset(@NonNull ImmichApiAssetResponse asset) {
-        if (asset.getType() == ImmichType.VIDEO) {
-            immichAssets.add(asset);
+    private void addAssetsFromSearch(@NonNull ImmichApiService apiService, @NonNull ImmichApiMetadataSearchBody firstPage)
+            throws IOException {
+        int page = firstPage.getPage() != null ? firstPage.getPage() : 1;
+        int pageSize = firstPage.getSize() != null ? firstPage.getSize() : SEARCH_PAGE_SIZE;
+        int count = pageSize;
+
+        while (count == pageSize) {
+            ImmichApiMetadataSearchBody body = new ImmichApiMetadataSearchBody(page, pageSize)
+                    .withAlbumIds(firstPage.getAlbumIds())
+                    .withIsFavorite(firstPage.getIsFavorite())
+                    .withIsNotInAlbum(firstPage.getIsNotInAlbum());
+
+            Response<ImmichApiMetadataSearchResponse> assetsResponse = apiService.getAllAssets(body).execute();
+
+            List<ImmichApiAssetResponse> items = null;
+            if (assetsResponse.body() != null && assetsResponse.body().getAssets() != null) {
+                items = assetsResponse.body().getAssets().getItems();
+            }
+
+            if (assetsResponse.isSuccessful() && items != null && !items.isEmpty()) {
+                for (ImmichApiAssetResponse asset : items) {
+                    if (isCompatibleAsset(asset)) {
+                        addCompatibleAsset(asset);
+                    }
+                }
+            }
+
+            page++;
+            count = items != null ? items.size() : 0;
         }
-        if (asset.getType() == ImmichType.IMAGE) {
+    }
+
+    private boolean isCompatibleAsset(@NonNull ImmichApiAssetResponse asset) {
+        ImmichExifInfo exif = asset.getExifInfo();
+        if (exif == null) {
+            return false;
+        }
+        Long fileSize = exif.getFileSizeInByte();
+        if (fileSize == null || fileSize > MAX_ASSET_BYTES) {
+            return false;
+        }
+        return !Boolean.TRUE.equals(asset.getIsTrashed());
+    }
+
+    private void addCompatibleAsset(@NonNull ImmichApiAssetResponse asset) {
+        if (asset.getType() == ImmichType.VIDEO || asset.getType() == ImmichType.IMAGE) {
             immichAssets.add(asset);
         }
     }
@@ -341,7 +345,7 @@ public class MediaManager implements MediaManagerInterface {
                         }
 
                         if (incompatibleTagId == null) {
-                            Response<ImmichApiTagResponse> createTag = apiService.createTag(new ImmichApiTag(INCOMPATIBLE_TAG_NAME, ImmichTagType.CUSTOM)).execute();
+                            Response<ImmichApiTagResponse> createTag = apiService.createTag(new ImmichApiTag(INCOMPATIBLE_TAG_NAME)).execute();
 
                             if (createTag.isSuccessful() && createTag.body() != null) {
                                 incompatibleTagId = createTag.body().getId();
