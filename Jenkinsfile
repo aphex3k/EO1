@@ -6,6 +6,7 @@ pipeline {
         // Even console ports 5554..5584 (16 slots). ADB's usable adb-port range is ~5555-5586.
         EMULATOR_PORT = "${5554 + 2 * (Math.abs(Integer.parseInt(env.BUILD_NUMBER) % 16))}"
         EMULATOR_NAME = "EO1-${EMULATOR_PORT}"
+        SONAR_TOKEN = credentials('sonar_token_gitea_eo1')
         ANDROID_HOME = '/var/android-sdk'
         PATH = "${ANDROID_HOME}/tools:${ANDROID_HOME}/tools/bin:${ANDROID_HOME}/platform-tools:${PATH}"
         JAVA_OPTS = "-Dorg.gradle.daemon=false"
@@ -126,94 +127,116 @@ pipeline {
                 }
             }
         }
-        stage ('Emulator 📱') {
-            steps {
-                script {
-                    sh '''
-                            set -eu
-                            SERIAL="emulator-${EMULATOR_PORT}"
-                            BOOT_TIMEOUT_SEC=180
-                            EMU_LOG="emulator.log"
-                            adb start-server
-                            adb devices -l
-                            : >"${EMU_LOG}"
-                            emulator -verbose -avd "${EMULATOR_NAME}" -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port "${EMULATOR_PORT}" -no-metrics -selinux permissive -gpu auto >"${EMU_LOG}" 2>&1 &
-                            EMU_PID=$!
-                            device_online() {
-                              adb devices | grep -qE "^${SERIAL}[[:space:]]+device$"
-                            }
-                            dump_emu_log() {
-                              echo "----- emulator.log (tail) -----"
-                              tail -n 200 "${EMU_LOG}" || true
-                              echo "----- FATAL lines -----"
-                              grep -E 'FATAL|ERROR|crash' "${EMU_LOG}" || true
-                            }
-                            echo "Waiting for ${SERIAL} (timeout ${BOOT_TIMEOUT_SEC}s)..."
-                            i=0
-                            dead_streak=0
-                            while [ "${i}" -lt "${BOOT_TIMEOUT_SEC}" ]; do
-                              if device_online; then
-                                break
-                              fi
-                              if kill -0 "${EMU_PID}" 2>/dev/null; then
+        stage ('Post Build') {
+            parallel {
+                stage ('Emulator 📱') {
+                    steps {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            script {
+                                sh '''
+                                set -eu
+                                SERIAL="emulator-${EMULATOR_PORT}"
+                                BOOT_TIMEOUT_SEC=180
+                                EMU_LOG="emulator.log"
+                                adb start-server
+                                adb devices -l
+                                : >"${EMU_LOG}"
+                                # API 19 + emulator 36: host GPU paths (lavapipe/swiftshader) crash after adb connect; guest is the compatible renderer.
+                                emulator -verbose -avd "${EMULATOR_NAME}" -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port "${EMULATOR_PORT}" -no-metrics -selinux permissive -gpu guest >"${EMU_LOG}" 2>&1 &
+                                EMU_PID=$!
+                                device_online() {
+                                  adb devices | grep -qE "^${SERIAL}[[:space:]]+device$"
+                                }
+                                dump_emu_log() {
+                                  echo "----- emulator.log (tail) -----"
+                                  tail -n 200 "${EMU_LOG}" || true
+                                  echo "----- FATAL lines -----"
+                                  grep -E 'FATAL|ERROR|crash' "${EMU_LOG}" || true
+                                }
+                                echo "Waiting for ${SERIAL} (timeout ${BOOT_TIMEOUT_SEC}s)..."
+                                i=0
                                 dead_streak=0
-                              else
-                                dead_streak=$((dead_streak + 1))
-                                if [ "${dead_streak}" -ge 5 ]; then
-                                  echo "Emulator process exited early; log:"
+                                while [ "${i}" -lt "${BOOT_TIMEOUT_SEC}" ]; do
+                                  if device_online; then
+                                    break
+                                  fi
+                                  if kill -0 "${EMU_PID}" 2>/dev/null; then
+                                    dead_streak=0
+                                  else
+                                    dead_streak=$((dead_streak + 1))
+                                    if [ "${dead_streak}" -ge 5 ]; then
+                                      echo "Emulator process exited early; log:"
+                                      dump_emu_log
+                                      exit 1
+                                    fi
+                                  fi
+                                  i=$((i + 1))
+                                  sleep 1
+                                done
+                                if ! device_online; then
+                                  echo "Emulator ${SERIAL} did not appear within ${BOOT_TIMEOUT_SEC}s; log:"
                                   dump_emu_log
                                   exit 1
                                 fi
-                              fi
-                              i=$((i + 1))
-                              sleep 1
-                            done
-                            if ! device_online; then
-                              echo "Emulator ${SERIAL} did not appear within ${BOOT_TIMEOUT_SEC}s; log:"
-                              dump_emu_log
-                              exit 1
-                            fi
-                            echo "Waiting for boot completed on ${SERIAL}..."
-                            dead_streak=0
-                            while [ "${i}" -lt "${BOOT_TIMEOUT_SEC}" ]; do
-                              if device_online; then
+                                # Give adbd a moment before first shell; flapping here previously preceded qemu exit.
+                                sleep 5
+                                echo "Waiting for boot completed on ${SERIAL}..."
                                 dead_streak=0
+                                while [ "${i}" -lt "${BOOT_TIMEOUT_SEC}" ]; do
+                                  if device_online; then
+                                    dead_streak=0
+                                    boot="$(adb -s "${SERIAL}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+                                    if [ "${boot}" = "1" ]; then
+                                      break
+                                    fi
+                                  elif kill -0 "${EMU_PID}" 2>/dev/null; then
+                                    dead_streak=0
+                                    echo "adb: ${SERIAL} not in device state yet; still waiting..."
+                                  else
+                                    dead_streak=$((dead_streak + 1))
+                                    if [ "${dead_streak}" -ge 5 ]; then
+                                      echo "Emulator disappeared during boot; log:"
+                                      dump_emu_log
+                                      adb devices -l || true
+                                      exit 1
+                                    fi
+                                  fi
+                                  i=$((i + 1))
+                                  sleep 1
+                                done
                                 boot="$(adb -s "${SERIAL}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
-                                if [ "${boot}" = "1" ]; then
-                                  break
-                                fi
-                              elif kill -0 "${EMU_PID}" 2>/dev/null; then
-                                dead_streak=0
-                                echo "adb: ${SERIAL} not in device state yet; still waiting..."
-                              else
-                                dead_streak=$((dead_streak + 1))
-                                if [ "${dead_streak}" -ge 5 ]; then
-                                  echo "Emulator disappeared during boot; log:"
+                                if [ "${boot}" != "1" ]; then
+                                  echo "Emulator ${SERIAL} did not finish booting within ${BOOT_TIMEOUT_SEC}s; log:"
                                   dump_emu_log
                                   adb devices -l || true
                                   exit 1
                                 fi
-                              fi
-                              i=$((i + 1))
-                              sleep 1
-                            done
-                            boot="$(adb -s "${SERIAL}" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
-                            if [ "${boot}" != "1" ]; then
-                              echo "Emulator ${SERIAL} did not finish booting within ${BOOT_TIMEOUT_SEC}s; log:"
-                              dump_emu_log
-                              adb devices -l || true
-                              exit 1
-                            fi
-                            adb -s "${SERIAL}" shell wm size 1080x1920
-                            adb -s "${SERIAL}" shell screencap -p /data/data/screenshot_00_before_app_start.png && adb -s "${SERIAL}" pull /data/data/screenshot_00_before_app_start.png
-                            adb -s "${SERIAL}" install app/build/outputs/apk/release/app-release.apk
-                            adb -s "${SERIAL}" shell am start -n com.aphex3k.eo1/com.aphex3k.eo1.MainActivity
-                            sleep 30
-                            adb -s "${SERIAL}" shell screencap -p /data/data/screenshot_01_app_start.png && adb -s "${SERIAL}" pull /data/data/screenshot_01_app_start.png
-                            compare -metric AE -fuzz 1 .jenkins/reference/screenshot_01_app_start.png screenshot_01_app_start.png screenshot_01_app_start_difference.png || compare -metric AE -fuzz 1 .jenkins/reference/screenshot_01_app_start_b.png screenshot_01_app_start.png screenshot_01_app_start_difference.png
-                            adb -s "${SERIAL}" shell monkey -p com.aphex3k.eo1 -v 500 && sleep 5
-                            adb -s "${SERIAL}" shell screencap -p /data/data/screenshot_02_post_monkey.png && adb -s "${SERIAL}" pull /data/data/screenshot_02_post_monkey.png
-                            '''
+                                adb -s "${SERIAL}" shell wm size 1080x1920
+                                adb -s "${SERIAL}" shell screencap -p /data/data/screenshot_00_before_app_start.png && adb -s "${SERIAL}" pull /data/data/screenshot_00_before_app_start.png
+                                adb -s "${SERIAL}" install app/build/outputs/apk/release/app-release.apk
+                                adb -s "${SERIAL}" shell am start -n com.aphex3k.eo1/com.aphex3k.eo1.MainActivity
+                                sleep 30
+                                adb -s "${SERIAL}" shell screencap -p /data/data/screenshot_01_app_start.png && adb -s "${SERIAL}" pull /data/data/screenshot_01_app_start.png
+                                compare -metric AE -fuzz 1 .jenkins/reference/screenshot_01_app_start.png screenshot_01_app_start.png screenshot_01_app_start_difference.png || compare -metric AE -fuzz 1 .jenkins/reference/screenshot_01_app_start_b.png screenshot_01_app_start.png screenshot_01_app_start_difference.png
+                                adb -s "${SERIAL}" shell monkey -p com.aphex3k.eo1 -v 500 && sleep 5
+                                adb -s "${SERIAL}" shell screencap -p /data/data/screenshot_02_post_monkey.png && adb -s "${SERIAL}" pull /data/data/screenshot_02_post_monkey.png
+                                '''
+                            }
+                        }
+                    }
+                }
+                stage ('Scanning') {
+                    steps {
+                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
+                            script {
+                                if (env.CHANGE_ID) {
+                                    sh "./gradlew --no-daemon sonar -Dsonar.pullrequest.base=${CHANGE_TARGET} -Dsonar.pullrequest.branch=${CHANGE_BRANCH} -Dsonar.pullrequest.key=${CHANGE_ID}"
+                                } else {
+                                    sh "./gradlew --no-daemon sonar -Dsonar.branch.name=${BRANCH_NAME}"
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
