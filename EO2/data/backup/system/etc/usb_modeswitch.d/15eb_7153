@@ -1,0 +1,13 @@
+#Tenda EVDO
+#
+
+DefaultVendor=  0x15eb
+DefaultProduct=0x7153
+
+TargetVendor=  0x15eb
+TargetProduct=0x0001
+
+MessageContent="55534243B80E418A0600000080000611060000000000000000000000000000"
+NeedResponse=1
+EvdoMode=1
+

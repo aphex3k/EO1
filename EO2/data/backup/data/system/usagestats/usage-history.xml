@@ -1,0 +1,12 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<usage-history>
+    <pkg name="com.electricobjects.updater">
+        <comp name="com.electricobjects.updater.UpdateActivity" lrt="1517168783774" />
+    </pkg>
+    <pkg name="com.electricobjects.app">
+        <comp name="com.electricobjects.app.artwork.activities.VideoArtActivity" lrt="1561582564905" />
+        <comp name="com.electricobjects.app.artwork.activities.StaticArtActivity" lrt="1557614056326" />
+        <comp name="com.electricobjects.app.MainActivity" lrt="86406641" />
+        <comp name="com.electricobjects.app.artwork.activities.WebArtActivity" lrt="1491081846244" />
+    </pkg>
+</usage-history>

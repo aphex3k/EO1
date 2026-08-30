@@ -1,0 +1,7 @@
+Build: MBX/stvm8b/stvm8b:4.4.2/V002M8B01_20160907/20160907:eng/test-keys
+Hardware: stvm8b
+Revision: 10
+Bootloader: unknown
+Radio: unknown
+Kernel: Linux version 3.10.33 (luoj@ubt124) (gcc version 4.7.3 20130205 (prerelease) (crosstool-NG linaro-1.13.1-4.7-2013.02-01-20130221 - Linaro GCC 2013.02) ) b762d34(20161018.110539)
+

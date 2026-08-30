@@ -15,3 +15,8 @@ passwords.txt
 ..bfg-report/
 .vscode
 /app/.idea
+EO2/**/dalvik-cache/
+EO2/data/backup/sys/
+EO2/data/backup/proc/
+ffmpeg/
+configuration.json

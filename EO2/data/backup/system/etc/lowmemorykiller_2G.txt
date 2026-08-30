@@ -1,0 +1,5 @@
+#foreground visible perceptible backup hidded_min hidden_max
+
+#adj:0,1,2,4,9,15
+
+#minfree:8192,12288,16384,24576,28672,32768

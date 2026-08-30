@@ -1,0 +1,233 @@
+on early-init
+    write /sys/class/boot_monitor/boot_timer 1
+    insmod /boot/aml_nftl_dev.ko
+    insmod /boot/otz_client.ko
+
+on init
+
+on aml-firstboot-init
+    #show first init logo
+    #display_logo /firstinitlogo.rle
+
+    #format data and cache patrition if not exist
+    confirm_formated ext4 /dev/block/data /data
+    confirm_formated ext4 /dev/block/cache /cache
+
+on fs
+    setprop ro.crypto.umount_sd false
+    mount ext4 /dev/block/system /system wait ro noatime nodiratime noauto_da_alloc
+    e2fsck -y /dev/block/data
+    mount ext4 /dev/block/data /data noatime nodiratime norelatime nosuid nodev noauto_da_alloc
+    e2fsck -y /dev/block/cache
+    mount ext4 /dev/block/cache /cache noatime nodiratime norelatime nosuid nodev noauto_da_alloc
+    write /sys/class/aml_keys/aml_keys/version auto3
+
+on post-fs-data
+
+on boot
+    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 1536000
+    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq 96000
+    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor hotplug
+    write /sys/class/freq_limit/limit 0
+#write /sys/devices/system/cpu/cpufreq/interactive/hispeed_freq 816000
+    #write /sys/devices/system/cpu/cpufreq/ondemand/freq_step 8
+    #write /sys/devices/system/cpu/cpufreq/ondemand/sampling_rate 100000
+    #write /sys/devices/system/cpu/cpufreq/ondemand/up_threshold 80
+    #write /sys/devices/system/cpu/cpufreq/ondemand/down_threshold 50
+    write /sys/devices/system/cpu/cpu0/cpufreq/scaling_dflt_freq 1536000
+
+    write /sys/class/vfm/map "rm default"
+    write /sys/class/vfm/map "add default decoder ppmgr deinterlace amvideo"
+    #write /sys/class/vfm/map "add default decoder ppmgr amvideo"
+
+    chmod 0666 /dev/otz_client
+    write /proc/sys/vm/mem_management_thresh 2048
+    write /sys/class/tv/policy_fr_auto 0
+    
+#HDMI IN
+    chmod 666 /sys/class/sii9233a/port
+    chmod 666 /sys/class/sii9233a/enable
+    chmod 666 /sys/module/tvin_vdin/parameters/max_buf_num
+    chown system system /sys/module/amvideo/parameters/hdmi_in_onvideo
+    chmod 664 /sys/module/amvideo/parameters/hdmi_in_onvideo
+    chown media system /sys/class/amaudio2/aml_amaudio2_enable
+    chmod 666 /sys/class/amaudio2/aml_amaudio2_enable
+    
+#Enable irblaster add by Rony    
+    chmod 666 /dev/irblaster0
+    
+#add for led brightness
+	chown system system /sys/class/lcd_lt8668/lcd_lt8668/brightness
+	chown system system /sys/class/lcd_lt8668/lcd_lt8668/enable
+    chmod 0666 /sys/class/lcd_lt8668/lcd_lt8668/brightness
+    chmod 0666 /sys/class/lcd_lt8668/lcd_lt8668/enable
+	chown system system /sys/class/aml_keys/aml_keys/key_name
+	chown system system /sys/class/aml_keys/aml_keys/key_read
+	chown system system /sys/class/aml_keys/aml_keys/key_write
+    chmod 0666 /sys/class/aml_keys/aml_keys/key_name
+    chmod 0444 /sys/class/aml_keys/aml_keys/key_read
+    chmod 0222 /sys/class/aml_keys/aml_keys/key_write
+    
+#add for mali scaling mode set
+    chown system /sys/module/mali/parameters/scaling_mode
+
+on property:svc.bootanim=running
+    setprop ro.config.low_ram false
+    write /sys/class/graphics/fb1/free_scale 0
+    write sys/class/graphics/fb0/free_scale 0x10001
+    write /sys/class/graphics/fb0/blank 0
+    write /sys/class/graphics/fb1/blank 1
+    write /sys/class/graphics/fb2/blank 1
+    write /sys/class/graphics/fb3/blank 1
+
+on property:init.svc.bootanim=stopped
+    start preinstall
+#    write /sys/class/aml_mod/mod_off audio
+    write /sys/class/aml_mod/mod_off mipi
+#    write /sys/class/aml_mod/mod_off spi
+#    write /sys/class/aml_mod/mod_off uart0
+#    write /sys/class/aml_mod/mod_off uart1
+#    write /sys/class/aml_mod/mod_off uart2
+    write /sys/class/aml_mod/mod_off uart3
+#    write /sys/class/aml_mod/mod_off venc
+#   write /sys/class/aml_mod/mod_off hdmi
+    write /sys/class/aml_mod/mod_off bt656
+    write /sys/class/aml_mod/mod_off vdec
+#    write /sys/class/aml_mod/mod_off rom
+#    write /sys/class/aml_mod/mod_off efuse
+    write /sys/class/aml_mod/mod_off random_num_gen
+    write /sys/class/aml_mod/mod_off tcon
+#    write /sys/class/aml_mod/mod_off ethernet
+#    write /sys/class/aml_mod/mod_off media_cpu
+   write /sys/class/aml_mod/mod_off viu2
+#    write /sys/class/aml_mod/mod_off smart_card
+    write /sys/class/aml_mod/mod_off sdhc
+    write /sys/class/aml_mod/mod_off stream
+    write /sys/class/aml_mod/mod_off blk_mov
+    write /sys/class/aml_mod/mod_off dvin
+#    write /sys/class/aml_mod/mod_off rdma
+    write /sys/class/aml_mod/mod_off ge2d
+#    write /sys/class/aml_mod/mod_off vdin
+    write /sys/class/aml_mod/mod_off lvds
+
+  # write /sys/class/aml_mod/dynamical_control audio
+    write /sys/class/aml_mod/dynamical_control vdec
+    write /sys/class/aml_mod/dynamical_control bt656
+    #write /sys/class/aml_mod/dynamical_control venc
+    #write /sys/class/aml_mod/dynamical_control media_cpu
+    write /sys/class/aml_mod/dynamical_control ge2d
+   #write /sys/class/aml_mod/dynamical_control vdin
+
+    write /sys/class/boot_monitor/boot_timer 0
+    write /sys/module/di/parameters/bypass_dynamic 0
+    write /sys/module/di/parameters/bypass_hd_prog 0
+    write /sys/module/tvin_vdin/parameters/max_buf_num 6
+    
+    #write /sys/kernel/mm/ksm/pages_to_scan 100
+    #write /sys/kernel/mm/ksm/sleep_millisecs 500
+    #write /sys/kernel/mm/ksm/run 1
+
+    write /sys/class/video/disable_video 2 
+    start checkboardtype
+    
+on property:hw.boardtype.dongle=true
+	write /sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq 1200000
+	write /sys/class/aml_mod/mod_off uart1
+	write /sys/class/aml_mod/mod_off uart2
+	write /sys/class/aml_mod/mod_off venc
+	write /sys/class/aml_mod/mod_off rom
+	write /sys/class/aml_mod/mod_off ethernet
+	write /sys/class/aml_mod/mod_off smart_card
+	write /sys/class/aml_mod/mod_off vdin
+	write /sys/class/aml_mod/dynamical_control venc
+	
+on property:hw.ddr.size=512
+	setprop ro.config.low_ram true
+	setprop const.window.w 1280
+	setprop const.window.h 720
+	setprop ro.platform.has.native720 true
+	setprop ro.platform.best_outputmode 720p	
+
+service low_mem /system/bin/lowmem_manage.sh
+    class main
+    oneshot
+ 
+service wpa_supplicant /system/bin/wpa_supplicant \
+    -iwlan0 -Dnl80211 -c/data/misc/wifi/wpa_supplicant.conf \
+    -I/system/etc/wifi/wpa_supplicant_overlay.conf \
+    -O/data/misc/wifi/sockets \
+    -e/data/misc/wifi/entropy.bin -g@android:wpa_wlan0
+    #   we will start as root and wpa_supplicant will switch to user wifi
+    #   after setting up the capabilities required for WEXT
+    #   user wifi
+    #   group wifi inet keystore
+    class main
+    socket wpa_wlan0 dgram 660 wifi wifi
+    disabled
+    oneshot
+
+# Rony modify for AP6XXX and wl-211 and wl212
+service p2p_supplicant /system/bin/wpa_supplicant \
+    -iwlan0 -Dnl80211 -c/data/misc/wifi/wpa_supplicant.conf \
+    -O/data/misc/wifi/sockets \
+    -g@android:wpa_wlan0	\
+    -puse_p2p_group_interface=1p2p_device=1 -e/data/misc/wifi/entropy.bin
+#   we will start as root and wpa_supplicant will switch to user wifi
+#   after setting up the capabilities required for WEXT
+#   user wifi
+#   group wifi inet keystore
+    class main
+    socket wpa_wlan0 dgram 660 wifi wifi
+    disabled
+    oneshot
+   
+# Rony add for usb wifi    
+service p2p_usb_supp /system/bin/wpa_supplicant_realtek \
+    -ip2p0 -Dnl80211 -c /data/misc/wifi/p2p_supplicant.conf \
+    -I/system/etc/wifi/p2p_supplicant_overlay.conf \
+    -O/data/misc/wifi/sockets \
+    -e/data/misc/wifi/entropy.bin -g@android:wpa_wlan0 \
+    -N -puse_p2p_group_interface=1 \
+    -iwlan0 -Dnl80211 -c/data/misc/wifi/wpa_supplicant.conf
+#   we will start as root and wpa_supplicant will switch to user wifi
+#   after setting up the capabilities required for WEXT
+#   user wifi
+#   group wifi inet keystore
+    class main
+    socket wpa_wlan0 dgram 660 wifi wifi
+    disabled
+    oneshot
+   
+# Rony add for usb wifi    
+service p2p_ath_supp /system/bin/wpa_supplicant_ath \
+    -ip2p0 -Dnl80211 -c/data/misc/wifi/p2p_supplicant.conf \
+	-e/data/misc/wifi/entropy.bin -N \
+	-iwlan0 -Dnl80211 -c/data/misc/wifi/wpa_supplicant.conf \
+	-O/data/misc/wifi/sockets \
+	-g@android:wpa_wlan0
+#   we will start as root and wpa_supplicant will switch to user wifi
+#   after setting up the capabilities required for WEXT
+#   user wifi
+#   group wifi inet keystore
+    class main
+    socket wpa_wlan0 dgram 660 wifi wifi
+    disabled
+    oneshot
+
+#service xcmidware /system/bin/xcmid-amlogic
+#    class main
+#    user root
+#    group root system input
+
+service preinstall /system/bin/preinstall.sh
+    user root
+    group root
+    disabled
+    oneshot
+
+#Rony add for dongle
+service checkboardtype /system/bin/check_board_type.sh
+    user root
+    group root
+    disabled
+    oneshot

@@ -1,0 +1,392 @@
+*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
+Build fingerprint: 'MBX/stvm8b/stvm8b:4.4.2/V002M8B01_20160907/20160907:eng/test-keys'
+Revision: '10'
+pid: 2512, tid: 2512, name: tar  >>> tar <<<
+signal 6 (SIGABRT), code -6 (SI_TKILL), fault addr --------
+Abort message: 'FORTIFY_SOURCE: vsprintf buffer overflow. Calling abort().'
+    r0 00000000  r1 000009d0  r2 00000006  r3 00000000
+    r4 00000006  r5 00000000  r6 000009d0  r7 0000010c
+    r8 bec70c13  r9 b7001b78  sl bec70c13  fp bec7069c
+    ip bec70700  sp bec705a8  lr b6f28201  pc b6f371d4  cpsr 00000010
+    d0  6e696c6c6143202e  d1  2874726f62612067
+    d2  0000000000000000  d3  0000000000000000
+    d4  0000000000000000  d5  0000000000000000
+    d6  0000000000000000  d7  c380d40000000000
+    d8  0000000000000000  d9  0000000000000000
+    d10 0000000000000000  d11 0000000000000000
+    d12 0000000000000000  d13 0000000000000000
+    d14 0000000000000000  d15 0000000000000000
+    d16 0000000000000007  d17 3f50624dd2f1a9fc
+    d18 4177946080000000  d19 0000000000000000
+    d20 0000000000000000  d21 0000000000000000
+    d22 0000000000000000  d23 0000000000000000
+    d24 0000000000000000  d25 0000000000000000
+    d26 0000000000000000  d27 0000000000000000
+    d28 0000000000000000  d29 0000000000000000
+    d30 0000000000000000  d31 0000000000000000
+    scr 00000010
+
+backtrace:
+    #00  pc 000241d4  /system/lib/libc.so (tgkill+12)
+    #01  pc 000151fd  /system/lib/libc.so (pthread_kill+48)
+    #02  pc 00015411  /system/lib/libc.so (raise+10)
+    #03  pc 00014147  /system/lib/libc.so
+    #04  pc 00023b04  /system/lib/libc.so (abort+4)
+    #05  pc 00014c2d  /system/lib/libc.so
+    #06  pc 00014c43  /system/lib/libc.so
+    #07  pc 00024f29  /system/lib/libc.so (__vsprintf_chk+24)
+    #08  pc 00024f45  /system/lib/libc.so (__sprintf_chk+16)
+    #09  pc 0000a119  /system/xbin/busybox
+    #10  pc 0000a429  /system/xbin/busybox
+    #11  pc 0000a7a3  /system/xbin/busybox
+    #12  pc 0002ed9f  /system/xbin/busybox
+    #13  pc 0000a35d  /system/xbin/busybox
+    #14  pc 0000aa25  /system/xbin/busybox
+    #15  pc 00027371  /system/xbin/busybox
+    #16  pc 000273af  /system/xbin/busybox
+    #17  pc 0002755b  /system/xbin/busybox
+    #18  pc 0000e9e8  /system/lib/libc.so (__libc_init+100)
+    #19  pc 000058e0  /system/xbin/busybox
+
+stack:
+         bec70568  00000000  
+         bec7056c  000000fc  
+         bec70570  b6ff5023  /system/xbin/busybox
+         bec70574  00000000  
+         bec70578  00000000  
+         bec7057c  000000fd  
+         bec70580  b6ff5039  /system/xbin/busybox
+         bec70584  36163b48  
+         bec70588  00000000  
+         bec7058c  00000000  
+         bec70590  00000000  
+         bec70594  00000000  
+         bec70598  00000000  
+         bec7059c  0000000c  
+         bec705a0  bec70664  [stack]
+         bec705a4  b6f63384  
+    #00  bec705a8  00000006  
+         bec705ac  00000000  
+         bec705b0  000009d0  
+         bec705b4  bec70700  [stack]
+         bec705b8  bec70700  [stack]
+         bec705bc  b6f28201  /system/lib/libc.so (pthread_kill+52)
+    #01  bec705c0  00000006  
+         bec705c4  00000000  
+         bec705c8  b6f63384  
+         bec705cc  b6f28415  /system/lib/libc.so (raise+14)
+    #02  bec705d0  bec705dc  [stack]
+         bec705d4  b6f2714b  /system/lib/libc.so
+    #03  bec705d8  00000203  
+         bec705dc  ffffffdf  
+         bec705e0  ffff0208  [vectors]
+         bec705e4  bec70664  [stack]
+         bec705e8  0000000c  
+         bec705ec  00000074  
+         bec705f0  00000000  
+         bec705f4  b6f570d3  /system/lib/libc.so
+         bec705f8  bec70664  [stack]
+         bec705fc  b6f36b08  /system/lib/libc.so (__pthread_clone)
+    #04  bec70600  36163b48  
+         bec70604  b6f27c31  /system/lib/libc.so
+    #05  bec70608  b6f54cb8  /system/lib/libc.so
+         bec7060c  bec7061c  [stack]
+         bec70610  00000000  
+         bec70614  b6f27c47  /system/lib/libc.so
+         bec70618  b6f54cb8  /system/lib/libc.so
+         bec7061c  b6f570d3  /system/lib/libc.so
+         bec70620  00000000  
+         bec70624  bec70670  [stack]
+    #06  bec70628  0000000d  
+         bec7062c  b6f37f2d  /system/lib/libc.so (__vsprintf_chk+28)
+    #07  bec70630  bec70658  [stack]
+         bec70634  b6f37f49  /system/lib/libc.so (__sprintf_chk+20)
+    #08  bec70638  bec70658  [stack]
+         bec7063c  00000000  
+         bec70640  00000000  
+         bec70644  bec70658  [stack]
+         bec70648  00000000  
+         bec7064c  00000008  
+         bec70650  b6f9111d  /system/xbin/busybox
+         bec70654  b6fea9eb  /system/xbin/busybox
+    #09  bec70658  00000008  
+         bec7065c  000001ed  
+         bec70660  00000000  
+         bec70664  33373331  
+         bec70668  32303730  
+         bec7066c  30363534  
+         bec70670  00000000  
+         bec70674  36163b48  
+         bec70678  00000000  
+         bec7067c  b6f63384  
+         bec70680  1ed00000  
+         bec70684  bec70900  [stack]
+         bec70688  bec709a0  [stack]
+         bec7068c  b6f9142d  /system/xbin/busybox
+    #10  bec70690  00000000  
+         bec70694  00000020  
+         bec70698  00000000  
+         bec7069c  0000002e  
+         bec706a0  00000000  
+         bec706a4  00000000  
+         bec706a8  00000000  
+         bec706ac  00000000  
+         bec706b0  00000000  
+         bec706b4  00000000  
+         bec706b8  00000000  
+         bec706bc  00000000  
+         bec706c0  00000000  
+         bec706c4  00000000  
+         bec706c8  00000000  
+         bec706cc  00000000  
+         ........  ........
+    #11  bec708c8  00000000  
+         bec708cc  bec70c13  [stack]
+         bec708d0  00004000  
+         bec708d4  00000001  
+         bec708d8  00000000  
+         bec708dc  b6f9165d  /system/xbin/busybox
+         bec708e0  bec709a0  [stack]
+         bec708e4  b6fb5da1  /system/xbin/busybox
+    #12  bec708e8  00000000  
+         bec708ec  00000000  
+         bec708f0  00000000  
+         bec708f4  00000000  
+         bec708f8  00000000  
+         bec708fc  00000000  
+         bec70900  00000001  
+         bec70904  00000000  
+         bec70908  00000000  
+         bec7090c  00000001  
+         bec70910  000041ed  
+         bec70914  00000011  
+         bec70918  000003eb  
+         bec7091c  00000073  
+         bec70920  00000000  
+         bec70924  00000000  
+         ........  ........
+    #13  bec70990  bec709a0  [stack]
+         bec70994  00000000  
+         bec70998  00000000  
+         bec7099c  00000000  
+         bec709a0  00000001  
+         bec709a4  00000000  
+         bec709a8  00000000  
+         bec709ac  00000000  
+         bec709b0  00000000  
+         bec709b4  00000003  
+         bec709b8  0000000a  
+         bec709bc  00000000  
+         bec709c0  00000000  
+         bec709c4  00000003  
+         bec709c8  00002180  
+         bec709cc  00000001  
+         ........  ........
+    #14  bec70a40  00000000  
+         bec70a44  00000001  
+         bec70a48  b71a3058  [heap]
+         bec70a4c  bec70a64  [stack]
+         bec70a50  bec70a60  [stack]
+         bec70a54  bec70a60  [stack]
+         bec70a58  00000000  
+         bec70a5c  bec70c11  [stack]
+         bec70a60  00000000  
+         bec70a64  00000000  
+         bec70a68  00000004  
+         bec70a6c  bec70b04  [stack]
+         bec70a70  b6f91805  /system/xbin/busybox
+         bec70a74  b70015d8  /system/xbin/busybox
+         bec70a78  b7002098  /system/xbin/busybox
+         bec70a7c  b6fae373  /system/xbin/busybox
+    #15  bec70a80  bec70b04  [stack]
+         bec70a84  bec70c08  [stack]
+         bec70a88  bec70b18  [stack]
+         bec70a8c  b6fae525  /system/xbin/busybox
+         bec70a90  00000000  
+         bec70a94  b6fae3b3  /system/xbin/busybox
+    #16  bec70a98  bec70c08  [stack]
+         bec70a9c  bec70b04  [stack]
+         bec70aa0  b700291c  /system/xbin/busybox
+         bec70aa4  bec70b04  [stack]
+         bec70aa8  bec70b18  [stack]
+         bec70aac  b6fae525  /system/xbin/busybox
+         bec70ab0  00000000  
+         bec70ab4  00000000  
+         bec70ab8  00000000  
+         bec70abc  b6fae55f  /system/xbin/busybox
+    #17  bec70ac0  00000000  
+         bec70ac4  bec70b04  [stack]
+         bec70ac8  00000004  
+         bec70acc  b6f219ec  /system/lib/libc.so (__libc_init+104)
+    #18  bec70ad0  bec70ae8  [stack]
+         bec70ad4  00000000  
+         bec70ad8  00000000  
+         bec70adc  00000000  
+         bec70ae0  00000000  
+         bec70ae4  b6f8c8e4  /system/xbin/busybox
+    #19  bec70ae8  b70015c0  /system/xbin/busybox
+         bec70aec  b70015c8  /system/xbin/busybox
+         bec70af0  b70015d0  /system/xbin/busybox
+         bec70af4  bec70b00  [stack]
+         bec70af8  00000000  
+         bec70afc  b6f76921  /system/bin/linker
+         bec70b00  00000004  
+         bec70b04  bec70c08  [stack]
+         bec70b08  bec70c0c  [stack]
+         bec70b0c  bec70c11  [stack]
+         bec70b10  bec70c13  [stack]
+         bec70b14  00000000  
+         bec70b18  bec70c15  [stack]
+         bec70b1c  bec70c28  [stack]
+         bec70b20  bec70c54  [stack]
+         bec70b24  bec70c7c  [stack]
+
+memory near r8:
+    bec70bf0 00000000 36163b48 916ea72d e15f1c8b  
+    bec70c00 bea8f14f 006c3776 00726174 667a632d  
+    bec70c10 2e002d00 2f3d5f00 74737973 782f6d65  
+    bec70c20 2f6e6962 00726174 4c554d45 44455441  
+    bec70c30 4f54535f 45474152 554f535f 3d454352  
+    bec70c40 746e6d2f 6568732f 652f6c6c 616c756d  
+    bec70c50 00646574 4c5f444c 41524249 505f5952  
+    bec70c60 3d485441 6e65762f 2f726f64 3a62696c  
+    bec70c70 7379732f 2f6d6574 0062696c 544f4f42  
+    bec70c80 53414c43 54415053 732f3d48 65747379  
+    bec70c90 72662f6d 77656d61 2f6b726f 65726f63  
+    bec70ca0 72616a2e 79732f3a 6d657473 6172662f  
+    bec70cb0 6f77656d 632f6b72 63736e6f 74707972  
+    bec70cc0 72616a2e 79732f3a 6d657473 6172662f  
+    bec70cd0 6f77656d 6f2f6b72 7474686b 616a2e70  
+    bec70ce0 732f3a72 65747379 72662f6d 77656d61  
+
+memory near r9:
+    b7001b58 b6f5f2dc b700290c b6fe6b17 b6fe6ac1  
+    b7001b68 b6fe7369 b6fe6b1b b6fe73d5 b70028fc  
+    b7001b78 00000000 00000000 00000000 b6f21984  
+    b7001b88 b6f3d375 b6f4ec95 b6f37500 b6f35bac  
+    b7001b98 b6f41815 b6f3622c b6f377f5 b6f20dac  
+    b7001ba8 b6f35cf4 b6f4f0a0 b6f27111 b6f4f0c0  
+    b7001bb8 b6f37394 b6f29665 b6f35d14 b6f37211  
+    b7001bc8 b6f37700 b6f3ac1d b6f355a8 b6f35d34  
+    b7001bd8 b6f3a1fd b6f35cd4 b6f37f5c b6f37df5  
+    b7001be8 b6f36e30 b6f296b1 b6f37f35 b6f37368  
+    b7001bf8 b6f42c6b b6f40945 b6f392e5 b6f34f74  
+    b7001c08 b6f4ec6d b6f3966d b6f35084 b6f37f53  
+    b7001c18 b6f3d78b b6f27e3d b6f41961 b6f2afb1  
+    b7001c28 b6f42415 b6f2a2ad b6f4eff8 b6f299d1  
+    b7001c38 b6f35b8c b6f35e18 b6f35c0c b6f28b5d  
+    b7001c48 b6f28d21 b6f35c4c b6f35c2c b6f38fad  
+
+memory near sl:
+    bec70bf0 00000000 36163b48 916ea72d e15f1c8b  
+    bec70c00 bea8f14f 006c3776 00726174 667a632d  
+    bec70c10 2e002d00 2f3d5f00 74737973 782f6d65  
+    bec70c20 2f6e6962 00726174 4c554d45 44455441  
+    bec70c30 4f54535f 45474152 554f535f 3d454352  
+    bec70c40 746e6d2f 6568732f 652f6c6c 616c756d  
+    bec70c50 00646574 4c5f444c 41524249 505f5952  
+    bec70c60 3d485441 6e65762f 2f726f64 3a62696c  
+    bec70c70 7379732f 2f6d6574 0062696c 544f4f42  
+    bec70c80 53414c43 54415053 732f3d48 65747379  
+    bec70c90 72662f6d 77656d61 2f6b726f 65726f63  
+    bec70ca0 72616a2e 79732f3a 6d657473 6172662f  
+    bec70cb0 6f77656d 632f6b72 63736e6f 74707972  
+    bec70cc0 72616a2e 79732f3a 6d657473 6172662f  
+    bec70cd0 6f77656d 6f2f6b72 7474686b 616a2e70  
+    bec70ce0 732f3a72 65747379 72662f6d 77656d61  
+
+memory near fp:
+    bec7067c b6f63384 1ed00000 bec70900 bec709a0  
+    bec7068c b6f9142d 00000000 00000020 00000000  
+    bec7069c 0000002e 00000000 00000000 00000000  
+    bec706ac 00000000 00000000 00000000 00000000  
+    bec706bc 00000000 00000000 00000000 00000000  
+    bec706cc 00000000 00000000 00000000 00000000  
+    bec706dc 00000000 00000000 00000000 00000000  
+    bec706ec 00000000 00000000 00000000 00000000  
+    bec706fc 00000000 00000000 00000000 00000000  
+    bec7070c 00000000 00000000 00000000 00000000  
+    bec7071c 00000000 00000000 00000000 00000000  
+    bec7072c 00000000 00000000 00000000 00000000  
+    bec7073c 00000000 00000000 00000000 00000000  
+    bec7074c 00000000 00000000 00000000 00000000  
+    bec7075c 00000000 00000000 00000000 00000000  
+    bec7076c 00000000 00000000 00000000 00000000  
+
+memory near ip:
+    bec706e0 00000000 00000000 00000000 00000000  
+    bec706f0 00000000 00000000 00000000 00000000  
+    bec70700 00000000 00000000 00000000 00000000  
+    bec70710 00000000 00000000 00000000 00000000  
+    bec70720 00000000 00000000 00000000 00000000  
+    bec70730 00000000 00000000 00000000 00000000  
+    bec70740 00000000 00000000 00000000 00000000  
+    bec70750 00000000 00000000 00000000 00000000  
+    bec70760 00000000 00000000 00000000 00000000  
+    bec70770 00000000 00000000 00000000 00000000  
+    bec70780 00000000 00000000 00000000 00000000  
+    bec70790 00000000 00000000 00000000 00000000  
+    bec707a0 00000000 00000000 00000000 00000000  
+    bec707b0 00000000 00000000 00000000 00000000  
+    bec707c0 00000000 00000000 00000000 00000000  
+    bec707d0 00000000 00000000 00000000 00000000  
+
+memory near sp:
+    bec70588 00000000 00000000 00000000 00000000  
+    bec70598 00000000 0000000c bec70664 b6f63384  
+    bec705a8 00000006 00000000 000009d0 bec70700  
+    bec705b8 bec70700 b6f28201 00000006 00000000  
+    bec705c8 b6f63384 b6f28415 bec705dc b6f2714b  
+    bec705d8 00000203 ffffffdf ffff0208 bec70664  
+    bec705e8 0000000c 00000074 00000000 b6f570d3  
+    bec705f8 bec70664 b6f36b08 36163b48 b6f27c31  
+    bec70608 b6f54cb8 bec7061c 00000000 b6f27c47  
+    bec70618 b6f54cb8 b6f570d3 00000000 bec70670  
+    bec70628 0000000d b6f37f2d bec70658 b6f37f49  
+    bec70638 bec70658 00000000 00000000 bec70658  
+    bec70648 00000000 00000008 b6f9111d b6fea9eb  
+    bec70658 00000008 000001ed 00000000 33373331  
+    bec70668 32303730 30363534 00000000 36163b48  
+    bec70678 00000000 b6f63384 1ed00000 bec70900  
+
+code around pc:
+    b6f371b4 e8bd00f0 e3700a01 912fff1e e2600000  
+    b6f371c4 ea006c59 e92d50f0 e3a07f43 ef000000  
+    b6f371d4 e8bd50f0 e3700a01 912fff1e e2600000  
+    b6f371e4 ea006c51 e92d50f0 e3a070ee ef000000  
+    b6f371f4 e8bd50f0 e3700a01 912fff1e e2600000  
+    b6f37204 ea006c49 f200429a bf0080a1 f000f891  
+    b6f37214 4001e92d f040f891 dd5f2a00 f000f891  
+    b6f37224 ea814684 f0130300 f0400f03 f011805a  
+    b6f37234 f0000f03 f811800b 3a013b01 3b01f800  
+    b6f37244 804bf000 0f03f011 aff5f47f f2c02a44  
+    b6f37254 f0118023 f0000f04 f8518007 3a043b04  
+    b6f37264 3b04f840 8039f000 f8913a40 f2c0f020  
+    b6f37274 f8918010 f891f040 bf00f060 0b10ecb1  
+    b6f37284 f080f891 f0a0f891 eca03a40 f6bf0b10  
+    b6f37294 3240aff5 8021f000 f2c02a08 ecb18009  
+    b6f372a4 f1a20b02 2a080208 0b02eca0 aff7f6bf  
+
+code around lr:
+    b6f281e0 447b4b13 42b3e010 6a1ed10e 44784811  
+    b6f281f0 eec6f7f9 ea0cf00d 46224631 efe4f00e  
+    b6f28200 d00a3001 e00b2400 2b00681b 480ad1eb  
+    b6f28210 44782403 eeb4f7f9 f001e002 6804fa23  
+    b6f28220 fa20f001 46206005 bf00bd70 0003b1c2  
+    b6f28230 0003b1b6 0003b1ae 0003b18a bf7ef7ff  
+    b6f28240 4a3e4b3d e92d447b b08b43f0 4606589c  
+    b6f28250 6823460d 930946a1 fa04f001 8000f8d0  
+    b6f28260 d0482d00 f00f4628 280ffac5 d8444604  
+    b6f28270 ffe4f7ff d1064286 4629200f e8d6f00d  
+    b6f28280 d03c2800 482ee02e f7f94478 482dedf8  
+    b6f28290 e0154478 d11342b0 482b6a06 f7f94478  
+    b6f282a0 4a2aee70 46332120 a801447a fd94f012  
+    b6f282b0 a8012101 f8aef01a 46061c42 e011d104  
+    b6f282c0 28006800 e02cd1e6 46294630 f00d4622  
+    b6f282d0 1c43e912 d11e4607 f9c4f001 29046801  
+--------- tail end of log /dev/log/main
+01-01 19:54:27.370  2512  2512 F libc    : FORTIFY_SOURCE: vsprintf buffer overflow. Calling abort().
+01-01 19:54:27.370  2512  2512 F libc    : Fatal signal 6 (SIGABRT) at 0x000009d0 (code=-6), thread 2512 (tar)
+--------- log /dev/log/main
+01-01 19:54:27.370  2512  2512 F libc    : FORTIFY_SOURCE: vsprintf buffer overflow. Calling abort().
+01-01 19:54:27.370  2512  2512 F libc    : Fatal signal 6 (SIGABRT) at 0x000009d0 (code=-6), thread 2512 (tar)

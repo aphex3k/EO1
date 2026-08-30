@@ -1,0 +1,55 @@
+#!/system/bin/sh
+#
+# Copyright (C) 2010 Frank.Chen@amlogic.com
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+
+# hosts help tool
+
+case $1 in 
+    getsmart)
+    		echo "      Start get hosts file from smarthost.google.com..."
+    		echo ""
+    		cd /system/etc/
+    		rm hosts
+        wget http://smarthosts.googlecode.com/svn/trunk/mobile_devices/hosts
+        cd -
+        echo "      Done"
+    ;;
+
+    clean)
+    		echo "        Clean all hosts settings..."
+    		echo ""
+        echo "127.0.0.1                   localhost" > /system/etc/hosts
+    ;;
+
+    show)
+        echo "Current hosts is:"
+        echo ""
+        cat /system/etc/hosts
+    ;;
+
+    get)
+        if [ $2 -z ]
+        	then 
+        		echo "AmlhostsTool get, the second param is need!"
+        	else
+                     echo "       Start get hosts file from $2"
+        		echo ""
+        		busybox wget $2 > /system/etc/hosts
+        		echo "       Done"
+        fi
+    ;;
+    
+    *)
+        echo "Usage:     AmlhostsTool [getsmart|clean|show|get url|help] "
+        echo "             getsmart   get host file from smarthosts website"
+        echo "             clean      clean all host settings"
+        echo "             show       show hosts content"
+        echo "             get url    get host form some url"
+        echo "             help       show this"
+esac
+

@@ -1,0 +1,63 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<app-ops>
+<pkg n="android">
+<uid n="1000">
+<op n="0" />
+<op n="11" t="92338973" />
+<op n="23" t="92373526" />
+<op n="32" t="89550966" />
+<op n="40" t="92407873" d="23" />
+<op n="41" t="92338962" d="1798255" />
+</uid>
+</pkg>
+<pkg n="com.electricobjects.app">
+<uid n="1000">
+<op n="0" />
+<op n="10" t="1562353475220" />
+<op n="23" t="92341636" />
+<op n="40" t="92341634" d="1795602" />
+</uid>
+</pkg>
+<pkg n="com.android.settings">
+<uid n="1000">
+<op n="40" t="92342283" d="59" />
+</uid>
+</pkg>
+<pkg n="com.android.phone">
+<uid n="1001">
+<op n="4" t="92341035" />
+<op n="6" t="92341032" />
+<op n="14" t="92340120" />
+<op n="40" t="92343523" d="3440" />
+</uid>
+</pkg>
+<pkg n="com.android.providers.calendar">
+<uid n="10001">
+<op n="8" t="92407828" />
+<op n="9" t="92344247" />
+<op n="40" t="92407847" d="40" />
+</uid>
+</pkg>
+<pkg n="com.android.providers.media">
+<uid n="10005">
+<op n="40" t="92409812" d="64636" />
+</uid>
+</pkg>
+<pkg n="com.google.android.gsf">
+<uid n="10007">
+<op n="23" t="1614244651098" />
+<op n="40" t="93612872" d="174" />
+</uid>
+</pkg>
+<pkg n="com.android.systemui">
+<uid n="10012">
+<op n="4" t="92343206" />
+</uid>
+</pkg>
+<pkg n="com.android.calendar">
+<uid n="10016">
+<op n="8" t="92412885" />
+<op n="40" t="92412905" d="5150" />
+</uid>
+</pkg>
+</app-ops>

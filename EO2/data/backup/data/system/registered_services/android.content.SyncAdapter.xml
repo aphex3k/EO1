@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<services>
+    <service uid="10019" authority="com.android.email.provider" accountType="com.android.exchange" />
+    <service uid="10019" authority="com.android.calendar" accountType="com.android.exchange" />
+    <service uid="10019" authority="com.android.contacts" accountType="com.android.exchange" />
+    <service uid="10007" authority="subscribedfeeds" accountType="com.google" />
+</services>

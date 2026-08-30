@@ -1,0 +1,456 @@
+*** *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***
+Build fingerprint: 'MBX/stvm8b/stvm8b:4.4.2/V002M8B01_20160907/20160907:eng/test-keys'
+Revision: '10'
+pid: 10351, tid: 10351, name: e.process.gapps  >>> com.google.process.gapps <<<
+signal 16 (SIGSTKFLT), code -6 (SI_TKILL), fault addr --------
+cannot get registers: No such process
+cannot get siginfo for 10351: No such process
+--------- tail end of log /dev/log/main
+04-21 15:25:02.930 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:02.930 10351 10359 I dalvikvm: 
+04-21 15:25:02.930 10351 10359 E dalvikvm: threadid=5: stuck on threadid=1, giving up
+04-21 15:25:02.930 10351 10359 D dalvikvm: threadid=5: sending two SIGSTKFLTs to threadid=1 (tid=10351) to cause debuggerd dump
+04-21 15:25:02.980 10351 10351 F libc    : Fatal signal 16 (SIGSTKFLT) at 0x0000286f (code=-6), thread 10351 (e.process.gapps)
+--------- log /dev/log/main
+04-21 15:24:51.850 10351 10359 W dalvikvm: threadid=5: spin on suspend #1 threadid=1 (pcf=0)
+04-21 15:24:52.600 10351 10359 W dalvikvm: threadid=5: spin on suspend #2 threadid=1 (pcf=0)
+04-21 15:24:52.600 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:24:52.600 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:24:52.600 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:24:52.720 10351 10359 I dalvikvm:   | state=R schedstat=( 3051000 3590000 34 ) utm=0 stm=0 core=0
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:24:52.850 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:24:53.130 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:24:53.130 10351 10359 I dalvikvm: 
+04-21 15:24:53.130 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:24:53.130 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:24:53.130 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:24:53.130 10351 10359 I dalvikvm:   | state=D schedstat=( 233339000 42079000 326 ) utm=5 stm=18 core=0
+04-21 15:24:53.130 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:24:53.350 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:24:53.360 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:24:53.670 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:24:53.670 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:24:53.670 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:24:53.670 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:24:53.670 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:24:53.670 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:24:53.670 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:24:53.870 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:24:53.870 10351 10359 I dalvikvm: 
+04-21 15:24:54.620 10351 10359 W dalvikvm: threadid=5: spin on suspend #3 threadid=1 (pcf=0)
+04-21 15:24:54.620 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:24:54.620 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:24:54.620 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:24:54.620 10351 10359 I dalvikvm:   | state=R schedstat=( 20435000 7083000 69 ) utm=1 stm=1 core=0
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:24:54.630 10351 10359 I dalvikvm: 
+04-21 15:24:54.630 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:24:54.630 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:24:54.630 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:24:54.630 10351 10359 I dalvikvm:   | state=D schedstat=( 266097000 49262000 371 ) utm=5 stm=21 core=0
+04-21 15:24:54.630 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:24:54.630 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:24:54.750 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:24:54.750 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:24:54.750 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:24:54.750 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:24:54.750 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:24:54.750 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:24:54.750 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:24:54.790 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:24:54.790 10351 10359 I dalvikvm: 
+04-21 15:24:55.540 10351 10359 W dalvikvm: threadid=5: spin on suspend #4 threadid=1 (pcf=0)
+04-21 15:24:55.540 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:24:55.540 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:24:55.540 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:24:55.540 10351 10359 I dalvikvm:   | state=R schedstat=( 37428000 16379000 93 ) utm=2 stm=1 core=0
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:24:55.540 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:24:55.770 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:24:55.770 10351 10359 I dalvikvm: 
+04-21 15:24:55.770 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:24:55.770 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:24:55.770 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:24:55.770 10351 10359 I dalvikvm:   | state=D schedstat=( 321073000 59737000 448 ) utm=5 stm=27 core=0
+04-21 15:24:55.770 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:24:56.030 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:24:56.130 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:24:56.130 10351 10359 I dalvikvm: 
+04-21 15:24:56.880 10351 10359 W dalvikvm: threadid=5: spin on suspend #5 threadid=1 (pcf=0)
+04-21 15:24:56.880 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:24:56.880 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:24:56.880 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:24:56.880 10351 10359 I dalvikvm:   | state=R schedstat=( 43284000 21897000 109 ) utm=2 stm=2 core=1
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:24:56.880 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:24:56.880 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:24:56.880 10351 10359 I dalvikvm: 
+04-21 15:24:56.880 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:24:56.880 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:24:56.880 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:24:56.880 10351 10359 I dalvikvm:   | state=D schedstat=( 355117000 70460000 500 ) utm=6 stm=29 core=0
+04-21 15:24:56.880 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:24:57.090 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:24:57.090 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:24:57.270 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:24:57.270 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:24:57.270 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:24:57.270 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:24:57.270 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:24:57.270 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:24:57.270 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:24:57.270 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:24:57.270 10351 10359 I dalvikvm: 
+04-21 15:24:58.020 10351 10359 W dalvikvm: threadid=5: spin on suspend #6 threadid=1 (pcf=0)
+04-21 15:24:58.030 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:24:58.030 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:24:58.030 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:24:58.030 10351 10359 I dalvikvm:   | state=R schedstat=( 54879000 21897000 124 ) utm=2 stm=3 core=1
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:24:58.030 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:24:58.030 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:24:58.030 10351 10359 I dalvikvm: 
+04-21 15:24:58.030 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:24:58.030 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:24:58.030 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:24:58.030 10351 10359 I dalvikvm:   | state=D schedstat=( 405711000 73067000 550 ) utm=7 stm=33 core=0
+04-21 15:24:58.030 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:24:58.220 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:24:58.220 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:24:58.370 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:24:58.370 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:24:58.370 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:24:58.370 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:24:58.370 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:24:58.370 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:24:58.370 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:24:58.370 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:24:58.370 10351 10359 I dalvikvm: 
+04-21 15:24:59.120 10351 10359 W dalvikvm: threadid=5: spin on suspend #7 threadid=1 (pcf=0)
+04-21 15:24:59.120 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:24:59.120 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:24:59.120 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:24:59.120 10351 10359 I dalvikvm:   | state=R schedstat=( 73935000 27680000 145 ) utm=3 stm=4 core=1
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:24:59.120 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:24:59.120 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:24:59.120 10351 10359 I dalvikvm: 
+04-21 15:24:59.120 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:24:59.120 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:24:59.120 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:24:59.130 10351 10359 I dalvikvm:   | state=D schedstat=( 433182000 74959000 579 ) utm=7 stm=36 core=0
+04-21 15:24:59.130 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:24:59.250 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:24:59.250 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:24:59.400 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:24:59.400 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:24:59.400 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:24:59.400 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:24:59.400 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:24:59.400 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:24:59.400 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:24:59.400 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:24:59.400 10351 10359 I dalvikvm: 
+04-21 15:25:00.150 10351 10359 W dalvikvm: threadid=5: spin on suspend #8 threadid=1 (pcf=0)
+04-21 15:25:00.150 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:25:00.150 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:25:00.150 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:25:00.150 10351 10359 I dalvikvm:   | state=R schedstat=( 81006000 29452000 163 ) utm=3 stm=6 core=0
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:00.150 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:00.150 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:00.150 10351 10359 I dalvikvm: 
+04-21 15:25:00.150 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:25:00.150 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:25:00.150 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:25:00.150 10351 10359 I dalvikvm:   | state=D schedstat=( 450612000 77135000 599 ) utm=7 stm=39 core=1
+04-21 15:25:00.150 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:25:00.230 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:25:00.230 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:25:00.450 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:25:00.450 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:25:00.450 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:25:00.450 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:25:00.450 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:25:00.450 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:25:00.450 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:25:00.450 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:25:00.450 10351 10359 I dalvikvm: 
+04-21 15:25:01.200 10351 10359 W dalvikvm: threadid=5: spin on suspend #9 threadid=1 (pcf=0)
+04-21 15:25:01.200 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:25:01.200 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:25:01.200 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:25:01.210 10351 10359 I dalvikvm:   | state=R schedstat=( 86602000 33323000 182 ) utm=3 stm=6 core=0
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:01.210 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:01.210 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:01.210 10351 10359 I dalvikvm: 
+04-21 15:25:01.210 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:25:01.210 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:25:01.210 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:25:01.210 10351 10359 I dalvikvm:   | state=D schedstat=( 480632000 77289000 622 ) utm=7 stm=42 core=1
+04-21 15:25:01.210 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:25:01.350 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:25:01.350 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:25:01.410 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:25:01.410 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:25:01.410 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:25:01.550 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:25:01.550 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:25:01.550 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:25:01.550 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:25:01.550 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:25:01.550 10351 10359 I dalvikvm: 
+04-21 15:25:02.300 10351 10359 W dalvikvm: threadid=5: spin on suspend #10 threadid=1 (pcf=0)
+04-21 15:25:02.300 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:25:02.300 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:25:02.300 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:25:02.300 10351 10359 I dalvikvm:   | state=R schedstat=( 100474000 37590000 209 ) utm=3 stm=8 core=0
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #03  pc 000546ae  /system/lib/libdvm.so (dvmDumpThread(Thread*, bool)+25)
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #04  pc 00054f6a  /system/lib/libdvm.so
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #05  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #06  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #07  pc 0005496a  /system/lib/libdvm.so
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #08  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:02.300 10351 10359 I dalvikvm:   #09  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:02.300 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:02.300 10351 10359 I dalvikvm: 
+04-21 15:25:02.300 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:25:02.300 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:25:02.300 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:25:02.300 10351 10359 I dalvikvm:   | state=D schedstat=( 517766000 77553000 652 ) utm=7 stm=44 core=1
+04-21 15:25:02.300 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:25:02.460 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:25:02.460 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:25:02.690 10351 10359 I dalvikvm: 
+04-21 15:25:02.690 10351 10359 E dalvikvm: Fatal spin-on-suspend, dumping threads
+04-21 15:25:02.690 10351 10359 I dalvikvm: DALVIK THREADS:
+04-21 15:25:02.690 10351 10359 I dalvikvm: (mutexes: tll=1 tsl=1 tscl=0 ghl=0)
+04-21 15:25:02.690 10351 10359 I dalvikvm: "main" prio=5 tid=1 RUNNABLE
+04-21 15:25:02.690 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x416d2ca8 self=0x4160b510
+04-21 15:25:02.690 10351 10359 I dalvikvm:   | sysTid=10351 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1074430292
+04-21 15:25:02.690 10351 10359 I dalvikvm:   | state=D schedstat=( 527673000 77553000 655 ) utm=7 stm=45 core=1
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at java.lang.Class.classForName(Native Method)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:251)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at java.lang.Class.forName(Class.java:216)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.invokeStaticMain(RuntimeInit.java:196)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.applicationInit(RuntimeInit.java:315)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.RuntimeInit.zygoteInit(RuntimeInit.java:270)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.handleChildProc(ZygoteConnection.java:905)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteConnection.runOnce(ZygoteConnection.java:242)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.runSelectLoop(ZygoteInit.java:664)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at com.android.internal.os.ZygoteInit.main(ZygoteInit.java:600)
+04-21 15:25:02.690 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.main(Native Method)
+04-21 15:25:02.690 10351 10359 I dalvikvm: 
+04-21 15:25:02.690 10351 10359 I dalvikvm: "Binder_2" prio=5 tid=10 NATIVE
+04-21 15:25:02.690 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x4176b568 self=0x66ac8278
+04-21 15:25:02.690 10351 10359 I dalvikvm:   | sysTid=10364 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1722581040
+04-21 15:25:02.690 10351 10359 I dalvikvm:   | state=S schedstat=( 349000 274000 2 ) utm=0 stm=0 core=0
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #00  pc 000227a0  /system/lib/libc.so (__ioctl+8)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #01  pc 0002e807  /system/lib/libc.so (ioctl+14)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #02  pc 0001d3ed  /system/lib/libbinder.so (android::IPCThreadState::talkWithDriver(bool)+140)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #03  pc 0001daf7  /system/lib/libbinder.so (android::IPCThreadState::getAndExecuteCommand()+6)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #04  pc 0001db8d  /system/lib/libbinder.so (android::IPCThreadState::joinThreadPool(bool)+48)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #05  pc 000219a5  /system/lib/libbinder.so
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #06  pc 0000ea5d  /system/lib/libutils.so (android::Thread::_threadLoop(void*)+216)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #07  pc 0004d5b9  /system/lib/libandroid_runtime.so (android::AndroidRuntime::javaThreadShell(void*)+68)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #08  pc 0000e58f  /system/lib/libutils.so
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #09  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #10  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:02.900 10351 10359 I dalvikvm: 
+04-21 15:25:02.900 10351 10359 I dalvikvm: "Binder_1" prio=5 tid=9 NATIVE
+04-21 15:25:02.900 10351 10359 I dalvikvm:   | group="main" sCount=1 dsCount=0 obj=0x4176b478 self=0x66ac7608
+04-21 15:25:02.900 10351 10359 I dalvikvm:   | sysTid=10363 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1722577856
+04-21 15:25:02.900 10351 10359 I dalvikvm:   | state=S schedstat=( 1017000 3433000 3 ) utm=0 stm=0 core=1
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #00  pc 000227a0  /system/lib/libc.so (__ioctl+8)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #01  pc 0002e807  /system/lib/libc.so (ioctl+14)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #02  pc 0001d3ed  /system/lib/libbinder.so (android::IPCThreadState::talkWithDriver(bool)+140)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #03  pc 0001daf7  /system/lib/libbinder.so (android::IPCThreadState::getAndExecuteCommand()+6)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #04  pc 0001db8d  /system/lib/libbinder.so (android::IPCThreadState::joinThreadPool(bool)+48)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #05  pc 000219a5  /system/lib/libbinder.so
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #06  pc 0000ea5d  /system/lib/libutils.so (android::Thread::_threadLoop(void*)+216)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #07  pc 0004d5b9  /system/lib/libandroid_runtime.so (android::AndroidRuntime::javaThreadShell(void*)+68)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #08  pc 0000e58f  /system/lib/libutils.so
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #09  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   #10  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:02.900 10351 10359 I dalvikvm: 
+04-21 15:25:02.900 10351 10359 I dalvikvm: "FinalizerWatchdogDaemon" daemon prio=5 tid=8 WAIT
+04-21 15:25:02.900 10351 10359 I dalvikvm:   | group="system" sCount=1 dsCount=0 obj=0x4174af90 self=0x667bfb40
+04-21 15:25:02.900 10351 10359 I dalvikvm:   | sysTid=10362 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1720483848
+04-21 15:25:02.900 10351 10359 I dalvikvm:   | state=S schedstat=( 273000 5503000 3 ) utm=0 stm=0 core=0
+04-21 15:25:02.900 10351 10359 I dalvikvm:   at java.lang.Object.wait(Native Method)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   - waiting on <0x416dc318> (a java.lang.Daemons$FinalizerWatchdogDaemon)
+04-21 15:25:02.900 10351 10359 I dalvikvm:   at java.lang.Object.wait(Object.java:364)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Daemons$FinalizerWatchdogDaemon.waitForObject(Daemons.java:230)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Daemons$FinalizerWatchdogDaemon.run(Daemons.java:207)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Thread.run(Thread.java:841)
+04-21 15:25:02.920 10351 10359 I dalvikvm: 
+04-21 15:25:02.920 10351 10359 I dalvikvm: "FinalizerDaemon" daemon prio=5 tid=7 WAIT
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | group="system" sCount=1 dsCount=0 obj=0x4174ac10 self=0x667bf210
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | sysTid=10361 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1719400040
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | state=S schedstat=( 216000 2789000 3 ) utm=0 stm=0 core=0
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Object.wait(Native Method)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   - waiting on <0x416c7718> (a java.lang.ref.ReferenceQueue)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Object.wait(Object.java:401)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:102)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.ref.ReferenceQueue.remove(ReferenceQueue.java:73)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Daemons$FinalizerDaemon.run(Daemons.java:170)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Thread.run(Thread.java:841)
+04-21 15:25:02.920 10351 10359 I dalvikvm: 
+04-21 15:25:02.920 10351 10359 I dalvikvm: "ReferenceQueueDaemon" daemon prio=5 tid=6 WAIT
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | group="system" sCount=1 dsCount=0 obj=0x4174aaa8 self=0x665b6840
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | sysTid=10360 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717267608
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | state=S schedstat=( 299000 370000 3 ) utm=0 stm=0 core=0
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Object.wait(Native Method)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   - waiting on <0x416c7640> 
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Object.wait(Object.java:364)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Daemons$ReferenceQueueDaemon.run(Daemons.java:130)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at java.lang.Thread.run(Thread.java:841)
+04-21 15:25:02.920 10351 10359 I dalvikvm: 
+04-21 15:25:02.920 10351 10359 I dalvikvm: "Compiler" daemon prio=5 tid=5 VMWAIT
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | group="system" sCount=0 dsCount=0 obj=0x4174a9b8 self=0x665b6138
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | sysTid=10359 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1717264112
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | state=R schedstat=( 120129000 55362000 395 ) utm=3 stm=9 core=1
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #00  pc 0000132e  /system/lib/libcorkscrew.so (unwind_backtrace_thread+29)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #01  pc 00060652  /system/lib/libdvm.so (dvmDumpNativeStack(DebugOutputTarget const*, int)+33)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #02  pc 00054640  /system/lib/libdvm.so (dvmDumpThreadEx(DebugOutputTarget const*, Thread*, bool)+395)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #03  pc 00054a0a  /system/lib/libdvm.so (dvmDumpAllThreadsEx(DebugOutputTarget const*, bool)+89)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #04  pc 00054b84  /system/lib/libdvm.so (dvmDumpAllThreads(bool)+19)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #05  pc 00054f94  /system/lib/libdvm.so
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #06  pc 00055122  /system/lib/libdvm.so (dvmSuspendAllThreads(SuspendCause)+165)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #07  pc 00073ed6  /system/lib/libdvm.so
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #08  pc 0005496a  /system/lib/libdvm.so
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #09  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #10  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:02.920 10351 10359 I dalvikvm: 
+04-21 15:25:02.920 10351 10359 I dalvikvm: "JDWP" daemon prio=5 tid=4 VMWAIT
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | group="system" sCount=1 dsCount=0 obj=0x4174a8d0 self=0x665b5808
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | sysTid=10358 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1671289992
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | state=S schedstat=( 453000 520000 7 ) utm=0 stm=0 core=0
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #00  pc 000235f0  /system/lib/libc.so (recvmsg+8)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #01  pc 00061083  /system/lib/libdvm.so
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #02  pc 000612b7  /system/lib/libdvm.so
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #03  pc 00063f87  /system/lib/libdvm.so
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #04  pc 0005496d  /system/lib/libdvm.so
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #05  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   #06  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:02.920 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:02.920 10351 10359 I dalvikvm: 
+04-21 15:25:02.920 10351 10359 I dalvikvm: "Signal Catcher" daemon prio=5 tid=3 VMWAIT
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | group="system" sCount=1 dsCount=0 obj=0x4174a7d8 self=0x639dd830
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | sysTid=10357 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1667062296
+04-21 15:25:02.920 10351 10359 I dalvikvm:   | state=S schedstat=( 225000 1021000 3 ) utm=0 stm=0 core=0
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #00  pc 00023388  /system/lib/libc.so (__rt_sigtimedwait+12)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #01  pc 00015569  /system/lib/libc.so (sigwait+24)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #02  pc 00051f53  /system/lib/libdvm.so
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #03  pc 0005496d  /system/lib/libdvm.so
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #04  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #05  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:02.930 10351 10359 I dalvikvm: 
+04-21 15:25:02.930 10351 10359 I dalvikvm: "GC" daemon prio=5 tid=2 VMWAIT
+04-21 15:25:02.930 10351 10359 I dalvikvm:   | group="system" sCount=1 dsCount=0 obj=0x41754f90 self=0x416c1050
+04-21 15:25:02.930 10351 10359 I dalvikvm:   | sysTid=10356 nice=0 sched=0/0 cgrp=[fopen-error:2] handle=1688062488
+04-21 15:25:02.930 10351 10359 I dalvikvm:   | state=S schedstat=( 3276000 4076000 8 ) utm=0 stm=0 core=0
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #00  pc 00023bc4  /system/lib/libc.so (__futex_syscall3+8)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #01  pc 0000f564  /system/lib/libc.so (__pthread_cond_timedwait_relative+48)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #02  pc 0000f5c4  /system/lib/libc.so (__pthread_cond_timedwait+64)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #03  pc 0007298b  /system/lib/libdvm.so
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #04  pc 0005496d  /system/lib/libdvm.so
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #05  pc 0000d200  /system/lib/libc.so (__thread_entry+72)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   #06  pc 0000d398  /system/lib/libc.so (pthread_create+240)
+04-21 15:25:02.930 10351 10359 I dalvikvm:   at dalvik.system.NativeStart.run(Native Method)
+04-21 15:25:02.930 10351 10359 I dalvikvm: 
+04-21 15:25:02.930 10351 10359 E dalvikvm: threadid=5: stuck on threadid=1, giving up
+04-21 15:25:02.930 10351 10359 D dalvikvm: threadid=5: sending two SIGSTKFLTs to threadid=1 (tid=10351) to cause debuggerd dump
+04-21 15:25:02.980 10351 10351 F libc    : Fatal signal 16 (SIGSTKFLT) at 0x0000286f (code=-6), thread 10351 (e.process.gapps)
