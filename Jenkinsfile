@@ -4,7 +4,7 @@ pipeline {
     agent { label "android-sdk && emulator" }
     environment {
         // Even console ports 5554..5682 (64 slots); adb only discovers emulators in this range.
-        EMULATOR_PORT = "${5554 + 2 * (Math.abs((env.BUILD_NUMBER as int) % 64))}"
+        EMULATOR_PORT = "${5554 + 2 * (Math.abs(Integer.parseInt(env.BUILD_NUMBER) % 64))}"
         EMULATOR_NAME = "EO1-${EMULATOR_PORT}"
         SONAR_TOKEN = credentials('sonar_token_gitea_eo1')
         ANDROID_HOME = '/var/android-sdk'
