@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Release-only maxSdk: real EO1/EO2 are KitKat (API 19). Debug omits this so
+     ./debug.sh can install on the Apple Silicon API 21 fallback AVD. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-sdk android:maxSdkVersion="19" />
+</manifest>

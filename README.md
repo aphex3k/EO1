@@ -102,13 +102,15 @@ The app will only be able to see content from your immich database that is share
 
 ### Local debug (emulator)
 
-Modern Android Studio no longer supports the Gradle/SDK pins this project needs for IDE debugging. On a host that can run an **API 19** emulator (x86_64 Linux or Intel Mac; not typically Apple Silicon), use:
+Modern Android Studio no longer supports the Gradle/SDK pins this project needs for IDE debugging. Use:
 
 ```bash
 ./debug.sh
 ```
 
-That builds the debug APK, creates or reuses an AVD named `EO1` constrained like the real hardware / Jenkins CI, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator.
+That builds the debug APK, creates or reuses an AVD named `EO1` (API 19) constrained like the real hardware / Jenkins CI, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator.
+
+On **Apple Silicon**, API 19 images generally cannot boot. After that failure the script falls back to AVD `EO1_API21` (`system-images;android-21;default;arm64-v8a`) — the lowest arm64 image that can run locally. That path is an approximation for development, not EO1 fidelity. Debug APKs omit `maxSdk` so they can install on the fallback AVD; **release** builds still use `maxSdk 19` for real devices.
 
 ## Further Reading
 

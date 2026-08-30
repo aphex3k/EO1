@@ -1,20 +1,27 @@
 #!/bin/bash
 # Build the debug APK, ensure/start an API 19 AVD named EO1 (EO1-like constraints),
 # install the app, and stream logcat until Ctrl+C.
+# On Apple Silicon, if API 19 cannot boot, fall back to EO1_API21 (API 21 arm64-v8a).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 AVD_NAME="EO1"
+EXPECTED_API=19
 PACKAGE_ID="com.aphex3k.eo1"
 ACTIVITY="${PACKAGE_ID}/${PACKAGE_ID}.MainActivity"
 APK_PATH="app/build/outputs/apk/debug/app-debug.apk"
 BOOT_TIMEOUT_SEC="${BOOT_TIMEOUT_SEC:-180}"
+EMU_LOG="/tmp/eo1-emulator.log"
+FALLBACK_AVD_NAME="EO1_API21"
+FALLBACK_SYSTEM_IMAGE="system-images;android-21;default;arm64-v8a"
+FALLBACK_API=21
 
 EMU_PID=""
 SERIAL=""
 CLEANED_UP=0
+SYSTEM_IMAGE=""
 
 die() {
   echo "error: $*" >&2
@@ -72,7 +79,6 @@ find_sdk_bin() {
       return
     fi
   done
-  # Newest cmdline-tools version dir if "latest" is missing
   local ct
   for ct in "${SDK_ROOT}/cmdline-tools/"*/bin/"${name}"; do
     if [[ -x "$ct" ]]; then
@@ -84,7 +90,8 @@ find_sdk_bin() {
 }
 
 avd_config_path() {
-  local ini="${HOME}/.android/avd/${AVD_NAME}.ini"
+  local name="${1:-$AVD_NAME}"
+  local ini="${HOME}/.android/avd/${name}.ini"
   [[ -f "$ini" ]] || return 1
   local path
   path="$(grep -E '^path=' "$ini" | head -1 | cut -d= -f2-)"
@@ -93,43 +100,58 @@ avd_config_path() {
 }
 
 avd_exists() {
-  "${EMULATOR}" -list-avds 2>/dev/null | grep -qx "${AVD_NAME}"
+  local name="${1:-$AVD_NAME}"
+  "${EMULATOR}" -list-avds 2>/dev/null | grep -qx "${name}"
+}
+
+avd_matches_api() {
+  local config="$1"
+  local api="$2"
+  local target sysdir
+  target="$(grep -E '^target=' "$config" | head -1 | cut -d= -f2- || true)"
+  sysdir="$(grep -E '^image\.sysdir\.1=' "$config" | head -1 | cut -d= -f2- || true)"
+  if [[ "$target" == "android-${api}" ]]; then
+    return 0
+  fi
+  if [[ "$sysdir" == *"/android-${api}/"* || "$sysdir" == *"android-${api}/"* ]]; then
+    return 0
+  fi
+  return 1
 }
 
 validate_existing_avd() {
+  local expected_api="${1:-$EXPECTED_API}"
+  local expected_abi="${2:-}"
   local config
-  config="$(avd_config_path)" || die "AVD ${AVD_NAME} is listed but config.ini was not found under ~/.android/avd/"
+  config="$(avd_config_path "$AVD_NAME")" \
+    || die "AVD ${AVD_NAME} is listed but config.ini was not found under ~/.android/avd/"
 
-  local target abi sysdir
+  local abi target sysdir
   target="$(grep -E '^target=' "$config" | head -1 | cut -d= -f2- || true)"
   abi="$(grep -E '^abi.type=' "$config" | head -1 | cut -d= -f2- || true)"
   sysdir="$(grep -E '^image\.sysdir\.1=' "$config" | head -1 | cut -d= -f2- || true)"
 
-  local api_ok=0
-  if [[ "$target" == "android-19" ]]; then
-    api_ok=1
-  elif [[ "$sysdir" == *"/android-19/"* || "$sysdir" == *"android-19/"* ]]; then
-    api_ok=1
-    target="android-19"
-  fi
-
-  if [[ "$api_ok" -ne 1 ]]; then
-    die "AVD ${AVD_NAME} exists but is not API 19 (target='${target:-unknown}', image='${sysdir:-unknown}'). Rename or delete it, then re-run (maxSdk is 19)."
+  if ! avd_matches_api "$config" "$expected_api"; then
+    die "AVD ${AVD_NAME} exists but is not API ${expected_api} (target='${target:-unknown}', image='${sysdir:-unknown}'). Rename or delete it, then re-run."
   fi
   if [[ -z "$abi" ]]; then
     die "AVD ${AVD_NAME} has no abi.type in config.ini"
   fi
-  log "Using existing AVD ${AVD_NAME} (target=${target}, abi=${abi})"
+  if [[ -n "$expected_abi" && "$abi" != "$expected_abi" ]]; then
+    die "AVD ${AVD_NAME} abi is '${abi}' but need '${expected_abi}'. Rename or delete it, then re-run."
+  fi
+  log "Using existing AVD ${AVD_NAME} (api=${expected_api}, abi=${abi})"
 }
 
 image_installed() {
   local pkg="$1"
   local rel="${pkg#system-images;}"
-  rel="${rel//;/\//}"
+  # Replace package ';' separators with path '/'.
+  rel="${rel//;//}"
   [[ -d "${SDK_ROOT}/system-images/${rel}" ]]
 }
 
-preferred_system_images() {
+preferred_api19_system_images() {
   if is_apple_silicon; then
     echo "system-images;android-19;default;armeabi-v7a"
     echo "system-images;android-19;default;x86"
@@ -139,26 +161,35 @@ preferred_system_images() {
   fi
 }
 
-ensure_system_image() {
+install_system_image() {
+  local pkg="$1"
+  if image_installed "$pkg"; then
+    SYSTEM_IMAGE="$pkg"
+    log "Using system image ${SYSTEM_IMAGE}"
+    return
+  fi
+  log "Installing system image ${pkg} via sdkmanager..."
+  set +o pipefail
+  yes | "${SDKMANAGER}" --licenses >/dev/null 2>&1 || true
+  yes | "${SDKMANAGER}" "${pkg}"
+  local sdk_rc=$?
+  set -o pipefail
+  [[ $sdk_rc -eq 0 ]] || die "Failed to install ${pkg}"
+  image_installed "${pkg}" || die "System image ${pkg} still missing after install"
+  SYSTEM_IMAGE="$pkg"
+}
+
+ensure_system_image_api19() {
   local pkg
-  for pkg in $(preferred_system_images); do
+  for pkg in $(preferred_api19_system_images); do
     if image_installed "$pkg"; then
       SYSTEM_IMAGE="$pkg"
       log "Using system image ${SYSTEM_IMAGE}"
       return
     fi
   done
-
-  # Install first preference for this host
-  SYSTEM_IMAGE="$(preferred_system_images | { read -r first; echo "$first"; })"
-  log "Installing system image ${SYSTEM_IMAGE} via sdkmanager..."
-  set +o pipefail
-  yes | "${SDKMANAGER}" --licenses >/dev/null 2>&1 || true
-  yes | "${SDKMANAGER}" "${SYSTEM_IMAGE}"
-  local sdk_rc=$?
-  set -o pipefail
-  [[ $sdk_rc -eq 0 ]] || die "Failed to install ${SYSTEM_IMAGE}"
-  image_installed "${SYSTEM_IMAGE}" || die "System image ${SYSTEM_IMAGE} still missing after install"
+  SYSTEM_IMAGE="$(preferred_api19_system_images | { read -r first; echo "$first"; })"
+  install_system_image "$SYSTEM_IMAGE"
 }
 
 device_eo1_available() {
@@ -167,12 +198,11 @@ device_eo1_available() {
 
 patch_avd_config() {
   local config
-  config="$(avd_config_path)" || die "Cannot patch AVD config for ${AVD_NAME}"
+  config="$(avd_config_path "$AVD_NAME")" || die "Cannot patch AVD config for ${AVD_NAME}"
 
   set_ini() {
     local key="$1" value="$2"
     if grep -qE "^${key}=" "$config"; then
-      # portable in-place edit
       local tmp
       tmp="$(mktemp)"
       awk -v k="$key" -v v="$value" 'BEGIN{FS=OFS="="} $1==k{$0=k"="v} {print}' "$config" >"$tmp"
@@ -199,8 +229,9 @@ patch_avd_config() {
   log "Patched ${AVD_NAME} hardware constraints (1GB RAM, 1080x1920 portrait, 2 cores, no cameras)"
 }
 
-create_avd() {
-  ensure_system_image
+create_avd_with_image() {
+  local pkg="$1"
+  SYSTEM_IMAGE="$pkg"
   log "Creating AVD ${AVD_NAME} with ${SYSTEM_IMAGE}"
 
   local create_args=(create avd --name "${AVD_NAME}" --package "${SYSTEM_IMAGE}" --force)
@@ -214,9 +245,8 @@ create_avd() {
     || die "Failed to create AVD ${AVD_NAME}"
 
   if ! device_eo1_available; then
-    # Ensure skin dimensions when no custom device profile
     local config
-    config="$(avd_config_path)"
+    config="$(avd_config_path "$AVD_NAME")"
     if ! grep -qE '^skin.name=' "$config"; then
       echo "skin.name=1080x1920" >>"$config"
       echo "skin.path=1080x1920" >>"$config"
@@ -226,20 +256,28 @@ create_avd() {
   patch_avd_config
 }
 
-cleanup() {
-  if [[ "$CLEANED_UP" -eq 1 ]]; then
-    return
+ensure_avd() {
+  local expected_api="$1"
+  local image_pkg="$2"
+  local expected_abi="${3:-}"
+
+  EXPECTED_API="$expected_api"
+  if avd_exists "$AVD_NAME"; then
+    validate_existing_avd "$expected_api" "$expected_abi"
+    patch_avd_config
+    local local_abi
+    local_abi="$(grep -E '^abi.type=' "$(avd_config_path "$AVD_NAME")" | head -1 | cut -d= -f2-)"
+    SYSTEM_IMAGE="system-images;android-${expected_api};default;${local_abi}"
+  elif [[ "$expected_api" -eq 19 ]]; then
+    ensure_system_image_api19
+    create_avd_with_image "$SYSTEM_IMAGE"
+  else
+    install_system_image "$image_pkg"
+    create_avd_with_image "$image_pkg"
   fi
-  CLEANED_UP=1
+}
 
-  # Only print/stop if we actually started the emulator
-  if [[ -z "$EMU_PID" && -z "$SERIAL" ]]; then
-    return
-  fi
-
-  echo
-  log "Stopping debug session..."
-
+stop_emulator_instance() {
   if [[ -n "$SERIAL" ]]; then
     "${ADB}" -s "$SERIAL" emu kill >/dev/null 2>&1 || true
   fi
@@ -247,6 +285,23 @@ cleanup() {
     kill "$EMU_PID" >/dev/null 2>&1 || true
     wait "$EMU_PID" 2>/dev/null || true
   fi
+  EMU_PID=""
+  SERIAL=""
+}
+
+cleanup() {
+  if [[ "$CLEANED_UP" -eq 1 ]]; then
+    return
+  fi
+  CLEANED_UP=1
+
+  if [[ -z "$EMU_PID" && -z "$SERIAL" ]]; then
+    return
+  fi
+
+  echo
+  log "Stopping debug session..."
+  stop_emulator_instance
 }
 
 list_emulator_serials() {
@@ -256,8 +311,8 @@ list_emulator_serials() {
 wait_for_boot() {
   local deadline=$((SECONDS + BOOT_TIMEOUT_SEC))
   local preexisting="$1"
+  local emu_log="${2:-$EMU_LOG}"
   local serial=""
-  local emu_log="${2:-/tmp/eo1-emulator.log}"
 
   log "Waiting for emulator to appear on adb (timeout ${BOOT_TIMEOUT_SEC}s)..."
   while (( SECONDS < deadline )); do
@@ -302,18 +357,43 @@ wait_for_boot() {
   return 1
 }
 
+launch_avd() {
+  local preexisting
+  preexisting="$(list_emulator_serials | tr '\n' ' ')"
+  : >"$EMU_LOG"
+
+  log "Launching emulator ${AVD_NAME}..."
+  "${EMULATOR}" -avd "${AVD_NAME}" \
+    -no-snapshot \
+    -camera-front none \
+    -camera-back none \
+    -memory 1024 \
+    -partition-size 1024 \
+    -no-boot-anim \
+    -screen no-touch \
+    -no-audio \
+    -no-metrics \
+    -selinux permissive \
+    -gpu auto \
+    >"$EMU_LOG" 2>&1 &
+  EMU_PID=$!
+
+  if wait_for_boot "$preexisting" "$EMU_LOG"; then
+    return 0
+  fi
+  return 1
+}
+
 boot_failure_hint() {
-  echo "error: Emulator AVD ${AVD_NAME} (API 19) did not become ready within ${BOOT_TIMEOUT_SEC}s." >&2
-  if is_apple_silicon; then
+  echo "error: Emulator AVD ${AVD_NAME} (API ${EXPECTED_API}) did not become ready within ${BOOT_TIMEOUT_SEC}s." >&2
+  if is_apple_silicon && [[ "$EXPECTED_API" -eq 19 ]]; then
     echo "error: This host is Apple Silicon (arm64). API 19 system images (armeabi-v7a / x86) generally cannot run here." >&2
-    echo "error: Use an x86_64 Linux or Intel Mac host (as Jenkins does with system-images;android-19;default;x86), or a remote x86 emulator." >&2
   else
-    echo "error: Check that KVM/HAXM acceleration works and that ${SYSTEM_IMAGE:-the API 19 image} is installed." >&2
+    echo "error: Check that acceleration works and that ${SYSTEM_IMAGE:-the system image} is installed." >&2
   fi
 }
 
 app_pid_on_device() {
-  # pidof is missing on some API 19 images; fall back to ps.
   local pid
   pid="$("${ADB}" -s "$SERIAL" shell pidof "${PACKAGE_ID}" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
   if [[ -n "$pid" ]]; then
@@ -325,7 +405,6 @@ app_pid_on_device() {
 
 follow_logcat() {
   log "Attaching to logcat for ${PACKAGE_ID} (Ctrl+C to stop and quit the AVD)..."
-  # Clear once so the session starts fresh
   "${ADB}" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
 
   local app_pid=""
@@ -341,9 +420,58 @@ follow_logcat() {
   if [[ -n "$app_pid" ]] && "${ADB}" -s "$SERIAL" logcat -h 2>&1 | grep -q -- '--pid'; then
     "${ADB}" -s "$SERIAL" logcat --pid="${app_pid}"
   else
-    # API 19-friendly fallback: filter common app tags / package string
     "${ADB}" -s "$SERIAL" logcat | grep --line-buffered -E "${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err"
   fi
+}
+
+push_configuration_if_present() {
+  local local_cfg="${ROOT}/configuration.json"
+  local remote_dir="/data/data/${PACKAGE_ID}/files"
+  local remote_cfg="${remote_dir}/configuration.json"
+
+  if [[ ! -f "$local_cfg" ]]; then
+    log "No ${local_cfg}; skipping config push"
+    return
+  fi
+
+  log "Copying ${local_cfg} to AVD at ${remote_cfg}"
+  # Emulator images allow adb root; needed so we can write into the app data dir before first launch.
+  "${ADB}" -s "$SERIAL" root >/dev/null 2>&1 || true
+  "${ADB}" -s "$SERIAL" wait-for-device >/dev/null 2>&1 || true
+
+  "${ADB}" -s "$SERIAL" shell "mkdir -p '${remote_dir}'" \
+    || die "Failed to create ${remote_dir} on AVD"
+
+  "${ADB}" -s "$SERIAL" push "$local_cfg" "$remote_cfg" \
+    || die "Failed to push ${local_cfg} to AVD"
+
+  local uid=""
+  uid="$("${ADB}" -s "$SERIAL" shell "stat -c %u /data/data/${PACKAGE_ID}" 2>/dev/null | tr -d '\r' || true)"
+  if [[ -z "$uid" || "$uid" == *"stat:"* ]]; then
+    uid="$("${ADB}" -s "$SERIAL" shell dumpsys package "${PACKAGE_ID}" 2>/dev/null \
+      | tr -d '\r' \
+      | sed -n 's/.*userId=\([0-9][0-9]*\).*/\1/p' \
+      | head -1 || true)"
+  fi
+  if [[ -n "$uid" && "$uid" =~ ^[0-9]+$ ]]; then
+    "${ADB}" -s "$SERIAL" shell "chown ${uid}:${uid} '${remote_dir}' '${remote_cfg}'" || true
+    "${ADB}" -s "$SERIAL" shell "chmod 771 '${remote_dir}'; chmod 660 '${remote_cfg}'" || true
+  else
+    log "Could not determine app UID; config pushed but ownership may need a relaunch"
+  fi
+}
+
+install_and_start() {
+  log "Setting display size 1080x1920"
+  "${ADB}" -s "$SERIAL" shell wm size 1080x1920 || true
+
+  log "Installing ${APK_PATH}"
+  "${ADB}" -s "$SERIAL" install -r "$APK_PATH"
+
+  push_configuration_if_present
+
+  log "Starting ${ACTIVITY}"
+  "${ADB}" -s "$SERIAL" shell am start -n "$ACTIVITY"
 }
 
 # --- main --------------------------------------------------------------------
@@ -361,7 +489,6 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$ADB"):$(dirname "$EMULATO
 
 command -v java >/dev/null 2>&1 || die "java not found on PATH (need JDK 21 for this project)"
 
-# Prefer JDK 21 when multiple JDKs are installed (Gradle 8.9 / AGP 8.7 do not support newer majors).
 if [[ -z "${JAVA_HOME:-}" ]]; then
   if [[ -x /usr/libexec/java_home ]]; then
     JAVA_HOME="$(/usr/libexec/java_home -v 21 2>/dev/null || true)"
@@ -384,52 +511,43 @@ log "Building debug APK..."
 ./gradlew assembleDebug
 [[ -f "$APK_PATH" ]] || die "Debug APK missing at ${APK_PATH}"
 
-SYSTEM_IMAGE=""
-if avd_exists; then
-  validate_existing_avd
-  patch_avd_config
-  # Infer image package from existing AVD for messaging
-  local_abi="$(grep -E '^abi.type=' "$(avd_config_path)" | head -1 | cut -d= -f2-)"
-  SYSTEM_IMAGE="system-images;android-19;default;${local_abi}"
-else
-  create_avd
+# Primary: API 19 AVD EO1
+AVD_NAME="EO1"
+EXPECTED_API=19
+ensure_avd 19 "system-images;android-19;default;x86"
+
+if launch_avd; then
+  install_and_start
+  follow_logcat
+  exit 0
 fi
 
-log "Launching emulator ${AVD_NAME}..."
-PREEXISTING_SERIALS="$(list_emulator_serials | tr '\n' ' ')"
-# Windowed interactive session; constraints align with Jenkins EO1 profile.
-"${EMULATOR}" -avd "${AVD_NAME}" \
-  -no-snapshot \
-  -camera-front none \
-  -camera-back none \
-  -memory 1024 \
-  -partition-size 1024 \
-  -no-boot-anim \
-  -screen no-touch \
-  -no-audio \
-  -no-metrics \
-  -selinux permissive \
-  -gpu auto \
-  >/tmp/eo1-emulator.log 2>&1 &
-EMU_PID=$!
+# Primary failed — stop dead emulator before fallback
+stop_emulator_instance
 
-if ! wait_for_boot "$PREEXISTING_SERIALS" /tmp/eo1-emulator.log; then
-  cleanup
+if ! is_apple_silicon; then
+  boot_failure_hint
+  echo "error: Emulator log: ${EMU_LOG}" >&2
+  tail -n 40 "$EMU_LOG" >&2 || true
   CLEANED_UP=1
   trap - INT TERM EXIT
-  boot_failure_hint
-  echo "error: Emulator log: /tmp/eo1-emulator.log" >&2
-  tail -n 40 /tmp/eo1-emulator.log >&2 || true
   exit 1
 fi
 
-log "Setting display size 1080x1920"
-"${ADB}" -s "$SERIAL" shell wm size 1080x1920 || true
+log "API 19 failed; falling back to ${FALLBACK_AVD_NAME} (API ${FALLBACK_API} arm64-v8a)"
+AVD_NAME="$FALLBACK_AVD_NAME"
+EXPECTED_API="$FALLBACK_API"
+ensure_avd "$FALLBACK_API" "$FALLBACK_SYSTEM_IMAGE" "arm64-v8a"
 
-log "Installing ${APK_PATH}"
-"${ADB}" -s "$SERIAL" install -r "$APK_PATH"
+if ! launch_avd; then
+  stop_emulator_instance
+  echo "error: Primary API 19 and fallback API ${FALLBACK_API} AVDs both failed to boot." >&2
+  echo "error: Emulator log: ${EMU_LOG}" >&2
+  tail -n 40 "$EMU_LOG" >&2 || true
+  CLEANED_UP=1
+  trap - INT TERM EXIT
+  exit 1
+fi
 
-log "Starting ${ACTIVITY}"
-"${ADB}" -s "$SERIAL" shell am start -n "$ACTIVITY"
-
+install_and_start
 follow_logcat

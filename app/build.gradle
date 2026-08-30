@@ -26,7 +26,8 @@ android {
         minSdk 19
         //noinspection ExpiredTargetSdkVersion,OldTargetApi
         targetSdk 19
-        maxSdk 19
+        // maxSdk 19 applies to release only (see src/release/AndroidManifest.xml) so
+        // debug APKs can install on the Apple Silicon API 21 fallback AVD.
         if (project.hasProperty('BUILD_NUMBER')) {
             versionCode = Integer.parseInt(project.BUILD_NUMBER)
         }
