@@ -103,6 +103,7 @@ The app will only be able to see content from your immich database that is share
 ## Further Reading
 
 1. [EO1 Hardware specifications](EO1-specs.md)
+1. [AGENTS.md](AGENTS.md) — repository map for AI coding agents
 
 ## Contribution
 
