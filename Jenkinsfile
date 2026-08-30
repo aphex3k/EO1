@@ -68,7 +68,7 @@ pipeline {
                     set_ini hw.audioInput no
                     set_ini hw.audioOutput no
                     set_ini hw.gpu.enabled yes
-                    set_ini hw.gpu.mode auto
+                    set_ini hw.gpu.mode software
                     set_ini skin.dynamic no
                     set_ini skin.name 1080x1920
                     set_ini skin.path 1080x1920
@@ -138,8 +138,8 @@ pipeline {
                     adb start-server
                     adb devices -l
                     : >"${EMU_LOG}"
-                    # API 19 + emulator 36: host GPU paths (lavapipe/swiftshader) crash after adb connect; guest is the compatible renderer.
-                    emulator -verbose -avd "${EMULATOR_NAME}" -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port "${EMULATOR_PORT}" -no-metrics -selinux permissive -gpu guest >"${EMU_LOG}" 2>&1 &
+                    # Emulator 36.4.9+ rejects deprecated -gpu guest (falls back to lavapipe and crashes API 19).
+                    emulator -verbose -avd "${EMULATOR_NAME}" -no-snapshot -camera-front none -camera-back none -memory 1024 -wipe-data -timezone America/Los_Angeles -no-boot-anim -screen no-touch -no-audio -no-window -partition-size 1024 -port "${EMULATOR_PORT}" -no-metrics -selinux permissive -gpu software -feature -Vulkan >"${EMU_LOG}" 2>&1 &
                     EMU_PID=$!
                     device_online() {
                       adb devices | grep -qE "^${SERIAL}[[:space:]]+device$"
