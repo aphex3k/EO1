@@ -147,7 +147,14 @@ public class MediaManager implements MediaManagerInterface {
                 assetResponse = immichAssets.remove(0);
 
                 try {
-                    tempFile = downloadAsset(assetResponse.getId(), assetResponse.getType(), false, activity, apiService);
+                    tempFile = downloadAsset(
+                            assetResponse.getId(),
+                            assetResponse.getType(),
+                            false,
+                            assetResponse.getOriginalFileName(),
+                            assetResponse.getOriginalPath(),
+                            activity,
+                            apiService);
                 } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 }
@@ -173,7 +180,7 @@ public class MediaManager implements MediaManagerInterface {
                 if (directoryListing != null) {
                     for (File child : directoryListing) {
                         // Only delete the file that is not supposed to get displayed this moment
-                        if (!child.getAbsolutePath().equals(finalTempFile.getAbsolutePath()) && child.getAbsolutePath().endsWith(".dat")) {
+                        if (!child.getAbsolutePath().equals(finalTempFile.getAbsolutePath())) {
                             removeFromCache(child);
                         }
                     }
@@ -236,8 +243,52 @@ public class MediaManager implements MediaManagerInterface {
         }
     }
 
+    static String cacheFileName(String uuid, String originalFileName, String originalPath,
+                                ImmichType type, boolean fallback) {
+        if (fallback) {
+            return uuid + defaultExtension(type);
+        }
+
+        String extension = extensionFromFileName(originalFileName);
+        if (extension == null) {
+            extension = extensionFromFileName(originalPath);
+        }
+        if (extension == null) {
+            extension = defaultExtension(type);
+        }
+        return uuid + extension;
+    }
+
+    static String extensionFromFileName(String name) {
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) {
+            name = name.substring(slash + 1);
+        }
+
+        int dot = name.lastIndexOf('.');
+        if (dot <= 0 || dot == name.length() - 1) {
+            return null;
+        }
+
+        String extension = name.substring(dot + 1).toLowerCase();
+        if (!extension.matches("[a-z0-9]{1,10}")) {
+            return null;
+        }
+        return "." + extension;
+    }
+
+    private static String defaultExtension(ImmichType type) {
+        return type == ImmichType.VIDEO ? ".mp4" : ".jpg";
+    }
+
     @NonNull
-    private synchronized File downloadAsset(String uuid, ImmichType type, Boolean fallback, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
+    private synchronized File downloadAsset(String uuid, ImmichType type, boolean fallback,
+                                            String originalFileName, String originalPath,
+                                            Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
 
         if (apiService == null) {
             SettingsManager settings = this.settingsManager.get();
@@ -252,14 +303,15 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
-        Response<ResponseBody> downloadResponse = Boolean.FALSE.equals(fallback) ? apiService.downloadFile(uuid, null).execute() :
+        Response<ResponseBody> downloadResponse = !fallback ? apiService.downloadFile(uuid, null).execute() :
                 type == ImmichType.IMAGE
                 ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.thumbnail, null).execute()
                 : apiService.playAssetVideo(uuid, null).execute();
 
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
             downloadMutex.lock();
-            File cacheFile = new File(activity.getCacheDir(), uuid + ".dat");
+            File cacheFile = new File(activity.getCacheDir(),
+                    cacheFileName(uuid, originalFileName, originalPath, type, fallback));
 
             try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
                 try (InputStream inputStream = downloadResponse.body().byteStream()) {
@@ -284,7 +336,7 @@ public class MediaManager implements MediaManagerInterface {
         new Thread(() -> {
             try {
 
-                File thumbnail = downloadAsset(assetId, type, true, activity, null);
+                File thumbnail = downloadAsset(assetId, type, true, null, null, activity, null);
 
                 activity.runOnUiThread(() -> {
                     MediaManagerListener mediaManagerListener = this.listener.get();

@@ -14,8 +14,6 @@ import android.view.TextureView;
 
 import androidx.annotation.NonNull;
 
-import com.aphex3k.eo1.BuildConfig;
-
 import java.io.IOException;
 
 /*
@@ -51,7 +49,6 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     private static final String TAG = TextureVideoView.class.getName();
 
     private MediaPlayer mMediaPlayer;
-    private Surface mVideoSurface;
 
     private float mVideoHeight;
     private float mVideoWidth;
@@ -89,61 +86,20 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     }
 
     private void updateTextureViewSize() {
-        if (getWidth() <= 0 || getHeight() <= 0) {
+        if (mVideoWidth <= 0 || mVideoHeight <= 0 || getWidth() <= 0 || getHeight() <= 0) {
             return;
         }
 
-        float pivotX = getWidth() / 2f;
-        float pivotY = getHeight() / 2f;
-        int matrixRotation = matrixRotationDegrees();
+        float viewWidth = getWidth();
+        float viewHeight = getHeight();
+        float pivotX = viewWidth / 2f;
+        float pivotY = viewHeight / 2f;
+        float scale = rotationAwareAspectScale(viewWidth, viewHeight, mVideoWidth, mVideoHeight, mVideoRotation);
 
         Matrix transformMatrix = new Matrix();
-        if (matrixRotation != 0) {
-            transformMatrix.setRotate(matrixRotation, pivotX, pivotY);
-        }
+        transformMatrix.setScale(scale, scale, pivotX, pivotY);
+        transformMatrix.postRotate(mVideoRotation, pivotX, pivotY);
         setTransform(transformMatrix);
-
-        if (BuildConfig.DEBUG) {
-            log(String.format(
-                    "view=%dx%d video=%dx%d metadataRotation=%d matrixRotation=%d",
-                    getWidth(),
-                    getHeight(),
-                    (int) mVideoWidth,
-                    (int) mVideoHeight,
-                    mVideoRotation,
-                    matrixRotation));
-        }
-    }
-
-    private int matrixRotationDegrees() {
-        if (mVideoRotation == 0) {
-            return 0;
-        }
-        if (mVideoRotation == 90 || mVideoRotation == 270) {
-            if (mVideoWidth < mVideoHeight) {
-                return 0;
-            }
-        }
-        return mVideoRotation;
-    }
-
-    private void bindVideoSurface(SurfaceTexture surfaceTexture) {
-        if (surfaceTexture == null || mMediaPlayer == null) {
-            return;
-        }
-
-        if (mVideoWidth > 0 && mVideoHeight > 0) {
-            surfaceTexture.setDefaultBufferSize((int) mVideoWidth, (int) mVideoHeight);
-        }
-
-        if (mVideoSurface != null) {
-            mMediaPlayer.setSurface(null);
-            mVideoSurface.release();
-            mVideoSurface = null;
-        }
-
-        mVideoSurface = new Surface(surfaceTexture);
-        mMediaPlayer.setSurface(mVideoSurface);
     }
 
     /**
@@ -208,8 +164,6 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         mIsVideoPrepared = false;
         mIsPlayCalled = false;
         mVideoRotation = 0;
-        mVideoWidth = 0;
-        mVideoHeight = 0;
         mState = State.UNINITIALIZED;
     }
 
@@ -220,7 +174,9 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         initPlayer();
 
         try {
-            setTransform(new Matrix());
+            Matrix transformMatrix = new Matrix();
+            transformMatrix.setScale(1, 1, 0, 0);
+            setTransform(transformMatrix);
 
             mVideoRotation = readVideoRotation(path);
             mMediaPlayer.setDataSource(path);
@@ -278,9 +234,6 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                         public void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
                             mVideoWidth = width;
                             mVideoHeight = height;
-                            if (mIsViewAvailable) {
-                                bindVideoSurface(getSurfaceTexture());
-                            }
                             updateTextureViewSize();
                         }
 
@@ -333,8 +286,6 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                     return false;
                 }
             });
-
-            mMediaPlayer.setVideoScalingMode(MediaPlayer.VIDEO_SCALING_MODE_SCALE_TO_FIT_WITH_CROPPING);
 
             // don't forget to call MediaPlayer.prepareAsync() method when you use constructor for
             // creating MediaPlayer
@@ -490,9 +441,9 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     @Override
     public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture, int width, int height) {
+        Surface surface = new Surface(surfaceTexture);
+        mMediaPlayer.setSurface(surface);
         mIsViewAvailable = true;
-        bindVideoSurface(surfaceTexture);
-        updateTextureViewSize();
         if (mIsDataSourceSet && mIsPlayCalled && mIsVideoPrepared) {
             log("View is available and play() was called.");
             play();
@@ -506,14 +457,6 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     @Override
     public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surface) {
-        if (mMediaPlayer != null) {
-            mMediaPlayer.setSurface(null);
-        }
-        if (mVideoSurface != null) {
-            mVideoSurface.release();
-            mVideoSurface = null;
-        }
-        mIsViewAvailable = false;
         return false;
     }
 

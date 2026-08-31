@@ -527,23 +527,7 @@ push_configuration_if_present() {
   fi
 }
 
-configure_display_size() {
-  if [[ "$USING_EMULATOR" -eq 1 ]]; then
-    log "Setting emulator display size to 1080x1920"
-    "${ADB}" -s "$SERIAL" shell wm size 1080x1920 || true
-  else
-    log "Resetting physical device display size override"
-    "${ADB}" -s "$SERIAL" shell wm size reset || true
-  fi
-
-  local effective_size
-  effective_size="$("${ADB}" -s "$SERIAL" shell wm size 2>/dev/null | tr -d '\r' || true)"
-  log "Effective display size: ${effective_size:-unknown}"
-}
-
 install_and_start() {
-  configure_display_size
-
   log "Installing ${APK_PATH}"
   "${ADB}" -s "$SERIAL" install -r "$APK_PATH"
 

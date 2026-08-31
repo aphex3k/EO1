@@ -46,6 +46,7 @@ import com.aphex3k.immichApi.ImmichType;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.DataSource;
 import com.bumptech.glide.load.engine.GlideException;
+import com.bumptech.glide.load.resource.gif.GifDrawable;
 import com.bumptech.glide.request.RequestListener;
 import com.bumptech.glide.request.target.Target;
 import com.dd.crop.TextureVideoView;
@@ -672,30 +673,54 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
             try {
-                Glide.with(this)
-                        .load(file)
-                        .centerCrop()
-                        .listener(new RequestListener<Drawable>() {
-                            @Override
-                            public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
-                                assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
-                                return false;
-                            }
+                videoView.stop();
+                videoView.setVisibility(View.INVISIBLE);
+                Glide.with(this).clear(imageView);
 
-                            @Override
-                            public boolean onResourceReady(@NonNull Drawable resource, @NonNull Object model, Target<Drawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
-                                if (lastVisibleView == videoView || lastVisibleView == null) {
-                                    videoView.stop();
-                                    videoView.setVisibility(View.INVISIBLE);
+                if (MediaTypeHelper.isGifFile(file)) {
+                    Glide.with(this)
+                            .asGif()
+                            .load(file)
+                            .centerCrop()
+                            .listener(new RequestListener<GifDrawable>() {
+                                @Override
+                                public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<GifDrawable> target, boolean isFirstResource) {
+                                    assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
+                                    return false;
+                                }
+
+                                @Override
+                                public boolean onResourceReady(@NonNull GifDrawable resource, @NonNull Object model, Target<GifDrawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
+                                    resource.setLoopCount(GifDrawable.LOOP_FOREVER);
                                     imageView.setVisibility(View.VISIBLE);
                                     lastVisibleView = imageView;
+                                    lastVisibleAsset = file.getAbsolutePath();
+                                    return false;
                                 }
-                                lastVisibleAsset = file.getAbsolutePath();
-                                return false;
-                            }
-                        })
-                        .dontAnimate()
-                        .into(imageView);
+                            })
+                            .into(imageView);
+                } else {
+                    Glide.with(this)
+                            .load(file)
+                            .centerCrop()
+                            .listener(new RequestListener<Drawable>() {
+                                @Override
+                                public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
+                                    assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
+                                    return false;
+                                }
+
+                                @Override
+                                public boolean onResourceReady(@NonNull Drawable resource, @NonNull Object model, Target<Drawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
+                                    imageView.setVisibility(View.VISIBLE);
+                                    lastVisibleView = imageView;
+                                    lastVisibleAsset = file.getAbsolutePath();
+                                    return false;
+                                }
+                            })
+                            .dontAnimate()
+                            .into(imageView);
+                }
             }
             catch (Exception e) {
                 handleException(e);
@@ -742,20 +767,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             try {
+                Glide.with(this).clear(imageView);
+                imageView.setVisibility(View.INVISIBLE);
+                videoView.setVisibility(View.VISIBLE);
+                lastVisibleView = videoView;
                 videoView.stop();
                 videoView.setListener(new TextureVideoView.MediaPlayerListener() {
                     @Override
                     public void onVideoPrepared() {
                         try {
-                            if (lastVisibleView == imageView || lastVisibleView == null) {
-                                videoView.setVisibility(View.VISIBLE);
-                                imageView.setVisibility(View.INVISIBLE);
-                                lastVisibleView = videoView;
-                            }
                             lastVisibleAsset = file.getAbsolutePath();
                             videoView.setLooping(true);
                             videoView.setFocusable(false);
-                            videoView.setVolume(0,0);
+                            videoView.setVolume(0, 0);
                             videoView.play();
                         } catch (Exception e) {
                             assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
@@ -773,8 +797,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     }
 
                     public boolean onInfo(int what, int extra) {
-                        // https://developer.android.com/reference/android/media/MediaPlayer.OnInfoListener
-
                         return false;
                     }
                 });

@@ -25,10 +25,11 @@ Gitignored (do not commit): `configuration.json`, `ffmpeg/`, large parts of `EO2
 
 - **Language:** Java only — no Kotlin
 - **SDK:** `minSdk` / `targetSdk` / `maxSdk` = **19** (KitKat 4.4.2); `compileSdk` 34
-- **Build:** Gradle + Android Gradle Plugin; CI via Jenkins (build, tests, Sonar, signed APKs)
+- **Build:** Gradle + Android Gradle Plugin; CI via Jenkins (build, tests, signed APKs)
 - **Networking:** Retrofit + OkHttp + Gson; hand-rolled Immich client; Gitea client for OTA
 - **Immich server:** supported range **3.0.0–3.1.0** (tested against 3.1.0). Bounds live in `MainActivity.IMMICH_MIN_VERSION` / `IMMICH_MAX_VERSION`. Immich’s API is not stable across releases — when bumping support, re-check OpenAPI and update types under `immichApi/`.
 - **TLS:** EO1 needs TLS 1.2 and weaker ciphers — see `Tls12SocketFactory.java` and `ApiServiceGenerator.java`
+- **Video:** Platform `MediaPlayer` via `com.dd.crop.TextureVideoView`. **Do not use ExoPlayer** (including 2.19.x / Media3) on Geniatech EO1/EO2 — it triggers MediaCodec/GPU driver lockups that hang the whole device (ADB dies; requires power-cycle). Prefer MediaPlayer or other paths that avoid aggressive MediaCodec usage on API 19 Geniatech boards.
 - **Secrets:** Immich password is stored cleartext in device `configuration.json` — never commit a real config
 
 Do not casually bump SDK levels or modernize AndroidX / OkHttp / Retrofit; pins exist for API 19.
@@ -90,5 +91,6 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 
 - Commit `configuration.json`, `ffmpeg/`, or bulk `EO2/` dumps
 - Introduce Kotlin or raise `minSdk` / `maxSdk` without an explicit product decision
+- Add ExoPlayer / Media3 for video playback (known Geniatech API 19 full-system hang)
 - Treat README marketing or hardware setup prose as build requirements for code changes
 - Edit or rely on `EO2/`, `ffmpeg/`, or `.electric-objects/` as product source
