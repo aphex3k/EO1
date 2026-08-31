@@ -20,5 +20,8 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
--keep class retrofit2.** { *; }
+# ffmpeg-kit (flat AAR in eo1-ffmpeg/libs/)
+-keep class com.arthenica.ffmpegkit.** { *; }
+-keep class com.arthenica.smartexception.** { *; }
+-dontwarn com.arthenica.smartexception.**
 

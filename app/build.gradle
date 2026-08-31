@@ -24,6 +24,9 @@ android {
     }
     buildTypes {
         release {
+            ndk {
+                abiFilters 'armeabi-v7a'
+            }
             // see: https://developer.android.com/build/shrink-code
             // Enables code shrinking, obfuscation, and optimization for only
             // your project's release build type. Make sure to use a build
@@ -42,6 +45,13 @@ android {
             debuggable = false
         }
         debug {
+            ndk {
+                def debugAbis = ['armeabi-v7a']
+                if (project.hasProperty('debugAbiArm64')) {
+                    debugAbis.add('arm64-v8a')
+                }
+                abiFilters(*debugAbis)
+            }
             enableUnitTestCoverage true
             enableAndroidTestCoverage true
         }
@@ -85,6 +95,13 @@ dependencies {
     implementation 'com.google.code.gson:gson:2.10.1'
 
     implementation project(':eo1-ffmpeg')
+
+    def ffmpegAar = rootProject.file('eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar')
+    if (ffmpegAar.exists()) {
+        implementation files(ffmpegAar)
+        // files() AAR does not resolve transitive deps from ffmpeg-kit's pom
+        implementation 'com.arthenica:smart-exception-java:0.2.1'
+    }
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation "org.mockito:mockito-core:5.10.0"

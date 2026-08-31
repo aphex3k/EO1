@@ -15,14 +15,16 @@ Android home-screen replacement APK for Electric Objects **EO1** and **EO2** dig
 | Path | Treat as |
 |------|----------|
 | `app/` | **App product source** (Java Android module) |
-| `eo1-ffmpeg/` | **FFmpeg transcode library** (Java API + CI-built native AAR) |
+| `eo1-ffmpeg/` | **FFmpeg transcode library** (Java API + Git LFS prebuilt native AAR) |
 | Root Gradle files, `Jenkinsfile` | Build & CI |
 | `docs/FFMPEG.md` | FFmpeg integration reference for agents |
 | `configuration_example.json` | Config template (may drift; see below) |
 | `EO2/`, `ffmpeg/`, `.electric-objects/` | Local dumps / vendor reference — not app logic |
 | `_img/` | README assets only |
 
-Gitignored (do not commit): `configuration.json`, `ffmpeg/`, `eo1-ffmpeg/libs/*.aar`, large parts of `EO2/`.
+Gitignored (do not commit): `configuration.json`, `ffmpeg/`, large parts of `EO2/`.
+
+Git LFS (tracked): `eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar` (ffmpeg-kit LTS GPL prebuilt; armeabi-v7a + arm64-v8a).
 
 ## Tech stack & hard constraints
 
@@ -34,7 +36,7 @@ Gitignored (do not commit): `configuration.json`, `ffmpeg/`, `eo1-ffmpeg/libs/*.
 - **TLS:** EO1 needs TLS 1.2 and weaker ciphers — see `Tls12SocketFactory.java` and `ApiServiceGenerator.java`
 - **Video:** Platform `MediaPlayer` via `com.dd.crop.TextureVideoView`. **Do not use ExoPlayer** (including 2.19.x / Media3) on Geniatech EO1/EO2 — it triggers MediaCodec/GPU driver lockups that hang the whole device (ADB dies; requires power-cycle). Prefer MediaPlayer or other paths that avoid aggressive MediaCodec usage on API 19 Geniatech boards.
 - **Video transcoding:** FFmpeg (via `:eo1-ffmpeg`) transcodes incompatible sources (HEVC/VP9/AV1) and oversized videos (longest axis > 1920px) to H.264 MP4 **before** `MediaPlayer` playback. FFmpeg is transcode-only — never used for playback. Immich `/video/playback` remains the last-resort fallback. See [docs/FFMPEG.md](docs/FFMPEG.md).
-- **CI:** Jenkins `Build FFmpeg Native` stage must run before Gradle when building APKs with transcoding enabled.
+- **CI:** Jenkins uses the committed LFS AAR by default. Set `REBUILD_FFMPEG_NATIVE=1` on a Jenkins build to rebuild ffmpeg-kit from source (see [docs/FFMPEG.md](docs/FFMPEG.md)).
 - **Secrets:** Immich password is stored cleartext in device `configuration.json` — never commit a real config
 
 Do not casually bump SDK levels or modernize AndroidX / OkHttp / Retrofit; pins exist for API 19.
@@ -97,7 +99,7 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 
 **Don’t**
 
-- Commit `configuration.json`, `ffmpeg/`, `eo1-ffmpeg/libs/*.aar`, or bulk `EO2/` dumps
+- Commit `configuration.json`, `ffmpeg/`, or bulk `EO2/` dumps
 - Introduce Kotlin or raise `minSdk` / `maxSdk` without an explicit product decision
 - Add ExoPlayer / Media3 for video playback (known Geniatech API 19 full-system hang)
 - Treat README marketing or hardware setup prose as build requirements for code changes

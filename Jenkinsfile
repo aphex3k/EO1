@@ -81,17 +81,23 @@ pipeline {
                 withCredentials([gitUsernamePassword(credentialsId: 'gitea-jenkins', gitToolName: 'Default')]) {
                     sh '''
                         set -eu
-                        rm -rf ffmpeg-kit-build
-                        git clone --depth 1 https://gitea.codingmerc.com/michael/ffmpeg-kit.git ffmpeg-kit-build
-                        cd ffmpeg-kit-build
-                        export ANDROID_SDK_ROOT=/var/android-sdk
-                        export ANDROID_NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/22.1.7171670"
-                        test -d "${ANDROID_NDK_ROOT}"
-                        ./android.sh --lts --enable-gpl --enable-x264 \
-                          --disable-arm64-v8a --disable-x86 --disable-x86_64
-                        mkdir -p ../eo1-ffmpeg/libs
-                        cp bundle-android-aar-lts/ffmpeg-kit-*-gpl*.aar ../eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar
-                        test -f ../eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar
+                        AAR=eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar
+                        if [ "${REBUILD_FFMPEG_NATIVE:-0}" = "1" ]; then
+                            echo "REBUILD_FFMPEG_NATIVE=1: rebuilding FFmpeg native AAR"
+                            rm -rf ffmpeg-kit-build
+                            git clone --depth 1 https://gitea.codingmerc.com/michael/ffmpeg-kit.git ffmpeg-kit-build
+                            cd ffmpeg-kit-build
+                            export ANDROID_SDK_ROOT=/var/android-sdk
+                            export ANDROID_NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/22.1.7171670"
+                            test -d "${ANDROID_NDK_ROOT}"
+                            ./android.sh --lts --enable-gpl --enable-x264 \
+                              --disable-x86 --disable-x86-64
+                            mkdir -p ../eo1-ffmpeg/libs
+                            cp prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar "../${AAR}"
+                        else
+                            echo "Using committed FFmpeg AAR (set REBUILD_FFMPEG_NATIVE=1 to rebuild)"
+                        fi
+                        test -f "${AAR}"
                     '''
                 }
             }

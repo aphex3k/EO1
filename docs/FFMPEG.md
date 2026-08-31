@@ -12,11 +12,11 @@ Agent-oriented reference for client-side video transcoding. FFmpeg is used **onl
 | Path | Role |
 |------|------|
 | [`eo1-ffmpeg/`](../eo1-ffmpeg/) | Android library module — `VideoProbe`, `VideoTranscoder`, FFmpeg command runner |
-| [`eo1-ffmpeg/libs/*.aar`](../eo1-ffmpeg/libs/) | CI-built ffmpeg-kit LTS GPL AAR (gitignored; not committed) |
+| [`eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar`](../eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar) | Git LFS prebuilt ffmpeg-kit LTS GPL AAR (armeabi-v7a + arm64-v8a) |
 | [`app/.../VideoTranscodeManager.java`](../app/src/main/java/com/aphex3k/eo1/VideoTranscodeManager.java) | App orchestration — cache, timeouts, disk guards |
 | [`app/.../MediaManager.java`](../app/src/main/java/com/aphex3k/eo1/MediaManager.java) | Proactive transcode after video download |
 | [`app/.../MainActivity.java`](../app/src/main/java/com/aphex3k/eo1/MainActivity.java) | Reactive transcode on `MediaPlayer` failure |
-| [`Jenkinsfile`](../Jenkinsfile) | `Build FFmpeg Native` stage before Gradle |
+| [`Jenkinsfile`](../Jenkinsfile) | Optional `Build FFmpeg Native` stage (`REBUILD_FFMPEG_NATIVE=1`) |
 | [`ffmpeg/`](../ffmpeg/) | Local dev workspace for ffmpeg-kit fork (gitignored) |
 
 ## Hard constraints
@@ -34,7 +34,7 @@ Agent-oriented reference for client-side video transcoding. FFmpeg is used **onl
 ```
 Immich download (original)
   → VideoProbe (FFprobe)
-  → if incompatible codec (HEVC/VP9/AV1) OR longest axis > 1920: VideoTranscoder → {uuid}_eo1.mp4
+  → if incompatible codec (HEVC/VP9/AV1), longest axis > 1920, or audio present: VideoTranscoder → {uuid}_eo1.mp4
   → displayVideo → MediaPlayer
   → on error: reactive transcode (if not already transcoded)
   → on failure: Immich /video/playback + EO1_INCOMPATIBLE tag
@@ -58,7 +58,7 @@ Inject `FfmpegCommandRunner` in tests to mock FFprobe/FFmpeg output without nati
 
 ## Default transcode profile
 
-Software-only FFmpeg arguments (via `TranscodeOptions` defaults):
+When video must be re-encoded (incompatible codec or oversized):
 
 ```
 -i <input>
@@ -68,37 +68,62 @@ Software-only FFmpeg arguments (via `TranscodeOptions` defaults):
 <output>
 ```
 
+When video is already EO1-compatible but contains audio (remux only):
+
+```
+-i <input>
+-c:v copy -an -movflags +faststart
+<output>
+```
+
 - Scale filter fits video inside a 1920×1920 box so the **longest side is at most 1920** while preserving aspect ratio.
 
-- `-an`: EO1 has no speakers.
+- `-an`: strip all audio tracks (EO1 has no speakers).
 - `-threads 2`: matches EO1 dual-core CPU.
 - Output cache name: `{assetId}_eo1.mp4`.
 
 ## Build workflow (native AAR)
 
-### CI (Jenkins)
+### Prebuilt AAR (default)
 
-1. Clone `https://gitea.codingmerc.com/michael/ffmpeg-kit.git`
-2. Set `ANDROID_SDK_ROOT=/var/android-sdk` and `ANDROID_NDK_ROOT` (NDK **r22b** recommended per ffmpeg-kit docs)
-3. Build LTS GPL package for armeabi-v7a:
+The repo ships [`eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar`](../eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar) via **Git LFS** (~22 MB; `armeabi-v7a` for EO1 hardware, `arm64-v8a` for Apple Silicon emulator debug). After clone:
 
 ```bash
-./android.sh --lts --enable-gpl --enable-x264 \
-  --disable-arm64-v8a --disable-x86 --disable-x86_64
+git lfs pull
+./gradlew test assembleDebug assembleRelease
 ```
 
-4. Copy AAR: `cp bundle-android-aar-lts/ffmpeg-kit-*-gpl*.aar ../eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar`
-5. Run `./gradlew assembleRelease`
+Release APKs still package **armeabi-v7a** natives only (`app/build.gradle` release `abiFilters`). Debug can include arm64 when `-PdebugAbiArm64=true` (set automatically by `./debug.sh` when the AAR contains arm64).
 
-### Local dev without native libs
+### CI (Jenkins)
+
+**Default:** verify the committed AAR exists after checkout; skip native build.
+
+**Opt-in rebuild:** set `REBUILD_FFMPEG_NATIVE=1` on the Jenkins job to clone ffmpeg-kit and run:
+
+```bash
+./android.sh --lts --enable-gpl --enable-x264 --disable-x86 --disable-x86-64
+cp prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar ../eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar
+```
+
+Use NDK **r22b** (`ANDROID_NDK_ROOT=/var/android-sdk/ndk/22.1.7171670`). Rebuilt AARs are workspace-only unless manually committed back to Git LFS.
+
+### Local dev without rebuilding natives
 
 - `./gradlew test` works — unit tests mock `FfmpegCommandRunner`.
-- `./gradlew assembleDebug` requires the AAR in `eo1-ffmpeg/libs/` (build locally or copy from CI artifact).
+- `./gradlew assembleDebug` / `assembleRelease` use the LFS AAR when present.
 - Without native libs at runtime, transcoding is skipped and the app falls back to Immich `/video/playback`.
 
-### Local native build (optional)
+### Local native rebuild (optional)
 
-Use the gitignored [`ffmpeg/ffmpeg-kit/`](../ffmpeg/ffmpeg-kit/) fork or clone fresh, then run the same `android.sh` command above.
+Use the gitignored [`ffmpeg/ffmpeg-kit/`](../ffmpeg/ffmpeg-kit/) fork or clone fresh, or run `./debug.sh` (builds when AAR is missing or `FORCE_FFMPEG_BUILD=1`).
+
+```bash
+./android.sh --lts --enable-gpl --enable-x264 --disable-x86 --disable-x86-64
+cp prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar ../eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar
+```
+
+**macOS note:** ffmpeg-kit LTS targets **API 16**, so NDK **r24+** cannot be used (`armv7a-linux-androideabi16-clang` is missing). `./debug.sh` uses NDK **r23** when installed, otherwise **r22** with llvm `ar` shims for both `arm-linux-androideabi-*` and `aarch64-linux-android-*` (GNU `ar` aborts on current macOS). On macOS it uses a Homebrew CMake 4.x compatibility shim (`CMAKE_POLICY_VERSION_MINIMUM=3.5`, cpu-features tests disabled) and bumps ffmpeg-kit's Gradle wrapper to **8.5** for Java 21. Set `FFMPEG_INSTALL_SDK_CMAKE=1` to install SDK `cmake;3.22.1` instead. On **Apple Silicon**, `./debug.sh` builds **arm64-v8a** in addition to armeabi-v7a when rebuilding locally.
 
 ## App guardrails
 
