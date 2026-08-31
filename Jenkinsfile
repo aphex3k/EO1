@@ -6,7 +6,6 @@ pipeline {
         // Even console ports 5554..5584 (16 slots). ADB's usable adb-port range is ~5555-5586.
         EMULATOR_PORT = "${5554 + 2 * (Math.abs(Integer.parseInt(env.BUILD_NUMBER) % 16))}"
         EMULATOR_NAME = "EO1-${EMULATOR_PORT}"
-        SONAR_TOKEN = credentials('sonar_token_gitea_eo1')
         ANDROID_HOME = '/var/android-sdk'
         PATH = "${ANDROID_HOME}/tools:${ANDROID_HOME}/tools/bin:${ANDROID_HOME}/platform-tools:${PATH}"
         JAVA_OPTS = "-Dorg.gradle.daemon=false"
@@ -98,12 +97,10 @@ pipeline {
                 }
             }
         }
-        stage ('Post Build') {
-            parallel {
-                stage ('Emulator 📱') {
-                    steps {
-                        script {
-                            sh '''
+        stage ('Emulator 📱') {
+            steps {
+                script {
+                    sh '''
                             set -eu
                             SERIAL="emulator-${EMULATOR_PORT}"
                             BOOT_TIMEOUT_SEC=180
@@ -188,21 +185,6 @@ pipeline {
                             adb -s "${SERIAL}" shell monkey -p com.aphex3k.eo1 -v 500 && sleep 5
                             adb -s "${SERIAL}" shell screencap -p /data/data/screenshot_02_post_monkey.png && adb -s "${SERIAL}" pull /data/data/screenshot_02_post_monkey.png
                             '''
-                        }   
-                    }
-                }
-                stage ('Scanning') {
-                    steps {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            script {
-                                if (env.CHANGE_ID) {
-                                    sh "./gradlew --no-daemon sonar -Dsonar.pullrequest.base=${CHANGE_TARGET} -Dsonar.pullrequest.branch=${CHANGE_BRANCH} -Dsonar.pullrequest.key=${CHANGE_ID}"
-                                } else {
-                                    sh "./gradlew --no-daemon sonar -Dsonar.branch.name=${BRANCH_NAME}"
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }
