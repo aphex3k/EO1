@@ -737,7 +737,39 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * @param isVideo true if it is a video
      * @param file file to load
      */
+    private void restoreImageViewAfterVideoFailure() {
+        videoView.stop();
+        videoView.setVisibility(View.INVISIBLE);
+        imageView.setVisibility(View.VISIBLE);
+        lastVisibleView = imageView;
+    }
+
     private void assetFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+        if (isVideo && mediaManager.shouldAttemptReactiveTranscode(assetId, file)) {
+            MainActivity activity = activityReference.get();
+            if (activity != null) {
+                restoreImageViewAfterVideoFailure();
+                mediaManager.attemptReactiveTranscode(activity, assetId, file, new MediaManager.ReactiveTranscodeCallback() {
+                    @Override
+                    public void onTranscodeSuccess(File transcodedFile) {
+                        displayVideo(transcodedFile, assetId);
+                    }
+
+                    @Override
+                    public void onTranscodeFailed() {
+                        immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
+                    }
+                });
+                return;
+            }
+        }
+        immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
+    }
+
+    private void immichPlaybackFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+        if (isVideo) {
+            restoreImageViewAfterVideoFailure();
+        }
         if (assetId != null) {
             MainActivity activity = activityReference.get();
             if (activity != null) {
@@ -767,21 +799,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             try {
-                Glide.with(this).clear(imageView);
-                imageView.setVisibility(View.INVISIBLE);
-                videoView.setVisibility(View.VISIBLE);
-                lastVisibleView = videoView;
                 videoView.stop();
+                videoView.setVisibility(View.INVISIBLE);
                 videoView.setListener(new TextureVideoView.MediaPlayerListener() {
                     @Override
                     public void onVideoPrepared() {
                         try {
+                            Glide.with(MainActivity.this).clear(imageView);
+                            imageView.setVisibility(View.INVISIBLE);
+                            videoView.setVisibility(View.VISIBLE);
+                            lastVisibleView = videoView;
                             lastVisibleAsset = file.getAbsolutePath();
                             videoView.setLooping(true);
                             videoView.setFocusable(false);
                             videoView.setVolume(0, 0);
                             videoView.play();
                         } catch (Exception e) {
+                            restoreImageViewAfterVideoFailure();
                             assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                             handleException(e);
                         }
@@ -792,6 +826,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     }
 
                     public boolean onError() {
+                        restoreImageViewAfterVideoFailure();
                         assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                         return false;
                     }
@@ -803,6 +838,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 videoView.setDataSource(file.getPath());
                 videoView.setLooping(true);
             } catch (Exception e) {
+                restoreImageViewAfterVideoFailure();
                 assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                 handleException(e);
             }

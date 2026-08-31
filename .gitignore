@@ -18,6 +18,8 @@ passwords.txt
 EO2/**/dalvik-cache/
 EO2/data/backup/sys/
 EO2/data/backup/proc/
-ffmpeg/
+/ffmpeg/
+eo1-ffmpeg/libs/*.aar
 configuration.json
 /EO2/data/backup
+/eo1-ffmpeg/build

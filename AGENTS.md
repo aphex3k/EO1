@@ -5,21 +5,24 @@
 Android home-screen replacement APK for Electric Objects **EO1** and **EO2** digital frames. It pulls photos/videos from a self-hosted [Immich](https://immich.app/) server and rotates them on an interval so display never depends on Electric Objects’ cloud.
 
 - Package ID: `com.aphex3k.eo1`
-- Product source: `app/` only
+- Product source: `app/` + `eo1-ffmpeg/` library module
 - Human install/ops guide: [README.md](README.md)
 - Hardware notes: [EO1-specs.md](EO1-specs.md)
+- FFmpeg / transcoding: [docs/FFMPEG.md](docs/FFMPEG.md)
 
 ## Source map
 
 | Path | Treat as |
 |------|----------|
-| `app/` | **Only product source** (Java Android module) |
+| `app/` | **App product source** (Java Android module) |
+| `eo1-ffmpeg/` | **FFmpeg transcode library** (Java API + CI-built native AAR) |
 | Root Gradle files, `Jenkinsfile` | Build & CI |
+| `docs/FFMPEG.md` | FFmpeg integration reference for agents |
 | `configuration_example.json` | Config template (may drift; see below) |
-| `EO2/`, `ffmpeg/`, `.electric-objects/` | Local dumps / binaries / vendor reference — **not** app logic |
+| `EO2/`, `ffmpeg/`, `.electric-objects/` | Local dumps / vendor reference — not app logic |
 | `_img/` | README assets only |
 
-Gitignored (do not commit): `configuration.json`, `ffmpeg/`, large parts of `EO2/`.
+Gitignored (do not commit): `configuration.json`, `ffmpeg/`, `eo1-ffmpeg/libs/*.aar`, large parts of `EO2/`.
 
 ## Tech stack & hard constraints
 
@@ -30,6 +33,8 @@ Gitignored (do not commit): `configuration.json`, `ffmpeg/`, large parts of `EO2
 - **Immich server:** supported range **3.0.0–3.1.0** (tested against 3.1.0). Bounds live in `MainActivity.IMMICH_MIN_VERSION` / `IMMICH_MAX_VERSION`. Immich’s API is not stable across releases — when bumping support, re-check OpenAPI and update types under `immichApi/`.
 - **TLS:** EO1 needs TLS 1.2 and weaker ciphers — see `Tls12SocketFactory.java` and `ApiServiceGenerator.java`
 - **Video:** Platform `MediaPlayer` via `com.dd.crop.TextureVideoView`. **Do not use ExoPlayer** (including 2.19.x / Media3) on Geniatech EO1/EO2 — it triggers MediaCodec/GPU driver lockups that hang the whole device (ADB dies; requires power-cycle). Prefer MediaPlayer or other paths that avoid aggressive MediaCodec usage on API 19 Geniatech boards.
+- **Video transcoding:** FFmpeg (via `:eo1-ffmpeg`) transcodes incompatible sources (HEVC/VP9/AV1) and oversized videos (longest axis > 1920px) to H.264 MP4 **before** `MediaPlayer` playback. FFmpeg is transcode-only — never used for playback. Immich `/video/playback` remains the last-resort fallback. See [docs/FFMPEG.md](docs/FFMPEG.md).
+- **CI:** Jenkins `Build FFmpeg Native` stage must run before Gradle when building APKs with transcoding enabled.
 - **Secrets:** Immich password is stored cleartext in device `configuration.json` — never commit a real config
 
 Do not casually bump SDK levels or modernize AndroidX / OkHttp / Retrofit; pins exist for API 19.
@@ -38,10 +43,11 @@ Do not casually bump SDK levels or modernize AndroidX / OkHttp / Retrofit; pins 
 
 ```
 MainActivity
-  ├── SettingsManager  → configuration.json (Configuration.java)
-  ├── MediaManager     → com.aphex3k.immichApi → Immich server
+  ├── SettingsManager       → configuration.json (Configuration.java)
+  ├── MediaManager          → com.aphex3k.immichApi → Immich server
+  │     └── VideoTranscodeManager → eo1-ffmpeg (probe / transcode)
   ├── BrightnessManager / BrightnessSensorManager
-  └── UpdateManager    → com.aphex3k.giteaApi → Gitea releases
+  └── UpdateManager         → com.aphex3k.giteaApi → Gitea releases
 ```
 
 Open these first:
@@ -50,6 +56,8 @@ Open these first:
 |------|------|
 | Launcher / orchestration | `app/src/main/java/com/aphex3k/eo1/MainActivity.java` |
 | Album fetch / rotation | `app/src/main/java/com/aphex3k/eo1/MediaManager.java` |
+| Video transcode orchestration | `app/src/main/java/com/aphex3k/eo1/VideoTranscodeManager.java` |
+| FFmpeg probe / transcode API | `eo1-ffmpeg/src/main/java/com/aphex3k/eo1/ffmpeg/` |
 | Settings I/O | `app/src/main/java/com/aphex3k/eo1/SettingsManager.java` |
 | Config model (source of truth) | `app/src/main/java/com/aphex3k/eo1/Configuration.java` |
 | Immich HTTP API | `app/src/main/java/com/aphex3k/immichApi/ImmichApiService.java` |
@@ -89,7 +97,7 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 
 **Don’t**
 
-- Commit `configuration.json`, `ffmpeg/`, or bulk `EO2/` dumps
+- Commit `configuration.json`, `ffmpeg/`, `eo1-ffmpeg/libs/*.aar`, or bulk `EO2/` dumps
 - Introduce Kotlin or raise `minSdk` / `maxSdk` without an explicit product decision
 - Add ExoPlayer / Media3 for video playback (known Geniatech API 19 full-system hang)
 - Treat README marketing or hardware setup prose as build requirements for code changes

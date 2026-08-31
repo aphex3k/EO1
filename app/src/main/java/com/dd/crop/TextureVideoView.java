@@ -185,6 +185,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         } catch (IOException e) {
             if (e.getMessage() != null)
                 Log.d(TAG, e.getMessage());
+            notifyListenerError();
         }
     }
 
@@ -205,6 +206,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         } catch (IOException e) {
             if (e.getMessage() != null)
                 Log.d(TAG, e.getMessage());
+            notifyListenerError();
         }
     }
 
@@ -223,6 +225,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         } catch (IOException e) {
             if (e.getMessage() != null)
                 Log.d(TAG, e.getMessage());
+            notifyListenerError();
         }
     }
 
@@ -287,6 +290,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                 }
             });
 
+            bindSurfaceIfAvailable();
+
             // don't forget to call MediaPlayer.prepareAsync() method when you use constructor for
             // creating MediaPlayer
             mMediaPlayer.prepareAsync();
@@ -294,7 +299,25 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         } catch (Exception e) {
             if (e.getMessage() != null)
                 Log.d(TAG, e.getMessage());
+            notifyListenerError();
         }
+    }
+
+    private void notifyListenerError() {
+        if (mListener != null) {
+            mListener.onError();
+        }
+    }
+
+    private void bindSurfaceIfAvailable() {
+        if (!mIsViewAvailable || mMediaPlayer == null) {
+            return;
+        }
+        SurfaceTexture texture = getSurfaceTexture();
+        if (texture == null) {
+            return;
+        }
+        mMediaPlayer.setSurface(new Surface(texture));
     }
 
     /**
@@ -441,9 +464,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     @Override
     public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture, int width, int height) {
-        Surface surface = new Surface(surfaceTexture);
-        mMediaPlayer.setSurface(surface);
         mIsViewAvailable = true;
+        bindSurfaceIfAvailable();
         if (mIsDataSourceSet && mIsPlayCalled && mIsVideoPrepared) {
             log("View is available and play() was called.");
             play();

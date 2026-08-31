@@ -28,6 +28,7 @@ import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -45,14 +46,25 @@ public class MediaManager implements MediaManagerInterface {
     private final WeakReference<MediaManagerListener> listener;
     private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
+    private final VideoTranscodeManager videoTranscodeManager;
+    private final HashSet<String> reactiveTranscodeAttempted = new HashSet<>();
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager, ApiServiceGenerator.ProgressListener downloadProgressListener) {
+        this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager());
+    }
+
+    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
+                        ApiServiceGenerator.ProgressListener downloadProgressListener,
+                        VideoTranscodeManager videoTranscodeManager) {
         this.listener = new WeakReference<>(listener);
         this.settingsManager = new WeakReference<>(settingsManager);
         this.downloadProgressListener = new WeakReference<>(downloadProgressListener);
+        this.videoTranscodeManager = videoTranscodeManager;
     }
 
     public void showNextImage(Activity activity) {
+
+        clearReactiveTranscodeAttempts();
 
         MediaManagerListener mediaManagerListener = this.listener.get();
 
@@ -162,16 +174,45 @@ public class MediaManager implements MediaManagerInterface {
             } while (!immichAssets.isEmpty() && (tempFile == null));
 
             ImmichApiAssetResponse finalAssetResponse = assetResponse;
-            File finalTempFile = tempFile;
+            File playbackFile = tempFile;
 
-            if (finalTempFile != null) {
+            if (playbackFile != null && finalAssetResponse.getType() == ImmichType.VIDEO) {
+                File prepared = prepareVideoForPlayback(activity, finalAssetResponse, playbackFile);
+                if (prepared != null) {
+                    if (!prepared.getAbsolutePath().equals(playbackFile.getAbsolutePath())) {
+                        removeFromCache(playbackFile);
+                    }
+                    playbackFile = prepared;
+                } else {
+                    try {
+                        File fallbackFile = downloadAsset(
+                                finalAssetResponse.getId(),
+                                ImmichType.VIDEO,
+                                true,
+                                finalAssetResponse.getOriginalFileName(),
+                                finalAssetResponse.getOriginalPath(),
+                                activity,
+                                apiService);
+                        removeFromCache(playbackFile);
+                        playbackFile = fallbackFile;
+                    } catch (Exception e) {
+                        removeFromCache(playbackFile);
+                        playbackFile = null;
+                        activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
+                    }
+                }
+            }
+
+            final File finalPlaybackFile = playbackFile;
+
+            if (finalPlaybackFile != null) {
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
-                        mediaManagerListener.displayPicture(finalTempFile, finalAssetResponse.getId());
+                        mediaManagerListener.displayPicture(finalPlaybackFile, finalAssetResponse.getId());
 
                     }
                     else if (finalAssetResponse.getType() == ImmichType.VIDEO) {
-                        mediaManagerListener.displayVideo(finalTempFile, finalAssetResponse.getId());
+                        mediaManagerListener.displayVideo(finalPlaybackFile, finalAssetResponse.getId());
                     }
                 });
 
@@ -180,7 +221,7 @@ public class MediaManager implements MediaManagerInterface {
                 if (directoryListing != null) {
                     for (File child : directoryListing) {
                         // Only delete the file that is not supposed to get displayed this moment
-                        if (!child.getAbsolutePath().equals(finalTempFile.getAbsolutePath())) {
+                        if (!child.getAbsolutePath().equals(finalPlaybackFile.getAbsolutePath())) {
                             removeFromCache(child);
                         }
                     }
@@ -328,6 +369,61 @@ public class MediaManager implements MediaManagerInterface {
 
         } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
 
+    }
+
+    private File prepareVideoForPlayback(Activity activity,
+                                         ImmichApiAssetResponse asset, File downloaded) {
+        return videoTranscodeManager.prepareForPlayback(
+                activity.getCacheDir(), asset.getId(), downloaded);
+    }
+
+    public boolean shouldAttemptReactiveTranscode(String assetId, File file) {
+        if (assetId == null || file == null || isTranscodedFile(file)) {
+            return false;
+        }
+        return !reactiveTranscodeAttempted.contains(assetId);
+    }
+
+    public void attemptReactiveTranscode(Activity activity, String assetId, File sourceFile,
+                                         ReactiveTranscodeCallback callback) {
+        if (!shouldAttemptReactiveTranscode(assetId, sourceFile)) {
+            activity.runOnUiThread(callback::onTranscodeFailed);
+            return;
+        }
+        recordReactiveTranscodeAttempt(assetId);
+
+        new Thread(() -> {
+            File transcoded = videoTranscodeManager.attemptReactiveTranscode(
+                    activity.getCacheDir(), assetId, sourceFile);
+
+            activity.runOnUiThread(() -> {
+                if (transcoded != null) {
+                    if (!transcoded.getAbsolutePath().equals(sourceFile.getAbsolutePath())) {
+                        removeFromCache(sourceFile);
+                    }
+                    callback.onTranscodeSuccess(transcoded);
+                } else {
+                    callback.onTranscodeFailed();
+                }
+            });
+        }).start();
+    }
+
+    public boolean isTranscodedFile(File file) {
+        return VideoTranscodeManager.isTranscodedFile(file);
+    }
+
+    void clearReactiveTranscodeAttempts() {
+        reactiveTranscodeAttempted.clear();
+    }
+
+    void recordReactiveTranscodeAttempt(String assetId) {
+        reactiveTranscodeAttempted.add(assetId);
+    }
+
+    public interface ReactiveTranscodeCallback {
+        void onTranscodeSuccess(File transcodedFile);
+        void onTranscodeFailed();
     }
 
     @Override
