@@ -7,12 +7,6 @@ import java.util.regex.Pattern;
 
 public class VideoProbe {
 
-    private static final Pattern VIDEO_STREAM_BLOCK = Pattern.compile(
-            "\\{[^{}]*\"codec_type\"\\s*:\\s*\"video\"[^{}]*\\}",
-            Pattern.DOTALL);
-    private static final Pattern STRING_FIELD = Pattern.compile(
-            "\"(%s)\"\\s*:\\s*\"([^\"]*)\"");
-
     private final FfmpegCommandRunner runner;
 
     public VideoProbe() {
@@ -25,6 +19,10 @@ public class VideoProbe {
 
     public boolean isAvailable() {
         return runner.isAvailable();
+    }
+
+    public String getUnavailableReason() {
+        return runner.getUnavailableReason();
     }
 
     public ProbeResult probe(File input) {
@@ -52,19 +50,19 @@ public class VideoProbe {
         return parseProbeJson(result.getOutput());
     }
 
-    static ProbeResult parseProbeJson(String json) {
+    static ProbeResult parseProbeJson(String output) {
+        String json = extractJsonPayload(output);
         if (json == null || json.trim().isEmpty()) {
             return ProbeResult.failure("Empty FFprobe output");
         }
 
         try {
-            String containerFormat = extractStringField(json, "format_name");
-            Matcher streamMatcher = VIDEO_STREAM_BLOCK.matcher(json);
-            if (!streamMatcher.find()) {
+            String containerFormat = extractFormatName(json);
+            String videoStream = findStreamJsonByCodecType(json, "video");
+            if (videoStream == null) {
                 return ProbeResult.failure("No video stream found");
             }
 
-            String videoStream = streamMatcher.group();
             String videoCodec = extractStringField(videoStream, "codec_name");
             if (videoCodec == null || videoCodec.isEmpty()) {
                 return ProbeResult.failure("No video stream found");
@@ -72,11 +70,123 @@ public class VideoProbe {
 
             int width = extractIntField(videoStream, "width");
             int height = extractIntField(videoStream, "height");
+            boolean hasAudio = findStreamJsonByCodecType(json, "audio") != null;
 
-            return ProbeResult.success(videoCodec, containerFormat, width, height);
+            return ProbeResult.success(videoCodec, containerFormat, width, height, hasAudio);
         } catch (Exception e) {
             return ProbeResult.failure("Failed to parse FFprobe JSON: " + e.getMessage());
         }
+    }
+
+    static String extractJsonPayload(String output) {
+        if (output == null) {
+            return null;
+        }
+        int start = output.indexOf('{');
+        if (start < 0) {
+            return null;
+        }
+        int end = indexOfMatchingBrace(output, start);
+        if (end < 0) {
+            return null;
+        }
+        return output.substring(start, end + 1);
+    }
+
+    static String findStreamJsonByCodecType(String json, String codecType) {
+        int streamsKey = json.indexOf("\"streams\"");
+        if (streamsKey < 0) {
+            return null;
+        }
+        int arrayStart = json.indexOf('[', streamsKey);
+        if (arrayStart < 0) {
+            return null;
+        }
+
+        int pos = arrayStart + 1;
+        while (pos < json.length()) {
+            while (pos < json.length() && Character.isWhitespace(json.charAt(pos))) {
+                pos++;
+            }
+            if (pos >= json.length()) {
+                break;
+            }
+            char ch = json.charAt(pos);
+            if (ch == ']') {
+                break;
+            }
+            if (ch == ',') {
+                pos++;
+                continue;
+            }
+            if (ch != '{') {
+                break;
+            }
+
+            int end = indexOfMatchingBrace(json, pos);
+            if (end < 0) {
+                break;
+            }
+
+            String block = json.substring(pos, end + 1);
+            if (codecType.equals(extractStringField(block, "codec_type"))) {
+                return block;
+            }
+            pos = end + 1;
+        }
+        return null;
+    }
+
+    static String extractFormatName(String json) {
+        int formatKey = json.indexOf("\"format\"");
+        if (formatKey >= 0) {
+            int objStart = json.indexOf('{', formatKey);
+            if (objStart >= 0) {
+                int objEnd = indexOfMatchingBrace(json, objStart);
+                if (objEnd >= 0) {
+                    String formatBlock = json.substring(objStart, objEnd + 1);
+                    String formatName = extractStringField(formatBlock, "format_name");
+                    if (formatName != null) {
+                        return formatName;
+                    }
+                }
+            }
+        }
+        return extractStringField(json, "format_name");
+    }
+
+    static int indexOfMatchingBrace(String text, int openIndex) {
+        if (openIndex < 0 || openIndex >= text.length() || text.charAt(openIndex) != '{') {
+            return -1;
+        }
+
+        int depth = 0;
+        boolean inString = false;
+        boolean escape = false;
+        for (int i = openIndex; i < text.length(); i++) {
+            char c = text.charAt(i);
+            if (inString) {
+                if (escape) {
+                    escape = false;
+                } else if (c == '\\') {
+                    escape = true;
+                } else if (c == '"') {
+                    inString = false;
+                }
+                continue;
+            }
+            if (c == '"') {
+                inString = true;
+            } else if (c == '{') {
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0) {
+                    return i;
+                }
+            }
+        }
+        return -1;
     }
 
     private static String extractStringField(String json, String fieldName) {

@@ -84,6 +84,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public static final String IMMICH_MAX_VERSION = "3.1.0";
     private View lastVisibleView;
     private String lastVisibleAsset = "";
+    private String activeVideoAssetId = "";
     private ImageView imageView;
     private TextureVideoView videoView;
     private LinearProgressIndicator progressIndicator;
@@ -745,6 +746,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     private void assetFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+        if (isVideo && !assetId.equals(activeVideoAssetId)) {
+            return;
+        }
         if (isVideo && mediaManager.shouldAttemptReactiveTranscode(assetId, file)) {
             MainActivity activity = activityReference.get();
             if (activity != null) {
@@ -796,6 +800,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
         WeakReference<MainActivity> activityReference = new WeakReference<>(this);
+        activeVideoAssetId = assetId;
 
         this.runOnUiThread(() -> {
             try {
@@ -804,6 +809,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 videoView.setListener(new TextureVideoView.MediaPlayerListener() {
                     @Override
                     public void onVideoPrepared() {
+                        if (!assetId.equals(activeVideoAssetId)) {
+                            return;
+                        }
                         try {
                             Glide.with(MainActivity.this).clear(imageView);
                             imageView.setVisibility(View.INVISIBLE);
@@ -826,6 +834,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     }
 
                     public boolean onError() {
+                        if (!assetId.equals(activeVideoAssetId)) {
+                            return false;
+                        }
                         restoreImageViewAfterVideoFailure();
                         assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                         return false;

@@ -26,4 +26,27 @@ public class VideoTranscoderTest {
         assertFalse(joined.contains("min(1080,ih)"));
         assertEquals(output.getAbsolutePath(), command[command.length - 1]);
     }
+
+    @Test
+    public void buildCommandCopiesVideoAndStripsAudio() {
+        File input = new File("/cache/input.mp4");
+        File output = new File("/cache/output_eo1.mp4");
+        ProbeResult probe = ProbeResult.success("h264", "mp4", 1920, 1080, true);
+
+        String[] command = VideoTranscoder.buildCommand(
+                input, output, TranscodeOptions.forProbe(probe));
+
+        String joined = String.join(" ", command);
+        assertTrue(joined.contains("-c:v copy"));
+        assertTrue(joined.contains("-an"));
+        assertFalse(joined.contains("libx264"));
+        assertFalse(joined.contains("-vf"));
+    }
+
+    @Test
+    public void forProbeReencodesIncompatibleVideoEvenWithAudio() {
+        ProbeResult probe = ProbeResult.success("hevc", "mp4", 1920, 1080, true);
+
+        assertTrue(TranscodeOptions.forProbe(probe).isVideoCopy() == false);
+    }
 }

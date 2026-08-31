@@ -48,6 +48,7 @@ public class MediaManager implements MediaManagerInterface {
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
     private final VideoTranscodeManager videoTranscodeManager;
     private final HashSet<String> reactiveTranscodeAttempted = new HashSet<>();
+    private final HashSet<String> pinnedCachePaths = new HashSet<>();
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager, ApiServiceGenerator.ProgressListener downloadProgressListener) {
         this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager());
@@ -76,6 +77,9 @@ public class MediaManager implements MediaManagerInterface {
             ImmichApiService apiService = null;
             ImmichApiAssetResponse assetResponse;
             File tempFile = null;
+
+            videoTranscodeManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
+                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
 
             if (immichAssets.isEmpty()) {
 
@@ -220,8 +224,10 @@ public class MediaManager implements MediaManagerInterface {
                 File[] directoryListing = activity.getCacheDir().listFiles();
                 if (directoryListing != null) {
                     for (File child : directoryListing) {
+                        String childPath = child.getAbsolutePath();
                         // Only delete the file that is not supposed to get displayed this moment
-                        if (!child.getAbsolutePath().equals(finalPlaybackFile.getAbsolutePath())) {
+                        if (!childPath.equals(finalPlaybackFile.getAbsolutePath())
+                                && !pinnedCachePaths.contains(childPath)) {
                             removeFromCache(child);
                         }
                     }
@@ -387,25 +393,56 @@ public class MediaManager implements MediaManagerInterface {
     public void attemptReactiveTranscode(Activity activity, String assetId, File sourceFile,
                                          ReactiveTranscodeCallback callback) {
         if (!shouldAttemptReactiveTranscode(assetId, sourceFile)) {
-            activity.runOnUiThread(callback::onTranscodeFailed);
+            activity.runOnUiThread(() -> {
+                MediaManagerListener mediaManagerListener = this.listener.get();
+                if (mediaManagerListener != null) {
+                    mediaManagerListener.debugInformationProvided(
+                            new DebugInformation("ffmpeg", "reactive: skipped (already attempted)"));
+                }
+                callback.onTranscodeFailed();
+            });
             return;
         }
         recordReactiveTranscodeAttempt(assetId);
 
-        new Thread(() -> {
-            File transcoded = videoTranscodeManager.attemptReactiveTranscode(
-                    activity.getCacheDir(), assetId, sourceFile);
+        pinCacheFile(sourceFile);
+        File transcodeCache = getTranscodeCacheFile(activity.getCacheDir(), assetId);
+        pinCacheFile(transcodeCache);
 
-            activity.runOnUiThread(() -> {
-                if (transcoded != null) {
-                    if (!transcoded.getAbsolutePath().equals(sourceFile.getAbsolutePath())) {
-                        removeFromCache(sourceFile);
+        new Thread(() -> {
+            File source = VideoTranscodeManager.resolveReactiveSource(
+                    activity.getCacheDir(), assetId, sourceFile);
+            File redownloaded = null;
+            try {
+                if (source == null || !source.exists()) {
+                    ffmpegDebug(activity, "reactive: re-downloading source");
+                    redownloaded = redownloadVideoForReactive(activity, assetId);
+                    source = redownloaded;
+                    if (source != null) {
+                        pinCacheFile(source);
                     }
-                    callback.onTranscodeSuccess(transcoded);
-                } else {
-                    callback.onTranscodeFailed();
                 }
-            });
+
+                File transcoded = videoTranscodeManager.attemptReactiveTranscode(
+                        activity.getCacheDir(), assetId, source);
+
+                final File playbackSource = source;
+                activity.runOnUiThread(() -> {
+                    if (transcoded != null) {
+                        if (playbackSource != null
+                                && !transcoded.getAbsolutePath().equals(playbackSource.getAbsolutePath())) {
+                            removeFromCache(playbackSource);
+                        }
+                        callback.onTranscodeSuccess(transcoded);
+                    } else {
+                        callback.onTranscodeFailed();
+                    }
+                });
+            } finally {
+                unpinCacheFile(sourceFile);
+                unpinCacheFile(transcodeCache);
+                unpinCacheFile(redownloaded);
+            }
         }).start();
     }
 
@@ -522,11 +559,48 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     public void removeFromCache(File file) {
+        if (file == null) {
+            return;
+        }
+        pinnedCachePaths.remove(file.getAbsolutePath());
         if (file.exists() && !file.delete()) {
             MediaManagerListener mediaManagerListener = this.listener.get();
             if (mediaManagerListener != null) {
                 mediaManagerListener.debugInformationProvided(new DebugInformation("MediaManager.removeFromCache", "Unable to delete file "+file.getAbsolutePath()));
             }
+        }
+    }
+
+    static File getTranscodeCacheFile(File cacheDir, String assetId) {
+        return VideoTranscodeManager.getTranscodeCacheFile(cacheDir, assetId);
+    }
+
+    private void pinCacheFile(File file) {
+        if (file != null) {
+            pinnedCachePaths.add(file.getAbsolutePath());
+        }
+    }
+
+    private void unpinCacheFile(File file) {
+        if (file != null) {
+            pinnedCachePaths.remove(file.getAbsolutePath());
+        }
+    }
+
+    private File redownloadVideoForReactive(Activity activity, String assetId) {
+        try {
+            return downloadAsset(assetId, ImmichType.VIDEO, true, null, null, activity, null);
+        } catch (Exception e) {
+            ffmpegDebug(activity, "reactive: re-download failed");
+            return null;
+        }
+    }
+
+    private void ffmpegDebug(Activity activity, String step) {
+        MediaManagerListener mediaManagerListener = this.listener.get();
+        if (mediaManagerListener != null) {
+            activity.runOnUiThread(() ->
+                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step)));
         }
     }
 }

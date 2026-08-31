@@ -20,11 +20,6 @@ android {
     }
 }
 
-def ffmpegAar = file('libs/ffmpeg-kit-min-gpl-lts.aar')
-
 dependencies {
-    if (ffmpegAar.exists()) {
-        implementation files(ffmpegAar)
-    }
     testImplementation 'junit:junit:4.13.2'
 }

@@ -100,6 +100,20 @@ public class VideoTranscodeManagerTest {
     }
 
     @Test
+    public void prepareForPlaybackStripsAudioFromCompatibleH264() throws IOException {
+        File source = tempFolder.newFile("video.mp4");
+        stubRunner.probeJson = probeJsonWithAudio("h264", 1920, 1080);
+        stubRunner.transcodeSucceeds = true;
+
+        File result = manager.prepareForPlayback(tempFolder.getRoot(), "asset1", source);
+
+        assertNotNull(result);
+        assertTrue(VideoTranscodeManager.isTranscodedFile(result));
+        assertEquals(1, stubRunner.transcodeCalls);
+        assertTrue(stubRunner.lastTranscodeUsedVideoCopy);
+    }
+
+    @Test
     public void prepareForPlaybackReturnsNullWhenTranscodeFails() throws IOException {
         File source = tempFolder.newFile("video.mp4");
         stubRunner.probeJson = probeJson("hevc", 1920, 1080);
@@ -118,6 +132,30 @@ public class VideoTranscodeManagerTest {
 
         assertNull(result);
         assertEquals(0, stubRunner.probeCalls);
+    }
+
+    @Test
+    public void findCachedSourceFileLocatesDownloadedAsset() throws IOException {
+        File cacheDir = tempFolder.getRoot();
+        File source = new File(cacheDir, "asset1.mp4");
+        assertTrue(source.createNewFile());
+        new File(cacheDir, "asset1_eo1.mp4").createNewFile();
+
+        File found = VideoTranscodeManager.findCachedSourceFile(cacheDir, "asset1");
+
+        assertEquals(source, found);
+    }
+
+    @Test
+    public void resolveReactiveSourceFallsBackToCacheLookup() throws IOException {
+        File cacheDir = tempFolder.getRoot();
+        File source = new File(cacheDir, "asset1.mov");
+        assertTrue(source.createNewFile());
+        File stale = new File(cacheDir, "missing.mp4");
+
+        File resolved = VideoTranscodeManager.resolveReactiveSource(cacheDir, "asset1", stale);
+
+        assertEquals(source, resolved);
     }
 
     @Test
@@ -153,16 +191,32 @@ public class VideoTranscodeManagerTest {
                 + "}";
     }
 
+    private static String probeJsonWithAudio(String codec, int width, int height) {
+        return "{"
+                + "\"format\":{\"format_name\":\"mov,mp4\"},"
+                + "\"streams\":["
+                + "{\"codec_type\":\"audio\",\"codec_name\":\"aac\"},"
+                + "{\"codec_type\":\"video\",\"codec_name\":\"" + codec + "\","
+                + "\"width\":" + width + ",\"height\":" + height + "}"
+                + "]}";
+    }
+
     private static class StubFfmpegRunner implements FfmpegCommandRunner {
         String probeJson;
         boolean transcodeSucceeds;
         int probeCalls;
         int transcodeCalls;
+        boolean lastTranscodeUsedVideoCopy;
         private final Map<String, File> outputs = new HashMap<>();
 
         @Override
         public boolean isAvailable() {
             return true;
+        }
+
+        @Override
+        public String getUnavailableReason() {
+            return null;
         }
 
         @Override
@@ -173,6 +227,7 @@ public class VideoTranscodeManagerTest {
             }
             if (command[0].equals("ffmpeg")) {
                 transcodeCalls++;
+                lastTranscodeUsedVideoCopy = String.join(" ", command).contains("-c:v copy");
                 String outputPath = command[command.length - 1];
                 if (transcodeSucceeds) {
                     try {

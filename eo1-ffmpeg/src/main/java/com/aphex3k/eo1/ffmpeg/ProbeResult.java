@@ -9,24 +9,31 @@ public class ProbeResult {
     private final String containerFormat;
     private final int width;
     private final int height;
+    private final boolean hasAudio;
     private final String errorMessage;
 
     public ProbeResult(boolean success, String videoCodec, String containerFormat,
-                       int width, int height, String errorMessage) {
+                       int width, int height, boolean hasAudio, String errorMessage) {
         this.success = success;
         this.videoCodec = videoCodec;
         this.containerFormat = containerFormat;
         this.width = width;
         this.height = height;
+        this.hasAudio = hasAudio;
         this.errorMessage = errorMessage;
     }
 
     public static ProbeResult failure(String message) {
-        return new ProbeResult(false, null, null, 0, 0, message);
+        return new ProbeResult(false, null, null, 0, 0, false, message);
+    }
+
+    public static ProbeResult success(String videoCodec, String containerFormat,
+                                      int width, int height, boolean hasAudio) {
+        return new ProbeResult(true, videoCodec, containerFormat, width, height, hasAudio, null);
     }
 
     public static ProbeResult success(String videoCodec, String containerFormat, int width, int height) {
-        return new ProbeResult(true, videoCodec, containerFormat, width, height, null);
+        return success(videoCodec, containerFormat, width, height, false);
     }
 
     public boolean isSuccess() {
@@ -49,6 +56,10 @@ public class ProbeResult {
         return height;
     }
 
+    public boolean hasAudio() {
+        return hasAudio;
+    }
+
     public String getErrorMessage() {
         return errorMessage;
     }
@@ -65,7 +76,11 @@ public class ProbeResult {
         return getLongestAxis() > MAX_LONGEST_AXIS;
     }
 
-    public boolean needsTranscode() {
+    public boolean needsVideoReencode() {
         return isKnownIncompatible() || exceedsMaxLongestAxis();
+    }
+
+    public boolean needsTranscode() {
+        return needsVideoReencode() || hasAudio;
     }
 }

@@ -24,6 +24,7 @@ public class VideoProbeTest {
         assertEquals("mov,mp4,m4a", result.getContainerFormat());
         assertEquals(1920, result.getWidth());
         assertEquals(1080, result.getHeight());
+        assertTrue(result.hasAudio());
         assertTrue(result.isKnownIncompatible());
     }
 
@@ -38,6 +39,40 @@ public class VideoProbeTest {
 
         assertTrue(result.isSuccess());
         assertFalse(result.isKnownIncompatible());
+    }
+
+    @Test
+    public void parseProbeJsonHandlesNestedStreamMetadata() {
+        String json = "{"
+                + "\"format\":{\"format_name\":\"mov,mp4,m4a\",\"tags\":{\"major_brand\":\"isom\"}},"
+                + "\"streams\":["
+                + "{\"codec_type\":\"audio\",\"codec_name\":\"aac\",\"tags\":{\"language\":\"eng\"}},"
+                + "{\"codec_type\":\"video\",\"codec_name\":\"hevc\",\"width\":3840,\"height\":2160,"
+                + "\"tags\":{\"creation_time\":\"2024-01-01T00:00:00.000000Z\"},"
+                + "\"disposition\":{\"default\":1}}"
+                + "]}";
+
+        ProbeResult result = VideoProbe.parseProbeJson(json);
+
+        assertTrue(result.isSuccess());
+        assertEquals("hevc", result.getVideoCodec());
+        assertEquals(3840, result.getWidth());
+        assertEquals(2160, result.getHeight());
+        assertTrue(result.hasAudio());
+    }
+
+    @Test
+    public void parseProbeJsonExtractsPayloadFromPrefixedLogOutput() {
+        String output = "ffmpeg-kit: loaded\n"
+                + "{"
+                + "\"format\":{\"format_name\":\"mp4\"},"
+                + "\"streams\":[{\"codec_type\":\"video\",\"codec_name\":\"h264\",\"width\":1920,\"height\":1080}]"
+                + "}";
+
+        ProbeResult result = VideoProbe.parseProbeJson(output);
+
+        assertTrue(result.isSuccess());
+        assertEquals("h264", result.getVideoCodec());
     }
 
     @Test
@@ -56,6 +91,22 @@ public class VideoProbeTest {
         assertTrue(hevc.needsTranscode());
         assertTrue(oversized.needsTranscode());
         assertFalse(inBounds.needsTranscode());
+    }
+
+    @Test
+    public void needsTranscodeWhenCompatibleVideoHasAudio() {
+        ProbeResult withAudio = ProbeResult.success("h264", "mp4", 1920, 1080, true);
+
+        assertTrue(withAudio.needsTranscode());
+        assertFalse(withAudio.needsVideoReencode());
+    }
+
+    @Test
+    public void incompatibleVideoWithAudioStillNeedsVideoReencode() {
+        ProbeResult hevcWithAudio = ProbeResult.success("hevc", "mp4", 1920, 1080, true);
+
+        assertTrue(hevcWithAudio.needsTranscode());
+        assertTrue(hevcWithAudio.needsVideoReencode());
     }
 
     @Test

@@ -72,6 +72,11 @@ public class MediaManagerReactiveTranscodeTest {
         }
 
         @Override
+        public String getUnavailableReason() {
+            return null;
+        }
+
+        @Override
         public CommandResult execute(String[] command) {
             return new CommandResult(0, "");
         }

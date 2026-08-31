@@ -9,6 +9,11 @@ public interface FfmpegCommandRunner {
     boolean isAvailable();
 
     /**
+     * When {@link #isAvailable()} is false, explains why native FFmpeg could not be initialized.
+     */
+    String getUnavailableReason();
+
+    /**
      * @param command executable name (ffprobe or ffmpeg) followed by arguments
      * @return result with exit code and combined stdout/stderr
      */

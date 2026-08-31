@@ -20,6 +20,10 @@ public class VideoTranscoder {
         return runner.isAvailable();
     }
 
+    public String getUnavailableReason() {
+        return runner.getUnavailableReason();
+    }
+
     public TranscodeResult transcode(File input, File output, TranscodeOptions options) {
         if (input == null || !input.exists()) {
             return TranscodeResult.failure("Input file does not exist");
@@ -70,21 +74,29 @@ public class VideoTranscoder {
         args.add("-y");
         args.add("-i");
         args.add(input.getAbsolutePath());
-        args.add("-c:v");
-        args.add("libx264");
-        args.add("-profile:v");
-        args.add("baseline");
-        args.add("-level");
-        args.add("3.1");
-        args.add("-pix_fmt");
-        args.add("yuv420p");
-        args.add("-vf");
-        args.add(opts.getVideoFilter());
-        args.add("-an");
-        args.add("-movflags");
-        args.add("+faststart");
-        args.add("-threads");
-        args.add(String.valueOf(opts.getThreadCount()));
+        if (opts.isVideoCopy()) {
+            args.add("-c:v");
+            args.add("copy");
+            args.add("-an");
+            args.add("-movflags");
+            args.add("+faststart");
+        } else {
+            args.add("-c:v");
+            args.add("libx264");
+            args.add("-profile:v");
+            args.add("baseline");
+            args.add("-level");
+            args.add("3.1");
+            args.add("-pix_fmt");
+            args.add("yuv420p");
+            args.add("-vf");
+            args.add(opts.getVideoFilter());
+            args.add("-an");
+            args.add("-movflags");
+            args.add("+faststart");
+            args.add("-threads");
+            args.add(String.valueOf(opts.getThreadCount()));
+        }
         args.add(output.getAbsolutePath());
         return args.toArray(new String[0]);
     }

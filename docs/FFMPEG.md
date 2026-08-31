@@ -93,7 +93,7 @@ git lfs pull
 ./gradlew test assembleDebug assembleRelease
 ```
 
-Release APKs still package **armeabi-v7a** natives only (`app/build.gradle` release `abiFilters`). Debug can include arm64 when `-PdebugAbiArm64=true` (set automatically by `./debug.sh` when the AAR contains arm64).
+Release APKs still package **armeabi-v7a** natives only (`app/build.gradle` release `abiFilters`). Debug builds include both armeabi-v7a and arm64-v8a for EO1 hardware and the Apple Silicon emulator fallback.
 
 ### CI (Jenkins)
 
