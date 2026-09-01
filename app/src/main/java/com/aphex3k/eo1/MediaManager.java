@@ -47,29 +47,42 @@ public class MediaManager implements MediaManagerInterface {
     private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
     private final VideoTranscodeManager videoTranscodeManager;
+    private final ImageConvertManager imageConvertManager;
     private final MediaCacheManager mediaCacheManager;
     private final HashSet<String> reactiveTranscodeAttempted = new HashSet<>();
     private final HashSet<String> pinnedCachePaths = new HashSet<>();
     private volatile String currentPlaybackPath;
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager, ApiServiceGenerator.ProgressListener downloadProgressListener) {
-        this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager(), new MediaCacheManager());
+        this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager(),
+                new ImageConvertManager(), new MediaCacheManager());
     }
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
                         ApiServiceGenerator.ProgressListener downloadProgressListener,
                         VideoTranscodeManager videoTranscodeManager) {
-        this(listener, settingsManager, downloadProgressListener, videoTranscodeManager, new MediaCacheManager());
+        this(listener, settingsManager, downloadProgressListener, videoTranscodeManager,
+                new ImageConvertManager(), new MediaCacheManager());
     }
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
                         ApiServiceGenerator.ProgressListener downloadProgressListener,
                         VideoTranscodeManager videoTranscodeManager,
                         MediaCacheManager mediaCacheManager) {
+        this(listener, settingsManager, downloadProgressListener, videoTranscodeManager,
+                new ImageConvertManager(), mediaCacheManager);
+    }
+
+    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
+                        ApiServiceGenerator.ProgressListener downloadProgressListener,
+                        VideoTranscodeManager videoTranscodeManager,
+                        ImageConvertManager imageConvertManager,
+                        MediaCacheManager mediaCacheManager) {
         this.listener = new WeakReference<>(listener);
         this.settingsManager = new WeakReference<>(settingsManager);
         this.downloadProgressListener = new WeakReference<>(downloadProgressListener);
         this.videoTranscodeManager = videoTranscodeManager;
+        this.imageConvertManager = imageConvertManager != null ? imageConvertManager : new ImageConvertManager();
         this.mediaCacheManager = mediaCacheManager != null ? mediaCacheManager : new MediaCacheManager();
     }
 
@@ -89,6 +102,8 @@ public class MediaManager implements MediaManagerInterface {
             File tempFile = null;
 
             videoTranscodeManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
+                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
+            imageConvertManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
                     mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
 
             if (immichAssets.isEmpty()) {
@@ -222,6 +237,32 @@ public class MediaManager implements MediaManagerInterface {
                         activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                     }
                 }
+            } else if (playbackFile != null && finalAssetResponse.getType() == ImmichType.IMAGE) {
+                imageConvertManager.setProtectedCachePaths(protectedCachePaths(playbackFile));
+                File prepared = prepareImageForDisplay(activity, finalAssetResponse, playbackFile);
+                if (prepared != null) {
+                    playbackFile = prepared;
+                } else {
+                    try {
+                        Long expectedBytes = null;
+                        if (finalAssetResponse.getExifInfo() != null) {
+                            expectedBytes = finalAssetResponse.getExifInfo().getFileSizeInByte();
+                        }
+                        File fallbackFile = downloadAsset(
+                                finalAssetResponse.getId(),
+                                ImmichType.IMAGE,
+                                true,
+                                finalAssetResponse.getOriginalFileName(),
+                                finalAssetResponse.getOriginalPath(),
+                                activity,
+                                apiService,
+                                expectedBytes);
+                        playbackFile = fallbackFile;
+                    } catch (Exception e) {
+                        playbackFile = null;
+                        activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
+                    }
+                }
             }
 
             final File finalPlaybackFile = playbackFile;
@@ -229,6 +270,7 @@ public class MediaManager implements MediaManagerInterface {
             if (finalPlaybackFile != null) {
                 currentPlaybackPath = finalPlaybackFile.getAbsolutePath();
                 videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
+                imageConvertManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
                         mediaManagerListener.displayPicture(finalPlaybackFile, finalAssetResponse.getId());
@@ -370,11 +412,18 @@ public class MediaManager implements MediaManagerInterface {
         File cacheFile = new File(cacheDir,
                 cacheFileName(uuid, originalFileName, originalPath, type, fallback));
 
-        // Prefer a completed transcode cache when present and not a fallback download.
+        // Prefer a completed convert/transcode cache when present and not a fallback download.
         if (!fallback) {
-            File transcoded = getTranscodeCacheFile(cacheDir, uuid);
-            if (transcoded.exists() && transcoded.length() > 0 && type == ImmichType.VIDEO) {
-                return transcoded;
+            if (type == ImmichType.VIDEO) {
+                File transcoded = getTranscodeCacheFile(cacheDir, uuid);
+                if (transcoded.exists() && transcoded.length() > 0) {
+                    return transcoded;
+                }
+            } else if (type == ImmichType.IMAGE) {
+                File converted = getImageConvertCacheFile(cacheDir, uuid);
+                if (converted.exists() && converted.length() > 0) {
+                    return converted;
+                }
             }
         }
 
@@ -392,7 +441,7 @@ public class MediaManager implements MediaManagerInterface {
 
         Response<ResponseBody> downloadResponse = !fallback ? apiService.downloadFile(uuid, null).execute() :
                 type == ImmichType.IMAGE
-                ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.thumbnail, null).execute()
+                ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.preview, null).execute()
                 : apiService.playAssetVideo(uuid, null).execute();
 
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
@@ -422,8 +471,21 @@ public class MediaManager implements MediaManagerInterface {
                 activity.getCacheDir(), asset.getId(), downloaded);
     }
 
+    private File prepareImageForDisplay(Activity activity,
+                                        ImmichApiAssetResponse asset, File downloaded) {
+        return imageConvertManager.prepareForDisplay(
+                activity.getCacheDir(), asset.getId(), downloaded);
+    }
+
     public boolean shouldAttemptReactiveTranscode(String assetId, File file) {
-        if (assetId == null || file == null || isTranscodedFile(file)) {
+        if (assetId == null || file == null || isTranscodedFile(file) || isImageConvertedFile(file)) {
+            return false;
+        }
+        return !reactiveTranscodeAttempted.contains(assetId);
+    }
+
+    public boolean shouldAttemptReactiveImageConvert(String assetId, File file) {
+        if (assetId == null || file == null || isImageConvertedFile(file) || MediaTypeHelper.isGifFile(file)) {
             return false;
         }
         return !reactiveTranscodeAttempted.contains(assetId);
@@ -486,8 +548,68 @@ public class MediaManager implements MediaManagerInterface {
         }).start();
     }
 
+    public void attemptReactiveImageConvert(Activity activity, String assetId, File sourceFile,
+                                            ReactiveTranscodeCallback callback) {
+        if (!shouldAttemptReactiveImageConvert(assetId, sourceFile)) {
+            activity.runOnUiThread(() -> {
+                MediaManagerListener mediaManagerListener = this.listener.get();
+                if (mediaManagerListener != null) {
+                    mediaManagerListener.debugInformationProvided(
+                            new DebugInformation("ffmpeg", "image-reactive: skipped (already attempted)"));
+                }
+                callback.onTranscodeFailed();
+            });
+            return;
+        }
+        recordReactiveTranscodeAttempt(assetId);
+
+        pinCacheFile(sourceFile);
+        File convertCache = getImageConvertCacheFile(activity.getCacheDir(), assetId);
+        pinCacheFile(convertCache);
+        imageConvertManager.setProtectedCachePaths(protectedCachePaths(sourceFile));
+
+        new Thread(() -> {
+            File source = ImageConvertManager.resolveReactiveSource(
+                    activity.getCacheDir(), assetId, sourceFile);
+            File redownloaded = null;
+            try {
+                if (source == null || !source.exists()) {
+                    ffmpegDebug(activity, "image-reactive: re-downloading source");
+                    redownloaded = redownloadImageForReactive(activity, assetId);
+                    source = redownloaded;
+                    if (source != null) {
+                        pinCacheFile(source);
+                    }
+                }
+
+                imageConvertManager.setProtectedCachePaths(protectedCachePaths(source));
+                File converted = imageConvertManager.attemptReactiveConvert(
+                        activity.getCacheDir(), assetId, source);
+
+                activity.runOnUiThread(() -> {
+                    if (converted != null) {
+                        if (converted.exists()) {
+                            currentPlaybackPath = converted.getAbsolutePath();
+                        }
+                        callback.onTranscodeSuccess(converted);
+                    } else {
+                        callback.onTranscodeFailed();
+                    }
+                });
+            } finally {
+                unpinCacheFile(sourceFile);
+                unpinCacheFile(convertCache);
+                unpinCacheFile(redownloaded);
+            }
+        }).start();
+    }
+
     public boolean isTranscodedFile(File file) {
         return VideoTranscodeManager.isTranscodedFile(file);
+    }
+
+    public boolean isImageConvertedFile(File file) {
+        return ImageConvertManager.isConvertedFile(file);
     }
 
     void clearReactiveTranscodeAttempts() {
@@ -615,6 +737,10 @@ public class MediaManager implements MediaManagerInterface {
         return VideoTranscodeManager.getTranscodeCacheFile(cacheDir, assetId);
     }
 
+    static File getImageConvertCacheFile(File cacheDir, String assetId) {
+        return ImageConvertManager.getConvertCacheFile(cacheDir, assetId);
+    }
+
     private HashSet<String> protectedCachePaths(File extra) {
         HashSet<String> protectedPaths = new HashSet<>(pinnedCachePaths);
         if (currentPlaybackPath != null) {
@@ -643,6 +769,16 @@ public class MediaManager implements MediaManagerInterface {
             return downloadAsset(assetId, ImmichType.VIDEO, true, null, null, activity, null, null);
         } catch (Exception e) {
             ffmpegDebug(activity, "reactive: re-download failed");
+            return null;
+        }
+    }
+
+    private File redownloadImageForReactive(Activity activity, String assetId) {
+        try {
+            // Re-fetch original (not Immich preview) so on-device convert can still succeed.
+            return downloadAsset(assetId, ImmichType.IMAGE, false, null, null, activity, null, null);
+        } catch (Exception e) {
+            ffmpegDebug(activity, "image-reactive: re-download failed");
             return null;
         }
     }

@@ -43,14 +43,18 @@ public class MediaCacheManagerTest {
         File original = new File(cacheDir, "178a4ea6-6675-49c7-be59-674b84987622.mp4");
         File converted = new File(cacheDir, "178a4ea6-6675-49c7-be59-674b84987622_eo1.mp4");
         File image = new File(cacheDir, "abc12345-1111-2222-3333-444444444444.jpg");
+        File imageConverted = new File(cacheDir, "abc12345-1111-2222-3333-444444444444_eo1.jpg");
         assertTrue(original.createNewFile());
         assertTrue(converted.createNewFile());
         assertTrue(image.createNewFile());
+        assertTrue(imageConverted.createNewFile());
 
         assertTrue(MediaCacheManager.isOwnedMediaCacheFile(original));
         assertTrue(MediaCacheManager.isOwnedMediaCacheFile(converted));
         assertTrue(MediaCacheManager.isOwnedMediaCacheFile(image));
+        assertTrue(MediaCacheManager.isOwnedMediaCacheFile(imageConverted));
         assertTrue(MediaCacheManager.isConvertedCacheFile(converted));
+        assertTrue(MediaCacheManager.isConvertedCacheFile(imageConverted));
         assertFalse(MediaCacheManager.isConvertedCacheFile(original));
     }
 
@@ -74,6 +78,17 @@ public class MediaCacheManagerTest {
     public void pickEvictionVictimPrefersNonConverted() throws IOException {
         File original = writeFile("11111111-2222-3333-4444-555555555555.mp4", "o");
         File converted = writeFile("11111111-2222-3333-4444-555555555555_eo1.mp4", "c");
+
+        for (int i = 0; i < 20; i++) {
+            File victim = manager.pickEvictionVictim(Arrays.asList(original, converted));
+            assertEquals(original, victim);
+        }
+    }
+
+    @Test
+    public void pickEvictionVictimPrefersNonConvertedImages() throws IOException {
+        File original = writeFile("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.heic", "o");
+        File converted = writeFile("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee_eo1.jpg", "c");
 
         for (int i = 0; i < 20; i++) {
             File victim = manager.pickEvictionVictim(Arrays.asList(original, converted));

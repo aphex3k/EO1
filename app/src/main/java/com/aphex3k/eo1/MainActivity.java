@@ -767,6 +767,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return;
             }
         }
+        if (!isVideo && mediaManager.shouldAttemptReactiveImageConvert(assetId, file)) {
+            MainActivity activity = activityReference.get();
+            if (activity != null) {
+                mediaManager.attemptReactiveImageConvert(activity, assetId, file, new MediaManager.ReactiveTranscodeCallback() {
+                    @Override
+                    public void onTranscodeSuccess(File convertedFile) {
+                        displayPicture(convertedFile, assetId);
+                    }
+
+                    @Override
+                    public void onTranscodeFailed() {
+                        immichPlaybackFallback(assetId, type, activityReference, false, file);
+                    }
+                });
+                return;
+            }
+        }
         immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
     }
 

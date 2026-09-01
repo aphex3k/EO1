@@ -773,6 +773,17 @@ ffmpeg_android_sh_disable_args() {
   echo "${args[@]}"
 }
 
+ffmpeg_android_sh_heic_args() {
+  # Copies libde265/libheif scripts into the kit and prints android.sh flags
+  # (android-zlib + custom libraries). See eo1-ffmpeg/native/README.md.
+  local kit_dir="$1"
+  local apply="${ROOT}/eo1-ffmpeg/native/apply-to-ffmpeg-kit.sh"
+  if [[ ! -x "$apply" ]]; then
+    chmod +x "$apply" 2>/dev/null || true
+  fi
+  "$apply" "$kit_dir"
+}
+
 prepare_ffmpeg_build_env() {
   local ndk_root="$1"
 
@@ -873,6 +884,7 @@ ensure_ffmpeg_aar() {
   log "NDK: ${ndk_root}"
 
   disable_args=( $(ffmpeg_android_sh_disable_args) )
+  heic_args=( $(ffmpeg_android_sh_heic_args "$kit_dir") )
 
   (
     export ANDROID_SDK_ROOT="$SDK_ROOT"
@@ -881,13 +893,13 @@ ensure_ffmpeg_aar() {
     patch_ffmpeg_kit_gradle_wrapper "$kit_dir"
     prepare_ffmpeg_build_env "$ndk_root"
     cd "$kit_dir"
-    log "Running ffmpeg-kit android.sh (progress below; full log: ${kit_dir}/build.log)"
+    log "Running ffmpeg-kit android.sh with libheif/libde265 (progress below; full log: ${kit_dir}/build.log)"
     if [[ "$eo1_ffmpeg_needs_redownload" -eq 1 ]]; then
       ./android.sh --no-output-redirection --redownload-ffmpeg --lts --enable-gpl --enable-x264 \
-        "${disable_args[@]}"
+        "${disable_args[@]}" "${heic_args[@]}"
     else
       ./android.sh --no-output-redirection --lts --enable-gpl --enable-x264 \
-        "${disable_args[@]}"
+        "${disable_args[@]}" "${heic_args[@]}"
     fi
   ) || die "FFmpeg native build failed"
 

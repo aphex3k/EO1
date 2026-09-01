@@ -27,7 +27,7 @@ public class VideoTranscodeManager {
     private final VideoProbe videoProbe;
     private final VideoTranscoder videoTranscoder;
     private final DiskSpaceGuard diskSpaceGuard;
-    private final ReentrantLock transcodeLock = new ReentrantLock();
+    private final ReentrantLock transcodeLock;
     private FfmpegStepListener stepListener;
     private Set<String> protectedCachePaths = Collections.emptySet();
 
@@ -61,11 +61,17 @@ public class VideoTranscodeManager {
 
     public VideoTranscodeManager(VideoProbe videoProbe, VideoTranscoder videoTranscoder,
                                  DiskSpaceGuard diskSpaceGuard) {
+        this(videoProbe, videoTranscoder, diskSpaceGuard, FfmpegConvertLock.get());
+    }
+
+    public VideoTranscodeManager(VideoProbe videoProbe, VideoTranscoder videoTranscoder,
+                                 DiskSpaceGuard diskSpaceGuard, ReentrantLock transcodeLock) {
         this.videoProbe = videoProbe;
         this.videoTranscoder = videoTranscoder;
         this.diskSpaceGuard = diskSpaceGuard != null
                 ? diskSpaceGuard
                 : defaultDiskSpaceGuard(new MediaCacheManager());
+        this.transcodeLock = transcodeLock != null ? transcodeLock : FfmpegConvertLock.get();
     }
 
     static DiskSpaceGuard defaultDiskSpaceGuard(final MediaCacheManager cacheManager) {

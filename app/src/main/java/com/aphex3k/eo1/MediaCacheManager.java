@@ -18,11 +18,11 @@ public class MediaCacheManager {
     public static final long SAFETY_MARGIN_BYTES = 128L * 1024L * 1024L;
 
     /**
-     * UUID-style Immich asset id followed by an extension, or {@code _eo1.mp4} suffix.
-     * Matches {@code abc-123.mp4}, {@code abc-123.jpg}, {@code abc-123_eo1.mp4}.
+     * UUID-style Immich asset id followed by an extension, or {@code _eo1.mp4}/{@code _eo1.jpg} suffix.
+     * Matches {@code abc-123.mp4}, {@code abc-123.jpg}, {@code abc-123_eo1.mp4}, {@code abc-123_eo1.jpg}.
      */
     private static final Pattern MEDIA_CACHE_NAME = Pattern.compile(
-            "^[0-9a-fA-F-]{8,}(\\.[a-zA-Z0-9]{1,10}|_eo1\\.mp4)$");
+            "^[0-9a-fA-F-]{8,}(\\.[a-zA-Z0-9]{1,10}|_eo1\\.(mp4|jpg))$");
 
     public interface SpaceProvider {
         long usableSpace(File cacheDir);
@@ -139,7 +139,8 @@ public class MediaCacheManager {
     }
 
     public static boolean isConvertedCacheFile(File file) {
-        return VideoTranscodeManager.isTranscodedFile(file);
+        return VideoTranscodeManager.isTranscodedFile(file)
+                || ImageConvertManager.isConvertedFile(file);
     }
 
     public static boolean isOwnedMediaCacheFile(File file) {
