@@ -171,7 +171,7 @@ public class VideoTranscodeManagerTest {
     }
 
     @Test
-    public void hasDiskSpaceRequiresTwiceSourceSize() throws IOException {
+    public void hasDiskSpaceRequiresTwiceSourceSizePlusMargin() throws IOException {
         File cacheDir = tempFolder.newFolder("cache");
         File source = new File(cacheDir, "large.bin");
         try (FileWriter writer = new FileWriter(source)) {
@@ -180,7 +180,26 @@ public class VideoTranscodeManagerTest {
             }
         }
 
+        // Host temp dirs usually have >> 128MB free; formula is 2×source + margin.
         assertTrue(VideoTranscodeManager.hasDiskSpace(cacheDir, source));
+        assertEquals(
+                source.length() * 2L + MediaCacheManager.SAFETY_MARGIN_BYTES,
+                MediaCacheManager.requiredFreeBytes(source.length() * 2L));
+    }
+
+    @Test
+    public void prepareForPlaybackFailsWhenDiskSpaceGuardRejects() throws IOException {
+        File source = tempFolder.newFile("video.mp4");
+        stubRunner.probeJson = probeJson("hevc", 1920, 1080);
+        VideoTranscodeManager guarded = new VideoTranscodeManager(
+                new VideoProbe(stubRunner),
+                new VideoTranscoder(stubRunner),
+                (cacheDir, src, protectedPaths) -> false);
+
+        File result = guarded.prepareForPlayback(tempFolder.getRoot(), "asset1", source);
+
+        assertNull(result);
+        assertEquals(0, stubRunner.transcodeCalls);
     }
 
     private static String probeJson(String codec, int width, int height) {

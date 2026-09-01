@@ -7,6 +7,8 @@ import com.aphex3k.eo1.ffmpeg.VideoProbe;
 import com.aphex3k.eo1.ffmpeg.VideoTranscoder;
 
 import java.io.File;
+import java.util.Collections;
+import java.util.Set;
 import java.util.concurrent.locks.ReentrantLock;
 
 /**
@@ -18,10 +20,16 @@ public class VideoTranscodeManager {
     static final long TRANSCODE_TIMEOUT_MS = 10L * 60L * 1000L;
     static final int MIN_FREE_DISK_MULTIPLIER = 2;
 
+    public interface DiskSpaceGuard {
+        boolean ensureTranscodeSpace(File cacheDir, File source, Set<String> protectedPaths);
+    }
+
     private final VideoProbe videoProbe;
     private final VideoTranscoder videoTranscoder;
+    private final DiskSpaceGuard diskSpaceGuard;
     private final ReentrantLock transcodeLock = new ReentrantLock();
     private FfmpegStepListener stepListener;
+    private Set<String> protectedCachePaths = Collections.emptySet();
 
     public interface FfmpegStepListener {
         void onStep(String step);
@@ -31,6 +39,12 @@ public class VideoTranscodeManager {
         this.stepListener = listener;
     }
 
+    public void setProtectedCachePaths(Set<String> protectedCachePaths) {
+        this.protectedCachePaths = protectedCachePaths != null
+                ? protectedCachePaths
+                : Collections.<String>emptySet();
+    }
+
     private void ffmpegStep(String step) {
         if (stepListener != null) {
             stepListener.onStep(step);
@@ -38,12 +52,29 @@ public class VideoTranscodeManager {
     }
 
     public VideoTranscodeManager() {
-        this(new VideoProbe(), new VideoTranscoder());
+        this(new VideoProbe(), new VideoTranscoder(), defaultDiskSpaceGuard(new MediaCacheManager()));
     }
 
     public VideoTranscodeManager(VideoProbe videoProbe, VideoTranscoder videoTranscoder) {
+        this(videoProbe, videoTranscoder, defaultDiskSpaceGuard(new MediaCacheManager()));
+    }
+
+    public VideoTranscodeManager(VideoProbe videoProbe, VideoTranscoder videoTranscoder,
+                                 DiskSpaceGuard diskSpaceGuard) {
         this.videoProbe = videoProbe;
         this.videoTranscoder = videoTranscoder;
+        this.diskSpaceGuard = diskSpaceGuard != null
+                ? diskSpaceGuard
+                : defaultDiskSpaceGuard(new MediaCacheManager());
+    }
+
+    static DiskSpaceGuard defaultDiskSpaceGuard(final MediaCacheManager cacheManager) {
+        return new DiskSpaceGuard() {
+            @Override
+            public boolean ensureTranscodeSpace(File cacheDir, File source, Set<String> protectedPaths) {
+                return cacheManager.ensureTranscodeSpace(cacheDir, source, protectedPaths);
+            }
+        };
     }
 
     public boolean isAvailable() {
@@ -176,7 +207,7 @@ public class VideoTranscodeManager {
             return output;
         }
 
-        if (!hasDiskSpace(cacheDir, source)) {
+        if (!diskSpaceGuard.ensureTranscodeSpace(cacheDir, source, protectedCachePaths)) {
             ffmpegStep("transcode: insufficient disk space");
             return null;
         }
@@ -199,8 +230,12 @@ public class VideoTranscodeManager {
         }
     }
 
+    /**
+     * Raw check without eviction: free space must cover {@code 2 × source + safety margin}.
+     */
     static boolean hasDiskSpace(File cacheDir, File source) {
-        long required = source.length() * MIN_FREE_DISK_MULTIPLIER;
+        long required = source.length() * MIN_FREE_DISK_MULTIPLIER
+                + MediaCacheManager.SAFETY_MARGIN_BYTES;
         long usable = cacheDir.getUsableSpace();
         return usable >= required;
     }

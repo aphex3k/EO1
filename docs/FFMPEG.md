@@ -131,7 +131,7 @@ cp prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar ../eo1-ffmpeg/libs/
 |-------|-------|-----------|
 | Transcode timeout | 10 minutes | Avoid blocking rotation on large 4K HEVC |
 | Max source size | 1 GB | Same as `MediaManager.MAX_ASSET_BYTES` |
-| Min free disk | 2× source file size | EO1 limited cache storage |
+| Min free disk | 2× source + **128 MB** safety margin | Revolving cache; evict non-converted media first, preserve `_eo1.mp4` longest |
 | Concurrent transcodes | 1 | 1 GB RAM budget |
 
 ## Failure modes
@@ -140,7 +140,7 @@ cp prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar ../eo1-ffmpeg/libs/
 |---------|--------------|--------|
 | `FfmpegCommandRunner.isAvailable()` false | AAR missing from APK | Rebuild with CI native stage |
 | Transcode timeout | Large HEVC / slow CPU | Falls back to Immich playback |
-| `TranscodeException` disk | Cache full | Falls back to Immich playback |
+| `TranscodeException` disk | Cache full after eviction | Falls back to Immich playback |
 | CI native stage fails | NDK/SDK mismatch | Pin NDK r22b; check ffmpeg-kit wiki |
 | Playback still fails after transcode | Exotic container/profile | Tag `EO1_INCOMPATIBLE`; Immich fallback |
 | Reactive transcode loops on same asset | Repeated `onError` for one asset | Reactive transcode runs once per asset per rotation; then Immich `/video/playback` |

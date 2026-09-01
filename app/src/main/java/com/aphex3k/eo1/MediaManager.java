@@ -47,20 +47,30 @@ public class MediaManager implements MediaManagerInterface {
     private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
     private final VideoTranscodeManager videoTranscodeManager;
+    private final MediaCacheManager mediaCacheManager;
     private final HashSet<String> reactiveTranscodeAttempted = new HashSet<>();
     private final HashSet<String> pinnedCachePaths = new HashSet<>();
+    private volatile String currentPlaybackPath;
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager, ApiServiceGenerator.ProgressListener downloadProgressListener) {
-        this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager());
+        this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager(), new MediaCacheManager());
     }
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
                         ApiServiceGenerator.ProgressListener downloadProgressListener,
                         VideoTranscodeManager videoTranscodeManager) {
+        this(listener, settingsManager, downloadProgressListener, videoTranscodeManager, new MediaCacheManager());
+    }
+
+    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
+                        ApiServiceGenerator.ProgressListener downloadProgressListener,
+                        VideoTranscodeManager videoTranscodeManager,
+                        MediaCacheManager mediaCacheManager) {
         this.listener = new WeakReference<>(listener);
         this.settingsManager = new WeakReference<>(settingsManager);
         this.downloadProgressListener = new WeakReference<>(downloadProgressListener);
         this.videoTranscodeManager = videoTranscodeManager;
+        this.mediaCacheManager = mediaCacheManager != null ? mediaCacheManager : new MediaCacheManager();
     }
 
     public void showNextImage(Activity activity) {
@@ -163,6 +173,10 @@ public class MediaManager implements MediaManagerInterface {
                 assetResponse = immichAssets.remove(0);
 
                 try {
+                    Long expectedBytes = null;
+                    if (assetResponse.getExifInfo() != null) {
+                        expectedBytes = assetResponse.getExifInfo().getFileSizeInByte();
+                    }
                     tempFile = downloadAsset(
                             assetResponse.getId(),
                             assetResponse.getType(),
@@ -170,7 +184,8 @@ public class MediaManager implements MediaManagerInterface {
                             assetResponse.getOriginalFileName(),
                             assetResponse.getOriginalPath(),
                             activity,
-                            apiService);
+                            apiService,
+                            expectedBytes);
                 } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 }
@@ -181,14 +196,17 @@ public class MediaManager implements MediaManagerInterface {
             File playbackFile = tempFile;
 
             if (playbackFile != null && finalAssetResponse.getType() == ImmichType.VIDEO) {
+                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(playbackFile));
                 File prepared = prepareVideoForPlayback(activity, finalAssetResponse, playbackFile);
                 if (prepared != null) {
-                    if (!prepared.getAbsolutePath().equals(playbackFile.getAbsolutePath())) {
-                        removeFromCache(playbackFile);
-                    }
+                    // Keep original on disk for revolving reuse; only eviction frees space.
                     playbackFile = prepared;
                 } else {
                     try {
+                        Long expectedBytes = null;
+                        if (finalAssetResponse.getExifInfo() != null) {
+                            expectedBytes = finalAssetResponse.getExifInfo().getFileSizeInByte();
+                        }
                         File fallbackFile = downloadAsset(
                                 finalAssetResponse.getId(),
                                 ImmichType.VIDEO,
@@ -196,11 +214,10 @@ public class MediaManager implements MediaManagerInterface {
                                 finalAssetResponse.getOriginalFileName(),
                                 finalAssetResponse.getOriginalPath(),
                                 activity,
-                                apiService);
-                        removeFromCache(playbackFile);
+                                apiService,
+                                expectedBytes);
                         playbackFile = fallbackFile;
                     } catch (Exception e) {
-                        removeFromCache(playbackFile);
                         playbackFile = null;
                         activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                     }
@@ -210,6 +227,8 @@ public class MediaManager implements MediaManagerInterface {
             final File finalPlaybackFile = playbackFile;
 
             if (finalPlaybackFile != null) {
+                currentPlaybackPath = finalPlaybackFile.getAbsolutePath();
+                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
                         mediaManagerListener.displayPicture(finalPlaybackFile, finalAssetResponse.getId());
@@ -219,19 +238,6 @@ public class MediaManager implements MediaManagerInterface {
                         mediaManagerListener.displayVideo(finalPlaybackFile, finalAssetResponse.getId());
                     }
                 });
-
-                // Clean all files from the cache directory we have already downloaded
-                File[] directoryListing = activity.getCacheDir().listFiles();
-                if (directoryListing != null) {
-                    for (File child : directoryListing) {
-                        String childPath = child.getAbsolutePath();
-                        // Only delete the file that is not supposed to get displayed this moment
-                        if (!childPath.equals(finalPlaybackFile.getAbsolutePath())
-                                && !pinnedCachePaths.contains(childPath)) {
-                            removeFromCache(child);
-                        }
-                    }
-                }
             }
             else {
                 activity.runOnUiThread(() -> showNextImage(activity));
@@ -335,7 +341,17 @@ public class MediaManager implements MediaManagerInterface {
     @NonNull
     private synchronized File downloadAsset(String uuid, ImmichType type, boolean fallback,
                                             String originalFileName, String originalPath,
-                                            Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
+                                            Activity activity, ImmichApiService apiService)
+            throws NullPointerException, MediaDownloadFailedException, IOException {
+        return downloadAsset(uuid, type, fallback, originalFileName, originalPath, activity, apiService, null);
+    }
+
+    @NonNull
+    private synchronized File downloadAsset(String uuid, ImmichType type, boolean fallback,
+                                            String originalFileName, String originalPath,
+                                            Activity activity, ImmichApiService apiService,
+                                            Long expectedBytes)
+            throws NullPointerException, MediaDownloadFailedException, IOException {
 
         if (apiService == null) {
             SettingsManager settings = this.settingsManager.get();
@@ -350,6 +366,30 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
+        File cacheDir = activity.getCacheDir();
+        File cacheFile = new File(cacheDir,
+                cacheFileName(uuid, originalFileName, originalPath, type, fallback));
+
+        // Prefer a completed transcode cache when present and not a fallback download.
+        if (!fallback) {
+            File transcoded = getTranscodeCacheFile(cacheDir, uuid);
+            if (transcoded.exists() && transcoded.length() > 0 && type == ImmichType.VIDEO) {
+                return transcoded;
+            }
+        }
+
+        // Reuse originals/images; Immich fallback streams may differ from the original bytes.
+        if (!fallback && cacheFile.exists() && cacheFile.length() > 0) {
+            return cacheFile;
+        }
+
+        long bytesNeeded = expectedBytes != null && expectedBytes > 0
+                ? expectedBytes
+                : MAX_ASSET_BYTES;
+        if (!mediaCacheManager.ensureSpace(cacheDir, bytesNeeded, protectedCachePaths(null))) {
+            throw new MediaDownloadFailedException("Insufficient cache space for asset download");
+        }
+
         Response<ResponseBody> downloadResponse = !fallback ? apiService.downloadFile(uuid, null).execute() :
                 type == ImmichType.IMAGE
                 ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.thumbnail, null).execute()
@@ -357,20 +397,19 @@ public class MediaManager implements MediaManagerInterface {
 
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
             downloadMutex.lock();
-            File cacheFile = new File(activity.getCacheDir(),
-                    cacheFileName(uuid, originalFileName, originalPath, type, fallback));
-
-            try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
-                try (InputStream inputStream = downloadResponse.body().byteStream()) {
-                    byte[] buffer = new byte[1024*32];
-                    int bytesRead;
-                    while ((bytesRead = inputStream.read(buffer)) != -1) {
-                        outputStream.write(buffer, 0, bytesRead);
+            try {
+                try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
+                    try (InputStream inputStream = downloadResponse.body().byteStream()) {
+                        byte[] buffer = new byte[1024*32];
+                        int bytesRead;
+                        while ((bytesRead = inputStream.read(buffer)) != -1) {
+                            outputStream.write(buffer, 0, bytesRead);
+                        }
                     }
                 }
+            } finally {
+                downloadMutex.unlock();
             }
-
-            downloadMutex.unlock();
             return cacheFile;
 
         } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
@@ -408,6 +447,7 @@ public class MediaManager implements MediaManagerInterface {
         pinCacheFile(sourceFile);
         File transcodeCache = getTranscodeCacheFile(activity.getCacheDir(), assetId);
         pinCacheFile(transcodeCache);
+        videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(sourceFile));
 
         new Thread(() -> {
             File source = VideoTranscodeManager.resolveReactiveSource(
@@ -423,15 +463,15 @@ public class MediaManager implements MediaManagerInterface {
                     }
                 }
 
+                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(source));
                 File transcoded = videoTranscodeManager.attemptReactiveTranscode(
                         activity.getCacheDir(), assetId, source);
 
-                final File playbackSource = source;
                 activity.runOnUiThread(() -> {
                     if (transcoded != null) {
-                        if (playbackSource != null
-                                && !transcoded.getAbsolutePath().equals(playbackSource.getAbsolutePath())) {
-                            removeFromCache(playbackSource);
+                        // Keep original on disk; eviction frees space when needed.
+                        if (transcoded.exists()) {
+                            currentPlaybackPath = transcoded.getAbsolutePath();
                         }
                         callback.onTranscodeSuccess(transcoded);
                     } else {
@@ -469,7 +509,7 @@ public class MediaManager implements MediaManagerInterface {
         new Thread(() -> {
             try {
 
-                File thumbnail = downloadAsset(assetId, type, true, null, null, activity, null);
+                File thumbnail = downloadAsset(assetId, type, true, null, null, activity, null, null);
 
                 activity.runOnUiThread(() -> {
                     MediaManagerListener mediaManagerListener = this.listener.get();
@@ -559,7 +599,7 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     public void removeFromCache(File file) {
-        if (file == null) {
+        if (file == null || !file.isFile()) {
             return;
         }
         pinnedCachePaths.remove(file.getAbsolutePath());
@@ -573,6 +613,17 @@ public class MediaManager implements MediaManagerInterface {
 
     static File getTranscodeCacheFile(File cacheDir, String assetId) {
         return VideoTranscodeManager.getTranscodeCacheFile(cacheDir, assetId);
+    }
+
+    private HashSet<String> protectedCachePaths(File extra) {
+        HashSet<String> protectedPaths = new HashSet<>(pinnedCachePaths);
+        if (currentPlaybackPath != null) {
+            protectedPaths.add(currentPlaybackPath);
+        }
+        if (extra != null) {
+            protectedPaths.add(extra.getAbsolutePath());
+        }
+        return protectedPaths;
     }
 
     private void pinCacheFile(File file) {
@@ -589,7 +640,7 @@ public class MediaManager implements MediaManagerInterface {
 
     private File redownloadVideoForReactive(Activity activity, String assetId) {
         try {
-            return downloadAsset(assetId, ImmichType.VIDEO, true, null, null, activity, null);
+            return downloadAsset(assetId, ImmichType.VIDEO, true, null, null, activity, null, null);
         } catch (Exception e) {
             ffmpegDebug(activity, "reactive: re-download failed");
             return null;
