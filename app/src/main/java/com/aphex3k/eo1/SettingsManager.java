@@ -109,7 +109,7 @@ public class SettingsManager {
         }
     }
 
-    private void updateTimeZone(Context context) {
+    void updateTimeZone(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             SettingsManagerListener settingsManagerListener = this.listener.get();
             if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty() && settingsManagerListener != null) {
@@ -165,7 +165,7 @@ public class SettingsManager {
             ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item, allTimeZoneIds);
             tzAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
             tzSpinner.setAdapter(tzAdapter);
-            if (configuration.selectedTimeZoneId != null && configuration.selectedTimeZoneId.isEmpty())
+            if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty())
                 tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId));
 
             View.OnClickListener load = view -> {

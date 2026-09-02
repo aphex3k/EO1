@@ -289,17 +289,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             handler.removeCallbacks(this::runOnTimer);
             handler.post(this::runOnTimer);
             setupQuietHours();
-
-            final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
-            final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
-            final int now = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
-
-            if (startQuietHour < now && endQuietHour > now) {
-                turnScreenOff();
-            }
-            else {
-                turnScreenOn();
-            }
+            applyScheduledScreenState();
 
             checkServerCompatibility();
         }
@@ -497,7 +487,28 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         handler.removeCallbacks(this::runOnTimer);
         handler.post(this::runOnTimer);
         setupQuietHours();
+        applyScheduledScreenState();
         checkServerCompatibility();
+    }
+
+    private void applyScheduledScreenState() {
+        if (settingsManager == null || brightnessManager == null) {
+            return;
+        }
+
+        int start = settingsManager.getConfiguration().startQuietHour;
+        int end = settingsManager.getConfiguration().endQuietHour;
+        int now = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+        boolean shouldBeOn = !QuietHours.isInQuietHours(start, end, now);
+
+        if (brightnessManager.getShouldTheScreenBeOn() != shouldBeOn) {
+            brightnessManager.setShouldTheScreenBeOn(shouldBeOn);
+            if (shouldBeOn) {
+                turnScreenOn();
+            } else {
+                turnScreenOff();
+            }
+        }
     }
 
     private void setupQuietHours() {
@@ -514,10 +525,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             handleException(e);
         }
 
-        quietHoursTimer = new Timer(true);
-
         final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
         final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
+
+        if (!QuietHours.isConfigured(startQuietHour, endQuietHour) || startQuietHour == endQuietHour) {
+            return;
+        }
+
+        quietHoursTimer = new Timer(true);
 
         final Calendar calendar = Calendar.getInstance();
         final Date time = calendar.getTime();
@@ -550,12 +565,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public void run() {
                 try {
-                    if (brightnessManager != null) {
-                        if (Boolean.TRUE.equals(brightnessManager.getShouldTheScreenBeOn())) {
-                            eventManager.onKeyDown(KeyEvent.EO1_TOP_BUTTON);
-                        }
-                        debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
-                    }
+                    handler.post(MainActivity.this::applyScheduledScreenState);
+                    debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
                 }
                 catch (Exception e) {
                     handleException(e);
@@ -567,12 +578,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public void run() {
                 try {
-                    if (brightnessManager != null) {
-                        if (Boolean.FALSE.equals(brightnessManager.getShouldTheScreenBeOn())) {
-                            eventManager.onKeyDown(KeyEvent.EO1_TOP_BUTTON);
-                        }
-                        debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
-                    }
+                    handler.post(MainActivity.this::applyScheduledScreenState);
+                    debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
                 }
                 catch (Exception e) {
                     handleException(e);

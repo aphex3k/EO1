@@ -42,11 +42,14 @@ public class OptionsDialogFragment extends DialogFragment {
         saveButton.setText("Save");
         ((ViewGroup) view).addView(saveButton);
         saveButton.setOnClickListener(v -> {
-            // Collect data from both fragments
             basicFragment.saveToConfiguration();
             mqttFragment.saveToConfiguration();
             try {
                 settingsManager.saveConfiguration();
+                settingsManager.updateTimeZone(requireContext());
+                if (getActivity() instanceof SettingsManagerListener) {
+                    ((SettingsManagerListener) getActivity()).settingsChanged();
+                }
                 Toast.makeText(getContext(), "Settings saved", Toast.LENGTH_SHORT).show();
                 dismiss();
             } catch (Exception e) {
