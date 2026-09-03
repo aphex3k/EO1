@@ -14,6 +14,7 @@ import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.drawable.Drawable;
 import android.hardware.SensorManager;
+import android.media.MediaPlayer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -77,6 +78,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     Amount of milliseconds in a minute
      */
     private static final long MILLIS = 60000;
+    private static final long VIDEO_WATCHDOG_POLL_MS = 2000L;
+    private static final long VIDEO_STALL_THRESHOLD_MS = 8000L;
 
     /** Inclusive lower bound for Immich server versions this APK is tested against. */
     public static final String IMMICH_MIN_VERSION = "3.0.0";
@@ -105,6 +108,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private Handler bannerHandler = new Handler(Looper.getMainLooper());
     private Runnable bannerFadeRunnable;
     private String currentTrackId = null;
+    private Runnable videoWatchdogRunnable;
+    private String videoWatchdogAssetId = "";
+    private File videoWatchdogFile;
+    private WeakReference<MainActivity> videoWatchdogActivityReference;
+    private int videoWatchdogLastPosition = -1;
+    private long videoWatchdogLastProgressMs = 0L;
+    private boolean videoWatchdogRecoverAttempted = false;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -350,6 +360,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     protected void onPause() {
+        cancelVideoWatchdog();
         handler.removeCallbacks(this::runOnTimer);
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
@@ -405,6 +416,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * Turn off the screen to conserve as much energy as possible without shutting down the device
      */
     private void turnScreenOff() {
+        cancelVideoWatchdog();
         Window window = this.getWindow();
         window.clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
         window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -677,6 +689,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("displayPictures", file.getAbsolutePath()));
 
         this.runOnUiThread(() -> {
+            cancelVideoWatchdog();
 
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
@@ -746,6 +759,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * @param file file to load
      */
     private void restoreImageViewAfterVideoFailure() {
+        cancelVideoWatchdog();
         videoView.stop();
         videoView.setVisibility(View.INVISIBLE);
         imageView.setVisibility(View.VISIBLE);
@@ -810,6 +824,110 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         mediaManager.removeFromCache(file);
     }
 
+    private void cancelVideoWatchdog() {
+        if (videoWatchdogRunnable != null) {
+            handler.removeCallbacks(videoWatchdogRunnable);
+            videoWatchdogRunnable = null;
+        }
+        videoWatchdogAssetId = "";
+        videoWatchdogFile = null;
+        videoWatchdogActivityReference = null;
+        videoWatchdogLastPosition = -1;
+        videoWatchdogLastProgressMs = 0L;
+        videoWatchdogRecoverAttempted = false;
+    }
+
+    private void startVideoWatchdog(String assetId, File file, WeakReference<MainActivity> activityReference) {
+        cancelVideoWatchdog();
+        videoWatchdogAssetId = assetId;
+        videoWatchdogFile = file;
+        videoWatchdogActivityReference = activityReference;
+        videoWatchdogLastPosition = -1;
+        videoWatchdogLastProgressMs = System.currentTimeMillis();
+        videoWatchdogRecoverAttempted = false;
+        scheduleVideoWatchdogCheck();
+    }
+
+    private void scheduleVideoWatchdogCheck() {
+        if (videoWatchdogRunnable != null) {
+            handler.removeCallbacks(videoWatchdogRunnable);
+        }
+        videoWatchdogRunnable = this::runVideoWatchdogCheck;
+        handler.postDelayed(videoWatchdogRunnable, VIDEO_WATCHDOG_POLL_MS);
+    }
+
+    private void runVideoWatchdogCheck() {
+        if (videoWatchdogRunnable == null || videoWatchdogAssetId.isEmpty()) {
+            return;
+        }
+
+        final String assetId = videoWatchdogAssetId;
+        final File file = videoWatchdogFile;
+        final WeakReference<MainActivity> activityReference = videoWatchdogActivityReference;
+
+        if (!assetId.equals(activeVideoAssetId)
+                || !brightnessManager.getShouldTheScreenBeOn()
+                || videoView.getVisibility() != View.VISIBLE) {
+            cancelVideoWatchdog();
+            return;
+        }
+
+        int position = videoView.getCurrentPosition();
+        long now = System.currentTimeMillis();
+
+        if (position != videoWatchdogLastPosition) {
+            videoWatchdogLastPosition = position;
+            videoWatchdogLastProgressMs = now;
+            videoWatchdogRecoverAttempted = false;
+            scheduleVideoWatchdogCheck();
+            return;
+        }
+
+        if (now - videoWatchdogLastProgressMs < VIDEO_STALL_THRESHOLD_MS) {
+            scheduleVideoWatchdogCheck();
+            return;
+        }
+
+        if (!videoWatchdogRecoverAttempted) {
+            videoWatchdogRecoverAttempted = true;
+            int duration = videoView.getDuration();
+            int seekTarget = position;
+            if (duration > 0 && position >= duration - 1000) {
+                seekTarget = 0;
+            }
+            debugInformationProvided(new DebugInformation("video",
+                    "stall recover pos=" + position + " seek=" + seekTarget + " duration=" + duration));
+            try {
+                videoView.seekTo(seekTarget);
+                videoView.play();
+            } catch (Exception e) {
+                handleException(e);
+            }
+            videoWatchdogLastProgressMs = System.currentTimeMillis();
+            scheduleVideoWatchdogCheck();
+            return;
+        }
+
+        debugInformationProvided(new DebugInformation("video",
+                "stall fallback pos=" + position + " duration=" + videoView.getDuration()));
+        cancelVideoWatchdog();
+        restoreImageViewAfterVideoFailure();
+        assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
+    }
+
+    private String describeMediaInfo(int what, int extra) {
+        switch (what) {
+            case MediaPlayer.MEDIA_INFO_BUFFERING_START:
+                return "buffering start extra=" + extra;
+            case MediaPlayer.MEDIA_INFO_BUFFERING_END:
+                return "buffering end extra=" + extra;
+            case MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START:
+                return "rendering start extra=" + extra;
+            default:
+                return "what=" + what + " extra=" + extra;
+        }
+    }
+
     @Override
     public void displayVideo(File file, String assetId) {
 
@@ -828,6 +946,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             try {
+                cancelVideoWatchdog();
                 videoView.stop();
                 videoView.setVisibility(View.INVISIBLE);
                 videoView.setListener(new TextureVideoView.MediaPlayerListener() {
@@ -846,6 +965,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                             videoView.setFocusable(false);
                             videoView.setVolume(0, 0);
                             videoView.play();
+                            debugInformationProvided(new DebugInformation("video",
+                                    "prepared duration=" + videoView.getDuration()));
+                            startVideoWatchdog(assetId, file, activityReference);
                         } catch (Exception e) {
                             restoreImageViewAfterVideoFailure();
                             assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
@@ -855,18 +977,43 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
                     @Override
                     public void onVideoEnd() {
+                        if (!assetId.equals(activeVideoAssetId)) {
+                            return;
+                        }
+                        int position = videoView.getCurrentPosition();
+                        int duration = videoView.getDuration();
+                        debugInformationProvided(new DebugInformation("video",
+                                "end pos=" + position + " duration=" + duration));
+                        if (brightnessManager.getShouldTheScreenBeOn()) {
+                            debugInformationProvided(new DebugInformation("video", "restart after end"));
+                            videoView.play();
+                            videoWatchdogLastPosition = -1;
+                            videoWatchdogLastProgressMs = System.currentTimeMillis();
+                            videoWatchdogRecoverAttempted = false;
+                        }
                     }
 
-                    public boolean onError() {
+                    public boolean onError(int what, int extra) {
                         if (!assetId.equals(activeVideoAssetId)) {
                             return false;
                         }
+                        cancelVideoWatchdog();
+                        debugInformationProvided(new DebugInformation("video",
+                                "error what=" + what + " extra=" + extra));
                         restoreImageViewAfterVideoFailure();
                         assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                         return false;
                     }
 
                     public boolean onInfo(int what, int extra) {
+                        if (!assetId.equals(activeVideoAssetId)) {
+                            return false;
+                        }
+                        if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START
+                                || what == MediaPlayer.MEDIA_INFO_BUFFERING_END
+                                || what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                            debugInformationProvided(new DebugInformation("video", describeMediaInfo(what, extra)));
+                        }
                         return false;
                     }
                 });
