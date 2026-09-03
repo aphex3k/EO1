@@ -28,6 +28,7 @@ import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -45,14 +46,49 @@ public class MediaManager implements MediaManagerInterface {
     private final WeakReference<MediaManagerListener> listener;
     private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
+    private final VideoTranscodeManager videoTranscodeManager;
+    private final ImageConvertManager imageConvertManager;
+    private final MediaCacheManager mediaCacheManager;
+    private final HashSet<String> reactiveTranscodeAttempted = new HashSet<>();
+    private final HashSet<String> pinnedCachePaths = new HashSet<>();
+    private volatile String currentPlaybackPath;
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager, ApiServiceGenerator.ProgressListener downloadProgressListener) {
+        this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager(),
+                new ImageConvertManager(), new MediaCacheManager());
+    }
+
+    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
+                        ApiServiceGenerator.ProgressListener downloadProgressListener,
+                        VideoTranscodeManager videoTranscodeManager) {
+        this(listener, settingsManager, downloadProgressListener, videoTranscodeManager,
+                new ImageConvertManager(), new MediaCacheManager());
+    }
+
+    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
+                        ApiServiceGenerator.ProgressListener downloadProgressListener,
+                        VideoTranscodeManager videoTranscodeManager,
+                        MediaCacheManager mediaCacheManager) {
+        this(listener, settingsManager, downloadProgressListener, videoTranscodeManager,
+                new ImageConvertManager(), mediaCacheManager);
+    }
+
+    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
+                        ApiServiceGenerator.ProgressListener downloadProgressListener,
+                        VideoTranscodeManager videoTranscodeManager,
+                        ImageConvertManager imageConvertManager,
+                        MediaCacheManager mediaCacheManager) {
         this.listener = new WeakReference<>(listener);
         this.settingsManager = new WeakReference<>(settingsManager);
         this.downloadProgressListener = new WeakReference<>(downloadProgressListener);
+        this.videoTranscodeManager = videoTranscodeManager;
+        this.imageConvertManager = imageConvertManager != null ? imageConvertManager : new ImageConvertManager();
+        this.mediaCacheManager = mediaCacheManager != null ? mediaCacheManager : new MediaCacheManager();
     }
 
     public void showNextImage(Activity activity) {
+
+        clearReactiveTranscodeAttempts();
 
         MediaManagerListener mediaManagerListener = this.listener.get();
 
@@ -64,6 +100,11 @@ public class MediaManager implements MediaManagerInterface {
             ImmichApiService apiService = null;
             ImmichApiAssetResponse assetResponse;
             File tempFile = null;
+
+            videoTranscodeManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
+                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
+            imageConvertManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
+                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
 
             if (immichAssets.isEmpty()) {
 
@@ -147,7 +188,19 @@ public class MediaManager implements MediaManagerInterface {
                 assetResponse = immichAssets.remove(0);
 
                 try {
-                    tempFile = downloadAsset(assetResponse.getId(), assetResponse.getType(), activity, apiService);
+                    Long expectedBytes = null;
+                    if (assetResponse.getExifInfo() != null) {
+                        expectedBytes = assetResponse.getExifInfo().getFileSizeInByte();
+                    }
+                    tempFile = downloadAsset(
+                            assetResponse.getId(),
+                            assetResponse.getType(),
+                            false,
+                            assetResponse.getOriginalFileName(),
+                            assetResponse.getOriginalPath(),
+                            activity,
+                            apiService,
+                            expectedBytes);
                 } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 }
@@ -155,29 +208,78 @@ public class MediaManager implements MediaManagerInterface {
             } while (!immichAssets.isEmpty() && (tempFile == null));
 
             ImmichApiAssetResponse finalAssetResponse = assetResponse;
-            File finalTempFile = tempFile;
+            File playbackFile = tempFile;
 
-            if (finalTempFile != null) {
+            if (playbackFile != null && finalAssetResponse.getType() == ImmichType.VIDEO) {
+                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(playbackFile));
+                File prepared = prepareVideoForPlayback(activity, finalAssetResponse, playbackFile);
+                if (prepared != null) {
+                    // Keep original on disk for revolving reuse; only eviction frees space.
+                    playbackFile = prepared;
+                } else {
+                    try {
+                        Long expectedBytes = null;
+                        if (finalAssetResponse.getExifInfo() != null) {
+                            expectedBytes = finalAssetResponse.getExifInfo().getFileSizeInByte();
+                        }
+                        File fallbackFile = downloadAsset(
+                                finalAssetResponse.getId(),
+                                ImmichType.VIDEO,
+                                true,
+                                finalAssetResponse.getOriginalFileName(),
+                                finalAssetResponse.getOriginalPath(),
+                                activity,
+                                apiService,
+                                expectedBytes);
+                        playbackFile = fallbackFile;
+                    } catch (Exception e) {
+                        playbackFile = null;
+                        activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
+                    }
+                }
+            } else if (playbackFile != null && finalAssetResponse.getType() == ImmichType.IMAGE) {
+                imageConvertManager.setProtectedCachePaths(protectedCachePaths(playbackFile));
+                File prepared = prepareImageForDisplay(activity, finalAssetResponse, playbackFile);
+                if (prepared != null) {
+                    playbackFile = prepared;
+                } else {
+                    try {
+                        Long expectedBytes = null;
+                        if (finalAssetResponse.getExifInfo() != null) {
+                            expectedBytes = finalAssetResponse.getExifInfo().getFileSizeInByte();
+                        }
+                        File fallbackFile = downloadAsset(
+                                finalAssetResponse.getId(),
+                                ImmichType.IMAGE,
+                                true,
+                                finalAssetResponse.getOriginalFileName(),
+                                finalAssetResponse.getOriginalPath(),
+                                activity,
+                                apiService,
+                                expectedBytes);
+                        playbackFile = fallbackFile;
+                    } catch (Exception e) {
+                        playbackFile = null;
+                        activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
+                    }
+                }
+            }
+
+            final File finalPlaybackFile = playbackFile;
+
+            if (finalPlaybackFile != null) {
+                currentPlaybackPath = finalPlaybackFile.getAbsolutePath();
+                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
+                imageConvertManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
-                        mediaManagerListener.displayPicture(finalTempFile, finalAssetResponse.getId());
+                        mediaManagerListener.displayPicture(finalPlaybackFile, finalAssetResponse.getId());
 
                     }
                     else if (finalAssetResponse.getType() == ImmichType.VIDEO) {
-                        mediaManagerListener.displayVideo(finalTempFile, finalAssetResponse.getId());
+                        mediaManagerListener.displayVideo(finalPlaybackFile, finalAssetResponse.getId());
                     }
                 });
-
-                // Clean all files from the cache directory we have already downloaded
-                File[] directoryListing = activity.getCacheDir().listFiles();
-                if (directoryListing != null) {
-                    for (File child : directoryListing) {
-                        // Only delete the file that is not supposed to get displayed this moment
-                        if (!child.getAbsolutePath().equals(finalTempFile.getAbsolutePath()) && child.getAbsolutePath().endsWith(".dat")) {
-                            removeFromCache(child);
-                        }
-                    }
-                }
             }
             else {
                 activity.runOnUiThread(() -> showNextImage(activity));
@@ -236,8 +338,62 @@ public class MediaManager implements MediaManagerInterface {
         }
     }
 
+    static String cacheFileName(String uuid, String originalFileName, String originalPath,
+                                ImmichType type, boolean fallback) {
+        if (fallback) {
+            return uuid + defaultExtension(type);
+        }
+
+        String extension = extensionFromFileName(originalFileName);
+        if (extension == null) {
+            extension = extensionFromFileName(originalPath);
+        }
+        if (extension == null) {
+            extension = defaultExtension(type);
+        }
+        return uuid + extension;
+    }
+
+    static String extensionFromFileName(String name) {
+        if (name == null || name.isEmpty()) {
+            return null;
+        }
+
+        int slash = name.lastIndexOf('/');
+        if (slash >= 0) {
+            name = name.substring(slash + 1);
+        }
+
+        int dot = name.lastIndexOf('.');
+        if (dot <= 0 || dot == name.length() - 1) {
+            return null;
+        }
+
+        String extension = name.substring(dot + 1).toLowerCase();
+        if (!extension.matches("[a-z0-9]{1,10}")) {
+            return null;
+        }
+        return "." + extension;
+    }
+
+    private static String defaultExtension(ImmichType type) {
+        return type == ImmichType.VIDEO ? ".mp4" : ".jpg";
+    }
+
     @NonNull
-    private synchronized File downloadAsset(String uuid, ImmichType type, Activity activity, ImmichApiService apiService) throws NullPointerException, MediaDownloadFailedException, IOException {
+    private synchronized File downloadAsset(String uuid, ImmichType type, boolean fallback,
+                                            String originalFileName, String originalPath,
+                                            Activity activity, ImmichApiService apiService)
+            throws NullPointerException, MediaDownloadFailedException, IOException {
+        return downloadAsset(uuid, type, fallback, originalFileName, originalPath, activity, apiService, null);
+    }
+
+    @NonNull
+    private synchronized File downloadAsset(String uuid, ImmichType type, boolean fallback,
+                                            String originalFileName, String originalPath,
+                                            Activity activity, ImmichApiService apiService,
+                                            Long expectedBytes)
+            throws NullPointerException, MediaDownloadFailedException, IOException {
 
         if (apiService == null) {
             SettingsManager settings = this.settingsManager.get();
@@ -252,29 +408,221 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Unable to create Immich service");
         }
 
-        Response<ResponseBody> downloadResponse = type == ImmichType.IMAGE
-                ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.thumbnail, null).execute()
+        File cacheDir = activity.getCacheDir();
+        File cacheFile = new File(cacheDir,
+                cacheFileName(uuid, originalFileName, originalPath, type, fallback));
+
+        // Prefer a completed convert/transcode cache when present and not a fallback download.
+        if (!fallback) {
+            if (type == ImmichType.VIDEO) {
+                File transcoded = getTranscodeCacheFile(cacheDir, uuid);
+                if (transcoded.exists() && transcoded.length() > 0) {
+                    return transcoded;
+                }
+            } else if (type == ImmichType.IMAGE) {
+                File converted = getImageConvertCacheFile(cacheDir, uuid);
+                if (converted.exists() && converted.length() > 0) {
+                    return converted;
+                }
+            }
+        }
+
+        // Reuse originals/images; Immich fallback streams may differ from the original bytes.
+        if (!fallback && cacheFile.exists() && cacheFile.length() > 0) {
+            return cacheFile;
+        }
+
+        long bytesNeeded = expectedBytes != null && expectedBytes > 0
+                ? expectedBytes
+                : MAX_ASSET_BYTES;
+        if (!mediaCacheManager.ensureSpace(cacheDir, bytesNeeded, protectedCachePaths(null))) {
+            throw new MediaDownloadFailedException("Insufficient cache space for asset download");
+        }
+
+        Response<ResponseBody> downloadResponse = !fallback ? apiService.downloadFile(uuid, null).execute() :
+                type == ImmichType.IMAGE
+                ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.preview, null).execute()
                 : apiService.playAssetVideo(uuid, null).execute();
 
         if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
             downloadMutex.lock();
-            File cacheFile = new File(activity.getCacheDir(), uuid + ".dat");
-
-            try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
-                try (InputStream inputStream = downloadResponse.body().byteStream()) {
-                    byte[] buffer = new byte[1024*32];
-                    int bytesRead;
-                    while ((bytesRead = inputStream.read(buffer)) != -1) {
-                        outputStream.write(buffer, 0, bytesRead);
+            try {
+                try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
+                    try (InputStream inputStream = downloadResponse.body().byteStream()) {
+                        byte[] buffer = new byte[1024*32];
+                        int bytesRead;
+                        while ((bytesRead = inputStream.read(buffer)) != -1) {
+                            outputStream.write(buffer, 0, bytesRead);
+                        }
                     }
                 }
+            } finally {
+                downloadMutex.unlock();
             }
-
-            downloadMutex.unlock();
             return cacheFile;
 
         } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
 
+    }
+
+    private File prepareVideoForPlayback(Activity activity,
+                                         ImmichApiAssetResponse asset, File downloaded) {
+        return videoTranscodeManager.prepareForPlayback(
+                activity.getCacheDir(), asset.getId(), downloaded);
+    }
+
+    private File prepareImageForDisplay(Activity activity,
+                                        ImmichApiAssetResponse asset, File downloaded) {
+        return imageConvertManager.prepareForDisplay(
+                activity.getCacheDir(), asset.getId(), downloaded);
+    }
+
+    public boolean shouldAttemptReactiveTranscode(String assetId, File file) {
+        if (assetId == null || file == null || isTranscodedFile(file) || isImageConvertedFile(file)) {
+            return false;
+        }
+        return !reactiveTranscodeAttempted.contains(assetId);
+    }
+
+    public boolean shouldAttemptReactiveImageConvert(String assetId, File file) {
+        if (assetId == null || file == null || isImageConvertedFile(file) || MediaTypeHelper.isGifFile(file)) {
+            return false;
+        }
+        return !reactiveTranscodeAttempted.contains(assetId);
+    }
+
+    public void attemptReactiveTranscode(Activity activity, String assetId, File sourceFile,
+                                         ReactiveTranscodeCallback callback) {
+        if (!shouldAttemptReactiveTranscode(assetId, sourceFile)) {
+            activity.runOnUiThread(() -> {
+                MediaManagerListener mediaManagerListener = this.listener.get();
+                if (mediaManagerListener != null) {
+                    mediaManagerListener.debugInformationProvided(
+                            new DebugInformation("ffmpeg", "reactive: skipped (already attempted)"));
+                }
+                callback.onTranscodeFailed();
+            });
+            return;
+        }
+        recordReactiveTranscodeAttempt(assetId);
+
+        pinCacheFile(sourceFile);
+        File transcodeCache = getTranscodeCacheFile(activity.getCacheDir(), assetId);
+        pinCacheFile(transcodeCache);
+        videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(sourceFile));
+
+        new Thread(() -> {
+            File source = VideoTranscodeManager.resolveReactiveSource(
+                    activity.getCacheDir(), assetId, sourceFile);
+            File redownloaded = null;
+            try {
+                if (source == null || !source.exists()) {
+                    ffmpegDebug(activity, "reactive: re-downloading source");
+                    redownloaded = redownloadVideoForReactive(activity, assetId);
+                    source = redownloaded;
+                    if (source != null) {
+                        pinCacheFile(source);
+                    }
+                }
+
+                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(source));
+                File transcoded = videoTranscodeManager.attemptReactiveTranscode(
+                        activity.getCacheDir(), assetId, source);
+
+                activity.runOnUiThread(() -> {
+                    if (transcoded != null) {
+                        // Keep original on disk; eviction frees space when needed.
+                        if (transcoded.exists()) {
+                            currentPlaybackPath = transcoded.getAbsolutePath();
+                        }
+                        callback.onTranscodeSuccess(transcoded);
+                    } else {
+                        callback.onTranscodeFailed();
+                    }
+                });
+            } finally {
+                unpinCacheFile(sourceFile);
+                unpinCacheFile(transcodeCache);
+                unpinCacheFile(redownloaded);
+            }
+        }).start();
+    }
+
+    public void attemptReactiveImageConvert(Activity activity, String assetId, File sourceFile,
+                                            ReactiveTranscodeCallback callback) {
+        if (!shouldAttemptReactiveImageConvert(assetId, sourceFile)) {
+            activity.runOnUiThread(() -> {
+                MediaManagerListener mediaManagerListener = this.listener.get();
+                if (mediaManagerListener != null) {
+                    mediaManagerListener.debugInformationProvided(
+                            new DebugInformation("ffmpeg", "image-reactive: skipped (already attempted)"));
+                }
+                callback.onTranscodeFailed();
+            });
+            return;
+        }
+        recordReactiveTranscodeAttempt(assetId);
+
+        pinCacheFile(sourceFile);
+        File convertCache = getImageConvertCacheFile(activity.getCacheDir(), assetId);
+        pinCacheFile(convertCache);
+        imageConvertManager.setProtectedCachePaths(protectedCachePaths(sourceFile));
+
+        new Thread(() -> {
+            File source = ImageConvertManager.resolveReactiveSource(
+                    activity.getCacheDir(), assetId, sourceFile);
+            File redownloaded = null;
+            try {
+                if (source == null || !source.exists()) {
+                    ffmpegDebug(activity, "image-reactive: re-downloading source");
+                    redownloaded = redownloadImageForReactive(activity, assetId);
+                    source = redownloaded;
+                    if (source != null) {
+                        pinCacheFile(source);
+                    }
+                }
+
+                imageConvertManager.setProtectedCachePaths(protectedCachePaths(source));
+                File converted = imageConvertManager.attemptReactiveConvert(
+                        activity.getCacheDir(), assetId, source);
+
+                activity.runOnUiThread(() -> {
+                    if (converted != null) {
+                        if (converted.exists()) {
+                            currentPlaybackPath = converted.getAbsolutePath();
+                        }
+                        callback.onTranscodeSuccess(converted);
+                    } else {
+                        callback.onTranscodeFailed();
+                    }
+                });
+            } finally {
+                unpinCacheFile(sourceFile);
+                unpinCacheFile(convertCache);
+                unpinCacheFile(redownloaded);
+            }
+        }).start();
+    }
+
+    public boolean isTranscodedFile(File file) {
+        return VideoTranscodeManager.isTranscodedFile(file);
+    }
+
+    public boolean isImageConvertedFile(File file) {
+        return ImageConvertManager.isConvertedFile(file);
+    }
+
+    void clearReactiveTranscodeAttempts() {
+        reactiveTranscodeAttempted.clear();
+    }
+
+    void recordReactiveTranscodeAttempt(String assetId) {
+        reactiveTranscodeAttempted.add(assetId);
+    }
+
+    public interface ReactiveTranscodeCallback {
+        void onTranscodeSuccess(File transcodedFile);
+        void onTranscodeFailed();
     }
 
     @Override
@@ -283,7 +631,7 @@ public class MediaManager implements MediaManagerInterface {
         new Thread(() -> {
             try {
 
-                File thumbnail = downloadAsset(assetId, type, activity, null);
+                File thumbnail = downloadAsset(assetId, type, true, null, null, activity, null, null);
 
                 activity.runOnUiThread(() -> {
                     MediaManagerListener mediaManagerListener = this.listener.get();
@@ -373,11 +721,73 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     public void removeFromCache(File file) {
+        if (file == null || !file.isFile()) {
+            return;
+        }
+        pinnedCachePaths.remove(file.getAbsolutePath());
         if (file.exists() && !file.delete()) {
             MediaManagerListener mediaManagerListener = this.listener.get();
             if (mediaManagerListener != null) {
                 mediaManagerListener.debugInformationProvided(new DebugInformation("MediaManager.removeFromCache", "Unable to delete file "+file.getAbsolutePath()));
             }
+        }
+    }
+
+    static File getTranscodeCacheFile(File cacheDir, String assetId) {
+        return VideoTranscodeManager.getTranscodeCacheFile(cacheDir, assetId);
+    }
+
+    static File getImageConvertCacheFile(File cacheDir, String assetId) {
+        return ImageConvertManager.getConvertCacheFile(cacheDir, assetId);
+    }
+
+    private HashSet<String> protectedCachePaths(File extra) {
+        HashSet<String> protectedPaths = new HashSet<>(pinnedCachePaths);
+        if (currentPlaybackPath != null) {
+            protectedPaths.add(currentPlaybackPath);
+        }
+        if (extra != null) {
+            protectedPaths.add(extra.getAbsolutePath());
+        }
+        return protectedPaths;
+    }
+
+    private void pinCacheFile(File file) {
+        if (file != null) {
+            pinnedCachePaths.add(file.getAbsolutePath());
+        }
+    }
+
+    private void unpinCacheFile(File file) {
+        if (file != null) {
+            pinnedCachePaths.remove(file.getAbsolutePath());
+        }
+    }
+
+    private File redownloadVideoForReactive(Activity activity, String assetId) {
+        try {
+            return downloadAsset(assetId, ImmichType.VIDEO, true, null, null, activity, null, null);
+        } catch (Exception e) {
+            ffmpegDebug(activity, "reactive: re-download failed");
+            return null;
+        }
+    }
+
+    private File redownloadImageForReactive(Activity activity, String assetId) {
+        try {
+            // Re-fetch original (not Immich preview) so on-device convert can still succeed.
+            return downloadAsset(assetId, ImmichType.IMAGE, false, null, null, activity, null, null);
+        } catch (Exception e) {
+            ffmpegDebug(activity, "image-reactive: re-download failed");
+            return null;
+        }
+    }
+
+    private void ffmpegDebug(Activity activity, String step) {
+        MediaManagerListener mediaManagerListener = this.listener.get();
+        if (mediaManagerListener != null) {
+            activity.runOnUiThread(() ->
+                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step)));
         }
     }
 }

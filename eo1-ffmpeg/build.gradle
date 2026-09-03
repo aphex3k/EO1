@@ -1,0 +1,25 @@
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'com.aphex3k.eo1.ffmpeg'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 19
+        targetSdk 19
+        ndk {
+            abiFilters 'armeabi-v7a'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_21
+        targetCompatibility JavaVersion.VERSION_21
+    }
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}

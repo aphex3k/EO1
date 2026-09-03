@@ -18,12 +18,15 @@ import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.view.animation.AlphaAnimation;
 import android.widget.ImageView;
+import android.widget.RelativeLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -34,12 +37,16 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewCompat;
 
+import com.aphex3k.eo1.mqtt.MqttManager;
+import com.aphex3k.eo1.mqtt.Payload;
+import com.aphex3k.eo1.mqtt.PlaybackListener;
 import com.aphex3k.immichApi.ImmichApiServerVersionResponse;
 import com.aphex3k.immichApi.ImmichApiService;
 import com.aphex3k.immichApi.ImmichType;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.DataSource;
 import com.bumptech.glide.load.engine.GlideException;
+import com.bumptech.glide.load.resource.gif.GifDrawable;
 import com.bumptech.glide.request.RequestListener;
 import com.bumptech.glide.request.target.Target;
 import com.dd.crop.TextureVideoView;
@@ -48,7 +55,6 @@ import com.google.gson.stream.MalformedJsonException;
 import com.vdurmont.semver4j.Semver;
 
 import java.io.File;
-import java.io.IOException;
 import java.lang.ref.WeakReference;
 import java.text.DateFormat;
 import java.text.SimpleDateFormat;
@@ -78,9 +84,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public static final String IMMICH_MAX_VERSION = "3.1.0";
     private View lastVisibleView;
     private String lastVisibleAsset = "";
+    private String activeVideoAssetId = "";
     private ImageView imageView;
     private TextureVideoView videoView;
     private LinearProgressIndicator progressIndicator;
+    private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
     private TextView debugOverlay;
     private EventManager eventManager;
@@ -94,6 +102,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private float lastScreenBrightness = 0.3f;
     private ConnectionManager connectionManager;
     private PowerManager.WakeLock screenOffWakeLock;
+    private Handler bannerHandler = new Handler(Looper.getMainLooper());
+    private Runnable bannerFadeRunnable;
+    private String currentTrackId = null;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -131,6 +142,103 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 0,
                 new Intent(getIntent()),
                 getIntent().getFlags());
+
+        configureMqttManager();
+    }
+
+    private void configureMqttManager() {
+        try {
+            // Construct MQTT broker string from settings
+            settingsManager.loadConfiguration();
+            String mqttProtocol = settingsManager.getConfiguration().mqttProtocol;
+            String mqttHost = settingsManager.getConfiguration().mqttHost;
+            int mqttPort = settingsManager.getConfiguration().mqttPort;
+            if (mqttProtocol == null || mqttProtocol.isEmpty()) mqttProtocol = "tcp";
+            if (mqttPort <= 0) mqttPort = 1883;
+
+            if (mqttHost != null && !mqttHost.isEmpty()) {
+
+                String mqttBroker = String.format("%s://%s:%d", mqttProtocol, mqttHost, mqttPort);
+
+                this.mqttManager = new MqttManager(mqttBroker, new PlaybackListener() {
+
+                    @Override
+                    public void onPlaybackStarted(Payload payload) {
+                        runOnUiThread(() -> {
+                            var duration = payload.currentTrack.duration;
+                            var title = payload.currentTrack.title;
+                            var artist = payload.currentTrack.artist;
+                            var groupName = payload.groupName;
+                            var trackId = groupName + "_" + title + "_" + artist + "_" + duration; // crude unique id
+
+                            var titleView = (TextView) findViewById(R.id.songTitleLabel);
+                            var artistView = (TextView) findViewById(R.id.songArtistLabel);
+                            var deviceLabel = (TextView) findViewById(R.id.deviceLabel);
+                            var bannerView = (RelativeLayout) findViewById(R.id.sonosBannerView);
+
+                            titleView.setText(title);
+                            artistView.setText(artist);
+                            deviceLabel.setText(groupName);
+                            bannerView.setVisibility(View.VISIBLE);
+                            bannerView.setAlpha(1f);
+
+                            // Cancel previous timer if track changed
+                            if (bannerFadeRunnable != null) {
+                                bannerHandler.removeCallbacks(bannerFadeRunnable);
+                            }
+                            currentTrackId = trackId;
+
+                            // Parse duration string (e.g., "03:45")
+                            long durationMs = 120 * 1000L;
+                            if (duration != null && duration.matches("\\d{1,2}:\\d{2}:\\d{2}")) {
+                                String[] parts = duration.split(":");
+                                int hours = Integer.parseInt(parts[0]);
+                                int min = Integer.parseInt(parts[1]);
+                                int sec = Integer.parseInt(parts[2]);
+                                durationMs = (hours * 360L + min * 60L + sec) * 1000L;
+                            }
+                            if (durationMs > 0) {
+                                bannerFadeRunnable = () -> {
+                                    // Only fade if the same track is still displayed
+                                    if (currentTrackId != null && currentTrackId.equals(trackId)) {
+                                        AlphaAnimation fadeOut = new AlphaAnimation(1f, 0f);
+                                        fadeOut.setDuration(1000);
+                                        fadeOut.setFillAfter(true);
+                                        bannerView.startAnimation(fadeOut);
+                                        bannerView.setVisibility(View.GONE);
+                                    }
+                                };
+                                bannerHandler.postDelayed(bannerFadeRunnable, durationMs);
+                            }
+                        });
+                    }
+
+                    @Override
+                    public void onPlaybackStopped(Payload payload) {
+                        runOnUiThread(() -> {
+                            if (payload == null || payload.currentTrack == null) {
+                                return;
+                            }
+                            var duration = payload.currentTrack.duration;
+                            var title = payload.currentTrack.title;
+                            var artist = payload.currentTrack.artist;
+                            var groupName = payload.groupName;
+                            var trackId = groupName + "_" + title + "_" + artist + "_" + duration; // crude unique id
+
+                            // Cancel previous timer if track changed
+                            if (bannerFadeRunnable != null && currentTrackId.equals(trackId)) {
+                                bannerHandler.removeCallbacks(bannerFadeRunnable);
+                                bannerHandler.post(bannerFadeRunnable);
+                            }
+                        });
+                    }
+
+                });
+            }
+        }
+        catch (Exception e) {
+            handleException(e);
+        }
     }
 
     /**
@@ -173,26 +281,33 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     0);
         }
 
-        if (!this.settingsManager.showSetupDialogIfNeeded(this)) {
+        if (this.settingsManager.isSetupDialogIfNeeded())
+        {
+            showConfigurationUI();
+        }
+        else if (!this.settingsManager.isSetupDialogIfNeeded()) {
             handler.removeCallbacks(this::runOnTimer);
             handler.post(this::runOnTimer);
             setupQuietHours();
-
-            final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
-            final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
-            final int now = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
-
-            if (startQuietHour < now && endQuietHour > now) {
-                turnScreenOff();
-            }
-            else {
-                turnScreenOn();
-            }
+            applyScheduledScreenState();
 
             checkServerCompatibility();
         }
 
         this.connectionManager.registerListener(this);
+
+        if (this.mqttManager != null)
+            try {
+                String mqttUser = settingsManager.getConfiguration().mqttUser;
+                String mqttPassword = settingsManager.getConfiguration().mqttPassword;
+    //            if (mqttUser == null || mqttUser.isEmpty()) mqttUser = "eos1";
+    //            if (mqttPassword == null) mqttPassword = "eos12345";
+                if (mqttPassword == null) mqttPassword = "";
+                this.mqttManager.connect(mqttUser, mqttPassword);
+            }
+            catch (Exception e) {
+                handleException(e);
+            }
 
         debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), this.connectionManager.isNetworkAvailable() ? "connected" : "disconnected"));
@@ -239,6 +354,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
         this.connectionManager.unregisterListener(this);
+        try {
+            this.mqttManager.disconnect();
+        }
+        catch (Exception e) {
+            handleException(e);
+        }
         super.onPause();
     }
 
@@ -328,7 +449,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void showConfigurationUI() {
         this.runOnUiThread(() -> {
-            this.settingsManager.showSetupDialog(this);
+            OptionsDialogFragment dialog = new OptionsDialogFragment(this.settingsManager);
+            dialog.show(getSupportFragmentManager(), "OptionsDialog");
         });
     }
 
@@ -365,7 +487,28 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         handler.removeCallbacks(this::runOnTimer);
         handler.post(this::runOnTimer);
         setupQuietHours();
+        applyScheduledScreenState();
         checkServerCompatibility();
+    }
+
+    private void applyScheduledScreenState() {
+        if (settingsManager == null || brightnessManager == null) {
+            return;
+        }
+
+        int start = settingsManager.getConfiguration().startQuietHour;
+        int end = settingsManager.getConfiguration().endQuietHour;
+        int now = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
+        boolean shouldBeOn = !QuietHours.isInQuietHours(start, end, now);
+
+        if (brightnessManager.getShouldTheScreenBeOn() != shouldBeOn) {
+            brightnessManager.setShouldTheScreenBeOn(shouldBeOn);
+            if (shouldBeOn) {
+                turnScreenOn();
+            } else {
+                turnScreenOff();
+            }
+        }
     }
 
     private void setupQuietHours() {
@@ -382,10 +525,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             handleException(e);
         }
 
-        quietHoursTimer = new Timer(true);
-
         final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
         final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
+
+        if (!QuietHours.isConfigured(startQuietHour, endQuietHour) || startQuietHour == endQuietHour) {
+            return;
+        }
+
+        quietHoursTimer = new Timer(true);
 
         final Calendar calendar = Calendar.getInstance();
         final Date time = calendar.getTime();
@@ -418,12 +565,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public void run() {
                 try {
-                    if (brightnessManager != null) {
-                        if (Boolean.TRUE.equals(brightnessManager.getShouldTheScreenBeOn())) {
-                            eventManager.onKeyDown(KeyEvent.EO1_TOP_BUTTON);
-                        }
-                        debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
-                    }
+                    handler.post(MainActivity.this::applyScheduledScreenState);
+                    debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
                 }
                 catch (Exception e) {
                     handleException(e);
@@ -435,12 +578,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public void run() {
                 try {
-                    if (brightnessManager != null) {
-                        if (Boolean.FALSE.equals(brightnessManager.getShouldTheScreenBeOn())) {
-                            eventManager.onKeyDown(KeyEvent.EO1_TOP_BUTTON);
-                        }
-                        debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
-                    }
+                    handler.post(MainActivity.this::applyScheduledScreenState);
+                    debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
                 }
                 catch (Exception e) {
                     handleException(e);
@@ -463,7 +602,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             if (e.getClass() == InvalidCredentialsException.class) {
-                settingsManager.showSetupDialogIfNeeded(this);
+                if (settingsManager.isSetupDialogIfNeeded()) {
+                    showConfigurationUI();
+                }
                 Toast.makeText(MainActivity.this, "User authentication failure. Check your configuration.", Toast.LENGTH_LONG).show();
             }
             if (e.getClass() == MalformedJsonException.class) {
@@ -540,31 +681,54 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
             try {
-                Glide.with(this)
-                        .load(file)
-                        .centerCrop()
-                        .listener(new RequestListener<Drawable>() {
-                            @Override
-                            public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
-                                assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
-                                return false;
-                            }
+                videoView.stop();
+                videoView.setVisibility(View.INVISIBLE);
+                Glide.with(this).clear(imageView);
 
-                            @Override
-                            public boolean onResourceReady(@NonNull Drawable resource, @NonNull Object model, Target<Drawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
-                                if (lastVisibleView == videoView || lastVisibleView == null) {
-                                    videoView.stop();
-                                    videoView.setVisibility(View.INVISIBLE);
+                if (MediaTypeHelper.isGifFile(file)) {
+                    Glide.with(this)
+                            .asGif()
+                            .load(file)
+                            .centerCrop()
+                            .listener(new RequestListener<GifDrawable>() {
+                                @Override
+                                public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<GifDrawable> target, boolean isFirstResource) {
+                                    assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
+                                    return false;
+                                }
+
+                                @Override
+                                public boolean onResourceReady(@NonNull GifDrawable resource, @NonNull Object model, Target<GifDrawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
+                                    resource.setLoopCount(GifDrawable.LOOP_FOREVER);
                                     imageView.setVisibility(View.VISIBLE);
                                     lastVisibleView = imageView;
+                                    lastVisibleAsset = file.getAbsolutePath();
+                                    return false;
                                 }
-                                lastVisibleAsset = file.getAbsolutePath();
-                                return false;
-                            }
-                        })
-                        .dontAnimate()
-                        .dontTransform()
-                        .into(imageView);
+                            })
+                            .into(imageView);
+                } else {
+                    Glide.with(this)
+                            .load(file)
+                            .centerCrop()
+                            .listener(new RequestListener<Drawable>() {
+                                @Override
+                                public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
+                                    assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
+                                    return false;
+                                }
+
+                                @Override
+                                public boolean onResourceReady(@NonNull Drawable resource, @NonNull Object model, Target<Drawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
+                                    imageView.setVisibility(View.VISIBLE);
+                                    lastVisibleView = imageView;
+                                    lastVisibleAsset = file.getAbsolutePath();
+                                    return false;
+                                }
+                            })
+                            .dontAnimate()
+                            .into(imageView);
+                }
             }
             catch (Exception e) {
                 handleException(e);
@@ -581,7 +745,59 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * @param isVideo true if it is a video
      * @param file file to load
      */
+    private void restoreImageViewAfterVideoFailure() {
+        videoView.stop();
+        videoView.setVisibility(View.INVISIBLE);
+        imageView.setVisibility(View.VISIBLE);
+        lastVisibleView = imageView;
+    }
+
     private void assetFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+        if (isVideo && !assetId.equals(activeVideoAssetId)) {
+            return;
+        }
+        if (isVideo && mediaManager.shouldAttemptReactiveTranscode(assetId, file)) {
+            MainActivity activity = activityReference.get();
+            if (activity != null) {
+                restoreImageViewAfterVideoFailure();
+                mediaManager.attemptReactiveTranscode(activity, assetId, file, new MediaManager.ReactiveTranscodeCallback() {
+                    @Override
+                    public void onTranscodeSuccess(File transcodedFile) {
+                        displayVideo(transcodedFile, assetId);
+                    }
+
+                    @Override
+                    public void onTranscodeFailed() {
+                        immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
+                    }
+                });
+                return;
+            }
+        }
+        if (!isVideo && mediaManager.shouldAttemptReactiveImageConvert(assetId, file)) {
+            MainActivity activity = activityReference.get();
+            if (activity != null) {
+                mediaManager.attemptReactiveImageConvert(activity, assetId, file, new MediaManager.ReactiveTranscodeCallback() {
+                    @Override
+                    public void onTranscodeSuccess(File convertedFile) {
+                        displayPicture(convertedFile, assetId);
+                    }
+
+                    @Override
+                    public void onTranscodeFailed() {
+                        immichPlaybackFallback(assetId, type, activityReference, false, file);
+                    }
+                });
+                return;
+            }
+        }
+        immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
+    }
+
+    private void immichPlaybackFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+        if (isVideo) {
+            restoreImageViewAfterVideoFailure();
+        }
         if (assetId != null) {
             MainActivity activity = activityReference.get();
             if (activity != null) {
@@ -608,25 +824,30 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
         WeakReference<MainActivity> activityReference = new WeakReference<>(this);
+        activeVideoAssetId = assetId;
 
         this.runOnUiThread(() -> {
             try {
                 videoView.stop();
+                videoView.setVisibility(View.INVISIBLE);
                 videoView.setListener(new TextureVideoView.MediaPlayerListener() {
                     @Override
                     public void onVideoPrepared() {
+                        if (!assetId.equals(activeVideoAssetId)) {
+                            return;
+                        }
                         try {
-                            if (lastVisibleView == imageView || lastVisibleView == null) {
-                                videoView.setVisibility(View.VISIBLE);
-                                imageView.setVisibility(View.INVISIBLE);
-                                lastVisibleView = videoView;
-                            }
+                            Glide.with(MainActivity.this).clear(imageView);
+                            imageView.setVisibility(View.INVISIBLE);
+                            videoView.setVisibility(View.VISIBLE);
+                            lastVisibleView = videoView;
                             lastVisibleAsset = file.getAbsolutePath();
                             videoView.setLooping(true);
                             videoView.setFocusable(false);
-                            videoView.setVolume(0,0);
+                            videoView.setVolume(0, 0);
                             videoView.play();
                         } catch (Exception e) {
+                            restoreImageViewAfterVideoFailure();
                             assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                             handleException(e);
                         }
@@ -637,19 +858,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     }
 
                     public boolean onError() {
+                        if (!assetId.equals(activeVideoAssetId)) {
+                            return false;
+                        }
+                        restoreImageViewAfterVideoFailure();
                         assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                         return false;
                     }
 
                     public boolean onInfo(int what, int extra) {
-                        // https://developer.android.com/reference/android/media/MediaPlayer.OnInfoListener
-
                         return false;
                     }
                 });
                 videoView.setDataSource(file.getPath());
                 videoView.setLooping(true);
             } catch (Exception e) {
+                restoreImageViewAfterVideoFailure();
                 assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                 handleException(e);
             }

@@ -1,20 +1,5 @@
 plugins {
     id 'com.android.application'
-    id "jacoco"
-    id "org.sonarqube" version "4.4.1.3373"
-}
-
-sonar {
-    properties {
-        property "sonar.projectKey", "gitea_eo1"
-        property "sonar.organization", "gitea"
-        property "sonar.host.url", "https://sonarcloud.io"
-        // To avoid implicit compilation, set property 'sonar.gradle.skipCompile' to 'true' and make sure your project is compiled, before analysis has started.
-        property "sonar.gradle.skipCompile", true
-        property "sonar.sources", "src/main/java"
-        property "sonar.junit.reportsPath", "build/test-results/*/TEST-*.xml"
-        property "sonar.tests", "src/test/java"
-    }
 }
 
 android {
@@ -39,6 +24,9 @@ android {
     }
     buildTypes {
         release {
+            ndk {
+                abiFilters 'armeabi-v7a'
+            }
             // see: https://developer.android.com/build/shrink-code
             // Enables code shrinking, obfuscation, and optimization for only
             // your project's release build type. Make sure to use a build
@@ -57,6 +45,10 @@ android {
             debuggable = false
         }
         debug {
+            // LFS ffmpeg-kit AAR ships armeabi-v7a + arm64-v8a; debug APK always includes both.
+            ndk {
+                abiFilters 'armeabi-v7a', 'arm64-v8a'
+            }
             enableUnitTestCoverage true
             enableAndroidTestCoverage true
         }
@@ -95,6 +87,18 @@ dependencies {
     // Support GIF Playback
     implementation 'com.github.bumptech.glide:glide:4.16.0'
     annotationProcessor 'com.github.bumptech.glide:compiler:4.16.0'
+    // https://mvnrepository.com/artifact/org.eclipse.paho/org.eclipse.paho.client.mqttv3
+    implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'
+    implementation 'com.google.code.gson:gson:2.10.1'
+
+    implementation project(':eo1-ffmpeg')
+
+    def ffmpegAar = rootProject.file('eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar')
+    if (ffmpegAar.exists()) {
+        implementation files(ffmpegAar)
+        // files() AAR does not resolve transitive deps from ffmpeg-kit's pom
+        implementation 'com.arthenica:smart-exception-java:0.2.1'
+    }
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation "org.mockito:mockito-core:5.10.0"

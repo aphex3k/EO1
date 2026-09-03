@@ -1,10 +1,7 @@
 package com.aphex3k.eo1;
 
-import android.Manifest;
-import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.content.Context;
-import android.content.pm.PackageManager;
 import android.os.Build;
 import android.view.View;
 import android.widget.ArrayAdapter;
@@ -42,7 +39,7 @@ public class SettingsManager {
         this.listener = new WeakReference<>(listener);
     }
 
-    protected void loadConfiguration() {
+    protected boolean loadConfiguration() {
 
         SettingsManagerListener settingsManagerListener = this.listener.get();
 
@@ -51,23 +48,25 @@ public class SettingsManager {
                 File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 
                 this.configuration = new Gson().fromJson(new FileReader(file), Configuration.class);
+
+                return true;
             } catch (Exception e) {
                 settingsManagerListener.handleException(e);
             }
         }
+
+        return false;
     }
 
-    protected boolean showSetupDialogIfNeeded(Context context) {
-
-        loadConfiguration();
-
-        if (this.configuration == null ||
+    protected boolean isSetupDialogIfNeeded()
+    {
+        if (!loadConfiguration() ||
+            this.configuration == null ||
             this.configuration.userid == null ||
             this.configuration.userid.isEmpty() ||
             this.configuration.password == null ||
             this.configuration.password.isEmpty())
         {
-            showSetupDialog(context);
             return true;
         }
         else {
@@ -110,7 +109,7 @@ public class SettingsManager {
         }
     }
 
-    private void updateTimeZone(Context context) {
+    void updateTimeZone(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             SettingsManagerListener settingsManagerListener = this.listener.get();
             if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty() && settingsManagerListener != null) {
@@ -121,7 +120,10 @@ public class SettingsManager {
         }
     }
 
-    @SuppressLint("DefaultLocale")
+    /**
+     * Deprecated: Use OptionsDialogFragment instead for configuration UI.
+     */
+    @Deprecated
     protected void showSetupDialog(Context context) {
 
         SettingsManagerListener settingsManagerListener = this.listener.get();
@@ -163,19 +165,20 @@ public class SettingsManager {
             ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item, allTimeZoneIds);
             tzAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
             tzSpinner.setAdapter(tzAdapter);
-            if (configuration.selectedTimeZoneId != null && configuration.selectedTimeZoneId.isEmpty())
+            if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty())
                 tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId));
 
             View.OnClickListener load = view -> {
-                loadConfiguration();
 
-                userIdEditText.setText(configuration.userid);
-                passwordEditText.setText(configuration.password);
-                hostEditText.setText(configuration.host);
-                tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId), true);
-                startHourSpinner.setSelection(configuration.startQuietHour, true);
-                endHourSpinner.setSelection(configuration.endQuietHour, true);
-                editTextInterval.setText(String.valueOf(configuration.interval));
+                if (loadConfiguration()) {
+                    userIdEditText.setText(configuration.userid);
+                    passwordEditText.setText(configuration.password);
+                    hostEditText.setText(configuration.host);
+                    tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId), true);
+                    startHourSpinner.setSelection(configuration.startQuietHour, true);
+                    endHourSpinner.setSelection(configuration.endQuietHour, true);
+                    editTextInterval.setText(String.valueOf(configuration.interval));
+                }
             };
 
             btnLoadConfig.setOnClickListener(load);

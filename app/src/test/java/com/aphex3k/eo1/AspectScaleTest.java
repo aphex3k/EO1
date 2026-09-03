@@ -35,4 +35,16 @@ public class AspectScaleTest {
 
         assertEquals(0.8888889, scale, 0.0001);
     }
+
+    @Test
+    public void rotationAwareScaleTest() {
+        float noRotation = TextureVideoView.rotationAwareAspectScale(1080, 1920, 1920, 1080, 0);
+        assertEquals(1.7777778, noRotation, 0.0001);
+
+        float rotatedPortrait = TextureVideoView.rotationAwareAspectScale(1080, 1920, 1920, 1080, 90);
+        assertEquals(1.0, rotatedPortrait, 0.0001);
+
+        float rotatedLandscape = TextureVideoView.rotationAwareAspectScale(1080, 1920, 1080, 1920, 270);
+        assertEquals(1.7777778, rotatedLandscape, 0.0001);
+    }
 }

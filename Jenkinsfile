@@ -6,7 +6,6 @@ pipeline {
         // Even console ports 5554..5584 (16 slots). ADB's usable adb-port range is ~5555-5586.
         EMULATOR_PORT = "${5554 + 2 * (Math.abs(Integer.parseInt(env.BUILD_NUMBER) % 16))}"
         EMULATOR_NAME = "EO1-${EMULATOR_PORT}"
-        SONAR_TOKEN = credentials('sonar_token_gitea_eo1')
         ANDROID_HOME = '/var/android-sdk'
         PATH = "${ANDROID_HOME}/tools:${ANDROID_HOME}/tools/bin:${ANDROID_HOME}/platform-tools:${PATH}"
         JAVA_OPTS = "-Dorg.gradle.daemon=false"
@@ -77,6 +76,35 @@ pipeline {
                 }
             }
         }
+        stage ('Build FFmpeg Native') {
+            steps {
+                withCredentials([gitUsernamePassword(credentialsId: 'gitea-jenkins', gitToolName: 'Default')]) {
+                    sh '''
+                        set -eu
+                        AAR=eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar
+                        if [ "${REBUILD_FFMPEG_NATIVE:-0}" = "1" ]; then
+                            echo "REBUILD_FFMPEG_NATIVE=1: rebuilding FFmpeg native AAR (x264 + libheif/libde265 + zlib)"
+                            rm -rf ffmpeg-kit-build
+                            git clone --depth 1 https://gitea.codingmerc.com/michael/ffmpeg-kit.git ffmpeg-kit-build
+                            chmod +x eo1-ffmpeg/native/apply-to-ffmpeg-kit.sh
+                            HEIC_ARGS=$(./eo1-ffmpeg/native/apply-to-ffmpeg-kit.sh ffmpeg-kit-build | tr '\n' ' ')
+                            cd ffmpeg-kit-build
+                            export ANDROID_SDK_ROOT=/var/android-sdk
+                            export ANDROID_NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/22.1.7171670"
+                            test -d "${ANDROID_NDK_ROOT}"
+                            # shellcheck disable=SC2086
+                            ./android.sh --lts --enable-gpl --enable-x264 \
+                              --disable-x86 --disable-x86-64 ${HEIC_ARGS}
+                            mkdir -p ../eo1-ffmpeg/libs
+                            cp prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar "../${AAR}"
+                        else
+                            echo "Using committed FFmpeg AAR (set REBUILD_FFMPEG_NATIVE=1 to rebuild)"
+                        fi
+                        test -f "${AAR}"
+                    '''
+                }
+            }
+        }
         stage ('Building Android 🤖') {
             environment {
                 KEYSTORE = credentials('keystore-eo1')
@@ -98,12 +126,10 @@ pipeline {
                 }
             }
         }
-        stage ('Post Build') {
-            parallel {
-                stage ('Emulator 📱') {
-                    steps {
-                        script {
-                            sh '''
+        stage ('Emulator 📱') {
+            steps {
+                script {
+                    sh '''
                             set -eu
                             SERIAL="emulator-${EMULATOR_PORT}"
                             BOOT_TIMEOUT_SEC=180
@@ -188,21 +214,6 @@ pipeline {
                             adb -s "${SERIAL}" shell monkey -p com.aphex3k.eo1 -v 500 && sleep 5
                             adb -s "${SERIAL}" shell screencap -p /data/data/screenshot_02_post_monkey.png && adb -s "${SERIAL}" pull /data/data/screenshot_02_post_monkey.png
                             '''
-                        }   
-                    }
-                }
-                stage ('Scanning') {
-                    steps {
-                        catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                            script {
-                                if (env.CHANGE_ID) {
-                                    sh "./gradlew --no-daemon sonar -Dsonar.pullrequest.base=${CHANGE_TARGET} -Dsonar.pullrequest.branch=${CHANGE_BRANCH} -Dsonar.pullrequest.key=${CHANGE_ID}"
-                                } else {
-                                    sh "./gradlew --no-daemon sonar -Dsonar.branch.name=${BRANCH_NAME}"
-                                }
-                            }
-                        }
-                    }
                 }
             }
         }

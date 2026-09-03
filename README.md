@@ -1,7 +1,6 @@
 # EO1 and EO2 Replacement APK
 
 [![Build Status](https://jenkins.codingmerc.com/buildStatus/icon?job=EO1%2Fmain)](https://jenkins.codingmerc.com/job/EO1/)
-[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=gitea_eo1&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=gitea_eo1)
 
 This repository is a [rewrite](https://gitea.codingmerc.com/michael/EO1/issues/26) of [spalt/EO1](https://github.com/spalt/EO1). The goal is to ideally use a
 self-hosted [immich.app](https://immich.app/) instance as a backend. This will allow **full self-custody** of the system.
@@ -103,15 +102,21 @@ The app will only be able to see content from your immich database that is share
 
 ### Local debug (emulator)
 
+Clone with Git LFS so the ffmpeg-kit prebuilt is present:
+
+```bash
+git lfs pull
+```
+
 Modern Android Studio no longer supports the Gradle/SDK pins this project needs for IDE debugging. Use:
 
 ```bash
 ./debug.sh
 ```
 
-That builds the debug APK, creates or reuses an AVD named `EO1` (API 19) constrained like the real hardware / Jenkins CI, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator.
+That builds the debug APK (always includes armeabi-v7a and arm64-v8a natives from the LFS ffmpeg-kit AAR), creates or reuses an AVD named `EO1` (API 19) constrained like the real hardware / Jenkins CI, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator.
 
-On **Apple Silicon**, API 19 images generally cannot boot. After that failure the script falls back to AVD `EO1_API21` (`system-images;android-21;default;arm64-v8a`) — the lowest arm64 image that can run locally. That path is an approximation for development, not EO1 fidelity. Debug APKs omit `maxSdk` so they can install on the fallback AVD; **release** builds still use `maxSdk 19` for real devices.
+On **Apple Silicon**, API 19 images generally cannot boot, and 32-bit ARM emulators are unsupported. After API 19 fails, the script falls back to AVD `EO1_API21` (`system-images;android-21;default;arm64-v8a`). The committed FFmpeg AAR includes **armeabi-v7a** (EO1 hardware) and **arm64-v8a** (emulator fallback). That path is an approximation for development, not EO1 fidelity. Debug APKs omit `maxSdk` so they can install on the fallback AVD; **release** builds still use `maxSdk 19` and armeabi-v7a only for real devices.
 
 ## Further Reading
 
