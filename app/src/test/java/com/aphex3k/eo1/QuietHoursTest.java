@@ -1,9 +1,12 @@
 package com.aphex3k.eo1;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
+
+import java.util.TimeZone;
 
 public class QuietHoursTest {
 
@@ -42,5 +45,29 @@ public class QuietHoursTest {
         assertFalse(QuietHours.isInQuietHours(-1, 14, 2));
         assertFalse(QuietHours.isInQuietHours(23, -1, 23));
         assertFalse(QuietHours.isInQuietHours(10, 10, 10));
+    }
+
+    @Test
+    public void resolveTimeZone_returnsConfiguredId() {
+        assertEquals("America/Los_Angeles", QuietHours.resolveTimeZone("America/Los_Angeles").getID());
+    }
+
+    @Test
+    public void resolveTimeZone_emptyOrNullUsesDefault() {
+        TimeZone def = TimeZone.getDefault();
+        assertEquals(def.getID(), QuietHours.resolveTimeZone(null).getID());
+        assertEquals(def.getID(), QuietHours.resolveTimeZone("").getID());
+        assertEquals(def.getID(), QuietHours.resolveTimeZone("   ").getID());
+    }
+
+    @Test
+    public void resolveTimeZone_unknownFallsBackToDefault() {
+        assertEquals(TimeZone.getDefault().getID(), QuietHours.resolveTimeZone("Not/ARealZone").getID());
+    }
+
+    @Test
+    public void calendarInTimeZone_usesResolvedZone() {
+        assertEquals("America/Los_Angeles",
+                QuietHours.calendarInTimeZone("America/Los_Angeles").getTimeZone().getID());
     }
 }

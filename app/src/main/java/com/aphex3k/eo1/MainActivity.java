@@ -68,6 +68,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.TimeZone;
 
 import okhttp3.HttpUrl;
 import retrofit2.Response;
@@ -80,6 +81,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long MILLIS = 60000;
     private static final long VIDEO_WATCHDOG_POLL_MS = 2000L;
     private static final long VIDEO_STALL_THRESHOLD_MS = 8000L;
+    /** Logcat tag matched by debug.sh follow_logcat filter. */
+    private static final String TAG = "EO1";
 
     /** Inclusive lower bound for Immich server versions this APK is tested against. */
     public static final String IMMICH_MIN_VERSION = "3.0.0";
@@ -115,6 +118,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int videoWatchdogLastPosition = -1;
     private long videoWatchdogLastProgressMs = 0L;
     private boolean videoWatchdogRecoverAttempted = false;
+    /** True after Immich slideshow / MQTT / version check have been started for this resume. */
+    private boolean coreLoopStarted = false;
+    /** Avoid spamming "Waiting for network…" while still offline. */
+    private boolean networkWaitNotified = false;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -259,6 +266,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (brightnessManager.getShouldTheScreenBeOn()) {
             brightnessChanged(lastScreenBrightness);
             mediaManager.showNextImage(this);
+        } else {
+            Log.i(TAG, "runOnTimer: skipping showNextImage (screen should be off / quiet hours)");
         }
     }
 
@@ -291,36 +300,79 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     0);
         }
 
-        if (this.settingsManager.isSetupDialogIfNeeded())
-        {
+        if (this.settingsManager.isSetupDialogIfNeeded()) {
             showConfigurationUI();
-        }
-        else if (!this.settingsManager.isSetupDialogIfNeeded()) {
-            handler.removeCallbacks(this::runOnTimer);
-            handler.post(this::runOnTimer);
-            setupQuietHours();
-            applyScheduledScreenState();
-
-            checkServerCompatibility();
+        } else {
+            startCoreLoopIfNetworkReady();
         }
 
         this.connectionManager.registerListener(this);
 
-        if (this.mqttManager != null)
-            try {
-                String mqttUser = settingsManager.getConfiguration().mqttUser;
-                String mqttPassword = settingsManager.getConfiguration().mqttPassword;
-    //            if (mqttUser == null || mqttUser.isEmpty()) mqttUser = "eos1";
-    //            if (mqttPassword == null) mqttPassword = "eos12345";
-                if (mqttPassword == null) mqttPassword = "";
-                this.mqttManager.connect(mqttUser, mqttPassword);
-            }
-            catch (Exception e) {
-                handleException(e);
-            }
-
         debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
-        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), this.connectionManager.isNetworkAvailable() ? "connected" : "disconnected"));
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key),
+                this.connectionManager.isNetworkAvailable() ? "connected" : "waiting for network"));
+    }
+
+    /**
+     * Start Immich slideshow, quiet hours, server check, and MQTT once the link is up.
+     * Idempotent for a given resume cycle; no-ops while setup dialog is showing or offline.
+     */
+    private void startCoreLoopIfNetworkReady() {
+        if (settingsManager.isSetupDialogIfNeeded()) {
+            Log.i(TAG, "startCoreLoop: skipped (setup dialog needed)");
+            return;
+        }
+        if (!connectionManager.isNetworkAvailable()) {
+            Log.i(TAG, "startCoreLoop: network unavailable, pausing");
+            pauseCoreLoopForNetwork();
+            return;
+        }
+        if (coreLoopStarted) {
+            Log.i(TAG, "startCoreLoop: already started");
+            return;
+        }
+
+        Log.i(TAG, "startCoreLoop: starting Immich slideshow / quiet hours / MQTT");
+        coreLoopStarted = true;
+        networkWaitNotified = false;
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "connected"));
+
+        handler.removeCallbacks(this::runOnTimer);
+        handler.post(this::runOnTimer);
+        setupQuietHours();
+        applyScheduledScreenState();
+        checkServerCompatibility();
+        connectMqttIfConfigured();
+    }
+
+    /**
+     * Stop the Immich timer while offline so we do not hammer the server before Wi‑Fi is ready.
+     */
+    private void pauseCoreLoopForNetwork() {
+        Log.i(TAG, "pauseCoreLoop: waiting for network (wasStarted=" + coreLoopStarted + ")");
+        coreLoopStarted = false;
+        handler.removeCallbacks(this::runOnTimer);
+        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "waiting for network"));
+        if (!networkWaitNotified) {
+            networkWaitNotified = true;
+            Toast.makeText(this, "Waiting for network…", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void connectMqttIfConfigured() {
+        if (this.mqttManager == null) {
+            return;
+        }
+        try {
+            String mqttUser = settingsManager.getConfiguration().mqttUser;
+            String mqttPassword = settingsManager.getConfiguration().mqttPassword;
+            if (mqttPassword == null) {
+                mqttPassword = "";
+            }
+            this.mqttManager.connect(mqttUser, mqttPassword);
+        } catch (Exception e) {
+            handleException(e);
+        }
     }
 
     private void checkServerCompatibility() {
@@ -361,12 +413,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     protected void onPause() {
         cancelVideoWatchdog();
+        coreLoopStarted = false;
+        networkWaitNotified = false;
         handler.removeCallbacks(this::runOnTimer);
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
         this.connectionManager.unregisterListener(this);
         try {
-            this.mqttManager.disconnect();
+            if (this.mqttManager != null) {
+                this.mqttManager.disconnect();
+            }
         }
         catch (Exception e) {
             handleException(e);
@@ -496,11 +552,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void settingsChanged() {
+        coreLoopStarted = false;
+        networkWaitNotified = false;
         handler.removeCallbacks(this::runOnTimer);
-        handler.post(this::runOnTimer);
-        setupQuietHours();
-        applyScheduledScreenState();
-        checkServerCompatibility();
+        startCoreLoopIfNetworkReady();
     }
 
     private void applyScheduledScreenState() {
@@ -508,10 +563,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
-        int start = settingsManager.getConfiguration().startQuietHour;
-        int end = settingsManager.getConfiguration().endQuietHour;
-        int now = Calendar.getInstance().get(Calendar.HOUR_OF_DAY);
-        boolean shouldBeOn = !QuietHours.isInQuietHours(start, end, now);
+        Configuration configuration = settingsManager.getConfiguration();
+        int start = configuration.startQuietHour;
+        int end = configuration.endQuietHour;
+        String tzId = configuration.selectedTimeZoneId;
+        Calendar localNow = QuietHours.calendarInTimeZone(tzId);
+        int now = localNow.get(Calendar.HOUR_OF_DAY);
+        boolean inQuietHours = QuietHours.isInQuietHours(start, end, now);
+        boolean shouldBeOn = !inQuietHours;
+
+        Log.i(TAG, "quietHours: tz=" + QuietHours.resolveTimeZone(tzId).getID()
+                + " localHour=" + now
+                + " window=" + start + "-" + end
+                + " inQuiet=" + inQuietHours
+                + " screenOn=" + shouldBeOn);
 
         if (brightnessManager.getShouldTheScreenBeOn() != shouldBeOn) {
             brightnessManager.setShouldTheScreenBeOn(shouldBeOn);
@@ -537,8 +602,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             handleException(e);
         }
 
-        final int startQuietHour = this.settingsManager.getConfiguration().startQuietHour;
-        final int endQuietHour = this.settingsManager.getConfiguration().endQuietHour;
+        final Configuration configuration = this.settingsManager.getConfiguration();
+        final int startQuietHour = configuration.startQuietHour;
+        final int endQuietHour = configuration.endQuietHour;
+        final String tzId = configuration.selectedTimeZoneId;
+        final TimeZone quietTimeZone = QuietHours.resolveTimeZone(tzId);
 
         if (!QuietHours.isConfigured(startQuietHour, endQuietHour) || startQuietHour == endQuietHour) {
             return;
@@ -546,10 +614,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         quietHoursTimer = new Timer(true);
 
-        final Calendar calendar = Calendar.getInstance();
+        final Calendar calendar = QuietHours.calendarInTimeZone(tzId);
         final Date time = calendar.getTime();
 
-        final Calendar startCalendar = Calendar.getInstance();
+        final Calendar startCalendar = QuietHours.calendarInTimeZone(tzId);
         startCalendar.set(Calendar.HOUR_OF_DAY, startQuietHour);
         startCalendar.set(Calendar.MINUTE, 0);
         startCalendar.set(Calendar.SECOND, 0);
@@ -558,7 +626,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             startCalendar.add(Calendar.DAY_OF_YEAR, 1);
         }
 
-        final Calendar endCalendar = Calendar.getInstance();
+        final Calendar endCalendar = QuietHours.calendarInTimeZone(tzId);
         endCalendar.set(Calendar.HOUR_OF_DAY, endQuietHour);
         endCalendar.set(Calendar.MINUTE, 0);
         endCalendar.set(Calendar.SECOND, 0);
@@ -569,6 +637,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         final long period = 24 * 60 * MILLIS;
         final DateFormat debugDateFormatter = new SimpleDateFormat("MMM d, yyyy HH:mm a", Locale.US);
+        debugDateFormatter.setTimeZone(quietTimeZone);
 
         final Date startTime = startCalendar.getTime();
         final Date endTime = endCalendar.getTime();
@@ -578,7 +647,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             public void run() {
                 try {
                     handler.post(MainActivity.this::applyScheduledScreenState);
-                    debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar)));
+                    debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar.getTime())));
                 }
                 catch (Exception e) {
                     handleException(e);
@@ -591,7 +660,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             public void run() {
                 try {
                     handler.post(MainActivity.this::applyScheduledScreenState);
-                    debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar)));
+                    debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar.getTime())));
                 }
                 catch (Exception e) {
                     handleException(e);
@@ -599,8 +668,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
         }, endTime, period);
 
-        debugInformationProvided(new DebugInformation("startCalendar", "Start of quiet hours scheduled for " + debugDateFormatter.format(startTime)));
-        debugInformationProvided(new DebugInformation("endCalendar", "End of quiet hours scheduled for " + debugDateFormatter.format(endTime)));
+        debugInformationProvided(new DebugInformation("startCalendar",
+                "Start of quiet hours scheduled for " + debugDateFormatter.format(startTime) + " (" + quietTimeZone.getID() + ")"));
+        debugInformationProvided(new DebugInformation("endCalendar",
+                "End of quiet hours scheduled for " + debugDateFormatter.format(endTime) + " (" + quietTimeZone.getID() + ")"));
     }
 
 
@@ -632,7 +703,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 Toast.makeText(MainActivity.this, "No Media found", Toast.LENGTH_LONG).show();
             }
         });
-        Log.e(e.getClass().toString(), e.getMessage() != null ? e.getMessage() : "");
+        Log.e(TAG, e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : ""), e);
 
         debugInformationProvided(new DebugInformation("Last Exception", e.toString()));
     }
@@ -672,17 +743,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 this.debugOverlay.setText(debugText.toString().trim());
             }
         });
-        Log.d(debugInformation.getKey(), debugInformation.getValue());
+        Log.i(TAG, debugInformation.getKey() + ": " + debugInformation.getValue());
     }
 
     @Override
     public void displayPicture(File file, String assetId) {
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
+            Log.i(TAG, "displayPicture: skip same asset " + assetId);
             return;
         }
 
         if (!this.brightnessManager.getShouldTheScreenBeOn()) {
+            Log.i(TAG, "displayPicture: skip (screen should be off) asset=" + assetId);
             return;
         }
 
@@ -932,10 +1005,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public void displayVideo(File file, String assetId) {
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
+            Log.i(TAG, "displayVideo: skip same asset " + assetId);
             return;
         }
 
         if (!this.brightnessManager.getShouldTheScreenBeOn()) {
+            Log.i(TAG, "displayVideo: skip (screen should be off) asset=" + assetId);
             return;
         }
 
@@ -1036,13 +1111,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void connected() {
+        Log.i(TAG, "ConnectionManager: connected");
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "connected"));
-        showNextImage();
+        startCoreLoopIfNetworkReady();
     }
 
     @Override
     public void disconnected() {
-        debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "disconnected"));
+        Log.i(TAG, "ConnectionManager: disconnected");
+        pauseCoreLoopForNetwork();
     }
 
     @Override
@@ -1051,17 +1128,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         long percent =  Math.round((100.0 * bytesRead) / contentLength);
 
         if (done) {
-            Log.i("download", "completed");
+            Log.i(TAG, "download: completed");
         } else if (percent == 0.0) {
             if (contentLength == -1) {
-                Log.i("download", "content-length: unknown");
+                Log.i(TAG, "download: content-length unknown");
             } else {
-                Log.i("download", "content-length: " + contentLength);
+                Log.i(TAG, "download: content-length " + contentLength);
             }
         }
 
         if (contentLength != -1 && !done) {
-            Log.d("download", String.format("%d%% downloaded...\n",percent));
+            Log.d(TAG, "download: " + percent + "%");
         }
 
         if (url != null && (url.toString().endsWith("video/playback") || url.toString().contains("/thumbnail"))) {
