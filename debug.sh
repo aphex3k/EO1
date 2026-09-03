@@ -4,6 +4,8 @@
 # an API 19 AVD named EO1 (EO1-like constraints), install the app, and stream
 # logcat until Ctrl+C.
 # On Apple Silicon, if API 19 cannot boot, fall back to EO1_API21 (API 21 arm64-v8a).
+# Physical-device adb shell/install calls use ADB_CMD_TIMEOUT_SEC / ADB_INSTALL_TIMEOUT_SEC
+# so a wedged EO1/EO2 fails fast instead of hanging forever.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -20,12 +22,15 @@ FALLBACK_AVD_NAME="EO1_API21"
 FALLBACK_SYSTEM_IMAGE="system-images;android-21;default;arm64-v8a"
 FALLBACK_API=21
 PREFERRED_PHYSICAL_SERIAL="${PREFERRED_PHYSICAL_SERIAL:-20061229}"
+ADB_CMD_TIMEOUT_SEC="${ADB_CMD_TIMEOUT_SEC:-15}"
+ADB_INSTALL_TIMEOUT_SEC="${ADB_INSTALL_TIMEOUT_SEC:-120}"
 
 EMU_PID=""
 SERIAL=""
 CLEANED_UP=0
 USING_EMULATOR=0
 SYSTEM_IMAGE=""
+TIMEOUT_BIN=""
 
 die() {
   echo "error: $*" >&2
@@ -34,6 +39,83 @@ die() {
 
 log() {
   echo "==> $*" >&2
+}
+
+# Populate TIMEOUT_BIN once (call after PATH is finalized). Empty string means use bash fallback.
+init_timeout_bin() {
+  if command -v timeout >/dev/null 2>&1; then
+    TIMEOUT_BIN="$(command -v timeout)"
+  elif command -v gtimeout >/dev/null 2>&1; then
+    TIMEOUT_BIN="$(command -v gtimeout)"
+  else
+    TIMEOUT_BIN=""
+    log "No timeout/gtimeout on PATH; using bash fallback for adb command limits"
+  fi
+}
+
+# Run a command with a wall-clock timeout (seconds). Exit 124 on timeout (GNU timeout convention).
+run_with_timeout() {
+  local secs="$1"
+  shift
+  if [[ -n "$TIMEOUT_BIN" ]]; then
+    # TERM at deadline, then KILL shortly after; exit status stays 124 on timeout.
+    "$TIMEOUT_BIN" -k 2 "$secs" "$@"
+    return $?
+  fi
+
+  "$@" &
+  local pid=$!
+  local i=0
+  while (( i < secs )); do
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid"
+      return $?
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  kill "$pid" 2>/dev/null || true
+  sleep 1
+  kill -KILL "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  return 124
+}
+
+adb_timed_out() {
+  # GNU timeout => 124; some builds with KILL-only => 128+9.
+  [[ "$1" -eq 124 || "$1" -eq 137 ]]
+}
+
+adb_cmd() {
+  local secs="$1"
+  shift
+  run_with_timeout "$secs" "${ADB}" -s "$SERIAL" "$@"
+}
+
+adb_unresponsive_hint() {
+  echo "Try: adb kill-server && adb start-server; unplug/replug USB; or power-cycle the EO1/EO2." >&2
+}
+
+# Fail fast when adb lists a device but shell never responds (common on wedged Geniatech boards).
+ensure_device_responsive() {
+  local out rc
+  log "Probing adb shell on ${SERIAL} (timeout ${ADB_CMD_TIMEOUT_SEC}s)..."
+  set +e
+  out="$(adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell echo ok 2>&1)"
+  rc=$?
+  set -e
+  out="$(printf '%s' "$out" | tr -d '\r' | tr -d '\n')"
+  if [[ $rc -eq 0 && "$out" == *ok* ]]; then
+    return 0
+  fi
+  if adb_timed_out "$rc"; then
+    echo "error: Device ${SERIAL} is listed by adb but shell is unresponsive (timed out after ${ADB_CMD_TIMEOUT_SEC}s)." >&2
+    adb_unresponsive_hint
+    exit 1
+  fi
+  echo "error: Device ${SERIAL} adb shell failed (rc=${rc}): ${out}" >&2
+  adb_unresponsive_hint
+  exit 1
 }
 
 host_arch() {
@@ -477,12 +559,12 @@ boot_failure_hint() {
 
 app_pid_on_device() {
   local pid
-  pid="$("${ADB}" -s "$SERIAL" shell pidof "${PACKAGE_ID}" 2>/dev/null | tr -d '\r' | awk '{print $1}')"
+  pid="$(adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell pidof "${PACKAGE_ID}" 2>/dev/null | tr -d '\r' | awk '{print $1}' || true)"
   if [[ -n "$pid" ]]; then
     echo "$pid"
     return
   fi
-  "${ADB}" -s "$SERIAL" shell ps 2>/dev/null | tr -d '\r' | awk -v p="$PACKAGE_ID" '$NF == p { print $2; exit }'
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell ps 2>/dev/null | tr -d '\r' | awk -v p="$PACKAGE_ID" '$NF == p { print $2; exit }' || true
 }
 
 follow_logcat() {
@@ -491,7 +573,7 @@ follow_logcat() {
   else
     log "Attaching to logcat for ${PACKAGE_ID} (Ctrl+C to stop)..."
   fi
-  "${ADB}" -s "$SERIAL" logcat -c >/dev/null 2>&1 || true
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" logcat -c >/dev/null 2>&1 || true
 
   local app_pid=""
   local i
@@ -503,10 +585,15 @@ follow_logcat() {
     sleep 1
   done
 
-    if [[ -n "$app_pid" ]] && "${ADB}" -s "$SERIAL" logcat -h 2>&1 | grep -q -- '--pid'; then
+  local logcat_grep="${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err|displayVideo|displayPictures|TextureVideo|MediaPlayer|Glide|OkHttp|Retrofit|download|ffmpeg| D video:"
+
+  # Host adb advertises --pid even when the API 19 device cannot filter by it.
+  # Use --pid only on the emulator; always grep on physical hardware.
+  if [[ "$USING_EMULATOR" -eq 1 && -n "$app_pid" ]] \
+    && adb_cmd "$ADB_CMD_TIMEOUT_SEC" logcat -h 2>&1 | grep -q -- '--pid'; then
     "${ADB}" -s "$SERIAL" logcat --pid="${app_pid}"
   else
-    "${ADB}" -s "$SERIAL" logcat | grep --line-buffered -E "${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err|displayVideo|displayPictures|TextureVideoView| D video:"
+    "${ADB}" -s "$SERIAL" logcat | grep --line-buffered -E "${logcat_grep}"
   fi
 }
 
@@ -522,34 +609,48 @@ push_configuration_if_present() {
 
   log "Copying ${local_cfg} to device at ${remote_cfg}"
   # adb root may work on emulators; needed so we can write into the app data dir before first launch.
-  "${ADB}" -s "$SERIAL" root >/dev/null 2>&1 || true
-  "${ADB}" -s "$SERIAL" wait-for-device >/dev/null 2>&1 || true
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" root >/dev/null 2>&1 || true
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" wait-for-device >/dev/null 2>&1 || true
 
-  "${ADB}" -s "$SERIAL" shell "mkdir -p '${remote_dir}'" \
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell "mkdir -p '${remote_dir}'" \
     || die "Failed to create ${remote_dir} on device"
 
-  "${ADB}" -s "$SERIAL" push "$local_cfg" "$remote_cfg" \
+  adb_cmd "$ADB_INSTALL_TIMEOUT_SEC" push "$local_cfg" "$remote_cfg" \
     || die "Failed to push ${local_cfg} to device"
 
   local uid=""
-  uid="$("${ADB}" -s "$SERIAL" shell "stat -c %u /data/data/${PACKAGE_ID}" 2>/dev/null | tr -d '\r' || true)"
+  uid="$(adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell "stat -c %u /data/data/${PACKAGE_ID}" 2>/dev/null | tr -d '\r' || true)"
   if [[ -z "$uid" || "$uid" == *"stat:"* ]]; then
-    uid="$("${ADB}" -s "$SERIAL" shell dumpsys package "${PACKAGE_ID}" 2>/dev/null \
+    uid="$(adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell dumpsys package "${PACKAGE_ID}" 2>/dev/null \
       | tr -d '\r' \
       | sed -n 's/.*userId=\([0-9][0-9]*\).*/\1/p' \
       | head -1 || true)"
   fi
   if [[ -n "$uid" && "$uid" =~ ^[0-9]+$ ]]; then
-    "${ADB}" -s "$SERIAL" shell "chown ${uid}:${uid} '${remote_dir}' '${remote_cfg}'" || true
-    "${ADB}" -s "$SERIAL" shell "chmod 771 '${remote_dir}'; chmod 660 '${remote_cfg}'" || true
+    adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell "chown ${uid}:${uid} '${remote_dir}' '${remote_cfg}'" || true
+    adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell "chmod 771 '${remote_dir}'; chmod 660 '${remote_cfg}'" || true
   else
     log "Could not determine app UID; config pushed but ownership may need a relaunch"
   fi
 }
 
 install_and_start() {
-  local device_abi
-  device_abi="$("${ADB}" -s "$SERIAL" shell getprop ro.product.cpu.abi 2>/dev/null | tr -d '\r')"
+  local device_abi rc
+
+  set +e
+  device_abi="$(adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell getprop ro.product.cpu.abi 2>/dev/null)"
+  rc=$?
+  set -e
+  device_abi="$(printf '%s' "$device_abi" | tr -d '\r' | tr -d '\n')"
+  if adb_timed_out "$rc"; then
+    echo "error: adb shell getprop timed out on ${SERIAL} after ${ADB_CMD_TIMEOUT_SEC}s." >&2
+    adb_unresponsive_hint
+    exit 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    die "adb shell getprop failed on ${SERIAL} (rc=${rc})"
+  fi
+
   case "$device_abi" in
     armeabi-v7a|armeabi) ;;
     arm64-v8a)
@@ -563,13 +664,38 @@ install_and_start() {
       ;;
   esac
 
-  log "Installing ${APK_PATH}"
-  "${ADB}" -s "$SERIAL" install -r "$APK_PATH"
+  log "Installing ${APK_PATH} (timeout ${ADB_INSTALL_TIMEOUT_SEC}s)"
+  set +e
+  adb_cmd "$ADB_INSTALL_TIMEOUT_SEC" install -r "$APK_PATH"
+  rc=$?
+  set -e
+  if adb_timed_out "$rc"; then
+    echo "error: adb install timed out on ${SERIAL} after ${ADB_INSTALL_TIMEOUT_SEC}s." >&2
+    adb_unresponsive_hint
+    exit 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    die "adb install failed on ${SERIAL} (rc=${rc})"
+  fi
 
   push_configuration_if_present
 
+  log "Force-stopping ${PACKAGE_ID} for cold start"
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell am force-stop "${PACKAGE_ID}" >/dev/null 2>&1 || true
+
   log "Starting ${ACTIVITY}"
-  "${ADB}" -s "$SERIAL" shell am start -n "$ACTIVITY"
+  set +e
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" shell am start -n "$ACTIVITY"
+  rc=$?
+  set -e
+  if adb_timed_out "$rc"; then
+    echo "error: adb shell am start timed out on ${SERIAL} after ${ADB_CMD_TIMEOUT_SEC}s." >&2
+    adb_unresponsive_hint
+    exit 1
+  fi
+  if [[ $rc -ne 0 ]]; then
+    die "adb shell am start failed on ${SERIAL} (rc=${rc})"
+  fi
 }
 
 ndk_version_major() {
@@ -924,6 +1050,8 @@ SDKMANAGER="$(find_sdk_bin sdkmanager)"
 
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:$(dirname "$ADB"):$(dirname "$EMULATOR"):$(dirname "$AVDMANAGER"):${PATH}"
 
+init_timeout_bin
+
 command -v java >/dev/null 2>&1 || die "java not found on PATH (need JDK 21 for this project)"
 
 if [[ -z "${JAVA_HOME:-}" ]]; then
@@ -953,6 +1081,7 @@ log "Building debug APK..."
 if selected="$(select_physical_serial)"; then
   SERIAL="$selected"
   log "Physical device ${SERIAL} detected; skipping emulator"
+  ensure_device_responsive
   install_and_start
   follow_logcat
   exit 0

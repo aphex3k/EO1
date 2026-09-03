@@ -13,18 +13,31 @@ import java.util.Set;
 import javax.annotation.Nullable;
 
 /**
- * This should rely be the connectivity manager...
+ * Polls ConnectivityManager and notifies listeners when the link goes up or down.
  */
 public class ConnectionManager {
 
+    static final long POLL_INTERVAL_MS = 2_000L;
+
     private final Set<WeakReference<ConnectionManagerListener>> listeners = new HashSet<>();
+    @Nullable
     private final ConnectivityManager connectivityManager;
-    private final Handler pollingHandler = new Handler();
+    @Nullable
+    private final Handler pollingHandler;
     @Nullable
     private Boolean lastConnectionStatus = null;
 
-    protected ConnectionManager (Activity activity) {
-        connectivityManager = (ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+    protected ConnectionManager(Activity activity) {
+        this((ConnectivityManager) activity.getSystemService(Context.CONNECTIVITY_SERVICE), new Handler());
+    }
+
+    /**
+     * Test / injectable constructor. Pass a null Handler to drive updates via {@link #evaluateConnectionStatus()}.
+     */
+    protected ConnectionManager(@Nullable ConnectivityManager connectivityManager,
+                                @Nullable Handler pollingHandler) {
+        this.connectivityManager = connectivityManager;
+        this.pollingHandler = pollingHandler;
     }
 
     /**
@@ -42,6 +55,10 @@ public class ConnectionManager {
         if (!existing) {
             this.listeners.add(new WeakReference<>(newListener));
         }
+
+        boolean available = isNetworkAvailable();
+        lastConnectionStatus = available;
+        notifyListener(newListener, available);
 
         checkPolling();
     }
@@ -83,6 +100,9 @@ public class ConnectionManager {
      * Start polling if not already polling.
      */
     private void startPolling() {
+        if (pollingHandler == null) {
+            return;
+        }
         pollingHandler.removeCallbacks(this::runOnTimer);
         pollingHandler.post(this::runOnTimer);
     }
@@ -91,6 +111,9 @@ public class ConnectionManager {
      * Stop polling.
      */
     private void stopPolling() {
+        if (pollingHandler == null) {
+            return;
+        }
         pollingHandler.removeCallbacks(this::runOnTimer);
     }
 
@@ -98,25 +121,40 @@ public class ConnectionManager {
      * If the connection status changed, let every listener know
      */
     private void runOnTimer() {
+        evaluateConnectionStatus();
+        if (pollingHandler != null) {
+            pollingHandler.postDelayed(this::runOnTimer, POLL_INTERVAL_MS);
+        }
+    }
+
+    /**
+     * Re-check connectivity and notify listeners on change. Package-visible for unit tests.
+     */
+    void evaluateConnectionStatus() {
         final boolean newStatus = isNetworkAvailable();
         if (lastConnectionStatus != null && lastConnectionStatus != newStatus) {
             for (WeakReference<ConnectionManagerListener> listenerReference: listeners) {
                 ConnectionManagerListener listener = listenerReference.get();
                 if (listener != null) {
-                    if (newStatus) {
-                        listener.connected();
-                    }
-                    else {
-                        listener.disconnected();
-                    }
+                    notifyListener(listener, newStatus);
                 }
             }
         }
         lastConnectionStatus = newStatus;
-        pollingHandler.postDelayed(this::runOnTimer, 10 * 1000);
+    }
+
+    private static void notifyListener(ConnectionManagerListener listener, boolean connected) {
+        if (connected) {
+            listener.connected();
+        } else {
+            listener.disconnected();
+        }
     }
 
     protected boolean isNetworkAvailable() {
+        if (connectivityManager == null) {
+            return false;
+        }
         NetworkInfo activeNetworkInfo = connectivityManager.getActiveNetworkInfo();
         return activeNetworkInfo != null && activeNetworkInfo.isConnected();
     }

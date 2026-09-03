@@ -1,6 +1,7 @@
 package com.aphex3k.eo1;
 
 import android.app.Activity;
+import android.util.Log;
 
 import androidx.annotation.NonNull;
 
@@ -37,6 +38,8 @@ import retrofit2.Call;
 import retrofit2.Response;
 
 public class MediaManager implements MediaManagerInterface {
+
+    private static final String TAG = "EO1";
 
     private static final String INCOMPATIBLE_TAG_NAME = "EO1_INCOMPATIBLE";
     private static final long MAX_ASSET_BYTES = 1073741824L;
@@ -93,6 +96,7 @@ public class MediaManager implements MediaManagerInterface {
         MediaManagerListener mediaManagerListener = this.listener.get();
 
         if (mediaManagerListener == null) {
+            Log.i(TAG, "showNextImage: no listener, abort");
             return;
         }
 
@@ -100,6 +104,8 @@ public class MediaManager implements MediaManagerInterface {
             ImmichApiService apiService = null;
             ImmichApiAssetResponse assetResponse;
             File tempFile = null;
+
+            Log.i(TAG, "showNextImage: start (cachedAssets=" + immichAssets.size() + ")");
 
             videoTranscodeManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
                     mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
@@ -110,11 +116,13 @@ public class MediaManager implements MediaManagerInterface {
 
                 SettingsManager settings = this.settingsManager.get();
                 Configuration configuration = settings.getConfiguration();
+                Log.i(TAG, "showNextImage: fetching albums from " + configuration.host);
 
                 try {
                     apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity, this.downloadProgressListener.get());
                 }
                 catch (Exception e) {
+                    Log.e(TAG, "showNextImage: createService failed", e);
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(new MediaDownloadFailedException(e)));
                     return;
                 }
@@ -142,11 +150,13 @@ public class MediaManager implements MediaManagerInterface {
                     }
 
                 } catch (Exception e) {
+                    Log.e(TAG, "showNextImage: login failed", e);
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                     return;
                 }
 
                 if (userId == null || userId.isEmpty()) {
+                    Log.e(TAG, "showNextImage: empty userId after login");
                     activity.runOnUiThread(() ->  mediaManagerListener.handleException(new InvalidCredentialsException()));
                     return;
                 }
@@ -172,15 +182,18 @@ public class MediaManager implements MediaManagerInterface {
                     // All timeline assets visible to this account
                     addAssetsFromSearch(apiService, new ImmichApiMetadataSearchBody(1, SEARCH_PAGE_SIZE));
                 } catch (Exception e) {
+                    Log.e(TAG, "showNextImage: album/timeline fetch failed", e);
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                     return;
                 }
 
                 if (immichAssets.isEmpty()) {
+                    Log.e(TAG, "showNextImage: no media found after fetch");
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(new NoMediaFoundException()));
                     return;
                 }
 
+                Log.i(TAG, "showNextImage: loaded " + immichAssets.size() + " assets");
                 Collections.shuffle(immichAssets);
             }
 
