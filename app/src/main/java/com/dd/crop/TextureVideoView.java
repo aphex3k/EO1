@@ -273,9 +273,9 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
             mMediaPlayer.setOnErrorListener(new MediaPlayer.OnErrorListener() {
                 @Override
-                public boolean onError(MediaPlayer mediaPlayer, int i, int i1) {
+                public boolean onError(MediaPlayer mediaPlayer, int what, int extra) {
                     if (mListener != null) {
-                        return mListener.onError();
+                        return mListener.onError(what, extra);
                     }
                     return false;
                 }
@@ -305,7 +305,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     private void notifyListenerError() {
         if (mListener != null) {
-            mListener.onError();
+            mListener.onError(MediaPlayer.MEDIA_ERROR_UNKNOWN, 0);
         }
     }
 
@@ -436,6 +436,16 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         return mMediaPlayer.getDuration();
     }
 
+    /**
+     * @see android.media.MediaPlayer#getCurrentPosition()
+     */
+    public int getCurrentPosition() {
+        if (mMediaPlayer == null) {
+            return 0;
+        }
+        return mMediaPlayer.getCurrentPosition();
+    }
+
     static void log(String message) {
         if (LOG_ON) {
             Log.d(TAG, message);
@@ -457,7 +467,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
         public void onVideoEnd();
 
-        public boolean onError();
+        public boolean onError(int what, int extra);
 
         public boolean onInfo(int what, int extra);
     }
