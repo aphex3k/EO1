@@ -585,7 +585,7 @@ follow_logcat() {
     sleep 1
   done
 
-  local logcat_grep="${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err|displayVideo|displayPictures|TextureVideo|MediaPlayer|Glide|OkHttp|Retrofit|download|ffmpeg| D video:"
+  local logcat_grep="${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err|displayVideo|displayPictures|TextureVideo|TsVideoView|TsPlayer|MediaPlayer|Glide|OkHttp|Retrofit|download|ffmpeg| D video:"
 
   # Host adb advertises --pid even when the API 19 device cannot filter by it.
   # Use --pid only on the emulator; always grep on physical hardware.

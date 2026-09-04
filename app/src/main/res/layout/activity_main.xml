@@ -7,6 +7,22 @@
     android:layout_height="match_parent"
     android:background="@color/black">
 
+    <com.aphex3k.eo1.TsVideoView
+        android:id="@+id/tsVideoView"
+        android:layout_width="fill_parent"
+        android:layout_height="fill_parent"
+        android:visibility="invisible"
+        tools:ignore="Deprecated" />
+
+    <com.dd.crop.TextureVideoView
+        android:id="@+id/videoView"
+        android:layout_width="fill_parent"
+        android:layout_height="fill_parent"
+        android:visibility="invisible"
+        tools:ignore="Deprecated" />
+
+    <!-- ImageView above video surfaces so wallpaper covers TsPlayer until prepared.
+         SurfaceView must be VISIBLE (under this) to create its surface. -->
     <ImageView
         android:id="@+id/imageView"
         android:layout_width="fill_parent"
@@ -15,13 +31,6 @@
         android:scaleType="centerCrop"
         android:visibility="visible"
         android:src="@mipmap/wallpaper"
-        tools:ignore="Deprecated" />
-
-    <com.dd.crop.TextureVideoView
-        android:id="@+id/videoView"
-        android:layout_width="fill_parent"
-        android:layout_height="fill_parent"
-        android:visibility="invisible"
         tools:ignore="Deprecated" />
 
     <EditText

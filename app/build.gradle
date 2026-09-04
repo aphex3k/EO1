@@ -21,6 +21,8 @@ android {
         }
         versionName "1.3.0"
         multiDexEnabled true
+        // Prefer Amlogic TsPlayer when libTsPlayer-jni loads; MediaPlayer remains fallback.
+        buildConfigField "boolean", "USE_TSPLAYER", "true"
     }
     buildTypes {
         release {

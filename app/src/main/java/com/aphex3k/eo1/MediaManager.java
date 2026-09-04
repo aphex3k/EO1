@@ -22,6 +22,8 @@ import com.aphex3k.immichApi.ImmichType;
 
 import org.jetbrains.annotations.NotNull;
 
+import com.example.tsplayer.TsPlayerNative;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -31,6 +33,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
 import okhttp3.ResponseBody;
@@ -45,6 +48,8 @@ public class MediaManager implements MediaManagerInterface {
     private static final long MAX_ASSET_BYTES = 1073741824L;
     private static final int SEARCH_PAGE_SIZE = 1000;
     private static final ReentrantLock downloadMutex = new ReentrantLock();
+    /** Prevents overlapping showNextImage worker threads (timer + retry + MQTT). */
+    private final AtomicBoolean showNextInFlight = new AtomicBoolean(false);
     private final WeakReference<SettingsManager> settingsManager;
     private final WeakReference<MediaManagerListener> listener;
     private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
@@ -100,7 +105,21 @@ public class MediaManager implements MediaManagerInterface {
             return;
         }
 
+        if (!showNextInFlight.compareAndSet(false, true)) {
+            Log.i(TAG, "showNextImage: already in flight, skip parallel start");
+            return;
+        }
+
         new Thread(() -> {
+            try {
+                showNextImageLocked(activity, mediaManagerListener);
+            } finally {
+                showNextInFlight.set(false);
+            }
+        }).start();
+    }
+
+    private void showNextImageLocked(Activity activity, MediaManagerListener mediaManagerListener) {
             ImmichApiService apiService = null;
             ImmichApiAssetResponse assetResponse;
             File tempFile = null;
@@ -230,6 +249,7 @@ public class MediaManager implements MediaManagerInterface {
                     // Keep original on disk for revolving reuse; only eviction frees space.
                     playbackFile = prepared;
                 } else {
+                    Log.i(TAG, "showNextImage: prepare failed, downloading Immich /video/playback fallback");
                     try {
                         Long expectedBytes = null;
                         if (finalAssetResponse.getExifInfo() != null) {
@@ -297,8 +317,6 @@ public class MediaManager implements MediaManagerInterface {
             else {
                 activity.runOnUiThread(() -> showNextImage(activity));
             }
-
-        }).start();
     }
 
     private void addAssetsFromSearch(@NonNull ImmichApiService apiService, @NonNull ImmichApiMetadataSearchBody firstPage)
@@ -480,8 +498,28 @@ public class MediaManager implements MediaManagerInterface {
 
     private File prepareVideoForPlayback(Activity activity,
                                          ImmichApiAssetResponse asset, File downloaded) {
+        if (shouldSkipClientVideoTranscode()) {
+            Log.i(TAG, "prepareVideo: skipped client FFmpeg (TsPlayer plays original)");
+            activity.runOnUiThread(() -> {
+                MediaManagerListener mediaManagerListener = this.listener.get();
+                if (mediaManagerListener != null) {
+                    mediaManagerListener.debugInformationProvided(new DebugInformation(
+                            "ffmpeg", "prepare: skipped (TsPlayer plays original)"));
+                }
+            });
+            return downloaded;
+        }
         return videoTranscodeManager.prepareForPlayback(
                 activity.getCacheDir(), asset.getId(), downloaded);
+    }
+
+    /**
+     * Client-side libx264 on EO hardware is ~1fps — unusable. When TsPlayer is active it can
+     * decode Amlogic-supported originals (including many HEVC paths). Skip all client video
+     * convert/remux; Immich {@code /video/playback} remains the last-resort download fallback.
+     */
+    private static boolean shouldSkipClientVideoTranscode() {
+        return BuildConfig.USE_TSPLAYER && TsPlayerNative.isAvailable();
     }
 
     private File prepareImageForDisplay(Activity activity,
@@ -491,6 +529,9 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     public boolean shouldAttemptReactiveTranscode(String assetId, File file) {
+        if (shouldSkipClientVideoTranscode()) {
+            return false;
+        }
         if (assetId == null || file == null || isTranscodedFile(file) || isImageConvertedFile(file)) {
             return false;
         }

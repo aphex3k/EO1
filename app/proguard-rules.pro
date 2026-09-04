@@ -25,3 +25,6 @@
 -keep class com.arthenica.smartexception.** { *; }
 -dontwarn com.arthenica.smartexception.**
 
+# Amlogic TsPlayer JNI (RegisterNatives looks up this exact class/methods)
+-keep class com.example.tsplayer.TsPlayerNative { *; }
+

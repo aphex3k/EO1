@@ -51,6 +51,7 @@ import com.bumptech.glide.load.resource.gif.GifDrawable;
 import com.bumptech.glide.request.RequestListener;
 import com.bumptech.glide.request.target.Target;
 import com.dd.crop.TextureVideoView;
+import com.example.tsplayer.TsPlayerNative;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.gson.stream.MalformedJsonException;
 import com.vdurmont.semver4j.Semver;
@@ -92,7 +93,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String lastVisibleAsset = "";
     private String activeVideoAssetId = "";
     private ImageView imageView;
-    private TextureVideoView videoView;
+    private TextureVideoView mediaPlayerVideoView;
+    private TsVideoView tsVideoView;
+    private VideoPlayerController videoPlayer;
+    private MediaPlayerController mediaPlayerController;
+    private TsPlayerController tsPlayerController;
+    private boolean preferTsPlayer;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
@@ -130,9 +136,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         setContentView(R.layout.activity_main);
 
         imageView = findViewById(R.id.imageView);
-        videoView = findViewById(R.id.videoView);
+        mediaPlayerVideoView = findViewById(R.id.videoView);
+        tsVideoView = findViewById(R.id.tsVideoView);
         debugOverlay = findViewById(R.id.debugOverlay);
         progressIndicator = findViewById(R.id.progressIndicator);
+
+        mediaPlayerController = new MediaPlayerController(mediaPlayerVideoView);
+        tsPlayerController = new TsPlayerController(tsVideoView);
+        preferTsPlayer = BuildConfig.USE_TSPLAYER && TsPlayerNative.isAvailable();
+        videoPlayer = preferTsPlayer ? tsPlayerController : mediaPlayerController;
+        Log.i(TAG, "video player: " + (preferTsPlayer ? "TsPlayer" : "MediaPlayer")
+                + " (USE_TSPLAYER=" + BuildConfig.USE_TSPLAYER
+                + " native=" + TsPlayerNative.isAvailable() + ")");
+
+        // Hide the inactive SurfaceView/TextureView so only one compositor path is live.
+        if (preferTsPlayer) {
+            mediaPlayerVideoView.setVisibility(View.GONE);
+        } else {
+            tsVideoView.setVisibility(View.GONE);
+        }
 
         progressIndicator.setVisibility(View.INVISIBLE);
         progressIndicator.setTrackColor(Color.argb(80,255,255,255));
@@ -328,7 +350,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
         if (coreLoopStarted) {
-            Log.i(TAG, "startCoreLoop: already started");
+            // Timer was cleared in onPause — re-arm without an immediate second fetch.
+            long delayMs = MILLIS * Math.max(1, settingsManager.getConfiguration().interval);
+            Log.i(TAG, "startCoreLoop: already started, re-arm timer in " + delayMs + "ms");
+            handler.removeCallbacks(this::runOnTimer);
+            handler.postDelayed(this::runOnTimer, delayMs);
             return;
         }
 
@@ -413,8 +439,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     protected void onPause() {
         cancelVideoWatchdog();
-        coreLoopStarted = false;
-        networkWaitNotified = false;
+        // Keep coreLoopStarted so onResume only re-arms the timer instead of
+        // kicking a second immediate showNextImage (cold-start pause/resume thrash).
         handler.removeCallbacks(this::runOnTimer);
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
@@ -482,7 +508,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             debugInformationProvided(new DebugInformation("screenOffWakeLock", "released"));
         }
 
-        videoView.setVisibility(View.INVISIBLE);
+        videoPlayer.setVisibility(View.INVISIBLE);
         imageView.setVisibility(View.INVISIBLE);
     }
 
@@ -767,8 +793,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
             try {
-                videoView.stop();
-                videoView.setVisibility(View.INVISIBLE);
+                videoPlayer.stop();
+                videoPlayer.setVisibility(View.INVISIBLE);
                 Glide.with(this).clear(imageView);
 
                 if (MediaTypeHelper.isGifFile(file)) {
@@ -833,8 +859,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private void restoreImageViewAfterVideoFailure() {
         cancelVideoWatchdog();
-        videoView.stop();
-        videoView.setVisibility(View.INVISIBLE);
+        videoPlayer.stop();
+        videoPlayer.setVisibility(View.INVISIBLE);
         imageView.setVisibility(View.VISIBLE);
         lastVisibleView = imageView;
     }
@@ -912,6 +938,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     private void startVideoWatchdog(String assetId, File file, WeakReference<MainActivity> activityReference) {
         cancelVideoWatchdog();
+        // TsPlayer getCurrentTime/duration are unreliable; position stalls false-trigger
+        // MediaPlayer fallback and break looping. TsVideoView owns health via status poll.
+        if (videoPlayer == tsPlayerController) {
+            debugInformationProvided(new DebugInformation("video", "watchdog skipped (TsPlayer)"));
+            return;
+        }
         videoWatchdogAssetId = assetId;
         videoWatchdogFile = file;
         videoWatchdogActivityReference = activityReference;
@@ -940,12 +972,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         if (!assetId.equals(activeVideoAssetId)
                 || !brightnessManager.getShouldTheScreenBeOn()
-                || videoView.getVisibility() != View.VISIBLE) {
+                || videoPlayer.getVisibility() != View.VISIBLE) {
             cancelVideoWatchdog();
             return;
         }
 
-        int position = videoView.getCurrentPosition();
+        int position = videoPlayer.getCurrentPosition();
         long now = System.currentTimeMillis();
 
         if (position != videoWatchdogLastPosition) {
@@ -963,7 +995,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         if (!videoWatchdogRecoverAttempted) {
             videoWatchdogRecoverAttempted = true;
-            int duration = videoView.getDuration();
+            int duration = videoPlayer.getDuration();
             int seekTarget = position;
             if (duration > 0 && position >= duration - 1000) {
                 seekTarget = 0;
@@ -971,8 +1003,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             debugInformationProvided(new DebugInformation("video",
                     "stall recover pos=" + position + " seek=" + seekTarget + " duration=" + duration));
             try {
-                videoView.seekTo(seekTarget);
-                videoView.play();
+                videoPlayer.seekTo(seekTarget);
+                videoPlayer.play();
             } catch (Exception e) {
                 handleException(e);
             }
@@ -982,8 +1014,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         debugInformationProvided(new DebugInformation("video",
-                "stall fallback pos=" + position + " duration=" + videoView.getDuration()));
+                "stall fallback pos=" + position + " duration=" + videoPlayer.getDuration()));
         cancelVideoWatchdog();
+        if (fallbackTsPlayerToMediaPlayer(assetId, file, activityReference)) {
+            return;
+        }
         restoreImageViewAfterVideoFailure();
         assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
     }
@@ -1022,84 +1057,162 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.runOnUiThread(() -> {
             try {
                 cancelVideoWatchdog();
-                videoView.stop();
-                videoView.setVisibility(View.INVISIBLE);
-                videoView.setListener(new TextureVideoView.MediaPlayerListener() {
-                    @Override
-                    public void onVideoPrepared() {
-                        if (!assetId.equals(activeVideoAssetId)) {
-                            return;
-                        }
-                        try {
-                            Glide.with(MainActivity.this).clear(imageView);
-                            imageView.setVisibility(View.INVISIBLE);
-                            videoView.setVisibility(View.VISIBLE);
-                            lastVisibleView = videoView;
-                            lastVisibleAsset = file.getAbsolutePath();
-                            videoView.setLooping(true);
-                            videoView.setFocusable(false);
-                            videoView.setVolume(0, 0);
-                            videoView.play();
-                            debugInformationProvided(new DebugInformation("video",
-                                    "prepared duration=" + videoView.getDuration()));
-                            startVideoWatchdog(assetId, file, activityReference);
-                        } catch (Exception e) {
-                            restoreImageViewAfterVideoFailure();
-                            assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
-                            handleException(e);
-                        }
-                    }
-
-                    @Override
-                    public void onVideoEnd() {
-                        if (!assetId.equals(activeVideoAssetId)) {
-                            return;
-                        }
-                        int position = videoView.getCurrentPosition();
-                        int duration = videoView.getDuration();
-                        debugInformationProvided(new DebugInformation("video",
-                                "end pos=" + position + " duration=" + duration));
-                        if (brightnessManager.getShouldTheScreenBeOn()) {
-                            debugInformationProvided(new DebugInformation("video", "restart after end"));
-                            videoView.play();
-                            videoWatchdogLastPosition = -1;
-                            videoWatchdogLastProgressMs = System.currentTimeMillis();
-                            videoWatchdogRecoverAttempted = false;
-                        }
-                    }
-
-                    public boolean onError(int what, int extra) {
-                        if (!assetId.equals(activeVideoAssetId)) {
-                            return false;
-                        }
-                        cancelVideoWatchdog();
-                        debugInformationProvided(new DebugInformation("video",
-                                "error what=" + what + " extra=" + extra));
-                        restoreImageViewAfterVideoFailure();
-                        assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
-                        return false;
-                    }
-
-                    public boolean onInfo(int what, int extra) {
-                        if (!assetId.equals(activeVideoAssetId)) {
-                            return false;
-                        }
-                        if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START
-                                || what == MediaPlayer.MEDIA_INFO_BUFFERING_END
-                                || what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
-                            debugInformationProvided(new DebugInformation("video", describeMediaInfo(what, extra)));
-                        }
-                        return false;
-                    }
-                });
-                videoView.setDataSource(file.getPath());
-                videoView.setLooping(true);
+                selectVideoPlayer(true);
+                startVideoOnController(videoPlayer, file, assetId, activityReference, true);
             } catch (Exception e) {
                 restoreImageViewAfterVideoFailure();
                 assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
                 handleException(e);
             }
         });
+    }
+
+    /**
+     * Prefer TsPlayer when enabled and the native library loaded; otherwise MediaPlayer.
+     *
+     * @param allowTsPlayer false forces MediaPlayer (used after TsPlayer failure for the same file)
+     */
+    private void selectVideoPlayer(boolean allowTsPlayer) {
+        boolean useTs = allowTsPlayer && preferTsPlayer;
+        VideoPlayerController next = useTs ? tsPlayerController : mediaPlayerController;
+        if (videoPlayer != null && videoPlayer != next) {
+            videoPlayer.stop();
+            videoPlayer.setVisibility(View.GONE);
+        }
+        videoPlayer = next;
+        if (useTs) {
+            mediaPlayerVideoView.setVisibility(View.GONE);
+            // VISIBLE required for SurfaceView to create its surface (under ImageView).
+            tsVideoView.setVisibility(View.VISIBLE);
+        } else {
+            tsVideoView.setVisibility(View.GONE);
+            mediaPlayerVideoView.setVisibility(View.INVISIBLE);
+        }
+        debugInformationProvided(new DebugInformation("videoPlayer",
+                useTs ? "TsPlayer" : "MediaPlayer"));
+    }
+
+    /**
+     * After TsPlayer stalls or errors, hand the same file to MediaPlayer once.
+     *
+     * @return true if MediaPlayer playback was started
+     */
+    private boolean fallbackTsPlayerToMediaPlayer(String assetId, File file,
+                                                  WeakReference<MainActivity> activityReference) {
+        if (!preferTsPlayer || videoPlayer != tsPlayerController) {
+            return false;
+        }
+        if (!assetId.equals(activeVideoAssetId)) {
+            return false;
+        }
+        debugInformationProvided(new DebugInformation("video", "TsPlayer → MediaPlayer fallback"));
+        try {
+            selectVideoPlayer(false);
+            startVideoOnController(videoPlayer, file, assetId, activityReference, false);
+            return true;
+        } catch (Exception e) {
+            handleException(e);
+            return false;
+        }
+    }
+
+    private void startVideoOnController(VideoPlayerController controller, File file, String assetId,
+                                        WeakReference<MainActivity> activityReference,
+                                        boolean allowTsFallback) {
+        controller.stop();
+        // TsPlayer SurfaceView must be VISIBLE to get a surface; MediaPlayer TextureView can stay
+        // invisible until prepared (ImageView covers both until then).
+        if (controller == tsPlayerController) {
+            controller.setVisibility(View.VISIBLE);
+        } else {
+            controller.setVisibility(View.INVISIBLE);
+        }
+        controller.setListener(new VideoPlayerListener() {
+            @Override
+            public void onVideoPrepared() {
+                if (!assetId.equals(activeVideoAssetId)) {
+                    return;
+                }
+                try {
+                    Glide.with(MainActivity.this).clear(imageView);
+                    imageView.setVisibility(View.INVISIBLE);
+                    controller.setVisibility(View.VISIBLE);
+                    lastVisibleView = controller.getView();
+                    lastVisibleAsset = file.getAbsolutePath();
+                    controller.setLooping(true);
+                    controller.setFocusable(false);
+                    controller.setVolume(0, 0);
+                    controller.play();
+                    debugInformationProvided(new DebugInformation("video",
+                            "prepared duration=" + controller.getDuration()
+                                    + " player=" + (controller == tsPlayerController
+                                    ? "TsPlayer" : "MediaPlayer")));
+                    startVideoWatchdog(assetId, file, activityReference);
+                } catch (Exception e) {
+                    if (allowTsFallback && fallbackTsPlayerToMediaPlayer(assetId, file, activityReference)) {
+                        return;
+                    }
+                    restoreImageViewAfterVideoFailure();
+                    assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
+                    handleException(e);
+                }
+            }
+
+            @Override
+            public void onVideoEnd() {
+                if (!assetId.equals(activeVideoAssetId)) {
+                    return;
+                }
+                int position = controller.getCurrentPosition();
+                int duration = controller.getDuration();
+                debugInformationProvided(new DebugInformation("video",
+                        "end pos=" + position + " duration=" + duration));
+                if (!brightnessManager.getShouldTheScreenBeOn()) {
+                    return;
+                }
+                // TsVideoView recreates itself for looping; calling play() here double-tears-down.
+                if (controller == tsPlayerController && tsVideoView.isRecreatingForLoop()) {
+                    debugInformationProvided(new DebugInformation("video", "loop recreate in progress"));
+                    return;
+                }
+                debugInformationProvided(new DebugInformation("video", "restart after end"));
+                controller.play();
+                videoWatchdogLastPosition = -1;
+                videoWatchdogLastProgressMs = System.currentTimeMillis();
+                videoWatchdogRecoverAttempted = false;
+            }
+
+            @Override
+            public boolean onError(int what, int extra) {
+                if (!assetId.equals(activeVideoAssetId)) {
+                    return false;
+                }
+                cancelVideoWatchdog();
+                debugInformationProvided(new DebugInformation("video",
+                        "error what=" + what + " extra=" + extra));
+                if (allowTsFallback && fallbackTsPlayerToMediaPlayer(assetId, file, activityReference)) {
+                    return true;
+                }
+                restoreImageViewAfterVideoFailure();
+                assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
+                return false;
+            }
+
+            @Override
+            public boolean onInfo(int what, int extra) {
+                if (!assetId.equals(activeVideoAssetId)) {
+                    return false;
+                }
+                if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START
+                        || what == MediaPlayer.MEDIA_INFO_BUFFERING_END
+                        || what == MediaPlayer.MEDIA_INFO_VIDEO_RENDERING_START) {
+                    debugInformationProvided(new DebugInformation("video", describeMediaInfo(what, extra)));
+                }
+                return false;
+            }
+        });
+        controller.setDataSource(file.getPath());
+        controller.setLooping(true);
     }
 
     @Override

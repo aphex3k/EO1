@@ -1,6 +1,6 @@
 # FFmpeg integration — EO1 / EO2
 
-Agent-oriented reference for client-side **video transcoding** and **image conversion/resampling**. FFmpeg is used **only to convert** incompatible media before display/playback. Playback stays on platform `MediaPlayer` via `TextureVideoView`; stills stay on Glide.
+Agent-oriented reference for client-side **video transcoding** and **image conversion/resampling**. FFmpeg is used **only to convert** incompatible media before display/playback. Playback prefers Amlogic **TsPlayer** on EO hardware (see [TSPLAYER.md](TSPLAYER.md)), with platform `MediaPlayer` via `TextureVideoView` as fallback; stills stay on Glide.
 
 ## Goal and scope
 
@@ -31,7 +31,7 @@ Agent-oriented reference for client-side **video transcoding** and **image conve
 | `minSdk` / `targetSdk` / `maxSdk` = **19** | EO1/EO2 ship KitKat 4.4.2 |
 | ABI **armeabi-v7a** only | Geniatech EO1/EO2 hardware |
 | **Software** decode/encode only | No `-hwaccel`, no FFmpeg MediaCodec — avoids Geniatech GPU lockups (see [`EO1-specs.md`](../EO1-specs.md)) |
-| Convert only; `MediaPlayer` / Glide for display | ExoPlayer/Media3 hang the device on API 19 Geniatech boards |
+| Convert only when TsPlayer unavailable; TsPlayer / `MediaPlayer` / Glide for display | Client libx264 on EO is ~1 fps; ExoPlayer/Media3 hang Geniatech boards |
 | GPL **x264** encoder + **libheif**/**libde265** | H.264 video + HEIC stills; ship GPL notices |
 
 ## Video pipeline
@@ -40,9 +40,10 @@ Agent-oriented reference for client-side **video transcoding** and **image conve
 Immich download (original)
   → VideoProbe (FFprobe)
   → if incompatible codec (HEVC/VP9/AV1), longest axis > 1920, or audio present: VideoTranscoder → {uuid}_eo1.mp4
-  → displayVideo → MediaPlayer
-  → on error: reactive transcode (if not already transcoded)
-  → on failure: Immich /video/playback + EO1_INCOMPATIBLE tag
+  → displayVideo → TsPlayer (preferred; original file, no client re-encode)
+  → on TsPlayer error: MediaPlayer fallback (same original)
+  → on MediaPlayer failure: Immich /video/playback + EO1_INCOMPATIBLE tag
+  → (client reactive transcode only if TsPlayer unavailable)
 ```
 
 ## Image pipeline
