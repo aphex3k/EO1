@@ -14,6 +14,8 @@ import android.view.TextureView;
 
 import androidx.annotation.NonNull;
 
+import com.aphex3k.eo1.BuildConfig;
+
 import java.io.IOException;
 
 /*
@@ -49,6 +51,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     private static final String TAG = TextureVideoView.class.getName();
 
     private MediaPlayer mMediaPlayer;
+    private Surface mVideoSurface;
 
     private float mVideoHeight;
     private float mVideoWidth;
@@ -100,6 +103,17 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         transformMatrix.setScale(scale, scale, pivotX, pivotY);
         transformMatrix.postRotate(mVideoRotation, pivotX, pivotY);
         setTransform(transformMatrix);
+
+        if (BuildConfig.DEBUG) {
+            log(String.format(
+                    "view=%dx%d video=%dx%d rotation=%d scale=%.3f",
+                    getWidth(),
+                    getHeight(),
+                    (int) mVideoWidth,
+                    (int) mVideoHeight,
+                    mVideoRotation,
+                    scale));
+        }
     }
 
     /**
@@ -164,6 +178,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         mIsVideoPrepared = false;
         mIsPlayCalled = false;
         mVideoRotation = 0;
+        mVideoWidth = 0;
+        mVideoHeight = 0;
         mState = State.UNINITIALIZED;
     }
 
@@ -237,10 +253,11 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                         public void onVideoSizeChanged(MediaPlayer mp, int width, int height) {
                             mVideoWidth = width;
                             mVideoHeight = height;
+                            if (mIsViewAvailable) {
+                                bindVideoSurface(getSurfaceTexture());
+                            }
                             updateTextureViewSize();
                         }
-
-
                     }
             );
             mMediaPlayer.setOnCompletionListener(new MediaPlayer.OnCompletionListener() {
@@ -290,7 +307,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
                 }
             });
 
-            bindSurfaceIfAvailable();
+            bindVideoSurface(getSurfaceTexture());
 
             // don't forget to call MediaPlayer.prepareAsync() method when you use constructor for
             // creating MediaPlayer
@@ -309,15 +326,27 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         }
     }
 
-    private void bindSurfaceIfAvailable() {
-        if (!mIsViewAvailable || mMediaPlayer == null) {
+    /**
+     * Bind MediaPlayer to the TextureView surface. When video size is known, size the
+     * SurfaceTexture buffer to native video pixels so absolute center-crop scale is correct.
+     */
+    private void bindVideoSurface(SurfaceTexture surfaceTexture) {
+        if (!mIsViewAvailable || mMediaPlayer == null || surfaceTexture == null) {
             return;
         }
-        SurfaceTexture texture = getSurfaceTexture();
-        if (texture == null) {
-            return;
+
+        if (mVideoWidth > 0 && mVideoHeight > 0) {
+            surfaceTexture.setDefaultBufferSize((int) mVideoWidth, (int) mVideoHeight);
         }
-        mMediaPlayer.setSurface(new Surface(texture));
+
+        if (mVideoSurface != null) {
+            mMediaPlayer.setSurface(null);
+            mVideoSurface.release();
+            mVideoSurface = null;
+        }
+
+        mVideoSurface = new Surface(surfaceTexture);
+        mMediaPlayer.setSurface(mVideoSurface);
     }
 
     /**
@@ -475,7 +504,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     @Override
     public void onSurfaceTextureAvailable(@NonNull SurfaceTexture surfaceTexture, int width, int height) {
         mIsViewAvailable = true;
-        bindSurfaceIfAvailable();
+        bindVideoSurface(surfaceTexture);
+        updateTextureViewSize();
         if (mIsDataSourceSet && mIsPlayCalled && mIsVideoPrepared) {
             log("View is available and play() was called.");
             play();
@@ -489,6 +519,14 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     @Override
     public boolean onSurfaceTextureDestroyed(@NonNull SurfaceTexture surface) {
+        if (mMediaPlayer != null) {
+            mMediaPlayer.setSurface(null);
+        }
+        if (mVideoSurface != null) {
+            mVideoSurface.release();
+            mVideoSurface = null;
+        }
+        mIsViewAvailable = false;
         return false;
     }
 

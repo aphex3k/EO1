@@ -34,8 +34,9 @@ Runtime still requires `TsPlayerNative.isAvailable()` (`System.loadLibrary("TsPl
 ```
 download Immich original
   → prepareVideo skipped when TsPlayer available (no client libx264)
-  → displayVideo → TsVideoView
-  → loop: MediaMetadataRetriever duration timer → recreate player
+  → displayVideo → TsVideoView (createPlayer once per asset)
+  → same-file loop: still-frame ImageView cover + start-only / create(no-delete)
+                   (deletePlayer only on next asset; stop blanks Amlogic plane)
   → on Ts error/surface-timeout: same original → MediaPlayer
   → on MediaPlayer failure: Immich /video/playback or thumbnail (not client re-encode)
 ```
@@ -44,15 +45,106 @@ Note: on-device `getStatus()` often stays `IDLE (0)` while frames play (OEM only
 
 `SurfaceView` does **not** create a surface while `INVISIBLE`/`GONE`. The layout keeps `ImageView` above `TsVideoView` so the wallpaper covers video until `onVideoPrepared` hides the image.
 
+## Looping policy
+
+**`deletePlayer` only at asset handoff** (new `setDataSource` / `stop` / surface destroy). Mid-loop `deletePlayer` clears the Amlogic video plane → black frame between generations (observed, unacceptable).
+
+Same-file loop order in `TsVideoView`:
+
+1. Show still cover on sibling `ImageView` (late frame from `MediaMetadataRetriever`) — Amlogic `stop`/EOS clears the video plane to black otherwise
+2. Prefer `start()` without `stop`
+3. Else `createPlayer` **without** `deletePlayer`, then `setSurface` + `start`
+4. Else `stop`/`start` (cover already visible)
+5. Hide cover shortly after restart
+6. On failure: error → MediaPlayer fallback (still no mid-loop delete / no surface pulse)
+
+`deletePlayer` remains only for asset handoff / `stop` / surface destroy.
+
+## Looping: rejected approaches (do not revive)
+
+### Mid-loop `deletePlayer` + `createPlayer`
+
+**Rejected for looping.** Clears the video plane → black frame between loops. Use only when leaving the asset for the next one.
+
+### Surface GONE→VISIBLE / setFormat “hard recreate”
+
+**Rejected.** Destroying `SurfaceHolder` between generations blanks the video plane (black flicker). Agents must **not** suggest or reintroduce periodic/fallback surface visibility pulses or `setFormat` cycles to unstick the decoder for looping.
+
+`GONE`/`VISIBLE` is only valid for normal show/hide of the video view (asset handoff, stop), never as a loop strategy.
+
+### Rolling createPlayer window (A→B→delete A→C→delete B…)
+
+**Not viable with this JNI.** `TsPlayerNative` exposes process-global statics only:
+
+- `boolean createPlayer(String path)` — no instance handle returned
+- `void deletePlayer()` — no argument; deletes the one global player
+- `void setSurface(Surface)` — binds that single player
+
+Native strings also imply exclusive Amlogic resources (`/dev/amstream_*`, “codec is busy”, “Existing an audio dec instance!”). A second live player cannot be held and cross-faded.
+
+### Repeated `createPlayer` without `deletePlayer` (many generations)
+
+**May wedge** after ~12 gens (JNI success, frozen last frame). Prefer `stop`/`start` for loops; if create-without-delete is used and wedges, fall back to MediaPlayer — do **not** “fix” with mid-loop delete.
+
+## Forensic findings (original EO APK)
+
+Source: `EoVideoView` / `TsPlayerNative` in `.electric-objects/apk/_forensic_extract/classes.dexdump.txt` and `libTsPlayer-jni.strings.txt`.
+
+### API shape
+
+Same static natives we wrap today. `getCurrentTime` and `resume` exist on the JNI class but **are never invoked** anywhere in the EO dex — only `getStatus`, `pause`, `stop`, `deletePlayer`, `createPlayer`, `setSurface`, `start`.
+
+### OEM does not loop inside the view
+
+`EoVideoView` has **no** duration timer and **no** end-of-stream poll. The only recreate path is `restartPlayer(artwork)`, called from:
+
+- `setVideoArtwork(...)` (new/changed artwork)
+- `setupView` if `mArtwork` already set
+
+So continuous same-file looping is **our** requirement; the stock app mostly tore the player down when the cloud/UI swapped artworks, not every ~10s of one clip.
+
+### OEM same-surface restart sequence (artwork change — not tight loop)
+
+`restartPlayer` posts to the main looper a runnable that logs *“Stopping player and invalidating surface…”* but **does not** destroy `SurfaceHolder`. Actual order:
+
+1. `isPlaying` CAS true→false (bail if already stopped)
+2. `pause()`
+3. `stop()` then `stop()` again (logged twice)
+4. `deletePlayer()`
+5. `createPlayer(path)`
+6. `setSurface(getHolder().getSurface())` — **same** surface
+7. `start()`
+8. `isPlaying = true`
+
+That full delete path is appropriate for **asset change**. Using it every loop is what introduced black frames on EO1/EO2.
+
+`surfaceCreated` only logs. `surfaceChanged` starts the player only if `isPlaying` CAS false→true. `surfaceDestroyed` does `stop` + `deletePlayer` if it was playing.
+
+### Implications for EO1
+
+| Idea | Verdict |
+|------|---------|
+| Rolling A/B players | Impossible — no instance handles; exclusive amstream |
+| Surface GONE→VISIBLE between loops | Rejected — black flicker |
+| Mid-loop delete + create | Rejected — black frame |
+| stop/start for same-file loop; delete only on next asset | Current policy |
+| Rely on `getStatus` / `getCurrentTime` for EOS | Unreliable / unused by OEM |
+
+## Open problem
+
+`stop`/`start` looping without mid-loop delete is the product-correct approach; validate on device for smoothness and for wedge if create-without-delete fallback is hit often. If wedging returns, prefer MediaPlayer for that asset or rotate to the next asset — **not** mid-loop `deletePlayer` or surface destroy.
+
 ## Hard constraints (video convert)
 
-Client-side FFmpeg **re-encode is not used when TsPlayer is available**. EO CPU manages ~1 fps libx264 — minutes per second of source. TsPlayer plays Immich originals directly; Immich `/video/playback` remains the download fallback if playback fails.## On-device validation checklist
+Client-side FFmpeg **re-encode is not used when TsPlayer is available**. EO CPU manages ~1 fps libx264 — minutes per second of source. TsPlayer plays Immich originals directly; Immich `/video/playback` remains the download fallback if playback fails.
+
+## On-device validation checklist
 
 On a physical EO1/EO2:
 
 1. Logcat `EO1: video player: TsPlayer (USE_TSPLAYER=true native=true)`
 2. Play a known-good local H.264 from Immich cache full-screen
-3. Loop ≥2 minutes without surface loss
+3. Loop ≥2 minutes without surface loss **and without black flicker between generations**
 4. Image ↔ video handoff and screen off/on
 5. HEVC (or other incompatible) still converts via FFmpeg then plays
 6. Force Ts failure (corrupt file) → log `TsPlayer → MediaPlayer fallback` then thumbnail/next asset path

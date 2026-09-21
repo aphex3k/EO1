@@ -16,6 +16,8 @@ import android.graphics.drawable.Drawable;
 import android.hardware.SensorManager;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -53,6 +55,7 @@ import com.bumptech.glide.request.target.Target;
 import com.dd.crop.TextureVideoView;
 import com.example.tsplayer.TsPlayerNative;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
+import com.google.gson.JsonObject;
 import com.google.gson.stream.MalformedJsonException;
 import com.vdurmont.semver4j.Semver;
 
@@ -74,7 +77,7 @@ import java.util.TimeZone;
 import okhttp3.HttpUrl;
 import retrofit2.Response;
 
-public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener, ApiServiceGenerator.ProgressListener {
+public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener, ApiServiceGenerator.ProgressListener, WebController {
 
     /**
     Amount of milliseconds in a minute
@@ -113,6 +116,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private Timer quietHoursTimer = new Timer(true);
     private float lastScreenBrightness = 0.3f;
     private ConnectionManager connectionManager;
+    private AppLogger appLogger;
+    private WebServer webServer;
     private PowerManager.WakeLock screenOffWakeLock;
     private Handler bannerHandler = new Handler(Looper.getMainLooper());
     private Runnable bannerFadeRunnable;
@@ -143,6 +148,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         mediaPlayerController = new MediaPlayerController(mediaPlayerVideoView);
         tsPlayerController = new TsPlayerController(tsVideoView);
+        tsVideoView.setLoopCoverView(imageView);
         preferTsPlayer = BuildConfig.USE_TSPLAYER && TsPlayerNative.isAvailable();
         videoPlayer = preferTsPlayer ? tsPlayerController : mediaPlayerController;
         Log.i(TAG, "video player: " + (preferTsPlayer ? "TsPlayer" : "MediaPlayer")
@@ -173,6 +179,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.settingsManager = new SettingsManager(this);
         this.mediaManager = new MediaManager(this, this.settingsManager, this);
         this.connectionManager = new ConnectionManager(this);
+
+        // Always-on LAN web server (debug / control / media upload).
+        this.appLogger = new AppLogger(this);
+        // Remove stale upload temp dirs from a previously crashed process. Must run before the
+        // accept loop starts so it can never delete an in-flight upload.
+        UploadedMedia.cleanStaleIncomingDirs(UploadedMedia.dirFor(this));
+        this.webServer = new WebServer(this);
+        this.webServer.start();
 
         Thread.setDefaultUncaughtExceptionHandler(this);
 
@@ -457,6 +471,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
+    protected void onDestroy() {
+        if (this.webServer != null) {
+            this.webServer.shutdown();
+        }
+        super.onDestroy();
+    }
+
+    @Override
     public void brightnessChanged(float targetScreenBrightness) {
 
         WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
@@ -731,6 +753,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         });
         Log.e(TAG, e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : ""), e);
 
+        if (this.appLogger != null) {
+            this.appLogger.error(TAG, e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : e.toString()));
+        }
         debugInformationProvided(new DebugInformation("Last Exception", e.toString()));
     }
 
@@ -738,38 +763,43 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             if (BuildConfig.DEBUG) {
-                this.debugInformation.put(debugInformation.getKey(), debugInformation.getValue());
+                synchronized (this.debugInformation) {
+                    this.debugInformation.put(debugInformation.getKey(), debugInformation.getValue());
 
-                Set<Map.Entry<String, String>> set = this.debugInformation.entrySet();
+                    Set<Map.Entry<String, String>> set = this.debugInformation.entrySet();
 
-                ArrayList<String> debugList = new ArrayList<>();
+                    ArrayList<String> debugList = new ArrayList<>();
 
-                for (Map.Entry<String, String> info : set) {
-                    StringBuilder text = new StringBuilder();
+                    for (Map.Entry<String, String> info : set) {
+                        StringBuilder text = new StringBuilder();
 
-                    text = text.append(info.getKey().trim()).append(": ").append(info.getValue().trim()).append("\n");
+                        text = text.append(info.getKey().trim()).append(": ").append(info.getValue().trim()).append("\n");
 
-                    int index = debugList.size();
+                        int index = debugList.size();
 
-                    for (String s : debugList) {
-                        if (s.length() > text.length()) {
-                            index = debugList.indexOf(s);
-                            break;
+                        for (String s : debugList) {
+                            if (s.length() > text.length()) {
+                                index = debugList.indexOf(s);
+                                break;
+                            }
                         }
+                        debugList.add(index, text.toString());
                     }
-                    debugList.add(index, text.toString());
+
+                    StringBuilder debugText = new StringBuilder();
+
+                    for (String text : debugList) {
+                        debugText.append(text);
+                    }
+
+                    this.debugOverlay.setText(debugText.toString().trim());
                 }
-
-                StringBuilder debugText = new StringBuilder();
-
-                for (String text : debugList) {
-                    debugText.append(text);
-                }
-
-                this.debugOverlay.setText(debugText.toString().trim());
             }
         });
         Log.i(TAG, debugInformation.getKey() + ": " + debugInformation.getValue());
+        if (this.appLogger != null) {
+            this.appLogger.info(TAG, debugInformation.getKey() + ": " + debugInformation.getValue());
+        }
     }
 
     @Override
@@ -912,11 +942,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             restoreImageViewAfterVideoFailure();
         }
         if (assetId != null) {
-            MainActivity activity = activityReference.get();
-            if (activity != null) {
-                mediaManager.displayThumbnailAsset(activity, assetId, type, isVideo);
+            if (mediaManager.isLocalAssetId(assetId)) {
+                // Local upload: no Immich asset to fetch a thumbnail for or tag as incompatible.
+            } else {
+                MainActivity activity = activityReference.get();
+                if (activity != null) {
+                    mediaManager.displayThumbnailAsset(activity, assetId, type, isVideo);
+                }
+                mediaManager.tagAssetAsIncompatible(assetId);
             }
-            mediaManager.tagAssetAsIncompatible(assetId);
         } else {
             showNextImage();
         }
@@ -1217,6 +1251,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void uncaughtException(@NonNull Thread thread, @NonNull Throwable throwable) {
+        if (this.appLogger != null) {
+            this.appLogger.error(TAG, "FATAL uncaught on " + thread.getName() + ": " + throwable);
+        }
         AlarmManager mgr = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
         mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 120000, pendingIntent);
         System.exit(2);
@@ -1269,6 +1306,152 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 }
             });
         }
+    }
+
+    // ------------------------------------------------------------------
+    // WebController — always-on LAN web server (/state, /logs, /files, /control).
+    // All of these are called from the web server's worker threads.
+    // ------------------------------------------------------------------
+
+    @Override
+    public String localIp() {
+        try {
+            WifiManager wifiManager = (WifiManager) getSystemService(WIFI_SERVICE);
+            if (wifiManager != null) {
+                WifiInfo info = wifiManager.getConnectionInfo();
+                if (info != null) {
+                    int ip = info.getIpAddress();
+                    if (ip != 0) {
+                        return DeviceTelemetry.ipToString(ip);
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "localIp: " + e);
+        }
+        return "unknown";
+    }
+
+    @Override
+    public String buildStateJson() {
+        JsonObject o = new JsonObject();
+
+        JsonObject device = new JsonObject();
+        device.addProperty("manufacturer", Build.MANUFACTURER);
+        device.addProperty("model", Build.MODEL);
+        device.addProperty("android", Build.VERSION.RELEASE);
+        o.add("device", device);
+
+        JsonObject app = new JsonObject();
+        app.addProperty("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE);
+        app.addProperty("debug", BuildConfig.DEBUG);
+        app.addProperty("tsPlayer", preferTsPlayer);
+        app.addProperty("webPort", webServer != null ? webServer.getBoundPort() : -1);
+        o.add("app", app);
+
+        JsonObject config = new JsonObject();
+        Configuration c = settingsManager.getConfiguration();
+        if (c != null) {
+            config.addProperty("host", c.host);
+            config.addProperty("intervalMinutes", c.interval);
+            config.addProperty("quietHours", c.startQuietHour + "-" + c.endQuietHour);
+            config.addProperty("timezone", c.selectedTimeZoneId);
+            config.addProperty("mqttHost", c.mqttHost);
+        }
+        o.add("config", config);
+
+        JsonObject network = new JsonObject();
+        network.addProperty("available", connectionManager.isNetworkAvailable());
+        network.add("wifi", DeviceTelemetry.wifi(this));
+        o.add("network", network);
+
+        JsonObject media = new JsonObject();
+        media.addProperty("rotationAssets", mediaManager.rotationListSize());
+        media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
+        o.add("media", media);
+
+        o.add("telemetry", DeviceTelemetry.snapshot(this));
+
+        if (BuildConfig.DEBUG && !debugInformation.isEmpty()) {
+            JsonObject debug = new JsonObject();
+            synchronized (debugInformation) {
+                for (Map.Entry<String, String> entry : debugInformation.entrySet()) {
+                    debug.addProperty(entry.getKey(), entry.getValue());
+                }
+            }
+            o.add("debug", debug);
+        }
+
+        return o.toString();
+    }
+
+    @Override
+    public String getLogTail(int lines) {
+        return appLogger != null ? appLogger.tailJson(lines) : "[]";
+    }
+
+    @Override
+    public String getFileLogTail(int lines) {
+        return appLogger != null ? appLogger.tailFile(lines) : "";
+    }
+
+    @Override
+    public File uploadedDir() {
+        return UploadedMedia.dirFor(this);
+    }
+
+    @Override
+    public UploadedMedia.FileInfo[] listUploadedFiles() {
+        return UploadedMedia.list(UploadedMedia.dirFor(this));
+    }
+
+    @Override
+    public File uploadedFile(String name) {
+        return UploadedMedia.resolve(UploadedMedia.dirFor(this), name);
+    }
+
+    @Override
+    public boolean deleteUploadedFile(String name) {
+        return UploadedMedia.delete(UploadedMedia.dirFor(this), name);
+    }
+
+    /**
+     * Mirrors a hardware key press from the web UI. Every action is posted to the UI thread
+     * because most of them touch views or start activities.
+     */
+    @Override
+    public boolean control(String action) {
+        if (action == null) {
+            return false;
+        }
+        final Runnable task;
+        switch (action) {
+            case "next":
+                task = this::showNextImage;
+                break;
+            case "screen":
+                task = this::toggleScreenOn;
+                break;
+            case "brightness":
+                task = this::adjustMinimumBrightness;
+                break;
+            case "config":
+                task = this::showConfigurationUI;
+                break;
+            case "settings":
+                task = this::openSystemSettings;
+                break;
+            case "update-site":
+                task = this::openUpdateWebsite;
+                break;
+            case "check-updates":
+                task = this::checkForUpdates;
+                break;
+            default:
+                return false;
+        }
+        runOnUiThread(task);
+        return true;
     }
 
     private void hideSystemUI() {

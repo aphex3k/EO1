@@ -24,15 +24,24 @@ import org.jetbrains.annotations.NotNull;
 
 import com.example.tsplayer.TsPlayerNative;
 
+import com.google.gson.Gson;
+import com.google.gson.JsonObject;
+
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.lang.ref.WeakReference;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -47,6 +56,12 @@ public class MediaManager implements MediaManagerInterface {
     private static final String INCOMPATIBLE_TAG_NAME = "EO1_INCOMPATIBLE";
     private static final long MAX_ASSET_BYTES = 1073741824L;
     private static final int SEARCH_PAGE_SIZE = 1000;
+    /** Recognised video extensions for uploaded files (lowercase, no dot). */
+    private static final Set<String> VIDEO_EXTENSIONS = Collections.unmodifiableSet(new HashSet<String>(
+            Arrays.asList("mp4", "mov", "mkv", "avi", "ts", "m4v", "webm", "3gp", "mpg", "mpeg", "hevc", "h265")));
+    /** Recognised image extensions for uploaded files (lowercase, no dot). */
+    private static final Set<String> IMAGE_EXTENSIONS = Collections.unmodifiableSet(new HashSet<String>(
+            Arrays.asList("jpg", "jpeg", "png", "gif", "webp", "heic", "heif", "bmp", "dng")));
     private static final ReentrantLock downloadMutex = new ReentrantLock();
     /** Prevents overlapping showNextImage worker threads (timer + retry + MQTT). */
     private final AtomicBoolean showNextInFlight = new AtomicBoolean(false);
@@ -54,6 +69,11 @@ public class MediaManager implements MediaManagerInterface {
     private final WeakReference<MediaManagerListener> listener;
     private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
+    /**
+     * Maps synthetic local-asset ids (deterministic UUIDs) to the uploaded file name. Populated at
+     * each rotation rebuild from the persistent {@code filesDir/uploaded} directory.
+     */
+    private final Map<String, String> localAssetIdToFilename = new HashMap<>();
     private final VideoTranscodeManager videoTranscodeManager;
     private final ImageConvertManager imageConvertManager;
     private final MediaCacheManager mediaCacheManager;
@@ -133,81 +153,19 @@ public class MediaManager implements MediaManagerInterface {
 
             if (immichAssets.isEmpty()) {
 
-                SettingsManager settings = this.settingsManager.get();
-                Configuration configuration = settings.getConfiguration();
-                Log.i(TAG, "showNextImage: fetching albums from " + configuration.host);
-
                 try {
-                    apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, activity, this.downloadProgressListener.get());
-                }
-                catch (Exception e) {
-                    Log.e(TAG, "showNextImage: createService failed", e);
-                    activity.runOnUiThread(() -> mediaManagerListener.handleException(new MediaDownloadFailedException(e)));
-                    return;
-                }
-
-                String userId;
-
-                try {
-                    Call<ImmichApiLoginResponse> service = apiService.login(new ImmichApiLogin(configuration.userid, configuration.password));
-                    Response<ImmichApiLoginResponse> call = service.execute();
-                    ImmichApiLoginResponse loginResponse = call.body();
-                    if (call.code() == 401) {
-                        throw new AuthenticationFailedException(call.code());
-                    }
-                    if (call.code() == 404) {
-                        throw new AuthenticationUnavailableException(call.code());
-                    }
-                    if (call.isSuccessful() && loginResponse == null) {
-                        throw new AuthenticationUnavailableException(call.code());
-                    }
-                    else if (loginResponse != null && !loginResponse.getUserId().isEmpty()){
-                        userId = loginResponse.getUserId();
-                    }
-                    else {
-                        throw new AuthenticationFailedException(-1);
-                    }
-
+                    apiService = fetchImmichAssets(activity);
                 } catch (Exception e) {
-                    Log.e(TAG, "showNextImage: login failed", e);
+                    // Do not stop the rotation on an Immich failure: fall back to local uploads.
+                    Log.e(TAG, "showNextImage: Immich fetch failed, falling back to local uploads", e);
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
-                    return;
+                    apiService = null;
                 }
 
-                if (userId == null || userId.isEmpty()) {
-                    Log.e(TAG, "showNextImage: empty userId after login");
-                    activity.runOnUiThread(() ->  mediaManagerListener.handleException(new InvalidCredentialsException()));
-                    return;
-                }
-
-                try {
-                    // Owned albums (isShared=false) and shared albums (isShared=true)
-                    for (int i = 0; i < 2; i++) {
-                        Response<List<ImmichApiGetAlbumResponse>> albumsResponse =
-                                apiService.getAllAlbums(i == 1, null).execute();
-
-                        List<ImmichApiGetAlbumResponse> albums =
-                                albumsResponse.body() != null ? albumsResponse.body() : new ArrayList<ImmichApiGetAlbumResponse>(0);
-
-                        for (ImmichApiGetAlbumResponse album : albums) {
-                            if (album.getId() == null || album.getAssetCount() == 0) {
-                                continue;
-                            }
-                            addAssetsFromSearch(apiService, new ImmichApiMetadataSearchBody(1, SEARCH_PAGE_SIZE)
-                                    .withAlbumIds(Collections.singletonList(album.getId())));
-                        }
-                    }
-
-                    // All timeline assets visible to this account
-                    addAssetsFromSearch(apiService, new ImmichApiMetadataSearchBody(1, SEARCH_PAGE_SIZE));
-                } catch (Exception e) {
-                    Log.e(TAG, "showNextImage: album/timeline fetch failed", e);
-                    activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
-                    return;
-                }
+                addLocalUploadedAssets(activity);
 
                 if (immichAssets.isEmpty()) {
-                    Log.e(TAG, "showNextImage: no media found after fetch");
+                    Log.e(TAG, "showNextImage: no media found (no Immich assets, no local uploads)");
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(new NoMediaFoundException()));
                     return;
                 }
@@ -220,19 +178,24 @@ public class MediaManager implements MediaManagerInterface {
                 assetResponse = immichAssets.remove(0);
 
                 try {
-                    Long expectedBytes = null;
-                    if (assetResponse.getExifInfo() != null) {
-                        expectedBytes = assetResponse.getExifInfo().getFileSizeInByte();
+                    if (isLocalAsset(assetResponse)) {
+                        // Local upload: use the on-disk file directly, no Immich download.
+                        tempFile = resolveLocalAssetFile(activity, assetResponse);
+                    } else {
+                        Long expectedBytes = null;
+                        if (assetResponse.getExifInfo() != null) {
+                            expectedBytes = assetResponse.getExifInfo().getFileSizeInByte();
+                        }
+                        tempFile = downloadAsset(
+                                assetResponse.getId(),
+                                assetResponse.getType(),
+                                false,
+                                assetResponse.getOriginalFileName(),
+                                assetResponse.getOriginalPath(),
+                                activity,
+                                apiService,
+                                expectedBytes);
                     }
-                    tempFile = downloadAsset(
-                            assetResponse.getId(),
-                            assetResponse.getType(),
-                            false,
-                            assetResponse.getOriginalFileName(),
-                            assetResponse.getOriginalPath(),
-                            activity,
-                            apiService,
-                            expectedBytes);
                 } catch (Exception e) {
                     activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
                 }
@@ -248,6 +211,10 @@ public class MediaManager implements MediaManagerInterface {
                 if (prepared != null) {
                     // Keep original on disk for revolving reuse; only eviction frees space.
                     playbackFile = prepared;
+                } else if (isLocalAsset(finalAssetResponse)) {
+                    // No Immich source to fall back to for a local upload; skip this asset.
+                    Log.i(TAG, "showNextImage: local video prepare failed, skipping asset");
+                    playbackFile = null;
                 } else {
                     Log.i(TAG, "showNextImage: prepare failed, downloading Immich /video/playback fallback");
                     try {
@@ -275,6 +242,10 @@ public class MediaManager implements MediaManagerInterface {
                 File prepared = prepareImageForDisplay(activity, finalAssetResponse, playbackFile);
                 if (prepared != null) {
                     playbackFile = prepared;
+                } else if (isLocalAsset(finalAssetResponse)) {
+                    // No Immich source to fall back to for a local upload; skip this asset.
+                    Log.i(TAG, "showNextImage: local image prepare failed, skipping asset");
+                    playbackFile = null;
                 } else {
                     try {
                         Long expectedBytes = null;
@@ -317,6 +288,70 @@ public class MediaManager implements MediaManagerInterface {
             else {
                 activity.runOnUiThread(() -> showNextImage(activity));
             }
+    }
+
+    /**
+     * Logs in and fetches all albums + timeline assets into {@link #immichAssets}.
+     *
+     * @return the authenticated Immich service, for later downloads.
+     * @throws Exception on any authentication or fetch failure (caller decides the fallback).
+     */
+    private ImmichApiService fetchImmichAssets(Activity activity) throws Exception {
+        SettingsManager settings = this.settingsManager.get();
+        Configuration configuration = settings.getConfiguration();
+        Log.i(TAG, "showNextImage: fetching albums from " + configuration.host);
+
+        ImmichApiService apiService;
+        try {
+            apiService = ApiServiceGenerator.createService(
+                    ImmichApiService.class, configuration.host, activity, this.downloadProgressListener.get());
+        } catch (Exception e) {
+            throw new MediaDownloadFailedException(e);
+        }
+
+        Call<ImmichApiLoginResponse> service =
+                apiService.login(new ImmichApiLogin(configuration.userid, configuration.password));
+        Response<ImmichApiLoginResponse> call = service.execute();
+        ImmichApiLoginResponse loginResponse = call.body();
+        if (call.code() == 401) {
+            throw new AuthenticationFailedException(call.code());
+        }
+        if (call.code() == 404) {
+            throw new AuthenticationUnavailableException(call.code());
+        }
+        if (call.isSuccessful() && loginResponse == null) {
+            throw new AuthenticationUnavailableException(call.code());
+        }
+        String userId;
+        if (loginResponse != null && !loginResponse.getUserId().isEmpty()) {
+            userId = loginResponse.getUserId();
+        } else {
+            throw new AuthenticationFailedException(-1);
+        }
+        if (userId == null || userId.isEmpty()) {
+            throw new InvalidCredentialsException();
+        }
+
+        // Owned albums (isShared=false) and shared albums (isShared=true)
+        for (int i = 0; i < 2; i++) {
+            Response<List<ImmichApiGetAlbumResponse>> albumsResponse =
+                    apiService.getAllAlbums(i == 1, null).execute();
+
+            List<ImmichApiGetAlbumResponse> albums =
+                    albumsResponse.body() != null ? albumsResponse.body() : new ArrayList<ImmichApiGetAlbumResponse>(0);
+
+            for (ImmichApiGetAlbumResponse album : albums) {
+                if (album.getId() == null || album.getAssetCount() == 0) {
+                    continue;
+                }
+                addAssetsFromSearch(apiService, new ImmichApiMetadataSearchBody(1, SEARCH_PAGE_SIZE)
+                        .withAlbumIds(Collections.singletonList(album.getId())));
+            }
+        }
+
+        // All timeline assets visible to this account
+        addAssetsFromSearch(apiService, new ImmichApiMetadataSearchBody(1, SEARCH_PAGE_SIZE));
+        return apiService;
     }
 
     private void addAssetsFromSearch(@NonNull ImmichApiService apiService, @NonNull ImmichApiMetadataSearchBody firstPage)
@@ -409,6 +444,115 @@ public class MediaManager implements MediaManagerInterface {
 
     private static String defaultExtension(ImmichType type) {
         return type == ImmichType.VIDEO ? ".mp4" : ".jpg";
+    }
+
+    /** True if this asset is a synthetic entry for a local uploaded file. */
+    public boolean isLocalAsset(ImmichApiAssetResponse asset) {
+        return asset != null && asset.getId() != null
+                && localAssetIdToFilename.containsKey(asset.getId());
+    }
+
+    /** True if the given asset id belongs to a local uploaded file. */
+    public boolean isLocalAssetId(String assetId) {
+        return assetId != null && localAssetIdToFilename.containsKey(assetId);
+    }
+
+    /** Package-visible test hook: current rotation-list size. */
+    int rotationListSize() {
+        return immichAssets.size();
+    }
+
+    /**
+     * Deterministic UUID derived from the file name. Stable across rebuilds (so transcode cache
+     * hits persist) and valid as a cache file name; matches {@code MediaCacheManager} eviction so
+     * local transcode outputs are evictable.
+     */
+    static String localAssetIdFor(String filename) {
+        return UUID.nameUUIDFromBytes(filename.getBytes(Charset.forName("UTF-8"))).toString();
+    }
+
+    /** Maps an extension (with or without leading dot) to an {@link ImmichType}. */
+    private static ImmichType mediaTypeForExtension(String extWithDot) {
+        String e = extWithDot.startsWith(".") ? extWithDot.substring(1) : extWithDot;
+        if (VIDEO_EXTENSIONS.contains(e)) {
+            return ImmichType.VIDEO;
+        }
+        if (IMAGE_EXTENSIONS.contains(e)) {
+            return ImmichType.IMAGE;
+        }
+        return ImmichType.OTHER;
+    }
+
+    /** Resolves a local asset to its on-disk file, or null if it was deleted. */
+    private File resolveLocalAssetFile(Activity activity, ImmichApiAssetResponse asset) {
+        String fname = localAssetIdToFilename.get(asset.getId());
+        if (fname == null) {
+            return null;
+        }
+        File f = new File(UploadedMedia.dirFor(activity), fname);
+        return f.isFile() ? f : null;
+    }
+
+    /**
+     * Scans the persistent upload directory and appends a synthetic asset entry for each
+     * recognised media file into {@link #immichAssets}. Re-run on every rotation rebuild so the
+     * set always reflects the current directory.
+     */
+    void addLocalUploadedAssets(Activity activity) {
+        int added = addLocalUploadedAssets(UploadedMedia.dirFor(activity));
+        if (added > 0) {
+            Log.i(TAG, "showNextImage: added " + added + " local uploaded asset(s)");
+        }
+    }
+
+    /**
+     * Package-visible variant operating on a directory, for unit testing. Deliberately free of
+     * Android calls (no Log) so it runs on the JVM.
+     *
+     * @return the number of local assets appended to the rotation list.
+     */
+    int addLocalUploadedAssets(File dir) {
+        localAssetIdToFilename.clear();
+        File[] files = dir.listFiles();
+        if (files == null) {
+            return 0;
+        }
+        int added = 0;
+        for (File f : files) {
+            if (!f.isFile()) {
+                continue;
+            }
+            String ext = extensionFromFileName(f.getName());
+            if (ext == null) {
+                continue;
+            }
+            ImmichType type = mediaTypeForExtension(ext);
+            if (type != ImmichType.IMAGE && type != ImmichType.VIDEO) {
+                continue;
+            }
+            String id = localAssetIdFor(f.getName());
+            localAssetIdToFilename.put(id, f.getName());
+            immichAssets.add(syntheticLocalAsset(id, type, f.getName(), f.length()));
+            added++;
+        }
+        return added;
+    }
+
+    /**
+     * Builds a synthetic {@link ImmichApiAssetResponse} for a local file. The id is a deterministic
+     * UUID (see {@link #localAssetIdFor}).
+     */
+    private static ImmichApiAssetResponse syntheticLocalAsset(String id, ImmichType type,
+            String name, long bytes) {
+        JsonObject root = new JsonObject();
+        root.addProperty("id", id);
+        root.addProperty("type", type.name());
+        root.addProperty("originalFileName", name);
+        JsonObject exif = new JsonObject();
+        exif.addProperty("fileSizeInByte", bytes);
+        root.add("exifInfo", exif);
+        root.addProperty("isTrashed", false);
+        return new Gson().fromJson(root.toString(), ImmichApiAssetResponse.class);
     }
 
     @NonNull
@@ -779,6 +923,12 @@ public class MediaManager implements MediaManagerInterface {
             return;
         }
         pinnedCachePaths.remove(file.getAbsolutePath());
+        // Only ever delete cache-owned media (UUID-named originals / transcode outputs). This
+        // protects local uploads (filesDir/uploaded) from being deleted on a playback failure.
+        if (!MediaCacheManager.isOwnedMediaCacheFile(file)) {
+            Log.i(TAG, "removeFromCache: skipping non-cache file " + file.getName());
+            return;
+        }
         if (file.exists() && !file.delete()) {
             MediaManagerListener mediaManagerListener = this.listener.get();
             if (mediaManagerListener != null) {

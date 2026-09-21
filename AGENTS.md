@@ -10,6 +10,7 @@ Android home-screen replacement APK for Electric Objects **EO1** and **EO2** dig
 - Hardware notes: [EO1-specs.md](EO1-specs.md)
 - FFmpeg / transcoding: [docs/FFMPEG.md](docs/FFMPEG.md)
 - TsPlayer / Amlogic video: [docs/TSPLAYER.md](docs/TSPLAYER.md)
+- LAN web server (debug / control / media upload): [docs/WEBSERVER.md](docs/WEBSERVER.md)
 
 ## Source map
 
@@ -71,6 +72,7 @@ Open these first:
 | Immich HTTP API | `app/src/main/java/com/aphex3k/immichApi/ImmichApiService.java` |
 | HTTP / TLS / cookies | `app/src/main/java/com/aphex3k/eo1/ApiServiceGenerator.java`, `Tls12SocketFactory.java` |
 | OTA updates | `app/src/main/java/com/aphex3k/eo1/UpdateManager.java` |
+| LAN web server | `WebServer` (HTTP on port 80→8080), `WebController` (implemented by `MainActivity`), `MultipartParser` (streaming multipart), `UploadedMedia` (persistent `filesDir/uploaded`), `AppLogger` (ring buffer + rolling file), `DeviceTelemetry` (on-demand `/state` data) — see [docs/WEBSERVER.md](docs/WEBSERVER.md) |
 | HOME launcher role | `app/src/main/AndroidManifest.xml` |
 | Unit tests | `app/src/test/java/` |
 
@@ -102,11 +104,15 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 - Keep API 19 compatibility and existing Retrofit/OkHttp pin strategy
 - Extend types under `immichApi/` when Immich API fields change
 - Treat `app/src/main/java/com/aphex3k/eo1/` as the app core
+- Keep the LAN web server dependency-free and resource-cheap (hand-rolled `ServerSocket`, `Connection: close`); every web-server thread must be defensively wrapped — a stray exception must never reach the global `UncaughtExceptionHandler` (which calls `System.exit(2)`)
 
 **Don’t**
 
 - Commit `configuration.json`, `ffmpeg/`, or bulk `EO2/` dumps
 - Introduce Kotlin or raise `minSdk` / `maxSdk` without an explicit product decision
 - Add ExoPlayer / Media3 for video playback (known Geniatech API 19 full-system hang)
+- Pulse TsPlayer `SurfaceView` GONE→VISIBLE / `setFormat`, or mid-loop `deletePlayer`, to fix loop stalls (black frame — rejected; see [docs/TSPLAYER.md](docs/TSPLAYER.md))
+- Add TLS/HTTPS or any new heavy dependency to the LAN web server; keep it unsecured plain-HTTP on 80→8080 for the trusted LAN only
+- Serve files via the web server from anywhere outside `filesDir/uploaded`
 - Treat README marketing or hardware setup prose as build requirements for code changes
 - Edit or rely on `EO2/`, `ffmpeg/`, or `.electric-objects/` as product source
