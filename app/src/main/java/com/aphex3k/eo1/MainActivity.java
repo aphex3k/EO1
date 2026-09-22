@@ -118,6 +118,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private ConnectionManager connectionManager;
     private AppLogger appLogger;
     private WebServer webServer;
+    /** True once the stale incoming_* cleanup has run for this process (first onCreate only). */
+    private static volatile boolean sStaleIncomingCleaned = false;
     private PowerManager.WakeLock screenOffWakeLock;
     private Handler bannerHandler = new Handler(Looper.getMainLooper());
     private Runnable bannerFadeRunnable;
@@ -182,9 +184,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // Always-on LAN web server (debug / control / media upload).
         this.appLogger = new AppLogger(this);
-        // Remove stale upload temp dirs from a previously crashed process. Must run before the
-        // accept loop starts so it can never delete an in-flight upload.
-        UploadedMedia.cleanStaleIncomingDirs(UploadedMedia.dirFor(this));
+        // Remove stale upload temp dirs from a previously killed process. Only the first
+        // onCreate of a given process may do this: after an Activity recreation the process
+        // is still alive and an in-flight upload worker may own a live incoming_* dir.
+        if (!sStaleIncomingCleaned) {
+            sStaleIncomingCleaned = true;
+            UploadedMedia.cleanStaleIncomingDirs(UploadedMedia.dirFor(this));
+        }
         this.webServer = new WebServer(this);
         this.webServer.start();
 
@@ -954,7 +960,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         } else {
             showNextImage();
         }
-        mediaManager.removeFromCache(file);
+        // Local uploads: 'file' may be the persistent original in filesDir/uploaded whose
+        // name matches the UUID cache-file pattern; never delete it. isLocalAssetId(null)
+        // is false, preserving the defensive null-assetId path.
+        if (!mediaManager.isLocalAssetId(assetId)) {
+            mediaManager.removeFromCache(file);
+        }
     }
 
     private void cancelVideoWatchdog() {

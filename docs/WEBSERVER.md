@@ -28,7 +28,7 @@ the server itself is unit-testable with a fake controller and never references t
 | `/files` | GET | JSON list of uploaded files (`name`, `size`, `lastModified`) |
 | `/files/<name>` | GET | Streams an uploaded file |
 | `/files/<name>/delete` | DELETE / POST | Deletes an uploaded file |
-| `/upload` | POST | `multipart/form-data` upload, 512 MB cap per file; stored in `filesDir/uploaded/` |
+| `/upload` | POST | `multipart/form-data` upload, 512 MB cap per file, 2 GB cap per request, max 32 parts; stored in `filesDir/uploaded/` |
 | `/control?action=<a>` | GET / POST | Fires a hardware-key action (below) |
 | `/health` | GET | `ok` |
 

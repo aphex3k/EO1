@@ -38,7 +38,7 @@ public class MultipartParserTest {
         String boundary = "XYZ123";
         byte[] body = multipart(boundary, part("file", "a.jpg", "image/jpeg", "hello world".getBytes(UTF8)));
 
-        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP);
+        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP, CAP, 4);
         assertEquals(1, parts.size());
         MultipartParser.Part p = parts.get(0);
         assertTrue(p.isFile());
@@ -57,7 +57,7 @@ public class MultipartParserTest {
                 part("f1", "one.bin", "application/octet-stream", a),
                 part("f2", "two.bin", "application/octet-stream", b));
 
-        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP);
+        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP, CAP, 4);
         assertEquals(2, parts.size());
         assertEquals("one.bin", parts.get(0).filename);
         assertEquals("alpha", new String(readBytes(parts.get(0).file), UTF8));
@@ -70,7 +70,7 @@ public class MultipartParserTest {
         String boundary = "T1";
         byte[] body = multipart(boundary, textPart("greeting", "hello there"));
 
-        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP);
+        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP, CAP, 4);
         assertEquals(1, parts.size());
         MultipartParser.Part p = parts.get(0);
         assertFalse(p.isFile());
@@ -83,7 +83,7 @@ public class MultipartParserTest {
         String boundary = "E1";
         byte[] body = multipart(boundary, part("f", "empty.txt", "text/plain", new byte[0]));
 
-        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP);
+        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP, CAP, 4);
         assertEquals(1, parts.size());
         assertEquals(0, parts.get(0).size);
         assertEquals(0, readBytes(parts.get(0).file).length);
@@ -100,7 +100,7 @@ public class MultipartParserTest {
         }
         byte[] body = multipart(boundary, part("f", "big.bin", "application/octet-stream", data));
 
-        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP);
+        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP, CAP, 4);
         assertEquals(1, parts.size());
         assertEquals(data.length, parts.get(0).size);
         byte[] got = readBytes(parts.get(0).file);
@@ -118,7 +118,7 @@ public class MultipartParserTest {
         }
         byte[] body = multipart(boundary, part("f", "bin.dat", "application/octet-stream", data));
 
-        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP);
+        List<MultipartParser.Part> parts = MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP, CAP, 4);
         byte[] got = readBytes(parts.get(0).file);
         if (!java.util.Arrays.equals(data, got)) {
             fail("binary bytes differ");
@@ -130,7 +130,7 @@ public class MultipartParserTest {
         String boundary = "CAP";
         byte[] body = multipart(boundary, part("f", "big.txt", "text/plain", "hello world".getBytes(UTF8)));
         try {
-            MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, 5L);
+            MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, 5L, 5L, 4);
             fail("expected MultipartException");
         } catch (MultipartParser.MultipartException expected) {
             // expected
@@ -150,12 +150,59 @@ public class MultipartParserTest {
     @Test
     public void missingBoundaryThrows() {
         try {
-            MultipartParser.parse(new ByteArrayInputStream(new byte[0]), null, outDir, CAP);
+            MultipartParser.parse(new ByteArrayInputStream(new byte[0]), null, outDir, CAP, CAP, 4);
             fail("expected MultipartException");
         } catch (MultipartParser.MultipartException expected) {
             // expected
         } catch (IOException e) {
             fail("wrong exception: " + e);
+        }
+    }
+
+    @Test
+    public void totalCapThrowsAndCleansTempPart() throws Exception {
+        String boundary = "TOT";
+        // Two 10-byte parts with an aggregate cap of 15: the second part is written then
+        // rejected, and its temp file must be removed.
+        byte[] body = multipart(boundary,
+                part("f1", "one.bin", "application/octet-stream", "0123456789".getBytes(UTF8)),
+                part("f2", "two.bin", "application/octet-stream", "abcdefghij".getBytes(UTF8)));
+        try {
+            MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, 100L, 15L, 4);
+            fail("expected MultipartException");
+        } catch (MultipartParser.MultipartException expected) {
+            // expected
+        }
+        assertFalse(new File(outDir, "part_tmp_2").exists());
+    }
+
+    @Test
+    public void tooManyPartsThrows() throws Exception {
+        String boundary = "MANY";
+        byte[] body = multipart(boundary,
+                part("f1", "one.bin", "application/octet-stream", "a".getBytes(UTF8)),
+                part("f2", "two.bin", "application/octet-stream", "b".getBytes(UTF8)),
+                part("f3", "three.bin", "application/octet-stream", "c".getBytes(UTF8)));
+        try {
+            MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP, CAP, 2);
+            fail("expected MultipartException");
+        } catch (MultipartParser.MultipartException expected) {
+            // expected
+        }
+    }
+
+    @Test
+    public void textPartOverMemoryCapThrows() throws Exception {
+        String boundary = "TX";
+        // 1 MiB + 1 as a text part: the in-memory cap must reject it even though the
+        // per-file/total caps are far larger.
+        byte[] data = new byte[1024 * 1024 + 1];
+        byte[] body = multipart(boundary, part("blob", null, "text/plain", data));
+        try {
+            MultipartParser.parse(new ByteArrayInputStream(body), boundary, outDir, CAP, CAP, 4);
+            fail("expected MultipartException");
+        } catch (MultipartParser.MultipartException expected) {
+            // expected
         }
     }
 

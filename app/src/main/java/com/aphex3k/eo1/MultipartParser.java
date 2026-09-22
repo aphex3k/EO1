@@ -24,6 +24,12 @@ public final class MultipartParser {
 
     private static final Charset UTF_8 = Charset.forName("UTF-8");
     private static final int CHUNK = 8192;
+    /**
+     * Text parts (form fields) are read into memory, so keep the in-memory cap small no matter
+     * how large the per-file/total caps are: a large payload sent as a "text" part (unquoted or
+     * missing {@code filename=}) must not be able to exhaust the heap.
+     */
+    private static final long MAX_TEXT_BYTES = 1024L * 1024L; // 1 MiB
 
     private MultipartParser() {
     }
@@ -90,12 +96,17 @@ public final class MultipartParser {
      * @param boundary        the boundary value (without leading {@code --}).
      * @param outDir          directory to write file parts into (must exist).
      * @param maxBytesPerFile cap per file; exceeding it throws {@link MultipartException}.
+     * @param maxTotalBytes   aggregate cap over all parts of the upload; exceeding it throws
+     *                        {@link MultipartException}.
+     * @param maxParts        maximum number of parts; exceeding it throws
+     *                        {@link MultipartException}.
      */
-    public static List<Part> parse(InputStream body, String boundary, File outDir, long maxBytesPerFile)
-            throws IOException {
+    public static List<Part> parse(InputStream body, String boundary, File outDir, long maxBytesPerFile,
+            long maxTotalBytes, int maxParts) throws IOException {
         if (boundary == null || boundary.isEmpty()) {
             throw new MultipartException("missing multipart boundary");
         }
+        long perFileCap = Math.min(maxBytesPerFile, maxTotalBytes);
         Reader r = new Reader(body);
         byte[] delim = ("--" + boundary).getBytes(UTF_8);
         List<Part> parts = new ArrayList<Part>();
@@ -104,6 +115,7 @@ public final class MultipartParser {
         if (!r.skipToken(delim)) {
             return parts;
         }
+        long total = 0;
         while (true) {
             int b1 = r.read();
             int b2 = r.read();
@@ -127,19 +139,32 @@ public final class MultipartParser {
             String name = param(disp, "name");
             String filename = param(disp, "filename");
 
+            if (parts.size() >= maxParts) {
+                throw new MultipartException("too many parts");
+            }
+
             byte[] endToken = ("\r\n--" + boundary).getBytes(UTF_8);
             if (filename != null) {
                 File out = new File(outDir, "part_tmp_" + (parts.size() + 1));
                 long size;
                 try {
-                    size = r.streamToFile(out, endToken, maxBytesPerFile);
+                    size = r.streamToFile(out, endToken, perFileCap);
                 } catch (IOException e) {
                     deleteQuietly(out);
                     throw e;
                 }
+                total += size;
+                if (total > maxTotalBytes) {
+                    deleteQuietly(out);
+                    throw new MultipartException("upload exceeds total size limit");
+                }
                 parts.add(new Part(name, filename, out, null, size));
             } else {
-                byte[] data = r.readToToken(endToken, maxBytesPerFile);
+                byte[] data = r.readToToken(endToken, Math.min(perFileCap, MAX_TEXT_BYTES));
+                total += data.length;
+                if (total > maxTotalBytes) {
+                    throw new MultipartException("upload exceeds total size limit");
+                }
                 parts.add(new Part(name, null, null, new String(data, UTF_8), data.length));
             }
             // Loop continues: the next read() consumes the bytes right after the boundary.

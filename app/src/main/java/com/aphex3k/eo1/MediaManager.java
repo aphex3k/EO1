@@ -70,16 +70,19 @@ public class MediaManager implements MediaManagerInterface {
     private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
     /**
-     * Maps synthetic local-asset ids (deterministic UUIDs) to the uploaded file name. Populated at
-     * each rotation rebuild from the persistent {@code filesDir/uploaded} directory.
+     * Maps synthetic local-asset ids (deterministic UUIDs) to the uploaded file name. Rebuilt
+     * from the persistent {@code filesDir/uploaded} directory at each rotation rebuild and
+     * published wholesale (volatile swap) so UI-thread readers never see an empty/partial map.
      */
-    private final Map<String, String> localAssetIdToFilename = new HashMap<>();
+    private volatile Map<String, String> localAssetIdToFilename = new HashMap<>();
     private final VideoTranscodeManager videoTranscodeManager;
     private final ImageConvertManager imageConvertManager;
     private final MediaCacheManager mediaCacheManager;
     private final HashSet<String> reactiveTranscodeAttempted = new HashSet<>();
     private final HashSet<String> pinnedCachePaths = new HashSet<>();
     private volatile String currentPlaybackPath;
+    /** Cache dir of the rotation currently in progress; guards {@link #removeFromCache}'s location check. */
+    private volatile File mediaCacheDir;
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager, ApiServiceGenerator.ProgressListener downloadProgressListener) {
         this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager(),
@@ -145,6 +148,7 @@ public class MediaManager implements MediaManagerInterface {
             File tempFile = null;
 
             Log.i(TAG, "showNextImage: start (cachedAssets=" + immichAssets.size() + ")");
+            mediaCacheDir = activity.getCacheDir();
 
             videoTranscodeManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
                     mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
@@ -286,6 +290,11 @@ public class MediaManager implements MediaManagerInterface {
                 });
             }
             else {
+                // Release the in-flight guard before re-posting the retry. The worker's finally
+                // (showNextImage) clears showNextInFlight only after showNextImageLocked returns;
+                // without this, the UI thread may execute the posted retry while the flag is
+                // still set and drop it (lost wakeup).
+                showNextInFlight.set(false);
                 activity.runOnUiThread(() -> showNextImage(activity));
             }
     }
@@ -512,7 +521,7 @@ public class MediaManager implements MediaManagerInterface {
      * @return the number of local assets appended to the rotation list.
      */
     int addLocalUploadedAssets(File dir) {
-        localAssetIdToFilename.clear();
+        Map<String, String> rebuilt = new HashMap<>();
         File[] files = dir.listFiles();
         if (files == null) {
             return 0;
@@ -531,10 +540,13 @@ public class MediaManager implements MediaManagerInterface {
                 continue;
             }
             String id = localAssetIdFor(f.getName());
-            localAssetIdToFilename.put(id, f.getName());
+            rebuilt.put(id, f.getName());
             immichAssets.add(syntheticLocalAsset(id, type, f.getName(), f.length()));
             added++;
         }
+        // Atomic publish: readers see either the previous complete map or the new complete map,
+        // never an empty/partial one mid-rebuild.
+        localAssetIdToFilename = rebuilt;
         return added;
     }
 
@@ -927,6 +939,13 @@ public class MediaManager implements MediaManagerInterface {
         // protects local uploads (filesDir/uploaded) from being deleted on a playback failure.
         if (!MediaCacheManager.isOwnedMediaCacheFile(file)) {
             Log.i(TAG, "removeFromCache: skipping non-cache file " + file.getName());
+            return;
+        }
+        // Location check: even when the name matches the cache pattern, only delete files that
+        // actually live in the media cache dir (never a persistent upload elsewhere).
+        File cacheDir = this.mediaCacheDir;
+        if (cacheDir == null || file.getParentFile() == null || !file.getParentFile().equals(cacheDir)) {
+            Log.i(TAG, "removeFromCache: skipping file outside cache dir " + file.getName());
             return;
         }
         if (file.exists() && !file.delete()) {

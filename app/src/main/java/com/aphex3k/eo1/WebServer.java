@@ -42,9 +42,21 @@ public class WebServer {
 
     /** Per-file upload size cap (512 MB). */
     public static final long MAX_UPLOAD_BYTES = 512L * 1024L * 1024L;
+    /** Aggregate cap for all parts of one upload request (2 GB). */
+    public static final long MAX_UPLOAD_TOTAL_BYTES = 2L * 1024L * 1024L * 1024L;
+    /** Maximum number of parts accepted per upload request. */
+    public static final int MAX_UPLOAD_PARTS = 32;
 
     private static final int PORTS[] = {80, 8080};
     private static final int READ_TIMEOUT_MS = 60000;
+    /**
+     * Idle timeout while the request line + headers must arrive. Short on purpose: a slow-drip
+     * connection (1 byte every ~55 s) must not be able to pin a worker through the 60 s body
+     * timeout.
+     */
+    private static final int HEADER_READ_TIMEOUT_MS = 10000;
+    /** Total request-header byte cap (bounds header memory on one connection). */
+    private static final int MAX_HEADER_BYTES = 16384;
     private static final int WORKERS = 3;
     private static final Charset UTF_8 = Charset.forName("UTF-8");
 
@@ -246,6 +258,10 @@ public class WebServer {
         InputStream is = socket.getInputStream();
         OutputStream os = socket.getOutputStream();
 
+        // Headers must arrive promptly; SO_TIMEOUT only fires on idle reads, so a 10 s cap
+        // here prevents slow-drip connections from pinning a worker thread.
+        socket.setSoTimeout(HEADER_READ_TIMEOUT_MS);
+
         String requestLine = readLine(is);
         if (requestLine == null || requestLine.trim().isEmpty()) {
             return;
@@ -262,6 +278,8 @@ public class WebServer {
         String query = q >= 0 ? fullPath.substring(q + 1) : "";
 
         Map<String, String> headers = readHeaders(is);
+
+        socket.setSoTimeout(READ_TIMEOUT_MS); // restore the body-read timeout for uploads
 
         try {
             dispatch(method, path, query, headers, is, os);
@@ -408,7 +426,8 @@ public class WebServer {
         }
 
         try {
-            List<MultipartParser.Part> parsed = MultipartParser.parse(is, boundary, incoming, MAX_UPLOAD_BYTES);
+            List<MultipartParser.Part> parsed = MultipartParser.parse(is, boundary, incoming,
+                    MAX_UPLOAD_BYTES, MAX_UPLOAD_TOTAL_BYTES, MAX_UPLOAD_PARTS);
 
             List<String> saved = new ArrayList<String>();
             for (MultipartParser.Part p : parsed) {
@@ -758,7 +777,12 @@ public class WebServer {
     private static Map<String, String> readHeaders(InputStream is) throws IOException {
         Map<String, String> m = new HashMap<String, String>();
         String line;
+        int total = 0;
         while ((line = readLine(is)) != null && !line.isEmpty()) {
+            total += line.length() + 1;
+            if (total > MAX_HEADER_BYTES) {
+                throw new IOException("header size limit exceeded");
+            }
             int colon = line.indexOf(':');
             if (colon > 0) {
                 m.put(line.substring(0, colon).trim().toLowerCase(Locale.US),
