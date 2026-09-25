@@ -101,10 +101,14 @@ public final class DeviceTelemetry {
     }
 
     /**
-     * Converts a host-order IPv4 int to dotted-quad form.
+     * Converts the int returned by {@link WifiInfo#getIpAddress()} to dotted-quad form.
+     *
+     * <p>On this device the int is in host (little-endian) byte order, so the first octet sits in
+     * the least-significant byte. Reading it the usual big-endian way yields a byte-swapped
+     * address (e.g. 192.168.1.174 would render as "174.1.168.192"), hence the reversed order.
      */
     public static String ipToString(int ip) {
-        return ((ip >> 24) & 0xff) + "." + ((ip >> 16) & 0xff) + "." + ((ip >> 8) & 0xff) + "." + (ip & 0xff);
+        return (ip & 0xff) + "." + ((ip >> 8) & 0xff) + "." + ((ip >> 16) & 0xff) + "." + ((ip >> 24) & 0xff);
     }
 
     /**

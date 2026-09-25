@@ -4,6 +4,7 @@ import android.content.Context;
 
 import java.io.File;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 
@@ -54,7 +55,9 @@ public final class UploadedMedia {
                 }
             }
         }
-        out.sort(new Comparator<FileInfo>() {
+        // Collections.sort (not List.sort) — the latter is a Java 8 default method that is absent
+        // on API 19 (no coreLibraryDesugaring), so it throws NoSuchMethodError at runtime.
+        Collections.sort(out, new Comparator<FileInfo>() {
             @Override
             public int compare(FileInfo a, FileInfo b) {
                 return Long.compare(b.lastModified, a.lastModified);

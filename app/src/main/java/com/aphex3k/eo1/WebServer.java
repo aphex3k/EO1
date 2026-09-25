@@ -5,6 +5,7 @@ import android.util.Log;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
+import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -46,6 +47,12 @@ public class WebServer {
     public static final long MAX_UPLOAD_TOTAL_BYTES = 2L * 1024L * 1024L * 1024L;
     /** Maximum number of parts accepted per upload request. */
     public static final int MAX_UPLOAD_PARTS = 32;
+    /**
+     * Uploads whose {@code Content-Length} is at or below this are drained off the socket in one
+     * bulk read and parsed from memory; larger ones stream straight to disk. The bulk-read path
+     * avoids pinning the socket through many small reads (see {@link #handleUpload}).
+     */
+    public static final long MAX_IN_MEMORY_UPLOAD_BYTES = 16L * 1024L * 1024L;
 
     private static final int PORTS[] = {80, 8080};
     private static final int READ_TIMEOUT_MS = 60000;
@@ -289,6 +296,16 @@ public class WebServer {
         } catch (Exception e) {
             Log.e(TAG, "handler error on " + method + " " + path, e);
             sendJson(os, 500, errorJson("internal error: " + e.getClass().getSimpleName()));
+        } catch (Throwable t) {
+            // Catch Errors too (NoSuchMethodError, OutOfMemoryError, ...) so the client gets a 500
+            // instead of a silently-closed connection. Best effort: if the stream is already
+            // broken the send throws and is swallowed; ConnectionHandler closes the socket.
+            Log.e(TAG, "fatal handler error on " + method + " " + path, t);
+            try {
+                sendJson(os, 500, errorJson("internal error: " + t.getClass().getSimpleName()));
+            } catch (Throwable ignored) {
+                // nothing more we can do over this connection
+            }
         }
     }
 
@@ -426,7 +443,17 @@ public class WebServer {
         }
 
         try {
-            List<MultipartParser.Part> parsed = MultipartParser.parse(is, boundary, incoming,
+            // For bounded uploads, drain the whole body off the socket in a single bulk read and
+            // parse it from memory. Streaming the body straight off the socket (MultipartParser's
+            // many small reads) has been observed to stall the subsequent response write on the
+            // target device; reading it in one go sidesteps that. Oversized or missing
+            // Content-Length falls back to the direct streaming path.
+            InputStream bodyStream = is;
+            long contentLength = parseLongLenient(headers.get("content-length"));
+            if (contentLength >= 0 && contentLength <= MAX_IN_MEMORY_UPLOAD_BYTES) {
+                bodyStream = new ByteArrayInputStream(readAll(is, contentLength));
+            }
+            List<MultipartParser.Part> parsed = MultipartParser.parse(bodyStream, boundary, incoming,
                     MAX_UPLOAD_BYTES, MAX_UPLOAD_TOTAL_BYTES, MAX_UPLOAD_PARTS);
 
             List<String> saved = new ArrayList<String>();
@@ -455,6 +482,45 @@ public class WebServer {
             cleanDir(incoming);
             incoming.delete();
         }
+    }
+
+    /** Parses a non-negative long, returning -1 for null/empty/invalid input. */
+    private static long parseLongLenient(String s) {
+        if (s == null) {
+            return -1;
+        }
+        try {
+            return Long.parseLong(s.trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    /**
+     * Reads up to {@code total} bytes from {@code in} into a fresh array. Returns exactly the bytes
+     * read; if the stream ends early it returns the (shorter) array. Bounded by {@code total} so a
+     * bogus oversized {@code Content-Length} cannot exhaust the heap.
+     */
+    private static byte[] readAll(InputStream in, long total) throws IOException {
+        if (total <= 0) {
+            return new byte[0];
+        }
+        int n = (int) Math.min(total, (long) Integer.MAX_VALUE);
+        byte[] out = new byte[n];
+        int off = 0;
+        while (off < n) {
+            int r = in.read(out, off, n - off);
+            if (r < 0) {
+                break;
+            }
+            off += r;
+        }
+        if (off == n) {
+            return out;
+        }
+        byte[] trimmed = new byte[off];
+        System.arraycopy(out, 0, trimmed, 0, off);
+        return trimmed;
     }
 
     // --- rendering ---
