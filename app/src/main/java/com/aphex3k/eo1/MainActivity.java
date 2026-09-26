@@ -102,6 +102,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private MediaPlayerController mediaPlayerController;
     private TsPlayerController tsPlayerController;
     private boolean preferTsPlayer;
+    private int tsFallbackCount;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
@@ -1149,7 +1150,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (!assetId.equals(activeVideoAssetId)) {
             return false;
         }
-        debugInformationProvided(new DebugInformation("video", "TsPlayer → MediaPlayer fallback"));
+        tsFallbackCount++;
+        Log.i(TAG, "TsPlayer → MediaPlayer fallback #" + tsFallbackCount);
+        debugInformationProvided(new DebugInformation("video", "TsPlayer → MediaPlayer fallback #" + tsFallbackCount));
         try {
             selectVideoPlayer(false);
             startVideoOnController(videoPlayer, file, assetId, activityReference, false);
@@ -1381,6 +1384,36 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.add("media", media);
 
         o.add("telemetry", DeviceTelemetry.snapshot(this));
+
+        if (BuildConfig.DEBUG) {
+            JsonObject video = new JsonObject();
+            video.addProperty("active", videoPlayer == tsPlayerController ? "TsPlayer" : "MediaPlayer");
+            video.addProperty("preferTsPlayer", preferTsPlayer);
+            video.addProperty("tsAvailable", TsPlayerNative.isAvailable());
+            video.addProperty("tsFallbacks", tsFallbackCount);
+            if (tsVideoView != null) {
+                video.addProperty("generation", tsVideoView.getLoopGeneration());
+                video.addProperty("errors", tsVideoView.getVideoErrorCount());
+                video.addProperty("playerCreated", tsVideoView.isPlayerCreated());
+                video.addProperty("surfaceReady", tsVideoView.isSurfaceReady());
+                video.addProperty("recreatingForLoop", tsVideoView.isRecreatingForLoop());
+                video.addProperty("path", tsVideoView.getActivePath());
+                video.addProperty("durationMs", tsVideoView.getDuration());
+                video.addProperty("positionMs", tsVideoView.getCurrentPosition());
+                JsonObject loopPerf = new JsonObject();
+                loopPerf.addProperty("restartLatencyMs", tsVideoView.getLastRestartLatencyMs());
+                loopPerf.addProperty("createPlayerMs", tsVideoView.getLastCreatePlayerMs());
+                loopPerf.addProperty("setSurfaceMs", tsVideoView.getLastSetSurfaceMs());
+                loopPerf.addProperty("startMs", tsVideoView.getLastStartMs());
+                loopPerf.addProperty("restartToPlayingMs", tsVideoView.getLastRestartToPlayingMs());
+                loopPerf.addProperty("endToPlayingMs", tsVideoView.getLastEndToPlayingMs());
+                loopPerf.addProperty("loopCycleMs", tsVideoView.getLastLoopCycleMs());
+                loopPerf.addProperty("posAtTriggerMs", tsVideoView.getLastPosAtTriggerMs());
+                loopPerf.addProperty("restartMethod", tsVideoView.getLastRestartMethod());
+                video.add("loopPerf", loopPerf);
+            }
+            o.add("video", video);
+        }
 
         if (BuildConfig.DEBUG && !debugInformation.isEmpty()) {
             JsonObject debug = new JsonObject();
