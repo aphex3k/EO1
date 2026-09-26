@@ -150,7 +150,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         mediaPlayerController = new MediaPlayerController(mediaPlayerVideoView);
         tsPlayerController = new TsPlayerController(tsVideoView);
-        tsVideoView.setLoopCoverView(imageView);
         preferTsPlayer = BuildConfig.USE_TSPLAYER && TsPlayerNative.isAvailable();
         videoPlayer = preferTsPlayer ? tsPlayerController : mediaPlayerController;
         Log.i(TAG, "video player: " + (preferTsPlayer ? "TsPlayer" : "MediaPlayer")

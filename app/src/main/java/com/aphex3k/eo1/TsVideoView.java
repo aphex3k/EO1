@@ -1,7 +1,6 @@
 package com.aphex3k.eo1;
 
 import android.content.Context;
-import android.graphics.Bitmap;
 import android.graphics.PixelFormat;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
@@ -13,18 +12,15 @@ import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
-import android.widget.ImageView;
 
 import com.example.tsplayer.TsPlayerNative;
 
 /**
  * SurfaceView-backed Amlogic TsPlayer view.
  * <p>
- * Same-file looping never calls {@code deletePlayer} (reserved for asset handoff).
- * {@code stop}/{@code EOS} clear the Amlogic video plane, so loops show a still
- * {@link #setLoopCoverView(ImageView) cover} (sibling ImageView above this surface)
- * across the gap. Prefer {@code start()} without {@code stop} when it works.
- * See {@code docs/TSPLAYER.md}.
+ * Looping: duration timer → tear down player → one Surface GONE/VISIBLE cycle →
+ * createPlayer/setSurface/start on the new surface. Avoid setFormat+visibility together
+ * (that double-destroys the surface and black-screens after the first pass).
  */
 public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
 
@@ -32,11 +28,8 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     private static final long PROGRESS_POLL_MS = 1000L;
     private static final long SURFACE_TIMEOUT_MS = 3000L;
     private static final long LOOP_END_MARGIN_MS = 0L;
-    /** Restart before metadata EOS so the cover is up before the plane blanks. */
-    private static final long LOOP_EARLY_RESTART_MS = 250L;
+    private static final long LOOP_EARLY_RESTART_MS = 80L;
     private static final long SURFACE_FALLBACK_MS = 500L;
-    /** Keep still cover up briefly after restart until new buffers paint. */
-    private static final long LOOP_COVER_HIDE_DELAY_MS = 180L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
 
@@ -54,19 +47,12 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     private Runnable durationLoopRunnable;
     private Runnable surfaceFallbackRunnable;
     private Runnable restartRunnable;
-    private Runnable hideLoopCoverRunnable;
 
     private int durationMs;
     private boolean recreatingForLoop;
     private boolean awaitingSurfaceForStart;
     private int lastLoggedStatus = Integer.MIN_VALUE;
     private int loopGeneration;
-
-    /** Sibling ImageView above this SurfaceView (layout z-order); covers black gaps. */
-    private ImageView loopCoverView;
-    private Bitmap holdBitmap;
-    private boolean loopCoverVisible;
-    private int holdBitmapPathHash;
 
     public TsVideoView(Context context) {
         super(context);
@@ -94,25 +80,14 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         this.listener = listener;
     }
 
-    /**
-     * ImageView drawn above this SurfaceView (see activity_main). Used to hold a still
-     * frame across loop restarts so Amlogic plane clears are not visible as black.
-     */
-    public void setLoopCoverView(ImageView coverView) {
-        this.loopCoverView = coverView;
-    }
-
     public void setDataSource(String path) {
         if (released) {
             return;
         }
-        hideLoopCover();
-        clearHoldBitmap();
         pendingPath = path;
         playWhenReady = true;
         awaitingSurfaceForStart = false;
         recreatingForLoop = false;
-        loopGeneration = 0;
         if (getVisibility() != View.VISIBLE) {
             setVisibility(View.VISIBLE);
         }
@@ -158,9 +133,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         cancelSurfaceTimeout();
         cancelSurfaceFallback();
         cancelRestart();
-        cancelHideLoopCover();
-        hideLoopCover();
-        clearHoldBitmap();
         tearDownPlayer();
         pendingPath = null;
         activePath = null;
@@ -284,7 +256,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
                 if (listener != null) {
                     listener.onVideoPrepared();
                 }
-                scheduleHoldBitmapAsync(path);
                 scheduleProgressPoll();
                 scheduleDurationLoop();
             }
@@ -300,14 +271,8 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
             playerCreated = false;
             return;
         }
-        // Match OEM EoVideoView.restartPlayer: pause → stop → stop → deletePlayer.
-        // Double stop is intentional in the original APK (logged twice).
         try {
             TsPlayerNative.pause();
-        } catch (Throwable ignored) {
-        }
-        try {
-            TsPlayerNative.stop();
         } catch (Throwable ignored) {
         }
         try {
@@ -340,7 +305,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
             if (generation != loopGeneration || released) {
                 return;
             }
-            Log.i("EO1", "TsPlayer duration elapsed (" + durationMs + "ms) — looping");
+            Log.i("EO1", "TsPlayer duration elapsed (" + durationMs + "ms) — recreating for loop");
             restartForLoop();
         };
         handler.postDelayed(durationLoopRunnable, delay);
@@ -404,29 +369,30 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         cancelDurationLoop();
         cancelSurfaceFallback();
         cancelRestart();
-        cancelHideLoopCover();
 
         loopGeneration++;
 
-        // Cover before any native call — stop/EOS blank the Amlogic plane under the surface.
-        showLoopCover();
-
+        // Seamless path: never blank the SurfaceView (no GONE/VISIBLE, no delete delay).
         if (trySeamlessRestart()) {
-            Log.i("EO1", "TsPlayer loop gen=" + loopGeneration);
+            Log.i("EO1", "TsPlayer seamless loop gen=" + loopGeneration);
             scheduleProgressPoll();
             scheduleDurationLoop();
-            scheduleHideLoopCover();
             return;
         }
 
-        hideLoopCover();
-        Log.w("EO1", "TsPlayer loop failed gen=" + loopGeneration + " — error (no delete)");
-        notifyError();
+        Log.w("EO1", "TsPlayer seamless loop failed — immediate full recreate gen=" + loopGeneration);
+        recreatingForLoop = true;
+        if (listener != null) {
+            listener.onVideoEnd();
+        }
+        tearDownPlayer();
+        recreatingForLoop = false;
+        startOrRestartPlayer();
     }
 
     /**
-     * Same-file loop without {@code deletePlayer}. Prefer {@code start()} alone (no stop);
-     * stop clears the video plane even with a cover briefly visible.
+     * Restart from the beginning without tearing down the video plane (avoids black flash).
+     * Tries in-place createPlayer first; then stop/start on the existing instance.
      */
     private boolean trySeamlessRestart() {
         if (!playerCreated || !TsPlayerNative.isAvailable()) {
@@ -437,154 +403,24 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         if (path == null || surface == null || !surface.isValid()) {
             return false;
         }
-
-        // 1) start without stop — may rewind without clearing the plane.
         try {
-            if (TsPlayerNative.start()) {
-                Log.i("EO1", "TsPlayer loop via start-only gen=" + loopGeneration);
-                return true;
-            }
-        } catch (Throwable t) {
-            Log.w("EO1", "TsPlayer start-only loop failed: " + t.getMessage());
-        }
-
-        // 2) re-open without delete/stop.
-        try {
+            // In-place reopen — keep the same Surface bound so the last frame stays up
+            // until new buffers arrive.
             if (TsPlayerNative.createPlayer(path)) {
                 TsPlayerNative.setSurface(surface);
                 if (TsPlayerNative.start()) {
-                    playerCreated = true;
-                    activePath = path;
-                    Log.i("EO1", "TsPlayer loop via create(no-delete) gen=" + loopGeneration);
                     return true;
                 }
             }
         } catch (Throwable t) {
-            Log.w("EO1", "TsPlayer create(no-delete) loop failed: " + t.getMessage());
+            Log.w("EO1", "TsPlayer in-place createPlayer loop failed: " + t.getMessage());
         }
-
-        // 3) stop/start last — plane blanks; cover ImageView must already be visible.
         try {
             TsPlayerNative.stop();
-            if (TsPlayerNative.start()) {
-                Log.i("EO1", "TsPlayer loop via stop/start gen=" + loopGeneration);
-                return true;
-            }
+            return TsPlayerNative.start();
         } catch (Throwable t) {
             Log.w("EO1", "TsPlayer stop/start loop failed: " + t.getMessage());
-        }
-        return false;
-    }
-
-    private void showLoopCover() {
-        if (loopCoverView == null) {
-            Log.w("EO1", "TsPlayer loop cover missing — black gap may show");
-            return;
-        }
-        if (holdBitmap == null || holdBitmap.isRecycled()) {
-            Log.w("EO1", "TsPlayer loop cover bitmap not ready gen=" + loopGeneration);
-            return;
-        }
-        loopCoverView.setImageBitmap(holdBitmap);
-        loopCoverView.setVisibility(View.VISIBLE);
-        loopCoverVisible = true;
-        Log.i("EO1", "TsPlayer loop cover shown gen=" + loopGeneration);
-    }
-
-    private void scheduleHideLoopCover() {
-        cancelHideLoopCover();
-        hideLoopCoverRunnable = () -> {
-            hideLoopCoverRunnable = null;
-            hideLoopCover();
-        };
-        handler.postDelayed(hideLoopCoverRunnable, LOOP_COVER_HIDE_DELAY_MS);
-    }
-
-    private void cancelHideLoopCover() {
-        if (hideLoopCoverRunnable != null) {
-            handler.removeCallbacks(hideLoopCoverRunnable);
-            hideLoopCoverRunnable = null;
-        }
-    }
-
-    private void hideLoopCover() {
-        if (!loopCoverVisible) {
-            return;
-        }
-        if (loopCoverView != null) {
-            loopCoverView.setVisibility(View.INVISIBLE);
-        }
-        loopCoverVisible = false;
-        Log.i("EO1", "TsPlayer loop cover hidden");
-    }
-
-    private void scheduleHoldBitmapAsync(String path) {
-        if (path == null || path.isEmpty()) {
-            return;
-        }
-        final int pathHash = path.hashCode();
-        final int durationForFrame = durationMs;
-        if (holdBitmap != null && !holdBitmap.isRecycled() && holdBitmapPathHash == pathHash) {
-            return;
-        }
-        new Thread(() -> {
-            Bitmap bmp = extractHoldFrame(path, durationForFrame);
-            handler.post(() -> {
-                if (released || (activePath == null && pendingPath == null)) {
-                    if (bmp != null) {
-                        bmp.recycle();
-                    }
-                    return;
-                }
-                String current = pendingPath != null ? pendingPath : activePath;
-                if (current == null || current.hashCode() != pathHash) {
-                    if (bmp != null) {
-                        bmp.recycle();
-                    }
-                    return;
-                }
-                clearHoldBitmap();
-                holdBitmap = bmp;
-                holdBitmapPathHash = pathHash;
-                if (bmp != null) {
-                    Log.i("EO1", "TsPlayer loop cover frame ready "
-                            + bmp.getWidth() + "x" + bmp.getHeight());
-                }
-            });
-        }, "ts-hold-frame").start();
-    }
-
-    private void clearHoldBitmap() {
-        holdBitmapPathHash = 0;
-        if (holdBitmap != null) {
-            if (!holdBitmap.isRecycled()) {
-                holdBitmap.recycle();
-            }
-            holdBitmap = null;
-        }
-    }
-
-    private static Bitmap extractHoldFrame(String path, int durationMs) {
-        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
-        try {
-            retriever.setDataSource(path);
-            long timeUs = 0L;
-            if (durationMs > 500) {
-                timeUs = (durationMs - 200L) * 1000L;
-            }
-            Bitmap bmp = retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
-            if (bmp == null) {
-                bmp = retriever.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
-            }
-            return bmp;
-        } catch (Exception e) {
-            Log.w(TAG, "hold frame extract failed: " + e.getMessage());
-            return null;
-        } finally {
-            try {
-                retriever.release();
-            } catch (Exception ignored) {
-            }
+            return false;
         }
     }
 
@@ -691,8 +527,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         cancelSurfaceTimeout();
         cancelSurfaceFallback();
         cancelRestart();
-        cancelHideLoopCover();
-        hideLoopCover();
         awaitingSurfaceForStart = false;
         recreatingForLoop = false;
         if (listener != null) {
