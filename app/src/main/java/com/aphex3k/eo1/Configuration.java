@@ -17,4 +17,14 @@ public class Configuration {
     public int startQuietHour = -1;
     public int endQuietHour = -1;
     public int interval = 5;
+    // MQTT fields
+    @Nullable
+    public String mqttHost = "";
+    public int mqttPort = 1883;
+    @Nullable
+    public String mqttProtocol = "";
+    @Nullable
+    public String mqttUser = "";
+    @Nullable
+    public String mqttPassword = "";
 }

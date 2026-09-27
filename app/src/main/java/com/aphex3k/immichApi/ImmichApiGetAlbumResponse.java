@@ -4,6 +4,7 @@ import androidx.annotation.Keep;
 
 import com.google.gson.annotations.SerializedName;
 
+import java.util.Collections;
 import java.util.Date;
 import java.util.List;
 
@@ -88,7 +89,7 @@ public class ImmichApiGetAlbumResponse extends ImmichApiResponse {
     }
 
     public List<ImmichApiAssetResponse> getAssets() {
-        return assets;
+        return assets != null ? assets : Collections.<ImmichApiAssetResponse>emptyList();
     }
 
     public List<ImmichOwner> getSharedUsers() {
@@ -104,6 +105,6 @@ public class ImmichApiGetAlbumResponse extends ImmichApiResponse {
     }
 
     public int getAssetCount() {
-        return assetCount;
+        return assetCount != null ? assetCount : 0;
     }
 }

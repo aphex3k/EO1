@@ -31,7 +31,7 @@ public class UpdateManager {
                 Semver latestVersion = new Semver(BuildConfig.VERSION_NAME);
                 GiteaApiGetReleasesResponse updateTo = null;
 
-                GiteaApiService apiService = ApiServiceGenerator.createService(GiteaApiService.class, "https://gitea.codingmerc.com/");
+                GiteaApiService apiService = ApiServiceGenerator.createService(GiteaApiService.class, "https://gitea.codingmerc.com/", null, null);
 
                 Response<List<GiteaApiGetReleasesResponse>> response = apiService.getReleases("michael", "EO1").execute();
 
@@ -63,7 +63,7 @@ public class UpdateManager {
 
                     final String fileName = "app-" + latestVersion.toStrict() + ".apk";
 
-                    final String downloadedFilePath = Util.downloadFileSync(downloadUrlString, ApiServiceGenerator.getNewHttpClient(), fileName);
+                    final String downloadedFilePath = Util.downloadFileSync(downloadUrlString, ApiServiceGenerator.getNewHttpClient(null, null), fileName);
 
                     if (downloadedFilePath == null) {
                         throw new FileNotFoundException("File failed downloading...");

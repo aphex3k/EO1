@@ -1,0 +1,34 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<package-restrictions>
+    <pkg name="com.android.inputmethod.latin">
+        <disabled-components>
+            <item name="com.android.inputmethod.latin.setup.SetupActivity" />
+        </disabled-components>
+    </pkg>
+    <pkg name="com.android.provision">
+        <disabled-components>
+            <item name="com.android.provision.DefaultActivity" />
+        </disabled-components>
+    </pkg>
+    <pkg name="com.android.settings">
+        <disabled-components>
+            <item name="com.android.settings.CryptKeeper" />
+        </disabled-components>
+    </pkg>
+    <pkg name="com.amlogic.promptuser">
+        <disabled-components>
+            <item name="com.amlogic.promptuser.BootActivity" />
+        </disabled-components>
+    </pkg>
+    <pkg name="com.google.android.gsf">
+        <disabled-components>
+            <item name="com.google.android.gsf.loginservice.MigrateToAccountManagerBroadcastReceiver" />
+        </disabled-components>
+    </pkg>
+    <pkg name="com.android.musicfx">
+        <enabled-components>
+            <item name="com.android.musicfx.ControlPanelReceiver" />
+        </enabled-components>
+    </pkg>
+    <preferred-activities />
+</package-restrictions>

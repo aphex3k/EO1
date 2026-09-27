@@ -1,8 +1,8 @@
 package com.aphex3k.eo1;
 
-import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.content.Context;
+import android.os.Build;
 import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -37,11 +37,9 @@ public class SettingsManager {
 
     protected SettingsManager (SettingsManagerListener listener) {
         this.listener = new WeakReference<>(listener);
-
-        loadConfiguration();
     }
 
-    protected void loadConfiguration() {
+    protected boolean loadConfiguration() {
 
         SettingsManagerListener settingsManagerListener = this.listener.get();
 
@@ -50,23 +48,25 @@ public class SettingsManager {
                 File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 
                 this.configuration = new Gson().fromJson(new FileReader(file), Configuration.class);
+
+                return true;
             } catch (Exception e) {
                 settingsManagerListener.handleException(e);
             }
         }
+
+        return false;
     }
 
-    protected boolean showSetupDialogIfNeeded(Context context) {
-
-        loadConfiguration();
-
-        if (this.configuration == null ||
+    protected boolean isSetupDialogIfNeeded()
+    {
+        if (!loadConfiguration() ||
+            this.configuration == null ||
             this.configuration.userid == null ||
             this.configuration.userid.isEmpty() ||
             this.configuration.password == null ||
             this.configuration.password.isEmpty())
         {
-            showSetupDialog(context);
             return true;
         }
         else {
@@ -92,7 +92,7 @@ public class SettingsManager {
 
             try {
                 if (file.exists() && !file.delete()) {
-                    settingsManagerListener.debugInformationProvided(new DebugInformation("Failed to delete outdated configuration file: ", "file.getAbsolutePath()"));
+                    settingsManagerListener.debugInformationProvided(new DebugInformation("Failed to delete outdated configuration file", file.getAbsolutePath()));
                 }
                 if (!file.createNewFile()) {
                     throw new IOException("Failed to create file: "+ file.getAbsolutePath());
@@ -109,16 +109,21 @@ public class SettingsManager {
         }
     }
 
-    private void updateTimeZone() {
-        SettingsManagerListener settingsManagerListener = this.listener.get();
-        if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty() && settingsManagerListener != null) {
+    void updateTimeZone(Context context) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            SettingsManagerListener settingsManagerListener = this.listener.get();
+            if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty() && settingsManagerListener != null) {
 
-            AlarmManager alarmManager=(AlarmManager)settingsManagerListener.getSystemService(Context.ALARM_SERVICE);
-            alarmManager.setTimeZone(configuration.selectedTimeZoneId);
+                AlarmManager alarmManager = (AlarmManager) settingsManagerListener.getSystemService(Context.ALARM_SERVICE);
+                alarmManager.setTimeZone(configuration.selectedTimeZoneId);
+            }
         }
     }
 
-    @SuppressLint("DefaultLocale")
+    /**
+     * Deprecated: Use OptionsDialogFragment instead for configuration UI.
+     */
+    @Deprecated
     protected void showSetupDialog(Context context) {
 
         SettingsManagerListener settingsManagerListener = this.listener.get();
@@ -160,19 +165,20 @@ public class SettingsManager {
             ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item, allTimeZoneIds);
             tzAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
             tzSpinner.setAdapter(tzAdapter);
-            if (configuration.selectedTimeZoneId != null && configuration.selectedTimeZoneId.isEmpty())
+            if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty())
                 tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId));
 
             View.OnClickListener load = view -> {
-                loadConfiguration();
 
-                userIdEditText.setText(configuration.userid);
-                passwordEditText.setText(configuration.password);
-                hostEditText.setText(configuration.host);
-                tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId), true);
-                startHourSpinner.setSelection(configuration.startQuietHour, true);
-                endHourSpinner.setSelection(configuration.endQuietHour, true);
-                editTextInterval.setText(String.valueOf(configuration.interval));
+                if (loadConfiguration()) {
+                    userIdEditText.setText(configuration.userid);
+                    passwordEditText.setText(configuration.password);
+                    hostEditText.setText(configuration.host);
+                    tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId), true);
+                    startHourSpinner.setSelection(configuration.startQuietHour, true);
+                    endHourSpinner.setSelection(configuration.endQuietHour, true);
+                    editTextInterval.setText(String.valueOf(configuration.interval));
+                }
             };
 
             btnLoadConfig.setOnClickListener(load);
@@ -193,7 +199,7 @@ public class SettingsManager {
                         if (!configuration.userid.isEmpty() && !configuration.password.isEmpty() && !configuration.host.isEmpty()) {
                             try {
                                 saveConfiguration();
-                                updateTimeZone();
+                                updateTimeZone(context);
                                 settingsManagerListener.settingsChanged();
                             } catch (IOException e) {
                                 settingsManagerListener.handleException(e);
@@ -201,6 +207,7 @@ public class SettingsManager {
                         }
                     })
                     .setNegativeButton("Cancel", (dialog, which) -> dialog.dismiss());
+
 
             builder.show();
         }

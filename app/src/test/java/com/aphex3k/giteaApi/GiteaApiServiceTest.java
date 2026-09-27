@@ -19,7 +19,7 @@ public class GiteaApiServiceTest {
     private GiteaApiService apiService;
     @Before
     public void instantiate() {
-        this.apiService = ApiServiceGenerator.createService(GiteaApiService.class, "https://gitea.codingmerc.com/");
+        this.apiService = ApiServiceGenerator.createService(GiteaApiService.class, "https://gitea.codingmerc.com/", null, null);
     }
 
     @org.junit.Test

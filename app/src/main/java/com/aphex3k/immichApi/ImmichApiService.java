@@ -2,7 +2,6 @@ package com.aphex3k.immichApi;
 
 import androidx.annotation.Keep;
 
-import java.util.Date;
 import java.util.List;
 
 import okhttp3.ResponseBody;
@@ -25,50 +24,45 @@ public interface ImmichApiService {
     );
 
     @Keep
-    @GET("/api/album")
+    @GET("/api/albums")
     Call<List<ImmichApiGetAlbumResponse>> getAllAlbums (
-            @Query("shared") Boolean shared,
+            @Query("isShared") Boolean isShared,
             @Query("assetId") String assetId
     );
 
     @Keep
-    @GET("/api/asset")
-    Call<List<ImmichApiAssetResponse>> getAllAssets (
-            @Query("userId") String userId,
-            @Query("isFavorite") Boolean isFavorite,
-            @Query("isArchived") Boolean isArchived,
-            @Query("skip") Integer skip,
-            @Query("updatedAfter") Date updatedAfter
+    @POST("/api/search/metadata")
+    Call<ImmichApiMetadataSearchResponse> getAllAssets (
+            @Body ImmichApiMetadataSearchBody body
     );
 
     @Keep
-    @POST("/api/asset/download/{id}")
+    @GET("/api/assets/{id}/original")
     @Streaming
     Call<ResponseBody> downloadFile (
-            @Path("id") String id
-    );
-
-    @Keep
-    @GET("/api/asset/file/{id}")
-    @Streaming
-    Call<ResponseBody> serveFile (
             @Path("id") String id,
-            @Query("isThumb") boolean isThumb,
-            @Query("isWeb") boolean isWeb,
             @Query("key") String key
     );
 
     @Keep
-    @GET("/api/asset/thumbnail/{id}")
+    @GET("/api/assets/{id}/thumbnail")
     @Streaming
     Call<ResponseBody> getAssetThumbnail(
             @Path("id") String id,
-            @Query("format") ImmichThumbnailFormat format,
+            @Query("size") ImmichSizeFormat sizeFormat,
             @Query("key") String key
     );
 
     @Keep
-    @GET("/api/album/{id}")
+    @GET("/api/assets/{id}/video/playback")
+    @Streaming
+    Call<ResponseBody> playAssetVideo(
+            @Path("id") String id,
+            @Query("key") String key
+    );
+
+    @Keep
+    @GET("/api/albums/{id}")
     Call<ImmichApiGetAlbumResponse> getAlbumInfo (
             @Path("id") String id,
             @Query("withoutAssets") Boolean withoutAssets,
@@ -76,29 +70,23 @@ public interface ImmichApiService {
     );
 
     @Keep
-    @GET("/api/asset/random")
-    Call<List<ImmichApiAssetResponse>> getRandom (
-            @Query("count") Integer count
-    );
-
-    @Keep
-    @GET("/api/server-info/ping")
-    Call<ImmichApiPingResponse> ping ();
-
-    @Keep
-    @POST("/api/tag")
+    @POST("/api/tags")
     Call<ImmichApiTagResponse> createTag (
             @Body ImmichApiTag tag
     );
 
     @Keep
-    @GET("/api/tag")
+    @GET("/api/tags")
     Call<List<ImmichApiTagResponse>> getAllTags ();
 
     @Keep
-    @PUT("/api/tag/{id}/assets")
+    @PUT("/api/tags/{id}/assets")
     Call<List<ImmichApiTagAssetResponse>> tagAssets (
             @Path("id") String tagId,
             @Body ImmichApiTagAssetBody body
     );
+
+    @Keep
+    @GET("/api/server/version")
+    Call<ImmichApiServerVersionResponse> getServerVersion ();
 }

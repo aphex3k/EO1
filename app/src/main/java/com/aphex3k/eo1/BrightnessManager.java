@@ -26,7 +26,7 @@ public class BrightnessManager {
      * At what sensor value do we want to reach the maximum screen brightness? Any value equal
      * or higher to maxLux results in maxBrightness returned from this function.
      */
-    protected static final Lux maxLux = Lux.OFFICE;
+    protected static final Lux maxLux = Lux.TRAIN_STATION;
     /**
      * At what sensor value do we want to reach the minimum screen brightness? Any value equal
      * or lower to minLux results in minBrightness returned from this function.
@@ -86,8 +86,8 @@ public class BrightnessManager {
 
         if (listener != null) {
 
-            listener.debugInformationProvided(new DebugInformation("Reported Light Value: ", String.valueOf(lightValue)));
-            listener.debugInformationProvided(new DebugInformation("Min Brightness: ", String.valueOf(this.minBrightness)));
+            listener.debugInformationProvided(new DebugInformation("Reported Light Value", String.valueOf(lightValue)));
+            listener.debugInformationProvided(new DebugInformation("Min Brightness", String.valueOf(this.minBrightness)));
 
             if (!shouldTheScreenBeOn) {
                 listener.brightnessChanged(0.0f);
@@ -96,7 +96,7 @@ public class BrightnessManager {
                 // See: https://stackoverflow.com/a/51494556/1117968
                 final float brightness = (maxBrightness - minBrightness) * (lightValue - minLux.value) / (maxLux.value - minLux.value) + minBrightness;
 
-                listener.debugInformationProvided(new DebugInformation("Calculated Brightness Value: ", String.valueOf(brightness)));
+                listener.debugInformationProvided(new DebugInformation("Calculated Brightness Value", String.valueOf(brightness)));
 
                 listener.brightnessChanged(brightness);
             }

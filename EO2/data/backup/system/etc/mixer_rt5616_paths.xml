@@ -1,0 +1,46 @@
+<mixer>
+    <ctl name="Ext Spk Switch" value="0" />
+    <ctl name="OUT Playback Volume" value="0" />
+    <ctl name="HP Playback Volume" value="0" />
+    <ctl name="HPO MIX HPVOL Switch" value="0" />
+    <ctl name="Headphone Switch" value="0" /> 
+ <path name="speaker">
+    <ctl name="LOUT MIX OUTVOL L Switch" value="1" />
+    <ctl name="LOUT MIX OUTVOL R Switch" value="1" />
+    <ctl name="OUT Channel Switch" value="1" />
+    <ctl name="OUT Playback Volume" value="31" />
+    <ctl name="Ext Spk Switch" value="1" />
+  </path>
+
+  <path name="headphone">
+    <ctl name="HPO MIX DAC1 Switch" value="1" />
+    <ctl name="HPO MIX HPVOL Switch" value="1" />
+    <ctl name="HP Playback Volume" value="31" />
+    <ctl name="Headphone Switch" value="1" /> 
+  </path>
+
+  <path name="main_mic">
+    <ctl name="IN2 Mode Control" value="0" />
+    <ctl name="RECMIXL BST2 Switch" value="1" />
+    <ctl name="RECMIXR BST2 Switch" value="1" />
+    <ctl name="ADC Capture Switch" value="0" />
+    <ctl name="IN2 Boost" value="4" />
+    <ctl name="ADC Capture Volume" value="90" />
+  </path>
+
+  <path name="headset-mic">
+    <ctl name="IN1 Mode Control" value="0" />
+    <ctl name="RECMIXL BST1 Switch" value="1" />
+    <ctl name="RECMIXR BST1 Switch" value="1" />
+    <ctl name="ADC Capture Switch" value="1" />
+    <ctl name="IN1 Boost" value="1" />
+    <ctl name="ADC Capture Volume" value="90" />
+  </path>
+
+  <path name="hdmi">
+    <ctl name="OUT Playback Volume" value="0" />
+    <ctl name="HP Playback Volume" value="0" />
+  </path>
+  
+</mixer>
+

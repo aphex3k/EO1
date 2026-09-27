@@ -20,7 +20,7 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
     private String deviceId;
 
     @SerializedName("duration")
-    private String duration;
+    private Integer duration; // video length in MILLISECONDS (Immich asset duration)
 
     @SerializedName("exifInfo")
     private ImmichExifInfo exifInfo;
@@ -39,6 +39,8 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
 
     @SerializedName("isFavorite")
     private Boolean isFavorite;
+    @SerializedName("isTrashed")
+    private Boolean isTrashed;
 
     @SerializedName("livePhotoVideoId")
     private String livePhotoVideoId;
@@ -85,7 +87,7 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
         return deviceId;
     }
 
-    public String getDuration() {
+    public Integer getDuration() {
         return duration;
     }
 
@@ -103,6 +105,14 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
 
     public Boolean getFavorite() {
         return isFavorite;
+    }
+
+    /**
+     * Asset has been moved to trash
+     * @return <em>true</em> if asset has been moved to trash, <em>false</em> otherwise
+     */
+    public Boolean getIsTrashed() {
+        return isTrashed;
     }
 
     public Boolean getResized() {

@@ -2,6 +2,8 @@ package com.aphex3k.eo1;
 
 import static android.view.KeyEvent.KEYCODE_C;
 import static android.view.KeyEvent.KEYCODE_SPACE;
+import static android.view.KeyEvent.KEYCODE_U;
+import static com.aphex3k.eo1.KeyEvent.PS4_CIRCLE;
 
 import android.annotation.SuppressLint;
 
@@ -21,15 +23,13 @@ public class EventManager {
         this.listener = new WeakReference<>(listener);
     }
 
-    @SuppressLint("InvalidWakeLockTag")
-    public void onKeyDown(int keyCode) {
+    public boolean onKeyDown(int keyCode) {
 
         EventManagerListener eventManagerListener = this.listener.get();
 
         if (eventManagerListener == null) {
-            return;
+            return false;
         }
-
         // Trigger update check if both buttons have been pressed "at the same time"
         if (
                 ((keyCode == KeyEvent.EO1_TOP_BUTTON && lastKeyCode == KeyEvent.EO1_BACK_BUTTON) ||
@@ -37,6 +37,7 @@ public class EventManager {
                         && ((new Date()).getTime() - lastKeyCodeDate.getTime() < 250))
         {
             eventManagerListener.checkForUpdates();
+            return true;
         }
 
         lastKeyCode = keyCode;
@@ -45,7 +46,7 @@ public class EventManager {
         if (keyCode == KEYCODE_C) {
             eventManagerListener.showConfigurationUI();
         }
-        else if (keyCode == KEYCODE_SPACE) {
+        else if (keyCode == KEYCODE_SPACE || keyCode == PS4_CIRCLE) {
             eventManagerListener.showNextImage();
         }
         else if (keyCode == KeyEvent.EO1_TOP_BUTTON) {
@@ -55,6 +56,12 @@ public class EventManager {
             eventManagerListener.adjustMinimumBrightness();
         } else if (keyCode == android.view.KeyEvent.KEYCODE_S) {
             eventManagerListener.openSystemSettings();
+        } else if (keyCode == KEYCODE_U) {
+            eventManagerListener.openUpdateWebsite();
         }
+        else {
+            return false;
+        }
+        return true;
     }
 }

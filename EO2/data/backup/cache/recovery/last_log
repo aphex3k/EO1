@@ -1,0 +1,353 @@
+__bionic_open_tzdata: couldn't find any tzdata when looking for localtime!
+__bionic_open_tzdata: couldn't find any tzdata when looking for GMT!
+__bionic_open_tzdata: couldn't find any tzdata when looking for posixrules!
+Starting recovery on Thu Dec 15 21:45:20 2016
+E:unknown volume for path [/cache/recovery/last_locale]
+E:Can't mount /cache/recovery/last_locale
+locale is [(null)]
+I:loaded /etc/recovery.kl
+I:recovery key map table
+I:=========================
+I:  0 type:select value:-4 key:28 15 158 -1 -1 -1
+I:  1 type:down value:-3 key:108 114 109 -1 -1 -1
+I:  2 type:up value:-2 key:103 104 115 -1 -1 -1
+I:  3 type:back_door value:-6 key:128 26 118 -1 -1 -1
+I:
+framebuffer: fd 4 (1280 x 720)
+       installing_text:  (1 x 1 @ 1896)
+          erasing_text:  (1 x 1 @ 1599)
+       no_command_text:  (1 x 1 @ 1599)
+            error_text:  (1 x 1 @ 1599)
+recovery filesystem table
+=========================
+  0 /bootloader mtd bootloader 0
+  1 /logo mtd logo 0
+  2 /aml_logo mtd aml_logo 0
+  3 /recovery mtd recovery 0
+  4 /boot mtd boot 0
+  5 /system ext4 /dev/block/system 0
+  6 /cache ext4 /dev/block/cache 0
+  7 /data ext4 /dev/block/data 0
+  8 /sdcard auto /dev/block/mmcblk#p# 0
+  9 /udisk auto /dev/block/sda# 0
+  10 /backup ext4 /dev/block/backup 0
+  11 /tmp ramdisk ramdisk 0
+
+stat /dev/block/env OK
+env device is  /dev/block/env  erasesize=(0x00000) envsize=(0x10000)
+E:Bad bootloader arguments
+"(null)"
+I:Got arguments from /cache/recovery/command
+stat /dev/block/env OK
+env device is  /dev/block/env  erasesize=(0x00000) envsize=(0x10000)
+---void factory_reset_wipe_data(int*, char***),wipe_data=success
+stat /dev/block/env OK
+env device is  /dev/block/env  erasesize=(0x00000) envsize=(0x10000)
+============================== upgrade_step = 2
+Command: "/sbin/recovery" "--wipe_data" "--locale=en_US"
+
+bt.keep_on.enable=true
+hw.ddr.size=1024
+hw.has.bluetooth=false
+hw.has.accelerometer=true
+hw.nopm=true
+hw.nogps=true
+hw.cameras=0
+hw.nophone=false
+hw.nobattery=true
+hw.novibrate=true
+hw.hasethernet=true
+hw.hasusbcamera=true
+ro.hw.ethernet.onboard=true
+ro.sf.hwrotation=0
+ro.ui.cursor=surface
+ro.app.optimization=true
+ro.com.android.dateformat=MM-dd-yyyy
+ro.boot.firstboot=0
+ro.hdmi.spdif=true
+ro.osd2.size=64x64
+ro.wifi.channels=11
+ro.alarm.align=true
+ro.allow.mock.location=1
+ro.board.platform=meson8
+ro.build.id=V002M8B01_20160907
+ro.build.date=Wed Sep  7 18:20:52 HKT 2016
+ro.build.date.utc=1473243652
+ro.build.host=ubt124
+ro.build.tags=test-keys
+ro.build.type=eng
+ro.build.user=lcq
+ro.build.display.id=stvm8b-eng 4.4.2 V002M8B01_20160907 20160907 test-keys
+ro.build.product=stvm8b
+ro.build.version.sdk=19
+ro.build.version.release=4.4.2
+ro.build.version.codename=REL
+ro.build.version.incremental=20160907
+ro.build.description=stvm8b-eng 4.4.2 V002M8B01_20160907 20160907 test-keys
+ro.build.fingerprint=MBX/stvm8b/stvm8b:4.4.2/V002M8B01_20160907/20160907:user/test-keys
+ro.build.characteristics=tablet
+ro.camera.exif.make=M8b
+ro.camera.exif.model=stvm8b
+ro.camera.preview.MaxSize=1280x720
+ro.camera.preview.UseMJPEG=1
+ro.camera.preview.LimitedRate=1280x720x30,640x480x30,320x240x28
+ro.camera.orientation.back=0
+ro.camera.orientation.front=0
+ro.config.ringtone=Ring_Synth_04.ogg
+ro.config.alarm_alert=Alarm_Classic.ogg
+ro.config.notification_sound=pixiedust.ogg
+ro.kernel.android.checkjni=1
+ro.screen.has.tvout=true
+ro.screen.has.timeout=false
+ro.screen.has.brightness=false
+ro.secure=0
+ro.amlogic.no.preloadclass=1
+ro.carrier=unknown
+ro.product.cpu.abi=armeabi-v7a
+ro.product.cpu.abi2=armeabi
+ro.product.name=stvm8b
+ro.product.board=stvm8b
+ro.product.brand=MBX
+ro.product.model=Quad-Core Enjoy TV Box
+ro.product.device=eo2
+ro.product.locale.region=US
+ro.product.locale.language=en
+ro.product.customer=0xCD000001
+ro.product.manufacturer=MBX
+ro.baseband=unknown
+ro.bootmode=unknown
+ro.ethernet.default_on=true
+ro.hardware=amlogic
+ro.opengles.version=131072
+ro.platform.has.tts=false
+ro.platform.has.pppoe=true
+ro.platform.has.touch=false
+ro.platform.has.rotate=true
+ro.platform.has.cecmode=false
+ro.platform.has.cvbsmode=false
+ro.platform.has.security=false
+ro.platform.has.mbxuimode=true
+ro.platform.has.digitaudio=true
+ro.platform.has.defaulttvfreq=false
+ro.platform.has.realoutputmode=true
+ro.platform.filter.modes=4k2k24hz,4k2k25hz,4k2k30hz,4k2ksmpte
+ro.platform.support.dts=true
+ro.platform.support.dtstrans=true
+ro.platform.support.dtsmulasset=true
+ro.platform.hdmionly=true
+ro.revision=10
+ro.serialno=12345678900
+ro.ubootenv.varible.prefix=ubootenv.var
+ro.firstboot=0
+ro.quickboot.enable=false
+ro.statusbar.button=false
+ro.statusbar.volume=true
+ro.statusbar.widget=false
+ro.statusbar.screenshot=true
+ro.statusbar.gotodownload=false
+ro.statusbar.yearmonthdayweek=false
+ro.bootloader=unknown
+ro.debuggable=1
+ro.factorytest=0
+ro.permissions.settings=true
+ro.vpn_eth_mtu=1400
+ro.vpn_ppp_mtu=1250
+ro.vpn_wlan_mtu=1400
+ro.default_eth_mtu=1500
+ro.default_wlan_mtu=1500
+drm.service.enable=true
+ds1.audio.effect.support=false
+ds1.audio.multichannel.support=false
+dtv.standard=DVBS
+gps.enable=false
+has.media.poll=true
+mbx.timeout.enable=false
+mbx.3D_Bright.enable=false
+net.bt.name=Android
+net.change=net.bt.name
+sys.fb.bits=32
+sys.amplayer.drop_pcm=1
+sys.screensaver.enable=true
+sys.keeplauncher.landcape=true
+sys.defaultStream.ismusic=true
+hwui.render_dirty_regions=false
+init.svc.adbd=running
+init.svc.console=running
+init.svc.display=running
+init.svc.healthd=running
+init.svc.ueventd=running
+init.svc.recovery=running
+init.svc.remotecontrol=stopped
+prop.sp.brightness=off
+wifi.interface=wlan0
+const.window.h=1080
+const.window.w=1920
+debug.hwui.render_dirty_regions=false
+media.arm.audio.decoder=ape,flac,dts,ac3,eac3,wma,wmapro,mp3,aac,vorbis,raac,cook,amr,pcm,adpcm,aac_latm,rm,alac
+media.wfd.use-pcm-audio=true
+media.wfd.videoframerate=20
+media.wfd.videoreolutiontype=0
+media.wfd.videoreolutiongroup=5
+media.decoder.vfm.defmap=decoder ppmgr deinterlace amvideo
+media.amplayer.enable=true
+media.amplayer.low_ram=true
+media.amplayer.startmode=true
+media.amplayer.thumbnail=true
+media.amplayer.seekkeyframe=1
+media.amplayer.dsource4local=1
+media.amplayer.enable-acodecs=ac3,eac3,rm,flac,dts,thd
+media.amplayer.support-exname=divx,h264,avi,ts,m2ts,mkv,mp4,mpg,mpeg,rm,rmvb,wmv,ts,dat,vob,vc1
+media.amplayer.thumbnail4http=true
+media.amplayer.widevineenable=false #antor modify for playready
+media.amplayer.support-exname1=mp2,mp3,ac3
+media.libplayer.seek.fwdsearch=1
+media.libplayer.modules=vhls_mod,dash_mod,curl_mod,prhls_mod
+media.libplayer.curlenable=true
+media.amsuperplayer.enable=true
+media.amsuperplayer.defplayer=PV_PLAYER
+media.amsuperplayer.m4aplayer=STAGEFRIGHT_PLAYER
+media.html5videowin.enable=1
+config.enable_quickboot=true
+dalvik.vm.heapsize=384m
+dalvik.vm.heapmaxfree=8m
+dalvik.vm.heapminfree=512k
+dalvik.vm.heapstartsize=8m
+dalvik.vm.heapgrowthlimit=128m
+dalvik.vm.stack-trace-file=/data/anr/traces.txt
+dalvik.vm.heaptargetutilization=0.75
+gadget.nand.force_sync=true
+online.ip=http://www.geniatech.net/down-eng/upgrade/stvm8b_4.4/
+online.ip.name=update.xml
+online.ip.type=static
+persist.sys.ui.hw=true
+persist.sys.usb.config=mtp,adb
+persist.sys.dalvik.vm.lib=libdvm.so
+persist.sys.hideStatusBar=true
+persist.miracast.hdcp2=false
+service.adb.tcp.port=5555
+service.bootvideo=0
+keyguard.no_require_sim=1
+ubootenv.var.has.accelerometer=true
+ubootenv.var.disp.fromleft=
+ubootenv.var.emac=efuse
+ubootenv.var.wifi=ap6330
+ubootenv.var.verhw=0x301
+ubootenv.var.camera=usb
+ubootenv.var.verubt=caca5e3(20160726.144554)
+ubootenv.var.bootcmd=run storeboot
+ubootenv.var.ethaddr=f8:02:78:50:27:26
+ubootenv.var.macaddr=f8:02:78:50:27:26
+ubootenv.var.cvbsmode=576cvbs
+ubootenv.var.hdmimode=1080p
+ubootenv.var.poweroff=disable
+ubootenv.var.boardname=stvm8b
+ubootenv.var.boardtype=m8b_normal
+ubootenv.var.cecconfig=false
+ubootenv.var.firstboot=0
+ubootenv.var.1024x768_x=
+ubootenv.var.1024x768_y=
+ubootenv.var.1280x800_x=
+ubootenv.var.1280x800_y=
+ubootenv.var.4k2k24hz_x=
+ubootenv.var.4k2k24hz_y=
+ubootenv.var.4k2k25hz_x=
+ubootenv.var.4k2k25hz_y=
+ubootenv.var.4k2k30hz_x=
+ubootenv.var.4k2k30hz_y=
+ubootenv.var.outputmode=1080p
+ubootenv.var.1600x1200_x=
+ubootenv.var.1600x1200_y=
+ubootenv.var.1920x1200_x=
+ubootenv.var.1920x1200_y=
+ubootenv.var.2560x1600_x=
+ubootenv.var.2560x1600_y=
+ubootenv.var.480ioutputx=
+ubootenv.var.480ioutputy=
+ubootenv.var.480poutputx=
+ubootenv.var.480poutputy=
+ubootenv.var.4k2ksmpte_x=
+ubootenv.var.4k2ksmpte_y=
+ubootenv.var.576ioutputx=
+ubootenv.var.576ioutputy=
+ubootenv.var.576poutputx=
+ubootenv.var.576poutputy=
+ubootenv.var.720poutputx=
+ubootenv.var.720poutputy=
+ubootenv.var.audiodecode=dummy
+ubootenv.var.1080ioutputx=
+ubootenv.var.1080ioutputy=
+ubootenv.var.1080poutputx=0
+ubootenv.var.1080poutputy=0
+ubootenv.var.1024x768_width=
+ubootenv.var.1280x800_width=
+ubootenv.var.4k2k24hz_width=
+ubootenv.var.4k2k25hz_width=
+ubootenv.var.4k2k30hz_width=
+ubootenv.var.1024x768_height=
+ubootenv.var.1280x800_height=
+ubootenv.var.1600x1200_width=
+ubootenv.var.1920x1200_width=
+ubootenv.var.2560x1600_width=
+ubootenv.var.480ioutputwidth=
+ubootenv.var.480poutputwidth=
+ubootenv.var.4k2k24hz_height=
+ubootenv.var.4k2k25hz_height=
+ubootenv.var.4k2k30hz_height=
+ubootenv.var.4k2ksmpte_width=
+ubootenv.var.576ioutputwidth=
+ubootenv.var.576poutputwidth=
+ubootenv.var.720poutputwidth=
+ubootenv.var.1080ioutputwidth=
+ubootenv.var.1080poutputwidth=1920
+ubootenv.var.1600x1200_height=
+ubootenv.var.1920x1200_height=
+ubootenv.var.2560x1600_height=
+ubootenv.var.480ioutputheight=
+ubootenv.var.480poutputheight=
+ubootenv.var.4k2ksmpte_height=
+ubootenv.var.576ioutputheight=
+ubootenv.var.576poutputheight=
+ubootenv.var.720poutputheight=
+ubootenv.var.digitaudiooutput=
+ubootenv.var.1080ioutputheight=
+ubootenv.var.1080poutputheight=1080
+ubootenv.var.defaulttvfrequency=
+libplayer.netts.recalcpts=1
+libplayer.livets.softdemux=1
+virtualsd.enable=true
+
+stat /dev/block/env OK
+env device is  /dev/block/env  erasesize=(0x00000) envsize=(0x10000)
+write env successful,sync & fsync...
+stat /dev/block/env OK
+env device is  /dev/block/env  erasesize=(0x00000) envsize=(0x10000)
+fw_setenv "wipe_data=failed" ok
+start erase volume: /data
+Formatting /data...
+ext4_erase_volum : open
+##ext4_erase_volum : erase /dev/block/data
+ext4_erase_volum : OK
+make_ext4fs_internal _directory:(null) directory:(null)
+Creating filesystem with parameters:
+    Size: 5347704832
+    Block size: 4096
+    Blocks per group: 32768
+    Inodes per group: 8160
+    Inode size: 256
+    Journal blocks: 20399
+    Label: 
+    Blocks: 1305592
+    Block groups: 40
+    Reserved block group size: 319
+Created filesystem with 11/326400 inodes and 43450/1305592 blocks
+format volume:/data sucessed!,now fsync the format device:
+stat /dev/block/env OK
+env device is  /dev/block/env  erasesize=(0x00000) envsize=(0x10000)
+write env successful,sync & fsync...
+stat /dev/block/env OK
+env device is  /dev/block/env  erasesize=(0x00000) envsize=(0x10000)
+fw_setenv "wipe_data=successful" ok
+install_customized_data.
+install_customized_data
+Can not found /system/customized_data.tar. Continue.
+I:Saving locale "en_US"

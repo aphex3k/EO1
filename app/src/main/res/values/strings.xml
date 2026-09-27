@@ -1,4 +1,5 @@
 <resources>
     <string name="app_name">EO1</string>
     <string name="debug_information_will_show_here">Debug information will show here</string>
+    <string name="connection_status_key">connection status</string>
 </resources>

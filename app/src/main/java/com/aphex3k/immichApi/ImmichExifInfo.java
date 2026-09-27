@@ -34,7 +34,7 @@ public class ImmichExifInfo {
     private Float fNumber;
 
     @SerializedName("fileSizeInByte")
-    private Integer fileSizeInByte;
+    private Long fileSizeInByte;
 
     @SerializedName("focalLength")
     private Float focalLength;
@@ -104,7 +104,7 @@ public class ImmichExifInfo {
         return fNumber;
     }
 
-    public Integer getFileSizeInByte() {
+    public Long getFileSizeInByte() {
         return fileSizeInByte;
     }
 

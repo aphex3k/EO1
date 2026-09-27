@@ -7,4 +7,5 @@ public interface EventManagerListener extends ListenerInterface {
     void adjustMinimumBrightness();
     void showNextImage();
     void openSystemSettings();
+    void openUpdateWebsite();
 }

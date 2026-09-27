@@ -9,14 +9,14 @@ import java.util.List;
 @Keep
 public class ImmichApiTagAssetBody {
 
-    @SerializedName("assetIds")
-    private List<String> assetIds;
+    @SerializedName("ids")
+    private List<String> ids;
 
-    public ImmichApiTagAssetBody(List<String> assetIds) {
-        this.assetIds = assetIds;
+    public ImmichApiTagAssetBody(List<String> ids) {
+        this.ids = ids;
     }
 
-    public List<String> getAssetIds() {
-        return assetIds;
+    public List<String> getIds() {
+        return ids;
     }
 }

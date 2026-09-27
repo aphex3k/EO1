@@ -9,14 +9,11 @@ public class ImmichApiLoginResponse extends ImmichApiResponse {
     @SerializedName("accessToken")
     private String accessToken;
 
-    @SerializedName("firstName")
-    private String firstName;
-
     @SerializedName("isAdmin")
     private Boolean isAdmin;
 
-    @SerializedName("lastName")
-    private String lastName;
+    @SerializedName("name")
+    private String name;
 
     @SerializedName("profileImagePath")
     private String profileImagePath;
@@ -34,12 +31,8 @@ public class ImmichApiLoginResponse extends ImmichApiResponse {
         return accessToken;
     }
 
-    public String getFirstName() {
-        return firstName;
-    }
-
-    public String getLastName() {
-        return lastName;
+    public String getName() {
+        return name;
     }
 
     public String getUserId() {

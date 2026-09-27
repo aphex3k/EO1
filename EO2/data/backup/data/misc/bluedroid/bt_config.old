@@ -1,0 +1,543 @@
+<Bluedroid>
+    <N1 Tag="Local">
+        <N1 Tag="Adapter">
+            <N1 Tag="BluezMigrationDone" Type="int">1</N1>
+            <N2 Tag="Address" Type="string">22:22:bd:0d:98:50</N2>
+            <N3 Tag="LE_LOCAL_KEY_IR" Type="binary">ac0aa7fa2784bf638cfc2234ea1a202f</N3>
+            <N4 Tag="LE_LOCAL_KEY_IRK" Type="binary">59fcc4a11e427cce866cc1a762fc4842</N4>
+            <N5 Tag="LE_LOCAL_KEY_DHK" Type="binary">664591d7a4eec123c7d5c16a7b6a5f7b</N5>
+            <N6 Tag="LE_LOCAL_KEY_ER" Type="binary">2a6384f30066d445ce2575650bfc28b0</N6>
+            <N7 Tag="ScanMode" Type="int">2</N7>
+            <N8 Tag="DiscoveryTimeout" Type="int">1200000</N8>
+            <N9 Tag="Name" Type="string">EO2 LGDNKQ</N9>
+        </N1>
+        <N2 Tag="AutoPairBlacklist">
+            <N1 Tag="AddressBlacklist" Type="string">00:02:C7,00:16:FE,00:19:C1,00:1B:FB,00:1E:3D,00:21:4F,00:23:06,00:24:33,00:A0:79,00:0E:6D,00:13:E0,00:21:E8,00:60:57,00:0E:9F,00:12:1C,00:18:91,00:18:96,00:13:04,00:16:FD,00:22:A0,00:0B:4C,00:60:6F,00:23:3D,00:C0:59,00:0A:30,00:1E:AE,00:1C:D7,00:80:F0,00:12:8A,00:09:93,00:80:37,00:26:7E,00:26:e8
+</N1>
+            <N2 Tag="ExactNameBlacklist" Type="string">Motorola IHF1000,i.TechBlueBAND,X5 Stereo v1.3,KML_CAN
+</N2>
+            <N3 Tag="PartialNameBlacklist" Type="string">BMW,Audi,Parrot,Car
+</N3>
+            <N4 Tag="FixedPinZerosKeyboardBlacklist" Type="string">00:0F:F6
+</N4>
+        </N2>
+    </N1>
+    <N2 Tag="Remote">
+        <N1 Tag="4e:2c:6c:cb:4e:35">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N1>
+        <N2 Tag="68:dc:fb:66:26:a9">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N2>
+        <N3 Tag="62:16:8c:0e:09:39">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N3>
+        <N4 Tag="42:41:9c:cb:9c:76">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N4>
+        <N5 Tag="46:60:39:57:f1:a3">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N5>
+        <N6 Tag="41:db:17:e0:80:6d">
+            <N1 Tag="Name" Type="string">S27 300A LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N6>
+        <N7 Tag="78:76:75:51:f0:14">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N7>
+        <N8 Tag="4a:cc:df:dd:7c:70">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N8>
+        <N9 Tag="68:30:fc:27:67:08">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N9>
+        <N10 Tag="0d:a3:dd:a1:4d:df">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N10>
+        <N11 Tag="c4:01:da:a2:97:ad">
+            <N1 Tag="Name" Type="string">Meshtastic_97ad</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N11>
+        <N12 Tag="53:8a:56:e0:03:c9">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N12>
+        <N13 Tag="6f:a0:aa:ca:19:f2">
+            <N1 Tag="Name" Type="string">S27 D946 LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N13>
+        <N14 Tag="5b:9e:05:0f:ec:2f">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N14>
+        <N15 Tag="ef:70:2e:e3:9e:9d">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N15>
+        <N16 Tag="6b:15:15:bd:8b:3f">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N16>
+        <N17 Tag="7b:15:f6:8d:a6:00">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N17>
+        <N18 Tag="e7:8f:09:f8:e2:d0">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N18>
+        <N19 Tag="0a:7b:06:4f:d4:5e">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N19>
+        <N20 Tag="fc:c1:88:c9:44:4b">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N20>
+        <N21 Tag="f3:aa:be:97:72:30">
+            <N1 Tag="Name" Type="string">Eve Light Switch EAAB</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N21>
+        <N22 Tag="77:ae:1e:34:d5:2b">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N22>
+        <N23 Tag="4e:54:18:61:eb:f5">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N23>
+        <N24 Tag="de:76:bc:11:50:b5">
+            <N1 Tag="Name" Type="string">Nanoleaf A19 5DLS</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N24>
+        <N25 Tag="d8:d0:3c:8d:ed:e4">
+            <N1 Tag="Name" Type="string">Aqa</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N25>
+        <N26 Tag="cc:61:2e:75:c7:d5">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N26>
+        <N27 Tag="df:b8:cf:a5:c7:a3">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N27>
+        <N28 Tag="74:82:12:91:f5:7a">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N28>
+        <N29 Tag="5b:ab:a2:e8:ce:cf">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N29>
+        <N30 Tag="61:16:bd:75:79:8a">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N30>
+        <N31 Tag="d0:98:b5:5e:06:76">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N31>
+        <N32 Tag="f6:c1:cb:1b:ab:72">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N32>
+        <N33 Tag="f9:ab:35:6b:e6:18">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N33>
+        <N34 Tag="ca:a8:37:53:7d:45">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N34>
+        <N35 Tag="df:30:40:15:31:54">
+            <N1 Tag="Name" Type="string">Eve Light Switch DFA8</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N35>
+        <N36 Tag="e7:3a:c0:b4:ab:63">
+            <N1 Tag="Name" Type="string">DA1</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N36>
+        <N37 Tag="e6:75:c5:f9:bc:61">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N37>
+        <N38 Tag="f7:41:0a:38:32:b9">
+            <N1 Tag="Name" Type="string">Eve Light Switch 7D5E</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N38>
+        <N39 Tag="59:f5:d9:7c:7f:9b">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N39>
+        <N40 Tag="df:22:f5:23:11:42">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N40>
+        <N41 Tag="3b:b0:0b:11:d5:1a">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N41>
+        <N42 Tag="ef:98:f0:98:4e:ff">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N42>
+        <N43 Tag="cb:53:b2:9c:40:d4">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N43>
+        <N44 Tag="56:76:04:62:ff:4d">
+            <N1 Tag="Name" Type="string">S27 D946 LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N44>
+        <N45 Tag="ed:ed:10:c6:4a:d6">
+            <N1 Tag="Name" Type="string">S30 4042 LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N45>
+        <N46 Tag="ca:b7:70:ad:a0:e0">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N46>
+        <N47 Tag="09:55:5f:66:3e:89">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N47>
+        <N48 Tag="c7:74:e2:4c:ad:f0">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N48>
+        <N49 Tag="2c:4c:c6:48:88:d5">
+            <N1 Tag="Name" Type="string">Venus_2C4CC64888D5</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">0</N4>
+        </N49>
+        <N50 Tag="d1:e0:a6:81:a5:d7">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N50>
+        <N51 Tag="c0:6d:ba:9c:1a:65">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N51>
+        <N52 Tag="d1:49:eb:37:40:67">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N52>
+        <N53 Tag="60:43:57:76:7b:2b">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N53>
+        <N54 Tag="c7:7b:de:69:77:cf">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N54>
+        <N55 Tag="5d:73:27:d0:d6:a1">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N55>
+        <N56 Tag="72:ba:d1:d3:98:d8">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N56>
+        <N57 Tag="79:65:8f:3e:bb:b8">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N57>
+        <N58 Tag="7e:da:cf:f3:d1:98">
+            <N1 Tag="Name" Type="string">S27 300A LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N58>
+        <N59 Tag="e4:73:84:9b:ed:08">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N59>
+        <N60 Tag="38:18:4c:5a:5d:8b">
+            <N1 Tag="Name" Type="string">LE_WH-1000XM3</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">3</N3>
+            <N4 Tag="AddrType" Type="int">0</N4>
+        </N60>
+        <N61 Tag="e3:47:d4:1e:06:47">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N61>
+        <N62 Tag="db:01:01:5e:47:1b">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N62>
+        <N63 Tag="e1:02:36:11:1c:91">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N63>
+        <N64 Tag="d6:95:17:0d:0d:ac">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N64>
+        <N65 Tag="c1:c8:e9:82:0a:d2">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N65>
+        <N66 Tag="e0:9a:0d:a5:07:ab">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N66>
+        <N67 Tag="e2:e8:50:2d:1c:66">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N67>
+        <N68 Tag="c9:ed:4f:e2:a9:58">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N68>
+        <N69 Tag="c8:df:f5:67:ba:bf">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N69>
+        <N70 Tag="e8:73:3b:07:5a:96">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N70>
+        <N71 Tag="ed:ed:7d:63:42:1e">
+            <N1 Tag="Name" Type="string">S30 404E LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N71>
+        <N72 Tag="c6:3a:9c:5e:16:53">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N72>
+        <N73 Tag="7d:3a:cc:b4:d0:78">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N73>
+        <N74 Tag="55:be:39:85:4c:e2">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N74>
+        <N75 Tag="50:f2:12:d0:58:41">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N75>
+        <N76 Tag="e7:97:f7:d4:30:6d">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N76>
+        <N77 Tag="d4:a7:3f:25:2b:6a">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N77>
+        <N78 Tag="45:3a:68:23:60:e6">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N78>
+        <N79 Tag="60:a6:50:20:e6:5a">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N79>
+        <N80 Tag="7d:6e:60:03:5c:4a">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N80>
+        <N81 Tag="60:16:7e:38:08:cf">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N81>
+        <N82 Tag="d8:e2:e6:a3:7d:e2">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N82>
+        <N83 Tag="6a:59:77:15:0b:9b">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N83>
+        <N84 Tag="6f:92:31:08:af:d4">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N84>
+        <N85 Tag="53:c4:6c:79:39:5f">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N85>
+        <N86 Tag="7e:30:e5:a6:99:21">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N86>
+        <N87 Tag="7f:71:a4:d4:a7:95">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N87>
+        <N88 Tag="03:d4:d3:c3:0b:e3">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N88>
+        <N89 Tag="76:75:e1:9f:f5:07">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N89>
+        <N90 Tag="77:60:95:c2:00:34">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N90>
+        <N91 Tag="00:8e:6e:8a:cf:ae">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N91>
+        <N92 Tag="4e:5a:58:e5:95:ff">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N92>
+        <N93 Tag="1f:97:97:86:63:45">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N93>
+        <N94 Tag="75:8d:cb:63:72:e4">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N94>
+        <N95 Tag="5a:b1:5b:3c:2f:2e">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N95>
+        <N96 Tag="ee:c1:5d:0f:e0:64">
+            <N1 Tag="Name" Type="string">Ace 3</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N96>
+        <N97 Tag="4c:fe:42:23:e1:ee">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N97>
+        <N98 Tag="69:eb:85:dd:22:fe">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N98>
+        <N99 Tag="6f:af:1d:7d:29:cd">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N99>
+        <N100 Tag="77:23:93:85:2d:69">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N100>
+        <N101 Tag="79:94:9b:2a:b0:2c">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N101>
+        <N102 Tag="79:06:a1:55:bd:31">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N102>
+        <N103 Tag="66:56:77:7f:85:b3">
+            <N1 Tag="Name" Type="string">S27 D946 LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N103>
+        <N104 Tag="5d:ff:d9:56:03:4f">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N104>
+        <N105 Tag="4d:cb:62:65:65:3a">
+            <N1 Tag="Name" Type="string">S27 300A LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N105>
+        <N106 Tag="e5:e5:d4:d2:a4:61">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N106>
+        <N107 Tag="48:6a:17:18:ef:d1">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N107>
+        <N108 Tag="c9:05:00:c8:31:fd">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N108>
+        <N109 Tag="6a:26:a6:ab:46:37">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N109>
+        <N110 Tag="7e:84:bf:da:23:1c">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N110>
+        <N111 Tag="f2:5d:e6:08:ab:f8">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N111>
+        <N112 Tag="c7:1a:4d:e9:e5:eb">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N112>
+        <N113 Tag="cf:4b:d3:46:ca:57">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N113>
+        <N114 Tag="c7:ed:86:cf:3a:38">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N114>
+        <N115 Tag="f6:91:4e:a1:af:a6">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N115>
+        <N116 Tag="d2:f7:f5:d6:1d:0f">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N116>
+        <N117 Tag="c7:96:ba:49:4d:d8">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N117>
+        <N118 Tag="c0:ab:a6:5d:88:75">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N118>
+        <N119 Tag="20:28:4d:de:0e:15">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N119>
+        <N120 Tag="4f:e0:7a:df:bc:84">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N120>
+        <N121 Tag="55:3c:dd:1c:8f:e2">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N121>
+        <N122 Tag="5f:ae:f3:c1:c8:bf">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N122>
+        <N123 Tag="f4:99:5d:e9:95:d9">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N123>
+        <N124 Tag="c9:27:e8:05:45:f0">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N124>
+        <N125 Tag="fd:06:bb:f3:4a:f4">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N125>
+        <N126 Tag="d1:3f:c3:c0:53:20">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N126>
+        <N127 Tag="7a:d3:b0:c0:ef:4c">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N127>
+        <N128 Tag="f7:6c:9e:24:0e:68">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N128>
+        <N129 Tag="eb:2e:9c:c9:ff:bd">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N129>
+        <N130 Tag="76:04:02:5d:33:ab">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N130>
+        <N131 Tag="56:68:9c:8e:b7:38">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N131>
+        <N132 Tag="0e:64:a8:73:71:da">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N132>
+        <N133 Tag="6a:2c:9c:b3:bd:79">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N133>
+        <N134 Tag="7c:df:dd:d6:36:af">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N134>
+        <N135 Tag="75:0e:ea:a6:f0:92">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N135>
+        <N136 Tag="78:fd:66:ea:10:fb">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N136>
+        <N137 Tag="c4:30:ca:81:6f:40">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N137>
+        <N138 Tag="11:dd:37:22:88:57">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N138>
+        <N139 Tag="51:c6:39:aa:e0:b6">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N139>
+        <N140 Tag="45:cb:9b:65:ff:42">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N140>
+        <N141 Tag="7f:ea:83:86:b4:fd">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N141>
+        <N142 Tag="54:22:0e:c5:9f:93">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N142>
+        <N143 Tag="7c:a3:30:37:d6:01">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N143>
+        <N144 Tag="73:71:f4:f9:d8:c9">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N144>
+        <N145 Tag="55:75:49:1d:aa:05">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N145>
+        <N146 Tag="77:83:e7:ac:31:1c">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N146>
+        <N147 Tag="53:a0:d1:ab:4d:c5">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N147>
+        <N148 Tag="4d:24:63:a8:19:f9">
+            <N1 Tag="Name" Type="string">S27 D946 LE</N1>
+            <N2 Tag="DevClass" Type="int">7936</N2>
+            <N3 Tag="DevType" Type="int">2</N3>
+            <N4 Tag="AddrType" Type="int">1</N4>
+        </N148>
+        <N149 Tag="5c:84:be:16:4f:99">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N149>
+        <N150 Tag="2a:b9:d8:bd:29:4f">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N150>
+        <N151 Tag="46:09:7b:62:57:0c">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N151>
+        <N152 Tag="48:d2:ff:67:c8:a3">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N152>
+        <N153 Tag="5b:94:25:d8:42:ea">
+            <N1 Tag="AddrType" Type="int">1</N1>
+        </N153>
+    </N2>
+</Bluedroid>
