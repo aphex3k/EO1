@@ -29,6 +29,11 @@ public class TsPlayerController implements VideoPlayerController {
     }
 
     @Override
+    public void setDurationHint(int durationMs) {
+        videoView.setDurationHint(durationMs);
+    }
+
+    @Override
     public void play() {
         videoView.play();
     }

@@ -1103,7 +1103,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             try {
                 cancelVideoWatchdog();
                 selectVideoPlayer(true);
-                startVideoOnController(videoPlayer, file, assetId, activityReference, true);
+                int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
+                startVideoOnController(videoPlayer, file, assetId, videoDurationMs, activityReference, true);
             } catch (Exception e) {
                 restoreImageViewAfterVideoFailure();
                 assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
@@ -1155,7 +1156,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("video", "TsPlayer → MediaPlayer fallback #" + tsFallbackCount));
         try {
             selectVideoPlayer(false);
-            startVideoOnController(videoPlayer, file, assetId, activityReference, false);
+            int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
+            startVideoOnController(videoPlayer, file, assetId, videoDurationMs, activityReference, false);
             return true;
         } catch (Exception e) {
             handleException(e);
@@ -1164,6 +1166,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     private void startVideoOnController(VideoPlayerController controller, File file, String assetId,
+                                        int durationHintMs,
                                         WeakReference<MainActivity> activityReference,
                                         boolean allowTsFallback) {
         controller.stop();
@@ -1258,6 +1261,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return false;
             }
         });
+        controller.setDurationHint(durationHintMs);
         controller.setDataSource(file.getPath());
         controller.setLooping(true);
     }

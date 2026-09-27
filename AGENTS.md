@@ -105,13 +105,14 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 - Extend types under `immichApi/` when Immich API fields change
 - Treat `app/src/main/java/com/aphex3k/eo1/` as the app core
 - Keep the LAN web server dependency-free and resource-cheap (hand-rolled `ServerSocket`, `Connection: close`); every web-server thread must be defensively wrapped — a stray exception must never reach the global `UncaughtExceptionHandler` (which calls `System.exit(2)`)
+- Let `libTsPlayer-jni.so` loop a media file **natively** — create the TsPlayer once per asset and run no per-duration Java teardown loop; full `deletePlayer` + `createPlayer` only on asset handoff / `stop()` / `surfaceDestroyed` (see [docs/TSPLAYER.md](docs/TSPLAYER.md) “Looping (native)”)
 
 **Don’t**
 
 - Commit `configuration.json`, `ffmpeg/`, or bulk `EO2/` dumps
 - Introduce Kotlin or raise `minSdk` / `maxSdk` without an explicit product decision
 - Add ExoPlayer / Media3 for video playback (known Geniatech API 19 full-system hang)
-- Pulse TsPlayer `SurfaceView` GONE→VISIBLE / `setFormat`, or mid-loop `deletePlayer`, to fix loop stalls (black frame — rejected; see [docs/TSPLAYER.md](docs/TSPLAYER.md))
+- Loop TsPlayer video with a Java per-duration `deletePlayer`/`createPlayer` (full-recreate) loop — the `.so` already loops natively; a per-duration recreate clears the Amlogic plane → a black flash every pass and fights the native loop. Also rejected for looping: `start()`-alone at EOS (EBUSY on `amstream_vbuf`) and create-without-delete (wedges after ~12 gens). Full teardown only on asset handoff / `stop()` / surface destroy. Pulse TsPlayer `SurfaceView` GONE→VISIBLE / `setFormat` only for normal show/hide, never to fix loop stalls (see [docs/TSPLAYER.md](docs/TSPLAYER.md) “Looping (native)”)
 - Add TLS/HTTPS or any new heavy dependency to the LAN web server; keep it unsecured plain-HTTP on 80→8080 for the trusted LAN only
 - Serve files via the web server from anywhere outside `filesDir/uploaded`
 - Treat README marketing or hardware setup prose as build requirements for code changes

@@ -9,7 +9,7 @@ Amlogic/Geniatech **TsPlayer** (`libTsPlayer-jni.so`) is the original Electric O
 | Immich **original** files via TsPlayer (no client re-encode when Ts available) | Client FFmpeg video re-encode while TsPlayer is preferred (~1 fps on EO CPU) |
 | `TsVideoView` (`SurfaceView`) → `TsPlayerNative` → `libTsPlayer-jni.so` | ExoPlayer / Media3 |
 | Automatic MediaPlayer fallback on load/play/surface failure | Non-Amlogic primary playback |
-| Loop via file duration timer (+ optional getCurrentTime), not getStatus | App-level video filters / ppmgr FX |
+| Native `.so` loop — create the player once per asset, no Java teardown loop | App-level video filters / ppmgr FX |
 
 When TsPlayer is available, client FFmpeg **video** prepare/reactive convert is skipped. Image convert is unchanged. See [FFMPEG.md](FFMPEG.md).
 
@@ -34,9 +34,9 @@ Runtime still requires `TsPlayerNative.isAvailable()` (`System.loadLibrary("TsPl
 ```
 download Immich original
   → prepareVideo skipped when TsPlayer available (no client libx264)
-  → displayVideo → TsVideoView (createPlayer once per asset)
-  → same-file loop: still-frame ImageView cover + start-only / create(no-delete)
-                   (deletePlayer only on next asset; stop blanks Amlogic plane)
+  → displayVideo → TsVideoView (createPlayer → setSurface → start, once per asset)
+  → loop: the .so loops the file natively (restarts at EOF; no Java intervention)
+  → deletePlayer + createPlayer only on asset handoff / stop() / surface destroy
   → on Ts error/surface-timeout: same original → MediaPlayer
   → on MediaPlayer failure: Immich /video/playback or thumbnail (not client re-encode)
 ```
@@ -45,26 +45,48 @@ Note: on-device `getStatus()` often stays `IDLE (0)` while frames play (OEM only
 
 `SurfaceView` does **not** create a surface while `INVISIBLE`/`GONE`. The layout keeps `ImageView` above `TsVideoView` so the wallpaper covers video until `onVideoPrepared` hides the image.
 
-## Looping policy
+## Looping (native)
 
-**`deletePlayer` only at asset handoff** (new `setDataSource` / `stop` / surface destroy). Mid-loop `deletePlayer` clears the Amlogic video plane → black frame between generations (observed, unacceptable).
+**The `.so` loops a media file natively.** After reaching EOF, `libTsPlayer-jni.so`
+restarts playback from the beginning on its own — no surface clear, no black frame, no
+Java callback. We therefore create the player **once per asset**
+(`createPlayer` → `setSurface` → `start`) and run **no** per-duration Java teardown loop.
 
-Same-file loop order in `TsVideoView`:
+Full teardown (`deletePlayer` + `createPlayer`) happens only:
 
-1. Show still cover on sibling `ImageView` (late frame from `MediaMetadataRetriever`) — Amlogic `stop`/EOS clears the video plane to black otherwise
-2. Prefer `start()` without `stop`
-3. Else `createPlayer` **without** `deletePlayer`, then `setSurface` + `start`
-4. Else `stop`/`start` (cover already visible)
-5. Hide cover shortly after restart
-6. On failure: error → MediaPlayer fallback (still no mid-loop delete / no surface pulse)
+- on asset handoff (new `setDataSource`),
+- on `stop()`,
+- on `surfaceDestroyed`.
 
-`deletePlayer` remains only for asset handoff / `stop` / surface destroy.
+This is the OEM's own mechanism: the stock `EoVideoView` also creates the player once and
+lets it loop, tearing down only when the cloud/UI swaps artwork (see
+[Forensic findings](#forensic-findings-original-eo-apk)).
+
+On-device confirmed (EO2, 2026-09-26): seamless looping, no wedge, no black flash between
+passes — the black-flash/wedge behavior was caused by a *Java* per-duration full-recreate
+loop, which has been removed.
+
+Do **not** reintroduce a per-duration Java loop, `start()`-at-EOS, or create-without-delete
+looping — see [rejected approaches](#looping-rejected-approaches-do-not-revive).
 
 ## Looping: rejected approaches (do not revive)
 
-### Mid-loop `deletePlayer` + `createPlayer`
+The native loop is the design. Everything below was tried to make *Java* loop the same file
+and failed on EO1/EO2 — do not revive them.
 
-**Rejected for looping.** Clears the video plane → black frame between loops. Use only when leaving the asset for the next one.
+### Per-duration Java full-recreate loop (`deletePlayer` + `createPlayer` on a timer)
+
+**Rejected — this was the original bug.** Firing a `deletePlayer` + `createPlayer` every
+`duration` (the per-duration teardown loop) cleared the Amlogic video plane on each
+`createPlayer` (~200 ms) → a visible **black flash on every pass**. Removed; replaced by
+native looping. `deletePlayer` + `createPlayer` is correct only on asset handoff / `stop` /
+surface destroy, never on a per-duration timer.
+
+### `start()`-alone at end-of-stream
+
+**Rejected** (verified on device 2026-09-26). Calling `start()` on a player parked at EOF
+re-inits the codec (`codec_video_es_init`), which returns `EBUSY` on `/dev/amstream_vbuf`
+(still held by the live player) and leaves the video frozen, spamming `amcodec` every loop.
 
 ### Surface GONE→VISIBLE / setFormat “hard recreate”
 
@@ -84,7 +106,7 @@ Native strings also imply exclusive Amlogic resources (`/dev/amstream_*`, “cod
 
 ### Repeated `createPlayer` without `deletePlayer` (many generations)
 
-**May wedge** after ~12 gens (JNI success, frozen last frame). Prefer `stop`/`start` for loops; if create-without-delete is used and wedges, fall back to MediaPlayer — do **not** “fix” with mid-loop delete.
+**May wedge** after ~12 gens (JNI success, frozen last frame). Do **not** use as a loop strategy. If an asset ever wedges under native looping, recover by moving to the next asset (asset handoff performs the full teardown) or falling back to MediaPlayer — never by adding a Java loop.
 
 ## Forensic findings (original EO APK)
 
@@ -101,7 +123,9 @@ Same static natives we wrap today. `getCurrentTime` and `resume` exist on the JN
 - `setVideoArtwork(...)` (new/changed artwork)
 - `setupView` if `mArtwork` already set
 
-So continuous same-file looping is **our** requirement; the stock app mostly tore the player down when the cloud/UI swapped artworks, not every ~10s of one clip.
+So between artwork changes the player is created **once** and left to loop the file
+**natively** in the `.so` — exactly the mechanism this APK now uses. The stock app only tore
+the player down when the cloud/UI swapped artwork, never on a per-clip timer.
 
 ### OEM same-surface restart sequence (artwork change — not tight loop)
 
@@ -116,7 +140,8 @@ So continuous same-file looping is **our** requirement; the stock app mostly tor
 7. `start()`
 8. `isPlaying = true`
 
-That full delete path is appropriate for **asset change**. Using it every loop is what introduced black frames on EO1/EO2.
+That full delete path is appropriate for **asset change**. Running it on a per-duration
+timer is what introduced the black frames on EO1/EO2.
 
 `surfaceCreated` only logs. `surfaceChanged` starts the player only if `isPlaying` CAS false→true. `surfaceDestroyed` does `stop` + `deletePlayer` if it was playing.
 
@@ -124,15 +149,20 @@ That full delete path is appropriate for **asset change**. Using it every loop i
 
 | Idea | Verdict |
 |------|---------|
+| Native `.so` loop; full teardown only on asset handoff | **Current design** |
 | Rolling A/B players | Impossible — no instance handles; exclusive amstream |
 | Surface GONE→VISIBLE between loops | Rejected — black flicker |
-| Mid-loop delete + create | Rejected — black frame |
-| stop/start for same-file loop; delete only on next asset | Current policy |
+| Mid-loop delete + create (per-duration timer) | Rejected — black frame each pass |
+| `start()`-alone at EOS | Rejected — EBUSY on amstream_vbuf, frozen |
 | Rely on `getStatus` / `getCurrentTime` for EOS | Unreliable / unused by OEM |
 
-## Open problem
+## Looping status
 
-`stop`/`start` looping without mid-loop delete is the product-correct approach; validate on device for smoothness and for wedge if create-without-delete fallback is hit often. If wedging returns, prefer MediaPlayer for that asset or rotate to the next asset — **not** mid-loop `deletePlayer` or surface destroy.
+Native looping is the shipped design and is confirmed on device (EO2, 2026-09-26): seamless
+passes, no wedge, no black flash. Watch long-term stability on real rotation (many assets,
+mixed durations). If an asset ever wedges under native looping, recover by moving to the next
+asset (asset handoff performs the full `deletePlayer` + `createPlayer`) or falling back to
+MediaPlayer — do **not** reintroduce a per-duration Java loop.
 
 ## Hard constraints (video convert)
 
@@ -144,7 +174,7 @@ On a physical EO1/EO2:
 
 1. Logcat `EO1: video player: TsPlayer (USE_TSPLAYER=true native=true)`
 2. Play a known-good local H.264 from Immich cache full-screen
-3. Loop ≥2 minutes without surface loss **and without black flicker between generations**
+3. Loop ≥2 minutes without surface loss **and without black flicker between passes** — `/state` shows `loopGen=0` and `lastRestartMethod=native-loop` (no Java recreate)
 4. Image ↔ video handoff and screen off/on
 5. HEVC (or other incompatible) still converts via FFmpeg then plays
 6. Force Ts failure (corrupt file) → log `TsPlayer → MediaPlayer fallback` then thumbnail/next asset path

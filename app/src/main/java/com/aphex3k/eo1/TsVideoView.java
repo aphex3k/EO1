@@ -19,31 +19,24 @@ import com.example.tsplayer.TsPlayerNative;
 /**
  * SurfaceView-backed Amlogic TsPlayer view.
  * <p>
- * Looping: duration timer → tear down player → one Surface GONE/VISIBLE cycle →
- * createPlayer/setSurface/start on the new surface. Avoid setFormat+visibility together
- * (that double-destroys the surface and black-screens after the first pass).
+ * Looping: the .so ({@code libTsPlayer-jni.so}) loops a media file <b>natively</b> — after
+ * reaching EOF it restarts from the beginning on its own, with no surface clear and no Java
+ * intervention. We therefore create the player <b>once per asset</b> (createPlayer → setSurface →
+ * start) and run <b>no</b> per-duration Java teardown loop. Full teardown (deletePlayer +
+ * createPlayer) happens only on asset handoff, {@link #stop()}, or surface destruction.
+ * See docs/TSPLAYER.md ("Looping (native)").
+ * <p>
+ * Do NOT reintroduce a per-duration deletePlayer/createPlayer loop: each {@code createPlayer()}
+ * costs ~200ms and clears the Amlogic plane → a visible black flash every cycle, and it fights
+ * the native loop. Alternatives that also fail: start()-alone at EOS EBUSYs on
+ * {@code /dev/amstream_vbuf}; create-without-delete wedges after ~12 gens.
  */
 public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
 
     private static final String TAG = "TsVideoView";
     private static final long PROGRESS_POLL_MS = 1000L;
     private static final long SURFACE_TIMEOUT_MS = 3000L;
-    private static final long LOOP_END_MARGIN_MS = 0L;
 
-    /**
-     * DEBUG-only: how often the loop-gap probe samples position while waiting for the next pass to
-     * start playing after a restart.
-     */
-    private static final long LOOP_PROBE_INTERVAL_MS = 30L;
-    /**
-     * DEBUG-only: give up probing for a playing next pass after this long (record a timeout).
-     */
-    private static final long LOOP_PROBE_TIMEOUT_MS = 2500L;
-    /**
-     * DEBUG-only: position (ms) at or beyond which the next pass is considered "playing".
-     */
-    private static final int LOOP_PROBE_PLAYING_THRESHOLD_MS = 200;
-    private static final long LOOP_EARLY_RESTART_MS = 80L;
     private static final long SURFACE_FALLBACK_MS = 500L;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -59,11 +52,12 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     private VideoPlayerListener listener;
     private Runnable progressPollRunnable;
     private Runnable surfaceTimeoutRunnable;
-    private Runnable durationLoopRunnable;
     private Runnable surfaceFallbackRunnable;
     private Runnable restartRunnable;
 
     private int durationMs;
+    /** Known duration (ms) supplied by the caller (Immich metadata); -1 if unknown. */
+    private int durationHintMs = -1;
     private boolean recreatingForLoop;
     private boolean awaitingSurfaceForStart;
     private int lastLoggedStatus = Integer.MIN_VALUE;
@@ -81,9 +75,8 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     private int lastEndToPlayingMs = -1;        // rewind trigger -> next pass playing (headline)
     private int lastLoopCycleMs = -1;           // previous pass start -> this one
     private int lastPosAtTriggerMs = -1;        // position read when the loop timer fired
-    private String lastRestartMethod;           // "create-no-delete" | "stop-start" | "full-recreate"
+    private String lastRestartMethod;           // "native-loop" (no Java restart) | "seek-restart"
     private long lastPassStartUptime;           // SystemClock.uptimeMillis at last (re)start
-    private Runnable loopProbeRunnable;         // DEBUG-only: polls position until next pass plays
 
     public TsVideoView(Context context) {
         super(context);
@@ -130,11 +123,14 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         }
     }
 
+    public void setDurationHint(int durationMs) {
+        this.durationHintMs = durationMs;
+    }
+
     public void setLooping(boolean looping) {
         this.looping = looping;
         if (!looping) {
             cancelProgressPoll();
-            cancelDurationLoop();
         }
     }
 
@@ -160,15 +156,14 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         awaitingSurfaceForStart = false;
         recreatingForLoop = false;
         cancelProgressPoll();
-        cancelDurationLoop();
         cancelSurfaceTimeout();
         cancelSurfaceFallback();
         cancelRestart();
-        cancelLoopProbe();
         tearDownPlayer();
         pendingPath = null;
         activePath = null;
         durationMs = 0;
+        durationHintMs = -1;
     }
 
     public int getCurrentPosition() {
@@ -182,7 +177,8 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     public void seekTo(int positionMs) {
         if (activePath != null || pendingPath != null) {
             playWhenReady = true;
-            restartForLoop();
+            lastRestartMethod = "seek-restart";
+            startOrRestartPlayer();
         }
     }
 
@@ -283,10 +279,8 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
         Log.i("EO1", "TsPlayer surfaceDestroyed awaiting=" + awaitingSurfaceForStart);
-        // During intentional loop recreate we already tore down the player.
         if (!awaitingSurfaceForStart && !recreatingForLoop) {
             cancelProgressPoll();
-            cancelDurationLoop();
             tearDownPlayer();
         }
     }
@@ -313,7 +307,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
 
         cancelSurfaceTimeout();
         cancelProgressPoll();
-        cancelDurationLoop();
         // Ensure no previous native instance (idempotent if already torn down).
         tearDownPlayer();
 
@@ -321,32 +314,46 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
 
         try {
             if (!sameFile) {
-                durationMs = readDurationMs(path);
+                if (durationHintMs > 0) {
+                    // Prefer the duration we already have. A system MediaMetadataRetriever
+                    // opens /dev/amstream_vbuf in mediaserver and holds it, permanently
+                    // starving the in-process TsPlayer codec with EBUSY.
+                    durationMs = durationHintMs;
+                } else {
+                    Log.w("EO1", "TsPlayer: no duration hint; using system retriever for " + path);
+                    durationMs = readDurationMs(path);
+                }
             }
             Log.i("EO1", "TsPlayer createPlayer path=" + path + " durationMs=" + durationMs
                     + " loopGen=" + loopGeneration);
+            long tCreate = SystemClock.uptimeMillis();
             if (!TsPlayerNative.createPlayer(path)) {
                 Log.e("EO1", "TsPlayer createPlayer failed");
                 notifyError();
                 return;
             }
+            lastCreatePlayerMs = (int) (SystemClock.uptimeMillis() - tCreate);
             playerCreated = true;
             activePath = path;
+            long tSurface = SystemClock.uptimeMillis();
             TsPlayerNative.setSurface(surface);
+            lastSetSurfaceMs = (int) (SystemClock.uptimeMillis() - tSurface);
             if (playWhenReady) {
+                long tStart = SystemClock.uptimeMillis();
                 if (!TsPlayerNative.start()) {
                     Log.e("EO1", "TsPlayer start failed");
                     tearDownPlayer();
                     notifyError();
                     return;
                 }
+                lastStartMs = (int) (SystemClock.uptimeMillis() - tStart);
                 recreatingForLoop = false;
                 awaitingSurfaceForStart = false;
                 if (listener != null) {
                     listener.onVideoPrepared();
                 }
                 scheduleProgressPoll();
-                scheduleDurationLoop();
+                lastRestartMethod = "native-loop";
                 lastPassStartUptime = SystemClock.uptimeMillis();
             }
         } catch (Throwable t) {
@@ -374,39 +381,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         } catch (Throwable ignored) {
         }
         playerCreated = false;
-    }
-
-    private void scheduleDurationLoop() {
-        cancelDurationLoop();
-        if (!looping || released || durationMs <= 0) {
-            if (durationMs <= 0) {
-                Log.w("EO1", "TsPlayer cannot schedule loop — durationMs=" + durationMs);
-            }
-            return;
-        }
-        final int generation = loopGeneration;
-        // Restart slightly before metadata end so new buffers can replace the last frame
-        // instead of blanking after EOS.
-        long delay = durationMs <= 500
-                ? durationMs
-                : Math.max(0L, durationMs - LOOP_EARLY_RESTART_MS) + LOOP_END_MARGIN_MS;
-        durationLoopRunnable = () -> {
-            durationLoopRunnable = null;
-            if (generation != loopGeneration || released) {
-                return;
-            }
-            Log.i("EO1", "TsPlayer duration elapsed (" + durationMs + "ms) — recreating for loop");
-            restartForLoop();
-        };
-        handler.postDelayed(durationLoopRunnable, delay);
-        Log.i("EO1", "TsPlayer loop scheduled in " + delay + "ms gen=" + generation);
-    }
-
-    private void cancelDurationLoop() {
-        if (durationLoopRunnable != null) {
-            handler.removeCallbacks(durationLoopRunnable);
-            durationLoopRunnable = null;
-        }
     }
 
     private void scheduleProgressPoll() {
@@ -442,159 +416,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
                     + " durationMs=" + durationMs);
         }
         scheduleProgressPoll();
-    }
-
-    private void restartForLoop() {
-        if (released || !looping || !playWhenReady) {
-            return;
-        }
-        if (pendingPath == null) {
-            pendingPath = activePath;
-        }
-        if (pendingPath == null) {
-            return;
-        }
-
-        cancelProgressPoll();
-        cancelDurationLoop();
-        cancelSurfaceFallback();
-        cancelRestart();
-
-        loopGeneration++;
-
-        long triggerUptime = SystemClock.uptimeMillis();
-        lastPosAtTriggerMs = readPositionMs();
-        lastLoopCycleMs = lastPassStartUptime > 0 ? (int) (triggerUptime - lastPassStartUptime) : -1;
-
-        // Seamless path: never blank the SurfaceView (no GONE/VISIBLE, no delete delay).
-        if (trySeamlessRestart()) {
-            lastRestartLatencyMs = (int) (SystemClock.uptimeMillis() - triggerUptime);
-            lastPassStartUptime = SystemClock.uptimeMillis();
-            Log.i("EO1", "TsPlayer seamless loop gen=" + loopGeneration);
-            scheduleProgressPoll();
-            scheduleDurationLoop();
-            logLoopPerfSummary();
-            startLoopProbe(triggerUptime);
-            return;
-        }
-
-        lastRestartLatencyMs = (int) (SystemClock.uptimeMillis() - triggerUptime);
-        lastRestartMethod = "full-recreate";
-        Log.w("EO1", "TsPlayer seamless loop failed — immediate full recreate gen=" + loopGeneration);
-        recreatingForLoop = true;
-        if (listener != null) {
-            listener.onVideoEnd();
-        }
-        tearDownPlayer();
-        recreatingForLoop = false;
-        startOrRestartPlayer();
-        logLoopPerfSummary();
-        startLoopProbe(triggerUptime);
-    }
-
-    /**
-     * Restart from the beginning without tearing down the video plane (avoids black flash).
-     * Tries in-place createPlayer first; then stop/start on the existing instance.
-     */
-    private boolean trySeamlessRestart() {
-        if (!playerCreated || !TsPlayerNative.isAvailable()) {
-            return false;
-        }
-        String path = pendingPath != null ? pendingPath : activePath;
-        Surface surface = getHolder().getSurface();
-        if (path == null || surface == null || !surface.isValid()) {
-            return false;
-        }
-        try {
-            // In-place reopen — keep the same Surface bound so the last frame stays up
-            // until new buffers arrive.
-            long c0 = SystemClock.uptimeMillis();
-            boolean created = TsPlayerNative.createPlayer(path);
-            lastCreatePlayerMs = (int) (SystemClock.uptimeMillis() - c0);
-            if (created) {
-                long s0 = SystemClock.uptimeMillis();
-                TsPlayerNative.setSurface(surface);
-                lastSetSurfaceMs = (int) (SystemClock.uptimeMillis() - s0);
-                long st0 = SystemClock.uptimeMillis();
-                if (TsPlayerNative.start()) {
-                    lastStartMs = (int) (SystemClock.uptimeMillis() - st0);
-                    lastRestartMethod = "create-no-delete";
-                    return true;
-                }
-                lastStartMs = (int) (SystemClock.uptimeMillis() - st0);
-            }
-        } catch (Throwable t) {
-            Log.w("EO1", "TsPlayer in-place createPlayer loop failed: " + t.getMessage());
-        }
-        try {
-            long st0 = SystemClock.uptimeMillis();
-            TsPlayerNative.stop();
-            boolean started = TsPlayerNative.start();
-            lastStartMs = (int) (SystemClock.uptimeMillis() - st0);
-            if (started) {
-                lastRestartMethod = "stop-start";
-            }
-            return started;
-        } catch (Throwable t) {
-            Log.w("EO1", "TsPlayer stop/start loop failed: " + t.getMessage());
-            return false;
-        }
-    }
-
-    /**
-     * DEBUG-only: poll position until the next pass is playing, then record the restart-done
-     * and rewind-trigger -> playing gaps. Bounded by a timeout; stops on release.
-     */
-    private void startLoopProbe(long triggerUptime) {
-        cancelLoopProbe();
-        if (!BuildConfig.DEBUG) {
-            return;
-        }
-        long started = SystemClock.uptimeMillis();
-        loopProbeRunnable = new Runnable() {
-            @Override
-            public void run() {
-                if (released) {
-                    return;
-                }
-                int pos = readPositionMs();
-                if (pos >= LOOP_PROBE_PLAYING_THRESHOLD_MS) {
-                    long now = SystemClock.uptimeMillis();
-                    lastRestartToPlayingMs = (int) (now - lastPassStartUptime);
-                    lastEndToPlayingMs = (int) (now - triggerUptime);
-                    Log.i("EO1", "TsPlayer loop gap: restart->playing=" + lastRestartToPlayingMs
-                            + "ms end->playing=" + lastEndToPlayingMs + "ms");
-                    cancelLoopProbe();
-                    return;
-                }
-                if (SystemClock.uptimeMillis() - started >= LOOP_PROBE_TIMEOUT_MS) {
-                    Log.w("EO1", "TsPlayer loop gap probe timed out after " + LOOP_PROBE_TIMEOUT_MS
-                            + "ms (lastPos=" + pos + ")");
-                    cancelLoopProbe();
-                    return;
-                }
-                handler.postDelayed(this, LOOP_PROBE_INTERVAL_MS);
-            }
-        };
-        handler.postDelayed(loopProbeRunnable, LOOP_PROBE_INTERVAL_MS);
-    }
-
-    private void cancelLoopProbe() {
-        if (loopProbeRunnable != null) {
-            handler.removeCallbacks(loopProbeRunnable);
-            loopProbeRunnable = null;
-        }
-    }
-
-    private void logLoopPerfSummary() {
-        if (!BuildConfig.DEBUG) {
-            return;
-        }
-        Log.i("EO1", "TsPlayer loop perf: triggerPos=" + lastPosAtTriggerMs + "ms restartLatency="
-                + lastRestartLatencyMs + "ms method=" + lastRestartMethod
-                + " create=" + lastCreatePlayerMs + "ms setSurface=" + lastSetSurfaceMs
-                + "ms start=" + lastStartMs + "ms loopCycle=" + lastLoopCycleMs
-                + "ms gen=" + loopGeneration);
     }
 
     private void cancelRestart() {
@@ -637,18 +458,36 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         if (!playerCreated || !TsPlayerNative.isAvailable()) {
             return 0;
         }
+        int nativeMs = 0;
         try {
             int raw = Math.max(0, TsPlayerNative.getCurrentTime());
-            if (raw <= 0) {
-                return 0;
+            if (raw > 0) {
+                if (durationMs >= 10000 && raw <= (durationMs / 1000) + 2) {
+                    nativeMs = raw * 1000;
+                } else {
+                    nativeMs = raw;
+                }
             }
-            if (durationMs >= 10000 && raw <= (durationMs / 1000) + 2) {
-                return raw * 1000;
-            }
-            return raw;
         } catch (Throwable t) {
-            return 0;
+            nativeMs = 0;
         }
+        if (nativeMs > 0) {
+            return nativeMs;
+        }
+        // The native getCurrentTime() is unreliable on TsPlayer (often stays 0). Fall back
+        // to elapsed time since the current pass started, clamped to the known duration,
+        // so /state reports a real, advancing position.
+        if (lastPassStartUptime > 0 && durationMs > 0) {
+            long elapsed = SystemClock.uptimeMillis() - lastPassStartUptime;
+            if (elapsed < 0) {
+                elapsed = 0;
+            }
+            if (elapsed > durationMs) {
+                elapsed = durationMs;
+            }
+            return (int) elapsed;
+        }
+        return 0;
     }
 
     private static int readDurationMs(String path) {
@@ -696,7 +535,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
 
     private void notifyError() {
         cancelProgressPoll();
-        cancelDurationLoop();
         cancelSurfaceTimeout();
         cancelSurfaceFallback();
         cancelRestart();

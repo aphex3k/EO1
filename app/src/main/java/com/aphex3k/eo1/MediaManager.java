@@ -42,6 +42,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -69,6 +70,13 @@ public class MediaManager implements MediaManagerInterface {
     private final WeakReference<MediaManagerListener> listener;
     private final WeakReference<ApiServiceGenerator.ProgressListener> downloadProgressListener;
     private final ArrayList<ImmichApiAssetResponse> immichAssets = new ArrayList<>();
+    /**
+     * Per-asset video duration (ms) from Immich metadata. Populated as assets are displayed so
+     * the TsPlayer path can avoid a system MediaMetadataRetriever (which grabs the Amlogic
+     * video-buffer node and starves the in-process codec). Absent when unknown.
+     */
+    private final ConcurrentHashMap<String, Integer> videoDurationMsByAsset =
+            new ConcurrentHashMap<String, Integer>();
     /**
      * Maps synthetic local-asset ids (deterministic UUIDs) to the uploaded file name. Rebuilt
      * from the persistent {@code filesDir/uploaded} directory at each rotation rebuild and
@@ -279,6 +287,15 @@ public class MediaManager implements MediaManagerInterface {
                 currentPlaybackPath = finalPlaybackFile.getAbsolutePath();
                 videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
                 imageConvertManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
+                if (finalAssetResponse.getType() == ImmichType.VIDEO) {
+                    // Immich reports asset duration in MILLISECONDS (ffprobe-verified: a 4.033s
+                    // clip has duration=4033). Store as-is — a *1000 here makes the seamless-loop
+                    // timer fire ~67min late, so short clips play once then freeze at EOS.
+                    Integer durationMs = finalAssetResponse.getDuration();
+                    if (durationMs != null && durationMs > 0) {
+                        videoDurationMsByAsset.put(finalAssetResponse.getId(), durationMs);
+                    }
+                }
                 activity.runOnUiThread(() -> {
                     if (finalAssetResponse.getType() == ImmichType.IMAGE) {
                         mediaManagerListener.displayPicture(finalPlaybackFile, finalAssetResponse.getId());
@@ -464,6 +481,18 @@ public class MediaManager implements MediaManagerInterface {
     /** True if the given asset id belongs to a local uploaded file. */
     public boolean isLocalAssetId(String assetId) {
         return assetId != null && localAssetIdToFilename.containsKey(assetId);
+    }
+
+    /**
+     * Video duration in milliseconds for an asset, from Immich metadata. Returns -1 when the
+     * asset is unknown or Immich did not report a duration.
+     */
+    public int getVideoDurationMs(String assetId) {
+        if (assetId == null) {
+            return -1;
+        }
+        Integer ms = videoDurationMsByAsset.get(assetId);
+        return ms != null ? ms : -1;
     }
 
     /** Package-visible test hook: current rotation-list size. */

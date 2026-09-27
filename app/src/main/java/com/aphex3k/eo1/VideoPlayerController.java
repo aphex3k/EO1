@@ -14,6 +14,14 @@ public interface VideoPlayerController {
 
     void setDataSource(String path);
 
+    /**
+     * Set the known duration (ms) before {@link #setDataSource(String)}. The TsPlayer path uses
+     * this instead of a system {@code MediaMetadataRetriever} (which would grab the Amlogic
+     * video-buffer node and starve the in-process codec). Implementations that derive their own
+     * duration (platform MediaPlayer) may ignore it.
+     */
+    void setDurationHint(int durationMs);
+
     void play();
 
     void stop();

@@ -20,7 +20,7 @@ public class ImmichApiAssetResponse extends ImmichApiResponse implements Compara
     private String deviceId;
 
     @SerializedName("duration")
-    private Integer duration;
+    private Integer duration; // video length in MILLISECONDS (Immich asset duration)
 
     @SerializedName("exifInfo")
     private ImmichExifInfo exifInfo;

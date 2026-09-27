@@ -56,6 +56,11 @@ public class MediaPlayerController implements VideoPlayerController {
     }
 
     @Override
+    public void setDurationHint(int durationMs) {
+        // The platform MediaPlayer reports its own duration; no hint needed.
+    }
+
+    @Override
     public void play() {
         videoView.play();
     }
