@@ -6,12 +6,12 @@ Amlogic/Geniatech **TsPlayer** (`libTsPlayer-jni.so`) is the original Electric O
 
 | In scope | Out of scope |
 |----------|----------------|
-| Immich **original** files via TsPlayer (no client re-encode when Ts available) | Client FFmpeg video re-encode while TsPlayer is preferred (~1 fps on EO CPU) |
+| Immich **original** files via TsPlayer (no client re-encode) | Client video re-encode (removed 2026-09; EO CPU ~1 fps on libx264) |
 | `TsVideoView` (`SurfaceView`) → `TsPlayerNative` → `libTsPlayer-jni.so` | ExoPlayer / Media3 |
 | Automatic MediaPlayer fallback on load/play/surface failure | Non-Amlogic primary playback |
 | Native `.so` loop — create the player once per asset, no Java teardown loop | App-level video filters / ppmgr FX |
 
-When TsPlayer is available, client FFmpeg **video** prepare/reactive convert is skipped. Image convert is unchanged. See [FFMPEG.md](FFMPEG.md).
+There is no client-side transcoding or conversion — the downloaded Immich original is used as-is. Undecodable images (HEIC, corrupt) and incompatible videos fall back to the Immich preview / `/video/playback` via the display-error path.
 
 ## Source map
 
@@ -33,7 +33,7 @@ Runtime still requires `TsPlayerNative.isAvailable()` (`System.loadLibrary("TsPl
 
 ```
 download Immich original
-  → prepareVideo skipped when TsPlayer available (no client libx264)
+  → no client re-encode — the downloaded original is played directly
   → displayVideo → TsVideoView (createPlayer → setSurface → start, once per asset)
   → loop: the .so loops the file natively (restarts at EOF; no Java intervention)
   → deletePlayer + createPlayer only on asset handoff / stop() / surface destroy
@@ -164,9 +164,9 @@ mixed durations). If an asset ever wedges under native looping, recover by movin
 asset (asset handoff performs the full `deletePlayer` + `createPlayer`) or falling back to
 MediaPlayer — do **not** reintroduce a per-duration Java loop.
 
-## Hard constraints (video convert)
+## Hard constraints (no client re-encode)
 
-Client-side FFmpeg **re-encode is not used when TsPlayer is available**. EO CPU manages ~1 fps libx264 — minutes per second of source. TsPlayer plays Immich originals directly; Immich `/video/playback` remains the download fallback if playback fails.
+Client-side FFmpeg **re-encode is not used at all** (removed 2026-09). The EO CPU manages ~1 fps on libx264 — minutes per second of source. TsPlayer plays Immich originals directly; if playback fails, the asset falls back to Immich `/video/playback` (or the preview thumbnail for images).
 
 ## On-device validation checklist
 
@@ -176,7 +176,7 @@ On a physical EO1/EO2:
 2. Play a known-good local H.264 from Immich cache full-screen
 3. Loop ≥2 minutes without surface loss **and without black flicker between passes** — `/state` shows `loopGen=0` and `lastRestartMethod=native-loop` (no Java recreate)
 4. Image ↔ video handoff and screen off/on
-5. HEVC (or other incompatible) still converts via FFmpeg then plays
+5. HEVC (or other incompatible) plays via TsPlayer/MediaPlayer; on failure it falls back to Immich /video/playback (images: preview thumbnail)
 6. Force Ts failure (corrupt file) → log `TsPlayer → MediaPlayer fallback` then thumbnail/next asset path
 
 To force MediaPlayer only: set `buildConfigField "boolean", "USE_TSPLAYER", "false"` and rebuild.

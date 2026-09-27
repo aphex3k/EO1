@@ -14,7 +14,6 @@ import org.junit.rules.TemporaryFolder;
 import java.io.File;
 import java.io.FileWriter;
 import java.io.IOException;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
@@ -53,9 +52,6 @@ public class MediaCacheManagerTest {
         assertTrue(MediaCacheManager.isOwnedMediaCacheFile(converted));
         assertTrue(MediaCacheManager.isOwnedMediaCacheFile(image));
         assertTrue(MediaCacheManager.isOwnedMediaCacheFile(imageConverted));
-        assertTrue(MediaCacheManager.isConvertedCacheFile(converted));
-        assertTrue(MediaCacheManager.isConvertedCacheFile(imageConverted));
-        assertFalse(MediaCacheManager.isConvertedCacheFile(original));
     }
 
     @Test
@@ -75,32 +71,9 @@ public class MediaCacheManagerTest {
     }
 
     @Test
-    public void pickEvictionVictimPrefersNonConverted() throws IOException {
-        File original = writeFile("11111111-2222-3333-4444-555555555555.mp4", "o");
-        File converted = writeFile("11111111-2222-3333-4444-555555555555_eo1.mp4", "c");
-
-        for (int i = 0; i < 20; i++) {
-            File victim = manager.pickEvictionVictim(Arrays.asList(original, converted));
-            assertEquals(original, victim);
-        }
-    }
-
-    @Test
-    public void pickEvictionVictimPrefersNonConvertedImages() throws IOException {
-        File original = writeFile("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.heic", "o");
-        File converted = writeFile("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee_eo1.jpg", "c");
-
-        for (int i = 0; i < 20; i++) {
-            File victim = manager.pickEvictionVictim(Arrays.asList(original, converted));
-            assertEquals(original, victim);
-        }
-    }
-
-    @Test
-    public void pickEvictionVictimFallsBackToConverted() throws IOException {
-        File converted = writeFile("aaaaaaaa-bbbb-cccc-dddd-ffffffffffff_eo1.mp4", "c");
-        File victim = manager.pickEvictionVictim(Collections.singletonList(converted));
-        assertEquals(converted, victim);
+    public void pickEvictionVictimReturnsSoleCandidate() throws IOException {
+        File only = writeFile("aaaaaaaa-bbbb-cccc-dddd-ffffffffffff.mp4", "x");
+        assertEquals(only, manager.pickEvictionVictim(Collections.singletonList(only)));
     }
 
     @Test
@@ -113,12 +86,12 @@ public class MediaCacheManagerTest {
     }
 
     @Test
-    public void ensureSpaceEvictsNonConvertedBeforeConverted() throws IOException {
+    public void ensureSpaceEvictsUntilEnough() throws IOException {
         File original = writeFile("bbbbbbbb-bbbb-cccc-dddd-222222222222.mp4", "xxxx");
         File converted = writeFile("cccccccc-bbbb-cccc-dddd-333333333333_eo1.mp4", "yyyy");
         usableSpace.set(MediaCacheManager.SAFETY_MARGIN_BYTES);
 
-        // Need 100 bytes beyond margin → must free something. After delete, simulate free space.
+        // 2 bytes beyond margin must be freed; simulate freed space on each delete.
         MediaCacheManager countingManager = new MediaCacheManager(dir -> usableSpace.get(), new Random(7)) {
             @Override
             public boolean ensureSpace(File dir, long bytesNeeded, Set<String> protectedPaths) {
@@ -143,8 +116,9 @@ public class MediaCacheManagerTest {
         };
 
         assertTrue(countingManager.ensureSpace(cacheDir, 2, Collections.<String>emptySet()));
-        assertFalse(original.exists());
-        assertTrue(converted.exists());
+        // Exactly one of the two candidates is evicted to cover the 2-byte shortfall; pick order
+        // is now random, so assert the remaining count, not which file.
+        assertEquals(1, cacheDir.listFiles().length);
     }
 
     @Test
@@ -186,21 +160,6 @@ public class MediaCacheManagerTest {
     public void ensureSpaceReturnsFalseWhenNothingToEvict() {
         usableSpace.set(0);
         assertFalse(manager.ensureSpace(cacheDir, 1, Collections.<String>emptySet()));
-    }
-
-    @Test
-    public void ensureTranscodeSpaceUsesTwiceSourceLength() throws IOException {
-        // Keep source outside cacheDir so eviction cannot delete it mid-check.
-        File source = tempFolder.newFile("source-outside.mp4");
-        try (FileWriter writer = new FileWriter(source)) {
-            writer.write("abcdefghij"); // 10 bytes → need 20 + margin
-        }
-
-        usableSpace.set(MediaCacheManager.SAFETY_MARGIN_BYTES + 19);
-        assertFalse(manager.ensureTranscodeSpace(cacheDir, source, Collections.<String>emptySet()));
-
-        usableSpace.set(MediaCacheManager.SAFETY_MARGIN_BYTES + 20);
-        assertTrue(manager.ensureTranscodeSpace(cacheDir, source, Collections.<String>emptySet()));
     }
 
     @Test

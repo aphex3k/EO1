@@ -905,41 +905,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (isVideo && !assetId.equals(activeVideoAssetId)) {
             return;
         }
-        if (isVideo && mediaManager.shouldAttemptReactiveTranscode(assetId, file)) {
-            MainActivity activity = activityReference.get();
-            if (activity != null) {
-                restoreImageViewAfterVideoFailure();
-                mediaManager.attemptReactiveTranscode(activity, assetId, file, new MediaManager.ReactiveTranscodeCallback() {
-                    @Override
-                    public void onTranscodeSuccess(File transcodedFile) {
-                        displayVideo(transcodedFile, assetId);
-                    }
-
-                    @Override
-                    public void onTranscodeFailed() {
-                        immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
-                    }
-                });
-                return;
-            }
-        }
-        if (!isVideo && mediaManager.shouldAttemptReactiveImageConvert(assetId, file)) {
-            MainActivity activity = activityReference.get();
-            if (activity != null) {
-                mediaManager.attemptReactiveImageConvert(activity, assetId, file, new MediaManager.ReactiveTranscodeCallback() {
-                    @Override
-                    public void onTranscodeSuccess(File convertedFile) {
-                        displayPicture(convertedFile, assetId);
-                    }
-
-                    @Override
-                    public void onTranscodeFailed() {
-                        immichPlaybackFallback(assetId, type, activityReference, false, file);
-                    }
-                });
-                return;
-            }
-        }
         immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
     }
 

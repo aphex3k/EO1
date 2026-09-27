@@ -26,24 +26,15 @@ public class MediaManagerLocalAssetsTest {
         mediaManager = new MediaManager(
                 mock(MediaManagerListener.class),
                 mock(SettingsManager.class),
-                mock(ApiServiceGenerator.ProgressListener.class),
-                mock(VideoTranscodeManager.class));
+                mock(ApiServiceGenerator.ProgressListener.class));
         uploadDir = temp.newFolder("uploaded");
     }
 
     @Test
-    public void localAssetIdIsDeterministicAndEvictable() throws Exception {
+    public void localAssetIdIsDeterministic() throws Exception {
         String id = MediaManager.localAssetIdFor("clip.mp4");
         assertEquals(id, MediaManager.localAssetIdFor("clip.mp4"));
         assertFalse(id.equals(MediaManager.localAssetIdFor("other.mp4")));
-
-        // Transcode/convert outputs are named <id>_eo1.* / <id>.* and must be evictable.
-        File videoOut = new File(uploadDir, id + "_eo1.mp4");
-        File imageOut = new File(uploadDir, id + ".jpg");
-        assertTrue(videoOut.createNewFile());
-        assertTrue(imageOut.createNewFile());
-        assertTrue(MediaCacheManager.isOwnedMediaCacheFile(videoOut));
-        assertTrue(MediaCacheManager.isOwnedMediaCacheFile(imageOut));
     }
 
     @Test

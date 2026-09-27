@@ -77,35 +77,6 @@ pipeline {
                 }
             }
         }
-        stage ('Build FFmpeg Native') {
-            steps {
-                withCredentials([gitUsernamePassword(credentialsId: 'gitea-jenkins', gitToolName: 'Default')]) {
-                    sh '''
-                        set -eu
-                        AAR=eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar
-                        if [ "${REBUILD_FFMPEG_NATIVE:-0}" = "1" ]; then
-                            echo "REBUILD_FFMPEG_NATIVE=1: rebuilding FFmpeg native AAR (x264 + libheif/libde265 + zlib)"
-                            rm -rf ffmpeg-kit-build
-                            git clone --depth 1 https://gitea.codingmerc.com/michael/ffmpeg-kit.git ffmpeg-kit-build
-                            chmod +x eo1-ffmpeg/native/apply-to-ffmpeg-kit.sh
-                            HEIC_ARGS=$(./eo1-ffmpeg/native/apply-to-ffmpeg-kit.sh ffmpeg-kit-build | tr '\n' ' ')
-                            cd ffmpeg-kit-build
-                            export ANDROID_SDK_ROOT=/var/android-sdk
-                            export ANDROID_NDK_ROOT="${ANDROID_SDK_ROOT}/ndk/22.1.7171670"
-                            test -d "${ANDROID_NDK_ROOT}"
-                            # shellcheck disable=SC2086
-                            ./android.sh --lts --enable-gpl --enable-x264 \
-                              --disable-x86 --disable-x86-64 ${HEIC_ARGS}
-                            mkdir -p ../eo1-ffmpeg/libs
-                            cp prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar "../${AAR}"
-                        else
-                            echo "Using committed FFmpeg AAR (set REBUILD_FFMPEG_NATIVE=1 to rebuild)"
-                        fi
-                        test -f "${AAR}"
-                    '''
-                }
-            }
-        }
         stage ('Building Android 🤖') {
             environment {
                 KEYSTORE = credentials('keystore-eo1')

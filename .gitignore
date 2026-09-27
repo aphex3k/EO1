@@ -21,5 +21,3 @@ EO2/data/backup/proc/
 /ffmpeg/
 configuration.json
 /EO2/data/backup
-/eo1-ffmpeg/build
-.ffmpeg-ndk-shims/

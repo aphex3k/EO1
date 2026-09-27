@@ -58,11 +58,11 @@ the persistent dir — parallel uploads cannot collide.
 On each rotation rebuild, `MediaManager.addLocalUploadedAssets()` scans that directory and
 adds one synthetic asset per recognised media file (video/image extension lists in
 `MediaManager`). Local assets are **fully interleaved** with Immich assets: they are appended
-to the same list before it is shuffled, and they go through the **same on-device FFmpeg
-pipeline** (`VideoTranscodeManager` / `ImageConvertManager`). Transcode/convert outputs are
-cached in `cacheDir` as `<local-asset-uuid>_eo1.*` — those outputs are evictable, the
-originals in `filesDir/uploaded` are not. When Immich is unreachable, the rotation simply
-falls back to the local uploads.
+to the same list before it is shuffled, and are **played/displayed directly from
+`filesDir/uploaded`** (`resolveLocalAssetFile`) — no cache copy and no client-side FFmpeg
+pipeline. The originals in `filesDir/uploaded` live outside the cache directory and are never
+touched by eviction. When Immich is unreachable, the rotation simply falls back to the local
+uploads.
 
 ## Logs / past state
 

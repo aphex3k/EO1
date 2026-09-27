@@ -15,4 +15,3 @@ dependencyResolutionManagement {
 }
 rootProject.name = "EO1"
 include ':app'
-include ':eo1-ffmpeg'

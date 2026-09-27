@@ -5,10 +5,9 @@
 Android home-screen replacement APK for Electric Objects **EO1** and **EO2** digital frames. It pulls photos/videos from a self-hosted [Immich](https://immich.app/) server and rotates them on an interval so display never depends on Electric Objects’ cloud.
 
 - Package ID: `com.aphex3k.eo1`
-- Product source: `app/` + `eo1-ffmpeg/` library module
+- Product source: `app/` (Java Android module)
 - Human install/ops guide: [README.md](README.md)
 - Hardware notes: [EO1-specs.md](EO1-specs.md)
-- FFmpeg / transcoding: [docs/FFMPEG.md](docs/FFMPEG.md)
 - TsPlayer / Amlogic video: [docs/TSPLAYER.md](docs/TSPLAYER.md)
 - LAN web server (debug / control / media upload): [docs/WEBSERVER.md](docs/WEBSERVER.md)
 
@@ -17,9 +16,7 @@ Android home-screen replacement APK for Electric Objects **EO1** and **EO2** dig
 | Path | Treat as |
 |------|----------|
 | `app/` | **App product source** (Java Android module) |
-| `eo1-ffmpeg/` | **FFmpeg transcode library** (Java API + Git LFS prebuilt native AAR) |
 | Root Gradle files, `Jenkinsfile` | Build & CI |
-| `docs/FFMPEG.md` | FFmpeg integration reference for agents |
 | `docs/TSPLAYER.md` | Amlogic TsPlayer playback + MediaPlayer fallback |
 | `configuration_example.json` | Config template (may drift; see below) |
 | `EO2/`, `ffmpeg/`, `.electric-objects/` | Local dumps / vendor reference — not app logic |
@@ -27,7 +24,7 @@ Android home-screen replacement APK for Electric Objects **EO1** and **EO2** dig
 
 Gitignored (do not commit): `configuration.json`, `ffmpeg/`, large parts of `EO2/`.
 
-Git LFS (tracked): `eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar` (ffmpeg-kit LTS GPL prebuilt; armeabi-v7a + arm64-v8a); `app/src/main/jniLibs/armeabi-v7a/libTsPlayer-jni.so` (Amlogic TsPlayer from original EO APK).
+Git LFS (tracked): `app/src/main/jniLibs/armeabi-v7a/libTsPlayer-jni.so` (Amlogic TsPlayer from original EO APK).
 
 ## Tech stack & hard constraints
 
@@ -38,8 +35,7 @@ Git LFS (tracked): `eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar` (ffmpeg-kit LTS 
 - **Immich server:** supported range **3.0.0–3.1.0** (tested against 3.1.0). Bounds live in `MainActivity.IMMICH_MIN_VERSION` / `IMMICH_MAX_VERSION`. Immich’s API is not stable across releases — when bumping support, re-check OpenAPI and update types under `immichApi/`.
 - **TLS:** EO1 needs TLS 1.2 and weaker ciphers — see `Tls12SocketFactory.java` and `ApiServiceGenerator.java`
 - **Video:** Prefer Amlogic **TsPlayer** (`TsVideoView` + `libTsPlayer-jni.so`) on Geniatech EO1/EO2 when the native library loads; **automatic fallback** to platform `MediaPlayer` via `com.dd.crop.TextureVideoView`. **Do not use ExoPlayer** (including 2.19.x / Media3) — it triggers MediaCodec/GPU driver lockups that hang the whole device (ADB dies; requires power-cycle). See [docs/TSPLAYER.md](docs/TSPLAYER.md).
-- **Video / image FFmpeg:** FFmpeg (via `:eo1-ffmpeg`) converts incompatible **videos** (HEVC/VP9/AV1, longest axis > 1920px) to H.264 MP4 and oversized **images** (longest axis > 1920px) to JPEG **before** display. FFmpeg is convert-only — never used for playback. GIFs are left alone. **HEIC/HEIF** cannot be decoded by ffmpeg-kit LTS (FFmpeg n6.0); those fall back to Immich `/thumbnail?size=preview`. See [docs/FFMPEG.md](docs/FFMPEG.md) and [`eo1-ffmpeg/native/`](eo1-ffmpeg/native/).
-- **CI:** Jenkins uses the committed LFS AAR by default. Set `REBUILD_FFMPEG_NATIVE=1` on a Jenkins build to rebuild ffmpeg-kit from source (see [docs/FFMPEG.md](docs/FFMPEG.md)).
+- **No client-side transcoding / conversion:** The downloaded Immich original is used as-is — there is no on-device FFmpeg, video re-encode, or image resize. Undecodable images (HEIC, corrupt) and incompatible videos surface through the display-error path (Glide `onLoadFailed` / player error → `assetFallback` → Immich `/thumbnail?size=preview` or `/video/playback`). The ~800MB Amlogic hardware cannot reliably transcode; oversized >1920px images are loaded directly (accepted OOM risk).
 - **Secrets:** Immich password is stored cleartext in device `configuration.json` — never commit a real config
 
 Do not casually bump SDK levels or modernize AndroidX / OkHttp / Retrofit; pins exist for API 19.
@@ -50,8 +46,6 @@ Do not casually bump SDK levels or modernize AndroidX / OkHttp / Retrofit; pins 
 MainActivity
   ├── SettingsManager       → configuration.json (Configuration.java)
   ├── MediaManager          → com.aphex3k.immichApi → Immich server
-  │     ├── VideoTranscodeManager → eo1-ffmpeg (probe / transcode)
-  │     └── ImageConvertManager   → eo1-ffmpeg (probe / convert)
   ├── Video playback        → TsPlayer (preferred) / MediaPlayer fallback
   ├── BrightnessManager / BrightnessSensorManager
   └── UpdateManager         → com.aphex3k.giteaApi → Gitea releases
@@ -64,9 +58,6 @@ Open these first:
 | Launcher / orchestration | `app/src/main/java/com/aphex3k/eo1/MainActivity.java` |
 | Video player (TsPlayer / MediaPlayer) | `TsVideoView`, `VideoPlayerController`, `com.example.tsplayer.TsPlayerNative` |
 | Album fetch / rotation | `app/src/main/java/com/aphex3k/eo1/MediaManager.java` |
-| Video transcode orchestration | `app/src/main/java/com/aphex3k/eo1/VideoTranscodeManager.java` |
-| Image convert orchestration | `app/src/main/java/com/aphex3k/eo1/ImageConvertManager.java` |
-| FFmpeg probe / convert API | `eo1-ffmpeg/src/main/java/com/aphex3k/eo1/ffmpeg/` |
 | Settings I/O | `app/src/main/java/com/aphex3k/eo1/SettingsManager.java` |
 | Config model (source of truth) | `app/src/main/java/com/aphex3k/eo1/Configuration.java` |
 | Immich HTTP API | `app/src/main/java/com/aphex3k/immichApi/ImmichApiService.java` |

@@ -13,8 +13,7 @@ import java.util.List;
  *
  * <p>Files live under {@code getFilesDir()/uploaded} — an internal, app-private directory that is
  * never scanned by {@link MediaCacheManager} eviction and is not cleared by "clear cache". The
- * original uploads stay here permanently; only the on-demand transcode/convert outputs (written to
- * the cache dir) are ever evicted.
+ * original uploads stay here permanently; only media files in the cache dir are ever evicted.
  *
  * <p>All of the path logic here is written against a plain {@link File baseDir} (not a
  * {@link Context}) so it is unit-testable on the JVM. {@link #dirFor(Context)} is the only

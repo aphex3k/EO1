@@ -10,8 +10,8 @@ import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
- * Revolving media cache: keep downloads/transcodes on disk, reserve a safety margin,
- * and evict owned media files when space is needed (prefer non-converted files).
+ * Revolving media cache: keep downloaded originals on disk, reserve a safety margin,
+ * and evict owned media files when space is needed.
  */
 public class MediaCacheManager {
 
@@ -78,18 +78,6 @@ public class MediaCacheManager {
         return true;
     }
 
-    /**
-     * Convenience for transcode: need room for an output assumed as large as the source
-     * (2× source length) plus the safety margin.
-     */
-    public boolean ensureTranscodeSpace(File cacheDir, File source, Set<String> protectedPaths) {
-        if (source == null || !source.exists()) {
-            return false;
-        }
-        long needed = source.length() * 2L;
-        return ensureSpace(cacheDir, needed, protectedPaths);
-    }
-
     public List<File> listEvictableMedia(File cacheDir, Set<String> protectedPaths) {
         List<File> result = new ArrayList<>();
         if (cacheDir == null || !cacheDir.isDirectory()) {
@@ -116,31 +104,13 @@ public class MediaCacheManager {
     }
 
     /**
-     * Prefer non-converted files; among a tier, pick randomly.
+     * Pick a random evictable candidate.
      */
     public File pickEvictionVictim(List<File> candidates) {
         if (candidates == null || candidates.isEmpty()) {
             return null;
         }
-        List<File> nonConverted = new ArrayList<>();
-        List<File> converted = new ArrayList<>();
-        for (File file : candidates) {
-            if (isConvertedCacheFile(file)) {
-                converted.add(file);
-            } else {
-                nonConverted.add(file);
-            }
-        }
-        List<File> tier = !nonConverted.isEmpty() ? nonConverted : converted;
-        if (tier.isEmpty()) {
-            return null;
-        }
-        return tier.get(random.nextInt(tier.size()));
-    }
-
-    public static boolean isConvertedCacheFile(File file) {
-        return VideoTranscodeManager.isTranscodedFile(file)
-                || ImageConvertManager.isConvertedFile(file);
+        return candidates.get(random.nextInt(candidates.size()));
     }
 
     public static boolean isOwnedMediaCacheFile(File file) {

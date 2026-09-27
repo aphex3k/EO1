@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the debug APK (including FFmpeg native AAR when missing), deploy to a connected physical device when available
+# Build the debug APK, deploy to a connected physical device when available
 # (preferring PREFERRED_PHYSICAL_SERIAL, default 20061229), otherwise ensure/start
 # an API 19 AVD named EO1 (EO1-like constraints), install the app, and stream
 # logcat until Ctrl+C.
@@ -585,7 +585,7 @@ follow_logcat() {
     sleep 1
   done
 
-  local logcat_grep="${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err|displayVideo|displayPictures|TextureVideo|TsVideoView|TsPlayer|MediaPlayer|Glide|OkHttp|Retrofit|download|ffmpeg| D video:"
+  local logcat_grep="${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err|displayVideo|displayPictures|TextureVideo|TsVideoView|TsPlayer|MediaPlayer|Glide|OkHttp|Retrofit|download| D video:"
 
   # Host adb advertises --pid even when the API 19 device cannot filter by it.
   # Use --pid only on the emulator; always grep on physical hardware.
@@ -657,7 +657,7 @@ install_and_start() {
       if [[ "$USING_EMULATOR" -ne 1 ]]; then
         die "Cannot install on arm64-v8a device: connect an EO1/EO2 (armeabi-v7a) or use the Apple Silicon emulator fallback."
       fi
-      log "arm64-v8a emulator: using arm64 FFmpeg natives (EO1 hardware uses armeabi-v7a)"
+      log "arm64-v8a emulator: no native TsPlayer (.so is armeabi-v7a only); MediaPlayer only here"
       ;;
     *)
       die "Cannot install APK: device ABI is '${device_abi:-unknown}'. Debug APK supports armeabi-v7a (EO1 hardware) and arm64-v8a (Apple Silicon emulator fallback only)."
@@ -698,345 +698,6 @@ install_and_start() {
   fi
 }
 
-ndk_version_major() {
-  basename "$1" | cut -d. -f1
-}
-
-ffmpeg_ndk_prebuilt_host() {
-  local ndk_root="$1"
-  if [[ -d "${ndk_root}/toolchains/llvm/prebuilt/darwin-arm64" ]]; then
-    echo "${ndk_root}/toolchains/llvm/prebuilt/darwin-arm64"
-  else
-    echo "${ndk_root}/toolchains/llvm/prebuilt/darwin-x86_64"
-  fi
-}
-
-ndk_supports_lts_api() {
-  local ndk_root="$1"
-  local prebuilt
-  prebuilt="$(ffmpeg_ndk_prebuilt_host "$ndk_root")"
-  [[ -x "${prebuilt}/bin/armv7a-linux-androideabi16-clang" ]]
-}
-
-setup_ffmpeg_ndk_binutils_shims() {
-  local ndk_root="$1"
-  local prebuilt llvm_bin shim_dir prefix gnu llvm
-
-  prebuilt="$(ffmpeg_ndk_prebuilt_host "$ndk_root")"
-  llvm_bin="${prebuilt}/bin"
-  shim_dir="${ROOT}/.ffmpeg-ndk-shims"
-  mkdir -p "$shim_dir"
-
-  write_shim() {
-    local name="$1"
-    local target="$2"
-    cat > "${shim_dir}/${name}" <<EOF
-#!/bin/bash
-exec "${target}" "\$@"
-EOF
-    chmod +x "${shim_dir}/${name}"
-  }
-
-  for prefix in arm-linux-androideabi aarch64-linux-android; do
-    for pair in ar:llvm-ar ranlib:llvm-ranlib strip:llvm-strip nm:llvm-nm; do
-      gnu="${pair%%:*}"
-      llvm="${pair##*:}"
-      write_shim "${prefix}-${gnu}" "${llvm_bin}/${llvm}"
-    done
-    write_shim "${prefix}-ld" "${llvm_bin}/ld.lld"
-  done
-
-  export PATH="${shim_dir}:${llvm_bin}:${PATH}"
-  log "macOS: llvm binutils shims enabled for NDK $(basename "$ndk_root") (arm + aarch64)"
-}
-
-resolve_ndk_root() {
-  if [[ -n "${ANDROID_NDK_ROOT:-}" && -d "${ANDROID_NDK_ROOT}" ]]; then
-    if ndk_supports_lts_api "${ANDROID_NDK_ROOT}"; then
-      echo "${ANDROID_NDK_ROOT}"
-      return
-    fi
-    die "ANDROID_NDK_ROOT=${ANDROID_NDK_ROOT} lacks armv7a-linux-androideabi16-clang (ffmpeg-kit LTS needs API 16; NDK r24+ is too new)"
-  fi
-
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    local ndk_dir
-    # NDK r23: llvm-ar + API 16 (last release before API 16 removal in r24).
-    for ndk_dir in $(find "${SDK_ROOT}/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -t. -k1,1n -k2,2n -k3,3n -r); do
-      if [[ "$(ndk_version_major "$ndk_dir")" == "23" ]] && ndk_supports_lts_api "$ndk_dir"; then
-        log "macOS: using NDK $(basename "$ndk_dir") (r23: llvm-ar + API 16)"
-        echo "$ndk_dir"
-        return
-      fi
-    done
-
-    local pinned="22.1.7171670"
-    if [[ -d "${SDK_ROOT}/ndk/${pinned}" ]] && ndk_supports_lts_api "${SDK_ROOT}/ndk/${pinned}"; then
-      log "macOS: using NDK ${pinned} with llvm binutils shims (GNU ar aborts on current macOS)"
-      echo "${SDK_ROOT}/ndk/${pinned}"
-      return
-    fi
-
-    die "On macOS, install NDK 23.2.8568313 or 22.1.7171670 for ffmpeg-kit LTS (API 16). NDK r24+ lacks API 16 toolchains. Example: sdkmanager \"ndk;23.2.8568313\""
-  fi
-
-  local preferred="${FFMPEG_NDK_VERSION:-22.1.7171670}"
-  local ndk="${SDK_ROOT}/ndk/${preferred}"
-  if [[ -d "$ndk" ]]; then
-    echo "$ndk"
-    return
-  fi
-  local first
-  first="$(find "${SDK_ROOT}/ndk" -maxdepth 1 -mindepth 1 -type d 2>/dev/null | sort -V | head -1)"
-  if [[ -n "$first" ]]; then
-    log "NDK ${preferred} not found; using ${first}"
-    echo "$first"
-    return
-  fi
-  die "Android NDK not found. Install NDK ${preferred} (sdkmanager \"ndk;${preferred}\") or set ANDROID_NDK_ROOT."
-}
-
-find_android_sdk_cmake() {
-  [[ -d "${SDK_ROOT}/cmake" ]] || return 0
-  find "${SDK_ROOT}/cmake" -path '*/bin/cmake' -type f 2>/dev/null | sort -V | tail -1
-}
-
-resolve_system_cmake() {
-  if [[ -x /opt/homebrew/bin/cmake ]]; then
-    echo /opt/homebrew/bin/cmake
-    return 0
-  fi
-  if [[ -x /usr/local/bin/cmake ]]; then
-    echo /usr/local/bin/cmake
-    return 0
-  fi
-  command -v cmake 2>/dev/null || true
-}
-
-setup_ffmpeg_cmake_shim() {
-  local system_cmake shim_dir
-  system_cmake="$(resolve_system_cmake)"
-  [[ -n "$system_cmake" ]] || die "cmake not found; install Android SDK cmake via sdkmanager \"cmake;3.22.1\""
-
-  shim_dir="${ROOT}/.ffmpeg-ndk-shims"
-  mkdir -p "$shim_dir"
-  cat > "${shim_dir}/cmake" <<EOF
-#!/bin/bash
-export CMAKE_POLICY_VERSION_MINIMUM=3.5
-exec "${system_cmake}" -DCMAKE_POLICY_VERSION_MINIMUM=3.5 "\$@"
-EOF
-  chmod +x "${shim_dir}/cmake"
-  export CMAKE_POLICY_VERSION_MINIMUM=3.5
-  export PATH="${shim_dir}:${PATH}"
-}
-
-patch_ffmpeg_kit_cpu_features() {
-  local kit_dir="$1"
-  local script="${kit_dir}/scripts/android/cpu-features.sh"
-  [[ -f "$script" ]] || return 0
-
-  if grep -q 'BUILD_TESTING=OFF' "$script"; then
-    return 0
-  fi
-
-  sed -i .eo1bak 's/$(android_ndk_cmake) || return 1/$(android_ndk_cmake) -DBUILD_TESTING=OFF || return 1/' "$script"
-  rm -rf "${kit_dir}/.tmp/cmake/build/android-arm-lts/cpu-features" 2>/dev/null || true
-  log "Patched ffmpeg-kit cpu-features to skip tests (CMake 4.x / googletest)"
-}
-
-ensure_ffmpeg_source() {
-  local kit_dir="$1"
-  local ffmpeg_dir="${kit_dir}/src/ffmpeg"
-
-  if [[ -f "${ffmpeg_dir}/configure" ]]; then
-    return 1
-  fi
-
-  log "ffmpeg source incomplete; removing and re-downloading"
-  rm -rf "${ffmpeg_dir}"
-  return 0
-}
-
-patch_ffmpeg_kit_gradle_wrapper() {
-  local kit_dir="$1"
-  local props="${kit_dir}/android/gradle/wrapper/gradle-wrapper.properties"
-  [[ -f "$props" ]] || return 0
-
-  if grep -q 'gradle-8\.1\.1-bin\.zip' "$props"; then
-    sed -i .eo1bak 's/gradle-8\.1\.1-bin\.zip/gradle-8.5-bin.zip/' "$props"
-    log "Patched ffmpeg-kit Gradle wrapper to 8.5 (Java 21 requires Gradle 8.5+)"
-  fi
-}
-
-find_ffmpeg_kit_aar() {
-  local kit_dir="$1"
-  local candidate
-
-  for candidate in \
-    "${kit_dir}/prebuilt/bundle-android-aar-lts/ffmpeg-kit/ffmpeg-kit.aar" \
-    "${kit_dir}/prebuilt/bundle-android-aar-lts/ffmpeg-kit/"*.aar \
-    "${kit_dir}/bundle-android-aar-lts/"ffmpeg-kit-*-gpl*.aar; do
-    if [[ -f "$candidate" ]]; then
-      echo "$candidate"
-      return 0
-    fi
-  done
-
-  candidate="$(find "${kit_dir}/prebuilt/bundle-android-aar-lts" -name '*.aar' -print -quit 2>/dev/null || true)"
-  if [[ -n "$candidate" && -f "$candidate" ]]; then
-    echo "$candidate"
-    return 0
-  fi
-
-  return 1
-}
-
-ffmpeg_android_sh_disable_args() {
-  local args=(--disable-x86 --disable-x86-64)
-  if ! is_apple_silicon; then
-    args+=(--disable-arm64-v8a)
-  fi
-  echo "${args[@]}"
-}
-
-ffmpeg_android_sh_heic_args() {
-  # Copies libde265/libheif scripts into the kit and prints android.sh flags
-  # (android-zlib + custom libraries). See eo1-ffmpeg/native/README.md.
-  local kit_dir="$1"
-  local apply="${ROOT}/eo1-ffmpeg/native/apply-to-ffmpeg-kit.sh"
-  if [[ ! -x "$apply" ]]; then
-    chmod +x "$apply" 2>/dev/null || true
-  fi
-  "$apply" "$kit_dir"
-}
-
-prepare_ffmpeg_build_env() {
-  local ndk_root="$1"
-
-  export CMAKE_POLICY_VERSION_MINIMUM=3.5
-
-  if [[ "$(uname -s)" == "Darwin" && "$(ndk_version_major "$ndk_root")" -lt 23 ]]; then
-    setup_ffmpeg_ndk_binutils_shims "$ndk_root"
-  fi
-  if [[ -z "$(find_android_sdk_cmake)" ]]; then
-    setup_ffmpeg_cmake_shim
-    log "CMake: using compatibility shim ($(resolve_system_cmake))"
-  fi
-}
-
-ensure_android_cmake() {
-  local cmake_bin
-  cmake_bin="$(find_android_sdk_cmake)"
-  if [[ -n "$cmake_bin" ]]; then
-    log "CMake: using Android SDK $(basename "$(dirname "$(dirname "$cmake_bin")")")"
-    return 0
-  fi
-
-  if [[ "$(uname -s)" == "Darwin" && "${FFMPEG_INSTALL_SDK_CMAKE:-0}" != "1" ]]; then
-    log "CMake: will use compatibility shim (set FFMPEG_INSTALL_SDK_CMAKE=1 to install SDK cmake;3.22.1)"
-    return 0
-  fi
-
-  if [[ "${SKIP_ANDROID_CMAKE_INSTALL:-0}" == "1" ]]; then
-    log "CMake: will use compatibility shim (SKIP_ANDROID_CMAKE_INSTALL=1)"
-    return 0
-  fi
-
-  log "Installing Android SDK CMake (required for ffmpeg-kit cpu-features)..."
-  set +o pipefail
-  yes | "${SDKMANAGER}" --licenses >/dev/null 2>&1 || true
-  "${SDKMANAGER}" "cmake;3.22.1"
-  local sdk_rc=$?
-  set -o pipefail
-  if [[ $sdk_rc -eq 0 ]]; then
-    cmake_bin="$(find_android_sdk_cmake)"
-    if [[ -n "$cmake_bin" ]]; then
-      log "CMake: installed Android SDK at ${cmake_bin}"
-      return 0
-    fi
-  fi
-
-  log "CMake: SDK install failed; will use compatibility shim"
-}
-
-resolve_ffmpeg_kit_dir() {
-  local local_fork="${ROOT}/ffmpeg/ffmpeg-kit"
-  if [[ -x "${local_fork}/android.sh" ]]; then
-    echo "$local_fork"
-    return
-  fi
-  local clone_dir="${ROOT}/ffmpeg-kit-build"
-  if [[ -x "${clone_dir}/android.sh" ]]; then
-    echo "$clone_dir"
-    return
-  fi
-  log "Cloning ffmpeg-kit (shallow)..."
-  rm -rf "$clone_dir"
-  git clone --depth 1 https://gitea.codingmerc.com/michael/ffmpeg-kit.git "$clone_dir" \
-    || die "Failed to clone ffmpeg-kit"
-  echo "$clone_dir"
-}
-
-ensure_ffmpeg_aar() {
-  local aar="${ROOT}/eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar"
-
-  if [[ -f "$aar" && "${FORCE_FFMPEG_BUILD:-0}" != "1" ]]; then
-    log "Using existing FFmpeg AAR (${aar})"
-    return
-  fi
-
-  if [[ "${SKIP_FFMPEG_BUILD:-0}" == "1" ]]; then
-    log "SKIP_FFMPEG_BUILD=1 and FFmpeg AAR missing — transcoding unavailable at runtime"
-    return
-  fi
-
-  local ndk_root kit_dir built disable_args
-  ndk_root="$(resolve_ndk_root)"
-  log "Resolving ffmpeg-kit source..."
-  kit_dir="$(resolve_ffmpeg_kit_dir)"
-  log "ffmpeg-kit source: ${kit_dir}"
-  log "Ensuring CMake for native build..."
-  ensure_android_cmake
-  eo1_ffmpeg_needs_redownload=0
-  if ensure_ffmpeg_source "$kit_dir"; then
-    eo1_ffmpeg_needs_redownload=1
-  fi
-
-  if is_apple_silicon; then
-    log "Building FFmpeg native AAR for armeabi-v7a + arm64-v8a (may take 30+ minutes on first run)..."
-  else
-    log "Building FFmpeg native AAR for armeabi-v7a (may take 30+ minutes on first run)..."
-  fi
-  log "NDK: ${ndk_root}"
-
-  disable_args=( $(ffmpeg_android_sh_disable_args) )
-  heic_args=( $(ffmpeg_android_sh_heic_args "$kit_dir") )
-
-  (
-    export ANDROID_SDK_ROOT="$SDK_ROOT"
-    export ANDROID_NDK_ROOT="$ndk_root"
-    patch_ffmpeg_kit_cpu_features "$kit_dir"
-    patch_ffmpeg_kit_gradle_wrapper "$kit_dir"
-    prepare_ffmpeg_build_env "$ndk_root"
-    cd "$kit_dir"
-    log "Running ffmpeg-kit android.sh with libheif/libde265 (progress below; full log: ${kit_dir}/build.log)"
-    if [[ "$eo1_ffmpeg_needs_redownload" -eq 1 ]]; then
-      ./android.sh --no-output-redirection --redownload-ffmpeg --lts --enable-gpl --enable-x264 \
-        "${disable_args[@]}" "${heic_args[@]}"
-    else
-      ./android.sh --no-output-redirection --lts --enable-gpl --enable-x264 \
-        "${disable_args[@]}" "${heic_args[@]}"
-    fi
-  ) || die "FFmpeg native build failed"
-
-  mkdir -p "${ROOT}/eo1-ffmpeg/libs"
-  built="$(find_ffmpeg_kit_aar "$kit_dir" || true)"
-  [[ -n "$built" && -f "$built" ]] \
-    || die "FFmpeg AAR not found under ${kit_dir}/prebuilt/bundle-android-aar-lts after build"
-  cp "$built" "$aar"
-  log "Installed FFmpeg AAR at ${aar}"
-}
-
 # --- main --------------------------------------------------------------------
 
 SDK_ROOT="$(resolve_sdk_root)"
@@ -1069,8 +730,6 @@ fi
 log "Using $(java -version 2>&1 | head -1)"
 
 [[ -x "./gradlew" ]] || die "./gradlew not found in ${ROOT}"
-
-ensure_ffmpeg_aar
 
 trap cleanup INT TERM EXIT
 
@@ -1109,10 +768,6 @@ if ! is_apple_silicon; then
   trap - INT TERM EXIT
   exit 1
 fi
-
-aar="${ROOT}/eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar"
-[[ -f "$aar" ]] \
-  || die "FFmpeg AAR missing at ${aar}. Run: git lfs pull"
 
 log "API 19 failed; falling back to ${FALLBACK_AVD_NAME} (API ${FALLBACK_API} arm64-v8a)"
 AVD_NAME="$FALLBACK_AVD_NAME"

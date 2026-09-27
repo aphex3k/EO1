@@ -22,8 +22,6 @@ import com.aphex3k.immichApi.ImmichType;
 
 import org.jetbrains.annotations.NotNull;
 
-import com.example.tsplayer.TsPlayerNative;
-
 import com.google.gson.Gson;
 import com.google.gson.JsonObject;
 
@@ -83,51 +81,26 @@ public class MediaManager implements MediaManagerInterface {
      * published wholesale (volatile swap) so UI-thread readers never see an empty/partial map.
      */
     private volatile Map<String, String> localAssetIdToFilename = new HashMap<>();
-    private final VideoTranscodeManager videoTranscodeManager;
-    private final ImageConvertManager imageConvertManager;
     private final MediaCacheManager mediaCacheManager;
-    private final HashSet<String> reactiveTranscodeAttempted = new HashSet<>();
-    private final HashSet<String> pinnedCachePaths = new HashSet<>();
     private volatile String currentPlaybackPath;
     /** Cache dir of the rotation currently in progress; guards {@link #removeFromCache}'s location check. */
     private volatile File mediaCacheDir;
 
-    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager, ApiServiceGenerator.ProgressListener downloadProgressListener) {
-        this(listener, settingsManager, downloadProgressListener, new VideoTranscodeManager(),
-                new ImageConvertManager(), new MediaCacheManager());
+    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
+                        ApiServiceGenerator.ProgressListener downloadProgressListener) {
+        this(listener, settingsManager, downloadProgressListener, new MediaCacheManager());
     }
 
     public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
                         ApiServiceGenerator.ProgressListener downloadProgressListener,
-                        VideoTranscodeManager videoTranscodeManager) {
-        this(listener, settingsManager, downloadProgressListener, videoTranscodeManager,
-                new ImageConvertManager(), new MediaCacheManager());
-    }
-
-    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
-                        ApiServiceGenerator.ProgressListener downloadProgressListener,
-                        VideoTranscodeManager videoTranscodeManager,
-                        MediaCacheManager mediaCacheManager) {
-        this(listener, settingsManager, downloadProgressListener, videoTranscodeManager,
-                new ImageConvertManager(), mediaCacheManager);
-    }
-
-    public MediaManager(MediaManagerListener listener, SettingsManager settingsManager,
-                        ApiServiceGenerator.ProgressListener downloadProgressListener,
-                        VideoTranscodeManager videoTranscodeManager,
-                        ImageConvertManager imageConvertManager,
                         MediaCacheManager mediaCacheManager) {
         this.listener = new WeakReference<>(listener);
         this.settingsManager = new WeakReference<>(settingsManager);
         this.downloadProgressListener = new WeakReference<>(downloadProgressListener);
-        this.videoTranscodeManager = videoTranscodeManager;
-        this.imageConvertManager = imageConvertManager != null ? imageConvertManager : new ImageConvertManager();
         this.mediaCacheManager = mediaCacheManager != null ? mediaCacheManager : new MediaCacheManager();
     }
 
     public void showNextImage(Activity activity) {
-
-        clearReactiveTranscodeAttempts();
 
         MediaManagerListener mediaManagerListener = this.listener.get();
 
@@ -157,11 +130,6 @@ public class MediaManager implements MediaManagerInterface {
 
             Log.i(TAG, "showNextImage: start (cachedAssets=" + immichAssets.size() + ")");
             mediaCacheDir = activity.getCacheDir();
-
-            videoTranscodeManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
-                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
-            imageConvertManager.setFfmpegStepListener(step -> activity.runOnUiThread(() ->
-                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step))));
 
             if (immichAssets.isEmpty()) {
 
@@ -217,76 +185,14 @@ public class MediaManager implements MediaManagerInterface {
             ImmichApiAssetResponse finalAssetResponse = assetResponse;
             File playbackFile = tempFile;
 
-            if (playbackFile != null && finalAssetResponse.getType() == ImmichType.VIDEO) {
-                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(playbackFile));
-                File prepared = prepareVideoForPlayback(activity, finalAssetResponse, playbackFile);
-                if (prepared != null) {
-                    // Keep original on disk for revolving reuse; only eviction frees space.
-                    playbackFile = prepared;
-                } else if (isLocalAsset(finalAssetResponse)) {
-                    // No Immich source to fall back to for a local upload; skip this asset.
-                    Log.i(TAG, "showNextImage: local video prepare failed, skipping asset");
-                    playbackFile = null;
-                } else {
-                    Log.i(TAG, "showNextImage: prepare failed, downloading Immich /video/playback fallback");
-                    try {
-                        Long expectedBytes = null;
-                        if (finalAssetResponse.getExifInfo() != null) {
-                            expectedBytes = finalAssetResponse.getExifInfo().getFileSizeInByte();
-                        }
-                        File fallbackFile = downloadAsset(
-                                finalAssetResponse.getId(),
-                                ImmichType.VIDEO,
-                                true,
-                                finalAssetResponse.getOriginalFileName(),
-                                finalAssetResponse.getOriginalPath(),
-                                activity,
-                                apiService,
-                                expectedBytes);
-                        playbackFile = fallbackFile;
-                    } catch (Exception e) {
-                        playbackFile = null;
-                        activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
-                    }
-                }
-            } else if (playbackFile != null && finalAssetResponse.getType() == ImmichType.IMAGE) {
-                imageConvertManager.setProtectedCachePaths(protectedCachePaths(playbackFile));
-                File prepared = prepareImageForDisplay(activity, finalAssetResponse, playbackFile);
-                if (prepared != null) {
-                    playbackFile = prepared;
-                } else if (isLocalAsset(finalAssetResponse)) {
-                    // No Immich source to fall back to for a local upload; skip this asset.
-                    Log.i(TAG, "showNextImage: local image prepare failed, skipping asset");
-                    playbackFile = null;
-                } else {
-                    try {
-                        Long expectedBytes = null;
-                        if (finalAssetResponse.getExifInfo() != null) {
-                            expectedBytes = finalAssetResponse.getExifInfo().getFileSizeInByte();
-                        }
-                        File fallbackFile = downloadAsset(
-                                finalAssetResponse.getId(),
-                                ImmichType.IMAGE,
-                                true,
-                                finalAssetResponse.getOriginalFileName(),
-                                finalAssetResponse.getOriginalPath(),
-                                activity,
-                                apiService,
-                                expectedBytes);
-                        playbackFile = fallbackFile;
-                    } catch (Exception e) {
-                        playbackFile = null;
-                        activity.runOnUiThread(() -> mediaManagerListener.handleException(e));
-                    }
-                }
-            }
-
+            // No client-side transcoding/conversion: the downloaded original is used as-is.
+            // Undecodable images (HEIC, corrupt) and incompatible videos fall back to the
+            // Immich preview / playback stream via the display error path
+            // (Glide/VideoPlayer onError -> assetFallback -> displayThumbnailAsset).
             final File finalPlaybackFile = playbackFile;
 
             if (finalPlaybackFile != null) {
                 currentPlaybackPath = finalPlaybackFile.getAbsolutePath();
-                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
-                imageConvertManager.setProtectedCachePaths(protectedCachePaths(finalPlaybackFile));
                 if (finalAssetResponse.getType() == ImmichType.VIDEO) {
                     // Immich reports asset duration in MILLISECONDS (ffprobe-verified: a 4.033s
                     // clip has duration=4033). Store as-is — a *1000 here makes the seamless-loop
@@ -501,9 +407,8 @@ public class MediaManager implements MediaManagerInterface {
     }
 
     /**
-     * Deterministic UUID derived from the file name. Stable across rebuilds (so transcode cache
-     * hits persist) and valid as a cache file name; matches {@code MediaCacheManager} eviction so
-     * local transcode outputs are evictable.
+     * Deterministic UUID derived from the file name. Stable across rotation rebuilds so a local
+     * upload keeps the same synthetic asset id between rebuilds.
      */
     static String localAssetIdFor(String filename) {
         return UUID.nameUUIDFromBytes(filename.getBytes(Charset.forName("UTF-8"))).toString();
@@ -628,22 +533,8 @@ public class MediaManager implements MediaManagerInterface {
         File cacheFile = new File(cacheDir,
                 cacheFileName(uuid, originalFileName, originalPath, type, fallback));
 
-        // Prefer a completed convert/transcode cache when present and not a fallback download.
-        if (!fallback) {
-            if (type == ImmichType.VIDEO) {
-                File transcoded = getTranscodeCacheFile(cacheDir, uuid);
-                if (transcoded.exists() && transcoded.length() > 0) {
-                    return transcoded;
-                }
-            } else if (type == ImmichType.IMAGE) {
-                File converted = getImageConvertCacheFile(cacheDir, uuid);
-                if (converted.exists() && converted.length() > 0) {
-                    return converted;
-                }
-            }
-        }
-
-        // Reuse originals/images; Immich fallback streams may differ from the original bytes.
+        // Reuse the original for non-fallback downloads; Immich fallback streams (preview /
+        // /video/playback) may differ from the original bytes, so they are always re-fetched.
         if (!fallback && cacheFile.exists() && cacheFile.length() > 0) {
             return cacheFile;
         }
@@ -679,189 +570,6 @@ public class MediaManager implements MediaManagerInterface {
 
         } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
 
-    }
-
-    private File prepareVideoForPlayback(Activity activity,
-                                         ImmichApiAssetResponse asset, File downloaded) {
-        if (shouldSkipClientVideoTranscode()) {
-            Log.i(TAG, "prepareVideo: skipped client FFmpeg (TsPlayer plays original)");
-            activity.runOnUiThread(() -> {
-                MediaManagerListener mediaManagerListener = this.listener.get();
-                if (mediaManagerListener != null) {
-                    mediaManagerListener.debugInformationProvided(new DebugInformation(
-                            "ffmpeg", "prepare: skipped (TsPlayer plays original)"));
-                }
-            });
-            return downloaded;
-        }
-        return videoTranscodeManager.prepareForPlayback(
-                activity.getCacheDir(), asset.getId(), downloaded);
-    }
-
-    /**
-     * Client-side libx264 on EO hardware is ~1fps — unusable. When TsPlayer is active it can
-     * decode Amlogic-supported originals (including many HEVC paths). Skip all client video
-     * convert/remux; Immich {@code /video/playback} remains the last-resort download fallback.
-     */
-    private static boolean shouldSkipClientVideoTranscode() {
-        return BuildConfig.USE_TSPLAYER && TsPlayerNative.isAvailable();
-    }
-
-    private File prepareImageForDisplay(Activity activity,
-                                        ImmichApiAssetResponse asset, File downloaded) {
-        return imageConvertManager.prepareForDisplay(
-                activity.getCacheDir(), asset.getId(), downloaded);
-    }
-
-    public boolean shouldAttemptReactiveTranscode(String assetId, File file) {
-        if (shouldSkipClientVideoTranscode()) {
-            return false;
-        }
-        if (assetId == null || file == null || isTranscodedFile(file) || isImageConvertedFile(file)) {
-            return false;
-        }
-        return !reactiveTranscodeAttempted.contains(assetId);
-    }
-
-    public boolean shouldAttemptReactiveImageConvert(String assetId, File file) {
-        if (assetId == null || file == null || isImageConvertedFile(file) || MediaTypeHelper.isGifFile(file)) {
-            return false;
-        }
-        return !reactiveTranscodeAttempted.contains(assetId);
-    }
-
-    public void attemptReactiveTranscode(Activity activity, String assetId, File sourceFile,
-                                         ReactiveTranscodeCallback callback) {
-        if (!shouldAttemptReactiveTranscode(assetId, sourceFile)) {
-            activity.runOnUiThread(() -> {
-                MediaManagerListener mediaManagerListener = this.listener.get();
-                if (mediaManagerListener != null) {
-                    mediaManagerListener.debugInformationProvided(
-                            new DebugInformation("ffmpeg", "reactive: skipped (already attempted)"));
-                }
-                callback.onTranscodeFailed();
-            });
-            return;
-        }
-        recordReactiveTranscodeAttempt(assetId);
-
-        pinCacheFile(sourceFile);
-        File transcodeCache = getTranscodeCacheFile(activity.getCacheDir(), assetId);
-        pinCacheFile(transcodeCache);
-        videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(sourceFile));
-
-        new Thread(() -> {
-            File source = VideoTranscodeManager.resolveReactiveSource(
-                    activity.getCacheDir(), assetId, sourceFile);
-            File redownloaded = null;
-            try {
-                if (source == null || !source.exists()) {
-                    ffmpegDebug(activity, "reactive: re-downloading source");
-                    redownloaded = redownloadVideoForReactive(activity, assetId);
-                    source = redownloaded;
-                    if (source != null) {
-                        pinCacheFile(source);
-                    }
-                }
-
-                videoTranscodeManager.setProtectedCachePaths(protectedCachePaths(source));
-                File transcoded = videoTranscodeManager.attemptReactiveTranscode(
-                        activity.getCacheDir(), assetId, source);
-
-                activity.runOnUiThread(() -> {
-                    if (transcoded != null) {
-                        // Keep original on disk; eviction frees space when needed.
-                        if (transcoded.exists()) {
-                            currentPlaybackPath = transcoded.getAbsolutePath();
-                        }
-                        callback.onTranscodeSuccess(transcoded);
-                    } else {
-                        callback.onTranscodeFailed();
-                    }
-                });
-            } finally {
-                unpinCacheFile(sourceFile);
-                unpinCacheFile(transcodeCache);
-                unpinCacheFile(redownloaded);
-            }
-        }).start();
-    }
-
-    public void attemptReactiveImageConvert(Activity activity, String assetId, File sourceFile,
-                                            ReactiveTranscodeCallback callback) {
-        if (!shouldAttemptReactiveImageConvert(assetId, sourceFile)) {
-            activity.runOnUiThread(() -> {
-                MediaManagerListener mediaManagerListener = this.listener.get();
-                if (mediaManagerListener != null) {
-                    mediaManagerListener.debugInformationProvided(
-                            new DebugInformation("ffmpeg", "image-reactive: skipped (already attempted)"));
-                }
-                callback.onTranscodeFailed();
-            });
-            return;
-        }
-        recordReactiveTranscodeAttempt(assetId);
-
-        pinCacheFile(sourceFile);
-        File convertCache = getImageConvertCacheFile(activity.getCacheDir(), assetId);
-        pinCacheFile(convertCache);
-        imageConvertManager.setProtectedCachePaths(protectedCachePaths(sourceFile));
-
-        new Thread(() -> {
-            File source = ImageConvertManager.resolveReactiveSource(
-                    activity.getCacheDir(), assetId, sourceFile);
-            File redownloaded = null;
-            try {
-                if (source == null || !source.exists()) {
-                    ffmpegDebug(activity, "image-reactive: re-downloading source");
-                    redownloaded = redownloadImageForReactive(activity, assetId);
-                    source = redownloaded;
-                    if (source != null) {
-                        pinCacheFile(source);
-                    }
-                }
-
-                imageConvertManager.setProtectedCachePaths(protectedCachePaths(source));
-                File converted = imageConvertManager.attemptReactiveConvert(
-                        activity.getCacheDir(), assetId, source);
-
-                activity.runOnUiThread(() -> {
-                    if (converted != null) {
-                        if (converted.exists()) {
-                            currentPlaybackPath = converted.getAbsolutePath();
-                        }
-                        callback.onTranscodeSuccess(converted);
-                    } else {
-                        callback.onTranscodeFailed();
-                    }
-                });
-            } finally {
-                unpinCacheFile(sourceFile);
-                unpinCacheFile(convertCache);
-                unpinCacheFile(redownloaded);
-            }
-        }).start();
-    }
-
-    public boolean isTranscodedFile(File file) {
-        return VideoTranscodeManager.isTranscodedFile(file);
-    }
-
-    public boolean isImageConvertedFile(File file) {
-        return ImageConvertManager.isConvertedFile(file);
-    }
-
-    void clearReactiveTranscodeAttempts() {
-        reactiveTranscodeAttempted.clear();
-    }
-
-    void recordReactiveTranscodeAttempt(String assetId) {
-        reactiveTranscodeAttempted.add(assetId);
-    }
-
-    public interface ReactiveTranscodeCallback {
-        void onTranscodeSuccess(File transcodedFile);
-        void onTranscodeFailed();
     }
 
     @Override
@@ -963,8 +671,7 @@ public class MediaManager implements MediaManagerInterface {
         if (file == null || !file.isFile()) {
             return;
         }
-        pinnedCachePaths.remove(file.getAbsolutePath());
-        // Only ever delete cache-owned media (UUID-named originals / transcode outputs). This
+        // Only ever delete cache-owned media (UUID-named originals or _eo1-suffixed files). This
         // protects local uploads (filesDir/uploaded) from being deleted on a playback failure.
         if (!MediaCacheManager.isOwnedMediaCacheFile(file)) {
             Log.i(TAG, "removeFromCache: skipping non-cache file " + file.getName());
@@ -985,16 +692,8 @@ public class MediaManager implements MediaManagerInterface {
         }
     }
 
-    static File getTranscodeCacheFile(File cacheDir, String assetId) {
-        return VideoTranscodeManager.getTranscodeCacheFile(cacheDir, assetId);
-    }
-
-    static File getImageConvertCacheFile(File cacheDir, String assetId) {
-        return ImageConvertManager.getConvertCacheFile(cacheDir, assetId);
-    }
-
     private HashSet<String> protectedCachePaths(File extra) {
-        HashSet<String> protectedPaths = new HashSet<>(pinnedCachePaths);
+        HashSet<String> protectedPaths = new HashSet<>();
         if (currentPlaybackPath != null) {
             protectedPaths.add(currentPlaybackPath);
         }
@@ -1004,42 +703,4 @@ public class MediaManager implements MediaManagerInterface {
         return protectedPaths;
     }
 
-    private void pinCacheFile(File file) {
-        if (file != null) {
-            pinnedCachePaths.add(file.getAbsolutePath());
-        }
-    }
-
-    private void unpinCacheFile(File file) {
-        if (file != null) {
-            pinnedCachePaths.remove(file.getAbsolutePath());
-        }
-    }
-
-    private File redownloadVideoForReactive(Activity activity, String assetId) {
-        try {
-            return downloadAsset(assetId, ImmichType.VIDEO, true, null, null, activity, null, null);
-        } catch (Exception e) {
-            ffmpegDebug(activity, "reactive: re-download failed");
-            return null;
-        }
-    }
-
-    private File redownloadImageForReactive(Activity activity, String assetId) {
-        try {
-            // Re-fetch original (not Immich preview) so on-device convert can still succeed.
-            return downloadAsset(assetId, ImmichType.IMAGE, false, null, null, activity, null, null);
-        } catch (Exception e) {
-            ffmpegDebug(activity, "image-reactive: re-download failed");
-            return null;
-        }
-    }
-
-    private void ffmpegDebug(Activity activity, String step) {
-        MediaManagerListener mediaManagerListener = this.listener.get();
-        if (mediaManagerListener != null) {
-            activity.runOnUiThread(() ->
-                    mediaManagerListener.debugInformationProvided(new DebugInformation("ffmpeg", step)));
-        }
-    }
 }

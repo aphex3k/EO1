@@ -47,7 +47,8 @@ android {
             debuggable = false
         }
         debug {
-            // LFS ffmpeg-kit AAR ships armeabi-v7a + arm64-v8a; debug APK always includes both.
+            // armeabi-v7a = EO hardware (TsPlayer .so); arm64-v8a = Apple Silicon API 21
+            // fallback AVD (MediaPlayer only — no TsPlayer .so for that ABI).
             ndk {
                 abiFilters 'armeabi-v7a', 'arm64-v8a'
             }
@@ -92,15 +93,6 @@ dependencies {
     // https://mvnrepository.com/artifact/org.eclipse.paho/org.eclipse.paho.client.mqttv3
     implementation 'org.eclipse.paho:org.eclipse.paho.client.mqttv3:1.2.5'
     implementation 'com.google.code.gson:gson:2.10.1'
-
-    implementation project(':eo1-ffmpeg')
-
-    def ffmpegAar = rootProject.file('eo1-ffmpeg/libs/ffmpeg-kit-min-gpl-lts.aar')
-    if (ffmpegAar.exists()) {
-        implementation files(ffmpegAar)
-        // files() AAR does not resolve transitive deps from ffmpeg-kit's pom
-        implementation 'com.arthenica:smart-exception-java:0.2.1'
-    }
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation "org.mockito:mockito-core:5.10.0"

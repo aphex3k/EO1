@@ -35,16 +35,6 @@ public class CacheFileNameTest {
     }
 
     @Test
-    public void transcodeCacheFileNameUsesEo1Suffix() {
-        assertEquals("abc123_eo1.mp4", VideoTranscodeManager.transcodeCacheFileName(UUID));
-    }
-
-    @Test
-    public void imageConvertCacheFileNameUsesEo1JpgSuffix() {
-        assertEquals("abc123_eo1.jpg", ImageConvertManager.convertCacheFileName(UUID));
-    }
-
-    @Test
     public void extensionFromFileNameRejectsInvalidValues() {
         assertNull(MediaManager.extensionFromFileName("file."));
         assertNull(MediaManager.extensionFromFileName("file.toolongext1"));
