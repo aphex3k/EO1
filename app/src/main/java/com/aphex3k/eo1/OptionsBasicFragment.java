@@ -86,7 +86,9 @@ public class OptionsBasicFragment extends Fragment {
             config.password = passwordField.getText().toString();
             config.host = hostField.getText().toString();
             try {
-                config.interval = Integer.parseInt(intervalField.getText().toString());
+                // Clamp to >= 1: a 0/negative interval would make the rotation timer
+                // reschedule itself in a tight loop.
+                config.interval = Math.max(1, Integer.parseInt(intervalField.getText().toString()));
             } catch (Exception ignored) {}
             config.startQuietHour = Integer.parseInt(startHourSpinner.getSelectedItem().toString());
             config.endQuietHour = Integer.parseInt(endHourSpinner.getSelectedItem().toString());

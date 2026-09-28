@@ -69,6 +69,7 @@ import java.util.Date;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
@@ -134,6 +135,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private boolean videoWatchdogRecoverAttempted = false;
     /** True after Immich slideshow / MQTT / version check have been started for this resume. */
     private boolean coreLoopStarted = false;
+    /**
+     * The single canonical rotation-timer Runnable. Handler callbacks are matched by Runnable
+     * identity, and a method reference (this::runOnTimer) may yield a fresh lambda object on
+     * each evaluation — posting one instance and removing a different one would leave a
+     * duplicate pending tick (forked timer chain, rapid successive flips).
+     */
+    private final Runnable timerTick = new Runnable() {
+        @Override
+        public void run() {
+            runOnTimer();
+        }
+    };
+    /** The pending tick was explicitly cleared (onPause / network pause); the next start must re-arm it. */
+    private boolean timerStopped = false;
+    /** Rotation ticks since process start; a spike here means the timer chain forked. */
+    private int timerTickCount = 0;
     /** Avoid spamming "Waiting for network…" while still offline. */
     private boolean networkWaitNotified = false;
 
@@ -304,7 +321,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * This function is run every time the timer fires.
      */
     private void runOnTimer() {
-        handler.postDelayed(this::runOnTimer, MILLIS * settingsManager.getConfiguration().interval);
+        timerTickCount++;
+        // Clamp: interval is user-editable (the options UI accepts any integer), and a persisted
+        // 0/negative value would otherwise reschedule in a tight loop and burn through assets.
+        long delayMs = MILLIS * Math.max(1, settingsManager.getConfiguration().interval);
+        Log.i(TAG, "runOnTimer: tick " + timerTickCount + " (next in " + delayMs + "ms)");
+        handler.postDelayed(timerTick, delayMs);
         if (brightnessManager.getShouldTheScreenBeOn()) {
             brightnessChanged(lastScreenBrightness);
             mediaManager.showNextImage(this);
@@ -370,11 +392,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
         if (coreLoopStarted) {
-            // Timer was cleared in onPause — re-arm without an immediate second fetch.
+            if (!timerStopped) {
+                Log.i(TAG, "startCoreLoop: timer already armed, skipping re-arm");
+                return;
+            }
+            // Timer was cleared in onPause / pauseCoreLoopForNetwork — re-arm at a full
+            // interval instead of an immediate second fetch.
             long delayMs = MILLIS * Math.max(1, settingsManager.getConfiguration().interval);
-            Log.i(TAG, "startCoreLoop: already started, re-arm timer in " + delayMs + "ms");
-            handler.removeCallbacks(this::runOnTimer);
-            handler.postDelayed(this::runOnTimer, delayMs);
+            Log.i(TAG, "startCoreLoop: re-arm timer in " + delayMs + "ms");
+            handler.removeCallbacks(timerTick);
+            handler.postDelayed(timerTick, delayMs);
+            timerStopped = false;
+            // onPause cancels quietHoursTimer; this resume path must restore the quiet-hours
+            // schedule (and the current screen state), otherwise 22:00/07:00 transitions stop
+            // firing until a settings save or app restart. Idempotent after a network blip,
+            // where the timer was not canceled, and self-corrects a missed transition.
+            setupQuietHours();
+            applyScheduledScreenState();
             return;
         }
 
@@ -383,8 +417,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         networkWaitNotified = false;
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "connected"));
 
-        handler.removeCallbacks(this::runOnTimer);
-        handler.post(this::runOnTimer);
+        handler.removeCallbacks(timerTick);
+        handler.post(timerTick);
+        timerStopped = false;
         setupQuietHours();
         applyScheduledScreenState();
         checkServerCompatibility();
@@ -396,8 +431,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private void pauseCoreLoopForNetwork() {
         Log.i(TAG, "pauseCoreLoop: waiting for network (wasStarted=" + coreLoopStarted + ")");
-        coreLoopStarted = false;
-        handler.removeCallbacks(this::runOnTimer);
+        // Keep coreLoopStarted=true so reconnect takes the re-arm path (next flip after a
+        // full interval) instead of the fresh-start path, which would fire an immediate
+        // showNextImage on every Wi-Fi blip.
+        handler.removeCallbacks(timerTick);
+        timerStopped = true;
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "waiting for network"));
         if (!networkWaitNotified) {
             networkWaitNotified = true;
@@ -461,7 +499,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         cancelVideoWatchdog();
         // Keep coreLoopStarted so onResume only re-arms the timer instead of
         // kicking a second immediate showNextImage (cold-start pause/resume thrash).
-        handler.removeCallbacks(this::runOnTimer);
+        handler.removeCallbacks(timerTick);
+        timerStopped = true;
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
         this.connectionManager.unregisterListener(this);
@@ -608,7 +647,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public void settingsChanged() {
         coreLoopStarted = false;
         networkWaitNotified = false;
-        handler.removeCallbacks(this::runOnTimer);
+        handler.removeCallbacks(timerTick);
         startCoreLoopIfNetworkReady();
     }
 
@@ -825,6 +864,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             cancelVideoWatchdog();
+            // No video is active while an image shows; a stale video callback (incl. one from a
+            // null-assetId fallback stream) must not match activeVideoAssetId.
+            activeVideoAssetId = "";
 
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
@@ -902,7 +944,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     private void assetFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
-        if (isVideo && !assetId.equals(activeVideoAssetId)) {
+        // assetId may be null for the /video/playback fallback stream; Objects.equals keeps
+        // this guard null-safe (a bare assetId.equals() would NPE and kill the app).
+        if (isVideo && !Objects.equals(assetId, activeVideoAssetId)) {
             return;
         }
         immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
@@ -948,6 +992,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     private void startVideoWatchdog(String assetId, File file, WeakReference<MainActivity> activityReference) {
         cancelVideoWatchdog();
+        // The /video/playback fallback stream is displayed with a null asset id; the
+        // same-asset guard in runVideoWatchdogCheck cannot match it, so skip arming.
+        if (assetId == null) {
+            debugInformationProvided(new DebugInformation("video", "watchdog skipped (fallback stream, no asset id)"));
+            return;
+        }
         // TsPlayer getCurrentTime/duration are unreliable; position stalls false-trigger
         // MediaPlayer fallback and break looping. TsVideoView owns health via status poll.
         if (videoPlayer == tsPlayerController) {
@@ -1113,7 +1163,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (!preferTsPlayer || videoPlayer != tsPlayerController) {
             return false;
         }
-        if (!assetId.equals(activeVideoAssetId)) {
+        if (!Objects.equals(assetId, activeVideoAssetId)) {
             return false;
         }
         tsFallbackCount++;
@@ -1145,7 +1195,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         controller.setListener(new VideoPlayerListener() {
             @Override
             public void onVideoPrepared() {
-                if (!assetId.equals(activeVideoAssetId)) {
+                if (!Objects.equals(assetId, activeVideoAssetId)) {
                     return;
                 }
                 try {
@@ -1175,7 +1225,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
             @Override
             public void onVideoEnd() {
-                if (!assetId.equals(activeVideoAssetId)) {
+                if (!Objects.equals(assetId, activeVideoAssetId)) {
                     return;
                 }
                 int position = controller.getCurrentPosition();
@@ -1199,7 +1249,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
             @Override
             public boolean onError(int what, int extra) {
-                if (!assetId.equals(activeVideoAssetId)) {
+                if (!Objects.equals(assetId, activeVideoAssetId)) {
                     return false;
                 }
                 cancelVideoWatchdog();
@@ -1215,7 +1265,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
             @Override
             public boolean onInfo(int what, int extra) {
-                if (!assetId.equals(activeVideoAssetId)) {
+                if (!Objects.equals(assetId, activeVideoAssetId)) {
                     return false;
                 }
                 if (what == MediaPlayer.MEDIA_INFO_BUFFERING_START
