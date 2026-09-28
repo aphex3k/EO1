@@ -42,3 +42,9 @@ bootvideo* filter=lfs diff=lfs merge=lfs -text
 tzdata filter=lfs diff=lfs merge=lfs -text
 *.mp4 filter=lfs diff=lfs merge=lfs -text
 *.tap filter=lfs diff=lfs merge=lfs -text
+# The Gradle wrapper jar is a tiny (~44KB) build prerequisite that every
+# CI/Actions checkout needs. It is committed as a regular git object, not
+# LFS: this repo is a GitHub fork, and forks cannot serve their own LFS
+# objects, so Actions checkouts 404 on the wrapper's LFS oid and ./gradlew
+# cannot start. The blanket *.jar LFS rule above must not re-capture it.
+gradle/wrapper/gradle-wrapper.jar -filter -diff -merge -text
