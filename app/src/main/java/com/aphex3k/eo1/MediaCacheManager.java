@@ -74,6 +74,7 @@ public class MediaCacheManager {
                 protectedCopy.add(victim.getAbsolutePath());
                 continue;
             }
+            MediaIntegrity.deleteSidecar(victim);
         }
         return true;
     }

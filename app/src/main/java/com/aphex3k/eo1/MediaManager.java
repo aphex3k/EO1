@@ -174,6 +174,7 @@ public class MediaManager implements MediaManagerInterface {
                                 assetResponse.getOriginalPath(),
                                 activity,
                                 apiService,
+                                assetResponse.getChecksum(),
                                 expectedBytes);
                     }
                 } catch (Exception e) {
@@ -506,14 +507,21 @@ public class MediaManager implements MediaManagerInterface {
                                             String originalFileName, String originalPath,
                                             Activity activity, ImmichApiService apiService)
             throws NullPointerException, MediaDownloadFailedException, IOException {
-        return downloadAsset(uuid, type, fallback, originalFileName, originalPath, activity, apiService, null);
+        return downloadAsset(uuid, type, fallback, originalFileName, originalPath, activity, apiService, null, null);
     }
 
+    /**
+     * Downloads (or verifies a cached) asset file. For non-fallback downloads, the cached file
+     * is re-verified against the server-reported SHA-1 checksum ({@code expectedChecksum},
+     * Base64 per the Immich API) and/or expected size before reuse; freshly downloaded bytes
+     * are digested in-flight and a hex sidecar ({@code <file>.sha1}) is written. Mismatched
+     * files are discarded and re-fetched once.
+     */
     @NonNull
     private synchronized File downloadAsset(String uuid, ImmichType type, boolean fallback,
                                             String originalFileName, String originalPath,
                                             Activity activity, ImmichApiService apiService,
-                                            Long expectedBytes)
+                                            String expectedChecksum, Long expectedBytes)
             throws NullPointerException, MediaDownloadFailedException, IOException {
 
         if (apiService == null) {
@@ -533,10 +541,16 @@ public class MediaManager implements MediaManagerInterface {
         File cacheFile = new File(cacheDir,
                 cacheFileName(uuid, originalFileName, originalPath, type, fallback));
 
-        // Reuse the original for non-fallback downloads; Immich fallback streams (preview /
-        // /video/playback) may differ from the original bytes, so they are always re-fetched.
+        // Reuse the original for non-fallback downloads only after an integrity check;
+        // Immich fallback streams (preview / /video/playback) may differ from the original
+        // bytes, so they are always re-fetched.
         if (!fallback && cacheFile.exists() && cacheFile.length() > 0) {
-            return cacheFile;
+            if (MediaIntegrity.isCacheFileUsable(cacheFile, expectedChecksum, expectedBytes)) {
+                return cacheFile;
+            }
+            Log.w(TAG, "downloadAsset: cached " + cacheFile.getName()
+                    + " failed integrity check, discarding and re-downloading");
+            deleteCachedFile(cacheFile);
         }
 
         long bytesNeeded = expectedBytes != null && expectedBytes > 0
@@ -546,30 +560,59 @@ public class MediaManager implements MediaManagerInterface {
             throw new MediaDownloadFailedException("Insufficient cache space for asset download");
         }
 
-        Response<ResponseBody> downloadResponse = !fallback ? apiService.downloadFile(uuid, null).execute() :
-                type == ImmichType.IMAGE
-                ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.preview, null).execute()
-                : apiService.playAssetVideo(uuid, null).execute();
+        // One retry: transient transport corruption is rare, a persistent mismatch means the
+        // asset is unusable and should be skipped until the next rotation cycle.
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            Response<ResponseBody> downloadResponse = !fallback ? apiService.downloadFile(uuid, null).execute() :
+                    type == ImmichType.IMAGE
+                    ? apiService.getAssetThumbnail(uuid, ImmichSizeFormat.preview, null).execute()
+                    : apiService.playAssetVideo(uuid, null).execute();
 
-        if (downloadResponse.isSuccessful() && downloadResponse.body() != null) {
-            downloadMutex.lock();
-            try {
-                try (FileOutputStream outputStream = new FileOutputStream(cacheFile)) {
-                    try (InputStream inputStream = downloadResponse.body().byteStream()) {
-                        byte[] buffer = new byte[1024*32];
-                        int bytesRead;
-                        while ((bytesRead = inputStream.read(buffer)) != -1) {
-                            outputStream.write(buffer, 0, bytesRead);
-                        }
-                    }
+            if (!downloadResponse.isSuccessful() || downloadResponse.body() == null) {
+                if (downloadResponse.body() != null) {
+                    downloadResponse.body().close();
                 }
+                throw new MediaDownloadFailedException("Failed downloading immich asset.");
+            }
+
+            byte[] digest;
+            downloadMutex.lock();
+            try (ResponseBody body = downloadResponse.body()) {
+                digest = MediaIntegrity.writeStreamToFile(cacheFile, body.byteStream());
+            } catch (IOException e) {
+                deleteCachedFile(cacheFile);
+                throw e;
             } finally {
                 downloadMutex.unlock();
             }
-            return cacheFile;
 
-        } else throw new MediaDownloadFailedException("Failed downloading immich asset.");
+            if (MediaIntegrity.isDownloadValid(cacheFile, digest, fallback, expectedChecksum, expectedBytes)) {
+                if (!fallback) {
+                    try {
+                        MediaIntegrity.writeSidecar(cacheFile, MediaIntegrity.toHex(digest));
+                    } catch (IOException e) {
+                        Log.w(TAG, "downloadAsset: failed to write integrity sidecar for " + cacheFile.getName(), e);
+                    }
+                }
+                return cacheFile;
+            }
 
+            Log.w(TAG, "downloadAsset: download of " + cacheFile.getName()
+                    + " failed integrity check, attempt " + attempt + "/2");
+            deleteCachedFile(cacheFile);
+        }
+
+        throw new MediaDownloadFailedException("Downloaded asset " + uuid + " failed integrity check");
+    }
+
+    private void deleteCachedFile(File file) {
+        if (file == null) {
+            return;
+        }
+        MediaIntegrity.deleteSidecar(file);
+        if (file.exists() && !file.delete()) {
+            Log.w(TAG, "downloadAsset: could not delete cache file " + file.getAbsolutePath());
+        }
     }
 
     @Override
@@ -578,7 +621,7 @@ public class MediaManager implements MediaManagerInterface {
         new Thread(() -> {
             try {
 
-                File thumbnail = downloadAsset(assetId, type, true, null, null, activity, null, null);
+                File thumbnail = downloadAsset(assetId, type, true, null, null, activity, null, null, null);
 
                 activity.runOnUiThread(() -> {
                     MediaManagerListener mediaManagerListener = this.listener.get();
@@ -684,10 +727,13 @@ public class MediaManager implements MediaManagerInterface {
             Log.i(TAG, "removeFromCache: skipping file outside cache dir " + file.getName());
             return;
         }
-        if (file.exists() && !file.delete()) {
-            MediaManagerListener mediaManagerListener = this.listener.get();
-            if (mediaManagerListener != null) {
-                mediaManagerListener.debugInformationProvided(new DebugInformation("MediaManager.removeFromCache", "Unable to delete file "+file.getAbsolutePath()));
+        if (file.exists()) {
+            MediaIntegrity.deleteSidecar(file);
+            if (!file.delete()) {
+                MediaManagerListener mediaManagerListener = this.listener.get();
+                if (mediaManagerListener != null) {
+                    mediaManagerListener.debugInformationProvided(new DebugInformation("MediaManager.removeFromCache", "Unable to delete file "+file.getAbsolutePath()));
+                }
             }
         }
     }
