@@ -98,3 +98,119 @@ dependencies {
     testImplementation "org.mockito:mockito-core:5.10.0"
 
 }
+
+// Emits a GitHub dependency-submission snapshot of this module's resolved
+// dependency graph (dependency-graph/snapshots API format, purl-based).
+// .github/workflows/dependency-submission.yml runs this and POSTs the JSON.
+// Local preview: ./gradlew :app:dependencySubmissionSnapshot
+tasks.register('dependencySubmissionSnapshot') {
+    description = 'Writes build/dependency-submission-snapshot.json for GitHub dependency reporting.'
+    def outFile = layout.buildDirectory.file('dependency-submission-snapshot.json')
+    outputs.file(outFile)
+
+    doLast {
+        // purl -> [package_url, relationship, scope, dependencies]
+        def appPackages = [:]
+        def buildPackages = [:]
+        def scopeRank = { String s -> s == 'runtime' ? 1 : 0 }
+
+        // Direct deps = what the resolution root requested for this configuration.
+        // (AGP leaves Configuration.dependencies / getAllDependencies() empty on the
+        // variant classpaths, so the resolution result is the reliable source.)
+        def declaredOf = { conf ->
+            def set = new HashSet<String>()
+            conf.incoming.resolutionResult.root.dependencies.each { dep ->
+                def req = dep.requested
+                if (req instanceof org.gradle.api.artifacts.component.ModuleComponentSelector) {
+                    set.add("${req.group}:${req.module}:${req.version}")
+                    if (req.module.endsWith('.gradle.plugin')) {
+                        // plugins DSL: the requested module is a marker pom; count the
+                        // actual plugin artifact (first hop, e.g. com.android.tools.build:gradle)
+                        // as direct too.
+                        def sel = (dep as org.gradle.api.artifacts.result.ResolvedDependencyResult).selected
+                        if (sel != null) {
+                            sel.dependencies.each { d ->
+                                def ds = (d as org.gradle.api.artifacts.result.ResolvedDependencyResult).selected
+                                if (ds != null && ds.moduleVersion != null) {
+                                    set.add("${ds.moduleVersion.group}:${ds.moduleVersion.name}:${ds.moduleVersion.version}")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            set
+        }
+
+        def ingest = { conf, scope, target ->
+            def declared = declaredOf(conf)
+            conf.incoming.artifacts.artifacts.each { art ->
+                def mci = art.id.componentIdentifier
+                if (!(mci instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier)) {
+                    return
+                }
+                def g = mci.group
+                def a = mci.module
+                def v = mci.version
+                if (g == null || g == 'unspecified' || a == null || v == null || v == 'unspecified') {
+                    return
+                }
+                def purl = "pkg:maven/${g}/${a}@${v}"
+                def entry = target.get(purl)
+                if (entry == null) {
+                    target[purl] = [package_url: purl, relationship: 'indirect',
+                                    scope: scope, dependencies: []]
+                } else if (scopeRank(scope) > scopeRank(entry.scope)) {
+                    entry.scope = scope
+                }
+                if (declared.contains("${g}:${a}:${v}")) {
+                    target[purl].relationship = 'direct'
+                }
+            }
+        }
+
+        configurations.each { c ->
+            def n = c.name
+            if (n in ['debugRuntimeClasspath', 'releaseRuntimeClasspath']) {
+                ingest(c, 'runtime', appPackages)
+            } else if (n.endsWith('UnitTestRuntimeClasspath')) {
+                ingest(c, 'development', appPackages)
+            } else if (n.endsWith('AnnotationProcessorClasspath')) {
+                ingest(c, 'development', appPackages)
+            }
+        }
+        def buildscriptClasspath = rootProject.buildscript.configurations.findByName('classpath')
+        if (buildscriptClasspath != null) {
+            ingest(buildscriptClasspath, 'development', buildPackages)
+        }
+
+        def manifests = [:]
+        if (!appPackages.isEmpty()) {
+            manifests['app'] = [
+                name    : 'app',
+                file    : [source_location: 'app/build.gradle'],
+                resolved: appPackages
+            ]
+        }
+        if (!buildPackages.isEmpty()) {
+            manifests['build'] = [
+                name    : 'build',
+                file    : [source_location: 'build.gradle'],
+                resolved: buildPackages
+            ]
+        }
+
+        def snapshot = [
+            manifests: manifests,
+            version  : 0,
+            job      : [correlator: 'gradle-snapshot',
+                        id: project.findProperty('depJobId') ?: System.getenv('GITHUB_RUN_ID') ?: 'local'],
+            sha      : project.findProperty('depSha') ?: System.getenv('GITHUB_SHA') ?: '',
+            ref      : project.findProperty('depRef') ?: System.getenv('GITHUB_REF') ?: '',
+            scanned  : java.time.Instant.now().toString(),
+            detector : [name: 'eo1-gradle-snapshot', url: 'https://github.com/aphex3k/EO1', version: '1.0']
+        ]
+        outFile.get().asFile.text = groovy.json.JsonOutput.toJson(snapshot)
+        logger.lifecycle("dependencySubmissionSnapshot: ${appPackages.size()} app + ${buildPackages.size()} build packages -> ${outFile.get().asFile}")
+    }
+}

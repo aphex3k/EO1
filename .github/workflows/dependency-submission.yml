@@ -1,0 +1,52 @@
+# Submits a Gradle-resolved dependency snapshot to the GitHub dependency graph
+# (POST /repos/{owner}/{repo}/dependency-graph/snapshots). User submissions take
+# priority over managed "Automatic dependency submission" runs, which cannot
+# work here: gradle/wrapper/gradle-wrapper.jar is a Git LFS object, so a plain
+# managed checkout leaves an LFS pointer and ./gradlew cannot start.
+name: Dependency Submission
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write # required by the dependency-graph/snapshots API
+
+jobs:
+  submit-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Materialize only the wrapper jar from LFS. Never fetch the full LFS
+      # set — it includes multi-GB EO2/.electric-objects dumps.
+      - name: Fetch Gradle wrapper jar (LFS)
+        run: |
+          git lfs install
+          git lfs pull --include="gradle/wrapper/gradle-wrapper.jar"
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # Installs cmdline-tools + platform-tools and accepts SDK licenses, so
+      # AGP can auto-download platforms;34 / build-tools as needed.
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Resolve dependencies and write snapshot
+        run: ./gradlew --no-daemon :app:dependencySubmissionSnapshot
+
+      - name: Submit dependency snapshot
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          curl -sS -f -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github.foo-bar-preview+json" \
+            -H "Content-Type: application/json" \
+            --data-binary @app/build/dependency-submission-snapshot.json \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/dependency-graph/snapshots"

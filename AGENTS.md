@@ -86,6 +86,16 @@ Current model fields: `host`, `userid`, `password`, `selectedTimeZoneId`, `start
 ./gradlew test
 ```
 
+### GitHub dependency reporting
+
+`.github/workflows/dependency-submission.yml` (on push to `main` + manual) resolves the `:app` classpaths with Gradle (no tests, no packaging) and submits a dependency snapshot to the GitHub dependency graph (`POST /repos/…/dependency-graph/snapshots`). Local preview:
+
+```bash
+./gradlew :app:dependencySubmissionSnapshot   # writes app/build/dependency-submission-snapshot.json
+```
+
+`gradle/wrapper/gradle-wrapper.jar` is a Git LFS object, so the workflow materializes just that file via `git lfs pull --include` — never a full LFS pull (it would fetch the multi-GB `EO2/` / `.electric-objects/` dumps).
+
 Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](README.md) — not required for most code changes.
 
 ## Do / don’t
@@ -101,6 +111,7 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 **Don’t**
 
 - Commit `configuration.json`, `ffmpeg/`, or bulk `EO2/` dumps
+- Enable GitHub’s managed “Automatic dependency submission” for this repo — its managed checkout can’t materialize the LFS-tracked `gradle/wrapper/gradle-wrapper.jar`, so `./gradlew` dies before anything runs. The repo’s `dependency-submission.yml` workflow is the dependency-reporting path
 - Introduce Kotlin or raise `minSdk` / `maxSdk` without an explicit product decision
 - Add ExoPlayer / Media3 for video playback (known Geniatech API 19 full-system hang)
 - Loop TsPlayer video with a Java per-duration `deletePlayer`/`createPlayer` (full-recreate) loop — the `.so` already loops natively; a per-duration recreate clears the Amlogic plane → a black flash every pass and fights the native loop. Also rejected for looping: `start()`-alone at EOS (EBUSY on `amstream_vbuf`) and create-without-delete (wedges after ~12 gens). Full teardown only on asset handoff / `stop()` / surface destroy. Pulse TsPlayer `SurfaceView` GONE→VISIBLE / `setFormat` only for normal show/hide, never to fix loop stalls (see [docs/TSPLAYER.md](docs/TSPLAYER.md) “Looping (native)”)
