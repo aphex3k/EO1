@@ -111,7 +111,12 @@ public class MqttManager {
     }
 
     public void disconnect() throws MqttException {
-        client.disconnect();
+        // paho throws MqttException(32101) when disconnecting a client that is
+        // not connected (never connected, connect still in flight, or broker
+        // connection already lost); skipping keeps onPause log-clean.
+        if (client.isConnected()) {
+            client.disconnect();
+        }
     }
 
     private void subscribe(String topic) throws MqttException {
