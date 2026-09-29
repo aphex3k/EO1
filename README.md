@@ -27,7 +27,7 @@ The following documentation assumes, that you have set up Immich already.
 
 ### Requirements
 
-- Immich server **3.0.0–3.1.0** (tested against **3.1.0**). Immich’s HTTP API changes between releases; newer servers may show an “unsupported” toast until this app is updated to match.
+- Immich server **3.0.0–3.2.2** (verified against the **3.2.2** OpenAPI spec). Immich’s HTTP API changes between releases; newer servers may show an “unsupported” toast until this app is updated to match.
 - You need a way to connect a keyboard and mouse to your EO1 frame.  You can get one of these [USB OTG Adapters](https://www.amazon.com/gp/product/B01C6032G0/?&_encoding=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=a2e10d0fcebbd4425ace19f040a24e27&camp=1789&creative=9325) and connect a [USB keyboard with hub built-in](https://www.amazon.com/gp/search?ie=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=56fac2fd57bf775c7512756260c58b6e&camp=1789&creative=9325&index=pc-hardware&keywords=usb) to it, then a USB mouse to the keyboard
   - Alternatively, you can get an [OTG Hub](https://www.amazon.com/dp/B01HYJLZH6?psc=1&ref=ppx_yo2ov_dt_b_product_details&_encoding=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=49938883224aa721262057e366759275&camp=1789&creative=9325) and connect a mouse and keyboard to it directly
 - Immich Account Host
