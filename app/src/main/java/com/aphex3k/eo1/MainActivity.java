@@ -92,7 +92,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** Inclusive lower bound for Immich server versions this APK is tested against. */
     public static final String IMMICH_MIN_VERSION = "3.0.0";
     /** Inclusive upper bound for Immich server versions this APK is tested against. */
-    public static final String IMMICH_MAX_VERSION = "3.1.0";
+    public static final String IMMICH_MAX_VERSION = "3.2.2";
     private View lastVisibleView;
     private String lastVisibleAsset = "";
     private String activeVideoAssetId = "";

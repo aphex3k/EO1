@@ -16,13 +16,13 @@ public class ImmichApiServerVersionResponseTest {
     @Test
     public void parsesMajorMinorPatch() {
         ImmichApiServerVersionResponse response = new Gson().fromJson(
-                "{\"major\":3,\"minor\":1,\"patch\":0}",
+                "{\"major\":3,\"minor\":2,\"patch\":2}",
                 ImmichApiServerVersionResponse.class
         );
 
         Semver version = response.getVersion();
         assertNotNull(version);
-        assertEquals("3.1.0", version.getValue());
+        assertEquals("3.2.2", version.getValue());
         assertFalse(version.isLowerThan(MainActivity.IMMICH_MIN_VERSION));
         assertFalse(version.isGreaterThan(MainActivity.IMMICH_MAX_VERSION));
     }
@@ -42,7 +42,7 @@ public class ImmichApiServerVersionResponseTest {
     @Test
     public void marksPostMaxAsUnsupported() {
         ImmichApiServerVersionResponse response = new Gson().fromJson(
-                "{\"major\":3,\"minor\":2,\"patch\":0}",
+                "{\"major\":3,\"minor\":3,\"patch\":0}",
                 ImmichApiServerVersionResponse.class
         );
 
