@@ -3,14 +3,8 @@ package com.aphex3k.eo1;
 import android.app.AlarmManager;
 import android.content.Context;
 import android.os.Build;
-import android.view.View;
-import android.widget.ArrayAdapter;
-import android.widget.Button;
-import android.widget.EditText;
-import android.widget.Spinner;
 
 import androidx.annotation.Keep;
-import androidx.appcompat.app.AlertDialog;
 
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -21,9 +15,7 @@ import java.io.FileReader;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
 import java.lang.ref.WeakReference;
-import java.util.Arrays;
 import java.util.Objects;
-import java.util.TimeZone;
 
 @Keep
 public class SettingsManager {
@@ -47,7 +39,17 @@ public class SettingsManager {
             try {
                 File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 
-                this.configuration = new Gson().fromJson(new FileReader(file), Configuration.class);
+                Configuration loaded = new Gson().fromJson(new FileReader(file), Configuration.class);
+                if (loaded != null && Configuration.normalize(loaded)) {
+                    // Persist the migrated/normalized form (legacy flat host -> backends, etc.).
+                    this.configuration = loaded;
+                    try {
+                        saveConfiguration();
+                    } catch (IOException ignored) {
+                        // In-memory config is already usable; the on-disk rewrite is best effort.
+                    }
+                }
+                this.configuration = loaded;
 
                 return true;
             } catch (Exception e) {
@@ -62,10 +64,7 @@ public class SettingsManager {
     {
         if (!loadConfiguration() ||
             this.configuration == null ||
-            this.configuration.userid == null ||
-            this.configuration.userid.isEmpty() ||
-            this.configuration.password == null ||
-            this.configuration.password.isEmpty())
+            this.configuration.validBackendCount() == 0)
         {
             return true;
         }
@@ -79,6 +78,10 @@ public class SettingsManager {
         SettingsManagerListener settingsManagerListener = this.listener.get();
 
         if (settingsManagerListener != null) {
+            // Keep the file readable by older APKs: mirror the first immich backend into the
+            // legacy flat host/userid/password fields before serializing.
+            mirrorLegacyHostFields();
+
             File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 
             Objects.requireNonNull(file.getParentFile()).mkdirs();
@@ -109,6 +112,29 @@ public class SettingsManager {
         }
     }
 
+    /**
+     * Keeps the deprecated flat {@code host/userid/password} fields in sync with the first
+     * immich backend so older APK versions can still read the config file.
+     */
+    private void mirrorLegacyHostFields() {
+        ConfigurationBackendEntry first = null;
+        for (ConfigurationBackendEntry entry : configuration.backendsOrEmpty()) {
+            if (entry.isImmich()) {
+                first = entry;
+                break;
+            }
+        }
+        if (first == null) {
+            configuration.host = "";
+            configuration.userid = "";
+            configuration.password = "";
+        } else {
+            configuration.host = first.host;
+            configuration.userid = first.userid;
+            configuration.password = first.password;
+        }
+    }
+
     void updateTimeZone(Context context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
             SettingsManagerListener settingsManagerListener = this.listener.get();
@@ -120,96 +146,4 @@ public class SettingsManager {
         }
     }
 
-    /**
-     * Deprecated: Use OptionsDialogFragment instead for configuration UI.
-     */
-    @Deprecated
-    protected void showSetupDialog(Context context) {
-
-        SettingsManagerListener settingsManagerListener = this.listener.get();
-
-        if (settingsManagerListener != null) {
-
-            AlertDialog.Builder builder = new AlertDialog.Builder(context);
-            View customLayout = settingsManagerListener.getLayoutInflater().inflate(R.layout.options, null);
-            builder.setView(customLayout);
-
-            final EditText userIdEditText = customLayout.findViewById(R.id.editTextUserId);
-            final EditText passwordEditText = customLayout.findViewById(R.id.editTextPassword);
-            final EditText hostEditText = customLayout.findViewById(R.id.editTextHost);
-            final Spinner startHourSpinner = customLayout.findViewById(R.id.startHourSpinner);
-            final Spinner endHourSpinner = customLayout.findViewById(R.id.endHourSpinner);
-            final Button btnLoadConfig = customLayout.findViewById(R.id.btnLoadConfig);
-            final EditText editTextInterval = customLayout.findViewById(R.id.editTextInterval);
-            final Spinner tzSpinner = customLayout.findViewById(R.id.tzSpinner);
-
-            userIdEditText.setText(configuration.userid);
-            passwordEditText.setText(configuration.password);
-            hostEditText.setText(configuration.host);
-            editTextInterval.setText(String.valueOf(configuration.interval));
-
-
-            // Set up the Spinners for start and end hour
-            String[] hours = new String[24];
-            for (int i = 0; i < 24; i++) {
-                hours[i] = String.format("%02d", i);
-            }
-            ArrayAdapter<String> hourAdapter = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item, hours);
-            hourAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-            startHourSpinner.setAdapter(hourAdapter);
-            if (configuration.startQuietHour != -1) startHourSpinner.setSelection(configuration.startQuietHour);
-            endHourSpinner.setAdapter(hourAdapter);
-            if (configuration.endQuietHour != -1) endHourSpinner.setSelection(configuration.endQuietHour);
-
-            String[] allTimeZoneIds = TimeZone.getAvailableIDs();
-            ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(context, android.R.layout.simple_spinner_item, allTimeZoneIds);
-            tzAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-            tzSpinner.setAdapter(tzAdapter);
-            if (configuration.selectedTimeZoneId != null && !configuration.selectedTimeZoneId.isEmpty())
-                tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId));
-
-            View.OnClickListener load = view -> {
-
-                if (loadConfiguration()) {
-                    userIdEditText.setText(configuration.userid);
-                    passwordEditText.setText(configuration.password);
-                    hostEditText.setText(configuration.host);
-                    tzSpinner.setSelection(Arrays.asList(allTimeZoneIds).indexOf(configuration.selectedTimeZoneId), true);
-                    startHourSpinner.setSelection(configuration.startQuietHour, true);
-                    endHourSpinner.setSelection(configuration.endQuietHour, true);
-                    editTextInterval.setText(String.valueOf(configuration.interval));
-                }
-            };
-
-            btnLoadConfig.setOnClickListener(load);
-            btnLoadConfig.callOnClick();
-
-            builder.setTitle("Setup")
-                    .setCancelable(false)
-                    .setView(customLayout)
-                    .setPositiveButton("Save", (dialog, which) -> {
-                        configuration.userid = userIdEditText.getText().toString().trim();
-                        configuration.password = passwordEditText.getText().toString().trim();
-                        configuration.host = hostEditText.getText().toString().trim();
-                        configuration.startQuietHour = Integer.parseInt(startHourSpinner.getSelectedItem().toString());
-                        configuration.endQuietHour = Integer.parseInt(endHourSpinner.getSelectedItem().toString());
-                        configuration.interval = Integer.parseInt(editTextInterval.getText().toString().trim());
-                        configuration.selectedTimeZoneId = tzSpinner.getSelectedItem().toString();
-
-                        if (!configuration.userid.isEmpty() && !configuration.password.isEmpty() && !configuration.host.isEmpty()) {
-                            try {
-                                saveConfiguration();
-                                updateTimeZone(context);
-                                settingsManagerListener.settingsChanged();
-                            } catch (IOException e) {
-                                settingsManagerListener.handleException(e);
-                            }
-                        }
-                    })
-                    .setNegativeButton("Cancel", (dialog, which) -> dialog.dismiss());
-
-
-            builder.show();
-        }
-    }
 }

@@ -21,7 +21,7 @@ the server itself is unit-testable with a fake controller and never references t
 | Route | Method | Purpose |
 |---|---|---|
 | `/` | GET | One-page UI: upload form, file table (download/delete), control buttons |
-| `/state` | GET | JSON: device/app info, config, network/Wi-Fi, rotation stats, battery/memory/uptime telemetry |
+| `/state` | GET | JSON: device/app info, config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours`, `timezone`), network/Wi-Fi, rotation stats, battery/memory/uptime telemetry |
 | `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
 | `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
 | `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
@@ -55,14 +55,18 @@ component; colliding names get a `_N` suffix. Uploads stream to disk in 8 KB chu
 (`MultipartParser`) into a per-request `incoming_<nanoTime>` temp dir, then are renamed into
 the persistent dir — parallel uploads cannot collide.
 
-On each rotation rebuild, `MediaManager.addLocalUploadedAssets()` scans that directory and
-adds one synthetic asset per recognised media file (video/image extension lists in
-`MediaManager`). Local assets are **fully interleaved** with Immich assets: they are appended
-to the same list before it is shuffled, and are **played/displayed directly from
-`filesDir/uploaded`** (`resolveLocalAssetFile`) — no cache copy and no client-side FFmpeg
-pipeline. The originals in `filesDir/uploaded` live outside the cache directory and are never
-touched by eviction. When Immich is unreachable, the rotation simply falls back to the local
-uploads.
+Each rotation tick, `MediaManager` re-scans that directory through the **`local` media
+backend** (`LocalMediaBackend`): newly appeared files are appended to the tail of the merged
+rotation pool and the unshown tail is reshuffled, so a web upload joins the rotation on the
+next interval tick — no restart, no pool rebuild, and no reference from the web server to the
+media pipeline. Local assets are **fully interleaved** with Immich assets from any number of
+hosts: they are peers in the same merged pool and are **played/displayed directly from
+`filesDir/uploaded`** — no cache copy and no client-side FFmpeg pipeline. The originals in
+`filesDir/uploaded` live outside the cache directory and are never touched by eviction (which
+only touches its UUID-named cache-file pattern). Files deleted through `/files/<name>/delete`
+or on disk drop out of the pool on the next tick. When an Immich backend is unreachable or
+its credentials are wrong, that backend is skipped with a toast and the remaining backends
+(including local uploads) keep rotating.
 
 ## Logs / past state
 

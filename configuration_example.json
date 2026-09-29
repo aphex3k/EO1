@@ -1,10 +1,28 @@
 {
-    "host": "https://your host here/",
-    "userid": "test@test.test",
-    "password": "correct-horse-battery-staple",
-    "autoBrightness": true,
     "selectedTimeZoneId": "America/Los_Angeles",
     "startQuietHour": 23,
     "endQuietHour": 14,
-    "interval": 15
+    "interval": 15,
+    "backends": [
+        {
+            "type": "immich",
+            "id": "immich-1",
+            "host": "https://your host here/",
+            "userid": "test@test.test",
+            "password": "correct-horse-battery-staple",
+            "apiVersion": "auto"
+        },
+        {
+            "type": "immich",
+            "id": "immich-2",
+            "host": "https://second-immich-host.example.com:3001/",
+            "userid": "frame-two@test.test",
+            "password": "another-secret",
+            "apiVersion": "3.1.0"
+        },
+        {
+            "type": "local",
+            "id": "local"
+        }
+    ]
 }

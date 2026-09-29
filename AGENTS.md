@@ -32,7 +32,7 @@ Git LFS (tracked): `app/src/main/jniLibs/armeabi-v7a/libTsPlayer-jni.so` (Amlogi
 - **SDK:** `minSdk` / `targetSdk` / `maxSdk` = **19** (KitKat 4.4.2); `compileSdk` 34
 - **Build:** Gradle + Android Gradle Plugin; CI via Jenkins (build, tests, signed APKs)
 - **Networking:** Retrofit + OkHttp + Gson; hand-rolled Immich client; Gitea client for OTA
-- **Immich server:** supported range **3.0.0–3.2.2** (verified against the 3.2.2 OpenAPI spec — no breaking changes to the endpoints this app uses). Bounds live in `MainActivity.IMMICH_MIN_VERSION` / `IMMICH_MAX_VERSION`. Immich’s API is not stable across releases — when bumping support, re-check OpenAPI and update types under `immichApi/`.
+- **Immich server:** supported band **3.0.0–3.2.2** (verified against the 3.2.2 OpenAPI spec — no breaking changes to the endpoints this app uses). The band lives in `com.aphex3k.media.immich.ImmichClientRegistry` (the V3 client); each backend entry may pin its `apiVersion` (default `"auto"` = best-effort probe of `GET /api/server/version`). Immich’s API is not stable across releases — on a breaking change, add a new frozen `com.aphex3k.immichApi.vN` DTO package + `ImmichClientVN` + one registry band; never edit a frozen client package.
 - **TLS:** EO1 needs TLS 1.2 and weaker ciphers — see `Tls12SocketFactory.java` and `ApiServiceGenerator.java`
 - **Video:** Prefer Amlogic **TsPlayer** (`TsVideoView` + `libTsPlayer-jni.so`) on Geniatech EO1/EO2 when the native library loads; **automatic fallback** to platform `MediaPlayer` via `com.dd.crop.TextureVideoView`. **Do not use ExoPlayer** (including 2.19.x / Media3) — it triggers MediaCodec/GPU driver lockups that hang the whole device (ADB dies; requires power-cycle). See [docs/TSPLAYER.md](docs/TSPLAYER.md).
 - **No client-side transcoding / conversion:** The downloaded Immich original is used as-is — there is no on-device FFmpeg, video re-encode, or image resize. Undecodable images (HEIC, corrupt) and incompatible videos surface through the display-error path (Glide `onLoadFailed` / player error → `assetFallback` → Immich `/thumbnail?size=preview` or `/video/playback`). The ~800MB Amlogic hardware cannot reliably transcode; oversized >1920px images are loaded directly (accepted OOM risk).
@@ -44,8 +44,8 @@ Do not casually bump SDK levels or modernize AndroidX / OkHttp / Retrofit; pins 
 
 ```
 MainActivity
-  ├── SettingsManager       → configuration.json (Configuration.java)
-  ├── MediaManager          → com.aphex3k.immichApi → Immich server
+  ├── SettingsManager       → configuration.json (Configuration.java, backends list)
+  ├── MediaManager          → com.aphex3k.media.MediaBackend (ImmichMediaBackend → ImmichClientV3 → com.aphex3k.immichApi | LocalMediaBackend)
   ├── Video playback        → TsPlayer (preferred) / MediaPlayer fallback
   ├── BrightnessManager / BrightnessSensorManager
   └── UpdateManager         → com.aphex3k.giteaApi → Gitea releases
@@ -57,7 +57,8 @@ Open these first:
 |------|------|
 | Launcher / orchestration | `app/src/main/java/com/aphex3k/eo1/MainActivity.java` |
 | Video player (TsPlayer / MediaPlayer) | `TsVideoView`, `VideoPlayerController`, `com.example.tsplayer.TsPlayerNative` |
-| Album fetch / rotation | `app/src/main/java/com/aphex3k/eo1/MediaManager.java` |
+| Asset acquisition / rotation pool | `app/src/main/java/com/aphex3k/eo1/MediaManager.java` |
+| Media layer (backend interface, assets, backends) | `app/src/main/java/com/aphex3k/media/` — `MediaBackend`, `MediaAsset`, `MediaSource`, `MediaType`; `media.immich` (`ImmichMediaBackend`, `ImmichClient(V3)`, `ImmichClientRegistry`); `media.local` (`LocalMediaBackend`) |
 | Settings I/O | `app/src/main/java/com/aphex3k/eo1/SettingsManager.java` |
 | Config model (source of truth) | `app/src/main/java/com/aphex3k/eo1/Configuration.java` |
 | Immich HTTP API | `app/src/main/java/com/aphex3k/immichApi/ImmichApiService.java` |
@@ -74,9 +75,9 @@ Open these first:
 Device config lives at `/data/data/com.aphex3k.eo1/files/configuration.json`.
 
 - Prefer **`Configuration.java`** as the source of truth for fields.
-- `configuration_example.json` is a template and may include fields the model no longer has (e.g. `autoBrightness`).
+- `configuration_example.json` is a template for the new multi-backend shape.
 
-Current model fields: `host`, `userid`, `password`, `selectedTimeZoneId`, `startQuietHour`, `endQuietHour`, `interval`.
+Current model fields: `backends` — a list of `ConfigurationBackendEntry` (`type` "immich"|"local", `id` like "immich-1"/"local", `host`, `userid`, `password`, `apiVersion` = "auto" or a pinned semver; local entries carry only `type`/`id`, at most one is honored) — plus `selectedTimeZoneId`, `startQuietHour`, `endQuietHour`, `interval`. The flat `host`/`userid`/`password` fields are `@Deprecated` legacy: on load, `Configuration.normalize` migrates a legacy flat config into a single immich backend (and re-saves it); on save, `SettingsManager` mirrors the first immich backend back into the flat fields so older APKs can still read the file.
 
 ## Common workflows
 
@@ -103,14 +104,16 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 **Do**
 
 - Keep API 19 compatibility and existing Retrofit/OkHttp pin strategy
-- Extend types under `immichApi/` when Immich API fields change
-- Treat `app/src/main/java/com/aphex3k/eo1/` as the app core
+- On a breaking Immich API change, add a new frozen `com.aphex3k.immichApi.vN` DTO package + `ImmichClientVN` + a registry band in `com.aphex3k.media.immich.ImmichClientRegistry` — never edit a frozen client package
+- Treat `app/src/main/java/com/aphex3k/eo1/` as the app core and `com.aphex3k.media` as the backend layer (per-backend client wiring; `MediaManager` only orchestrates)
 - Keep the LAN web server dependency-free and resource-cheap (hand-rolled `ServerSocket`, `Connection: close`); every web-server thread must be defensively wrapped — a stray exception must never reach the global `UncaughtExceptionHandler` (which calls `System.exit(2)`)
 - Let `libTsPlayer-jni.so` loop a media file **natively** — create the TsPlayer once per asset and run no per-duration Java teardown loop; full `deletePlayer` + `createPlayer` only on asset handoff / `stop()` / `surfaceDestroyed` (see [docs/TSPLAYER.md](docs/TSPLAYER.md) “Looping (native)”)
 
 **Don’t**
 
 - Commit `configuration.json`, `ffmpeg/`, or bulk `EO2/` dumps
+- Modify a frozen Immich client package (`com.aphex3k.immichApi`, `ImmichClientV3`) in place for a breaking API change — add the versioned package + registry band instead
+- Grow the rotation pool beyond compact `MediaAsset` records; the ~800MB device cannot hold full API response objects for large libraries
 - Enable GitHub’s managed “Automatic dependency submission” for this repo — the repo’s `dependency-submission.yml` workflow (user submission) is the dependency-reporting path, and user submissions take priority over managed runs
 - Introduce Kotlin or raise `minSdk` / `maxSdk` without an explicit product decision
 - Add ExoPlayer / Media3 for video playback (known Geniatech API 19 full-system hang)

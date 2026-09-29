@@ -1,16 +1,20 @@
 package com.aphex3k.immichApi;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNull;
 
-import com.aphex3k.eo1.MainActivity;
+import com.aphex3k.media.immich.ImmichClientRegistry;
+import com.aphex3k.media.immich.ImmichClientV3;
 import com.google.gson.Gson;
 import com.vdurmont.semver4j.Semver;
 
 import org.junit.Test;
 
+/**
+ * Version-probe responses parse into a Semver that lands inside (or outside) the
+ * client band registered in {@link ImmichClientRegistry}.
+ */
 public class ImmichApiServerVersionResponseTest {
 
     @Test
@@ -23,8 +27,7 @@ public class ImmichApiServerVersionResponseTest {
         Semver version = response.getVersion();
         assertNotNull(version);
         assertEquals("3.2.2", version.getValue());
-        assertFalse(version.isLowerThan(MainActivity.IMMICH_MIN_VERSION));
-        assertFalse(version.isGreaterThan(MainActivity.IMMICH_MAX_VERSION));
+        assertEquals(ImmichClientV3.class, ImmichClientRegistry.clientForVersion(version));
     }
 
     @Test
@@ -36,7 +39,7 @@ public class ImmichApiServerVersionResponseTest {
 
         Semver version = response.getVersion();
         assertNotNull(version);
-        assertTrue(version.isLowerThan(MainActivity.IMMICH_MIN_VERSION));
+        assertNull(ImmichClientRegistry.clientForVersion(version));
     }
 
     @Test
@@ -48,6 +51,6 @@ public class ImmichApiServerVersionResponseTest {
 
         Semver version = response.getVersion();
         assertNotNull(version);
-        assertTrue(version.isGreaterThan(MainActivity.IMMICH_MAX_VERSION));
+        assertNull(ImmichClientRegistry.clientForVersion(version));
     }
 }
