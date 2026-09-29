@@ -15,7 +15,7 @@ On your smart device, you will run the immich app for your platform and device. 
 
 - A simple single-user configuration runs the same user credentials on the picture frame as well as on the smart device.
 - In a multi-user configuration, everyone can upload pictures to one shared album or several shared albums which is accessible from the account that is used on the frames.
-- The client app on the frames will select a random picture from the pool of all available pictures in shared or non-shared albums.
+- The client app on the frames will select a random picture from the merged pool of all available pictures across every configured media backend (Immich albums from one or more hosts, plus optionally locally uploaded files).
 - A new picutre is chosen every interval.
 - A best effort is made that once every picture had been displayed once, the cycle starts anew.
 
@@ -30,8 +30,8 @@ The following documentation assumes, that you have set up Immich already.
 - Immich server **3.0.0–3.2.2** (verified against the **3.2.2** OpenAPI spec). Immich’s HTTP API changes between releases; newer servers may show an “unsupported” toast until this app is updated to match.
 - You need a way to connect a keyboard and mouse to your EO1 frame.  You can get one of these [USB OTG Adapters](https://www.amazon.com/gp/product/B01C6032G0/?&_encoding=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=a2e10d0fcebbd4425ace19f040a24e27&camp=1789&creative=9325) and connect a [USB keyboard with hub built-in](https://www.amazon.com/gp/search?ie=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=56fac2fd57bf775c7512756260c58b6e&camp=1789&creative=9325&index=pc-hardware&keywords=usb) to it, then a USB mouse to the keyboard
   - Alternatively, you can get an [OTG Hub](https://www.amazon.com/dp/B01HYJLZH6?psc=1&ref=ppx_yo2ov_dt_b_product_details&_encoding=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=49938883224aa721262057e366759275&camp=1789&creative=9325) and connect a mouse and keyboard to it directly
-- Immich Account Host
-- Immich Account Login (Username/Password)
+- For each Immich backend: the server host and an account login (username/password) — see [Multiple media backends](#multiple-media-backends)
+- (optionally) the local uploads backend — no account needed, files uploaded via the frame's [LAN web server](docs/WEBSERVER.md)
 - (optionally) a web server hosting the APK for download onto the frames
 
 #### Caveats
@@ -56,14 +56,17 @@ Amongst other things, I had to disable PFS as well as enable TLSv1.2 in addition
 - Restart/power cycle your EO1 by unplugging and plugging only the power cable
   - At this point, the keyboard and mouse are still connected via OTG
 - Because this APK is designated as a "Home screen replacement", when EO1 boots, it will ask if you want to load the Electric Object app or the EO1 app. Select EO1 and choose "Always".
-- The first time the EO1 is run you will need to specify the information listed above. Click OK to save and continue. **To get back to the configuration screen later, press C on your connected keyboard**
-  - Username: this is the same email address you would use to log in on the web-app or the native apps on iOS or Android
-    - Depending in how you set up your immich installation this is your own user or a shared user account dedicated for use with the frames
+- The first time the EO1 is run, the options dialog opens on the **Media** tab. Under **Media backends** click **"+ Add Immich backend"** and fill in the fields in the row that expands:
+  - Server: the same server URL you use to log in on the web-app or the native apps on iOS or Android
+    - If you connect to immich in your browser via `http://immich.local`, that is what you want to use here
+    - If you run immich on a different port than `80`, include it in the server string, like `http://immich.local:8080`
+  - Username: the same email address you would use to log in on the web-app or the native apps on iOS or Android
+    - Depending on how you set up your immich installation this is your own user or a shared user account dedicated for use with the frames
   - Password: same as above
     - Keep in mind that this password is stored in clear-text on the frame. Everyone with access to your device can recover the password!
-  - Server / Host: Insert the same server URL you use to to log in on the web-app or the native apps on iOS or Android
-    - If you connect to immich on your browser by using `http://immich.local`, that is what you want to use in the configuration window as well
-    - If you run immich on a different port than `80`, you need to include that in the server string like `http://immich.local:8080`
+  - API version: leave blank for `auto` (the frame probes the server's version on first contact) or pin a version like `3.1.0` — see [Multiple media backends](#multiple-media-backends)
+  - Pointing the frame at more than one server? Click **"+ Add Immich backend"** again for each additional host. **"+ Add Local uploads"** enables the optional local uploads backend (no credentials needed).
+- Press **Save** at the bottom of the dialog. **To get back to the configuration screen later, press C on your connected keyboard**
 - You can now unplug your mouse and keyboard and hang your EO1 back on the wall!
 
 ### Setup for EO2
@@ -83,7 +86,7 @@ This guide assumes your EO2 already has an IP address on your network that is kn
   1. `adb install -r PATH/TO/eo1-app-release.apk`
 - At this point, when you reboot your EO2, the configuration window should pop up. You can either attempt to connect a keyboard to the EO2 to edit the file directly, or follow these instructions to create the configuration.json file manually
   1. open the configuration_example.json from the root of this repo (either clone the repo or copy-paste the contents to a new text file)
-  2. adjust the values for your setup. If you have multiple EO2s, see the section below around managing multiple EO2s with immich
+  2. adjust the values for your setup — the file now carries a `backends` list (one entry per Immich host, plus an optional `local` entry); see [Multiple media backends](#multiple-media-backends) below. If you have multiple EO2s, see the section around managing multiple EO2s with immich
   3. once the file is edited with your preferences, copy it to the EO2 with the following command:
   4. `adb push PATH/TO/configuration.json /data/data/com.aphex3k.eo1/files/configuration.json`
 - Reboot your EO2 with the following command:
@@ -95,10 +98,36 @@ This guide assumes your EO2 already has an IP address on your network that is kn
 
 In a situation where you will want to manage multiple EO2s (or when you want to have granular control on what a single EO2 displays) you'll want to create an immich account for **each EO**. These accounts should be separate from your master (admin) account that manages the immich instance.
 In the immich Administration area, click the "Create User" button and name it for the EO2 (eg EO2-LivingRoom). _at the point of writing this, each account requires a separate email address, however in my testing this address is not used and does not need to be verifed. If this changes in future versions of immich, you'll have to provide unique emails for each EO._
-Use the created email/password combo for each EO2 in the app configuration.json
+Use the created email/password combo for each EO2 as that device's `immich` backend entry in its `configuration.json` (one backend per device is the typical setup; extra backends can be added in the file or the options dialog)
 Create separate albums for your pictures - either organized as previously on the electricobjects website (each album is a playlist) or create albums specific for each device
 Choose the album you want to show on each device, click the Share icon in the up-right of the immich app, and choose the account associated with the device.
 The app will only be able to see content from your immich database that is shared with it.
+
+### Multiple media backends
+
+The frame's configuration holds a list of **media backends**; the rotation pool merges the catalogs of all of them and picks randomly across the combined set. Any number of Immich hosts is allowed, plus one optional **local** backend for files uploaded through the frame's [LAN web server](docs/WEBSERVER.md) — it joins the rotation as an equal peer and needs no account.
+
+Template: [`configuration_example.json`](configuration_example.json).
+
+```json
+{
+  "selectedTimeZoneId": "America/Los_Angeles",
+  "startQuietHour": 22,
+  "endQuietHour": 7,
+  "interval": 15,
+  "backends": [
+    { "type": "immich", "id": "immich-1", "host": "http://immich.local/", "userid": "frame1@example.com", "password": "secret", "apiVersion": "auto" },
+    { "type": "immich", "id": "immich-2", "host": "https://other.example.com:3001/", "userid": "frame2@example.com", "password": "secret", "apiVersion": "3.1.0" },
+    { "type": "local", "id": "local" }
+  ]
+}
+```
+
+- **`apiVersion`** — per backend, so one frame can point at servers of different vintages. `"auto"` (the default) probes the server's version on first contact and uses the matching client; a pinned semver like `"3.1.0"` skips the probe and selects the client for that band (the current band is **3.0.0–3.2.2**). A pin or probed version outside the supported band disables just that backend with a toast; the others keep rotating.
+- **Local backend** — optional, at most one (`"type": "local"`). Files uploaded through the web server appear in the rotation on the next interval tick, no restart; deleting a file drops it out.
+- **Legacy configs** — an old file with flat `host`/`userid`/`password` is migrated on load to a single `immich-1` backend and rewritten on disk; the flat fields are kept mirrored on save so older APK versions can still read the file.
+- **Editing** — the options dialog's Media tab (press **C** on a connected keyboard on EO1) manages the list: add/remove Immich backends, add/remove the local one, and edit host/username/password/API version per row. Or edit `configuration.json` directly and reboot (EO2).
+- If a backend's server is unreachable or a credential is wrong, that backend is skipped for the cycle and the rest keep rotating.
 
 ### Local debug (emulator)
 

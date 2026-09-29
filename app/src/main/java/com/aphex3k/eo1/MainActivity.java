@@ -43,9 +43,6 @@ import androidx.core.view.ViewCompat;
 import com.aphex3k.eo1.mqtt.MqttManager;
 import com.aphex3k.eo1.mqtt.Payload;
 import com.aphex3k.eo1.mqtt.PlaybackListener;
-import com.aphex3k.immichApi.ImmichApiServerVersionResponse;
-import com.aphex3k.immichApi.ImmichApiService;
-import com.aphex3k.immichApi.ImmichType;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.DataSource;
 import com.bumptech.glide.load.engine.GlideException;
@@ -57,7 +54,6 @@ import com.example.tsplayer.TsPlayerNative;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.gson.JsonObject;
 import com.google.gson.stream.MalformedJsonException;
-import com.vdurmont.semver4j.Semver;
 
 import java.io.File;
 import java.lang.ref.WeakReference;
@@ -76,7 +72,6 @@ import java.util.TimerTask;
 import java.util.TimeZone;
 
 import okhttp3.HttpUrl;
-import retrofit2.Response;
 
 public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener, ApiServiceGenerator.ProgressListener, WebController {
 
@@ -88,11 +83,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long VIDEO_STALL_THRESHOLD_MS = 8000L;
     /** Logcat tag matched by debug.sh follow_logcat filter. */
     private static final String TAG = "EO1";
-
-    /** Inclusive lower bound for Immich server versions this APK is tested against. */
-    public static final String IMMICH_MIN_VERSION = "3.0.0";
-    /** Inclusive upper bound for Immich server versions this APK is tested against. */
-    public static final String IMMICH_MAX_VERSION = "3.2.2";
     private View lastVisibleView;
     private String lastVisibleAsset = "";
     private String activeVideoAssetId = "";
@@ -422,7 +412,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         timerStopped = false;
         setupQuietHours();
         applyScheduledScreenState();
-        checkServerCompatibility();
         connectMqttIfConfigured();
     }
 
@@ -457,41 +446,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         } catch (Exception e) {
             handleException(e);
         }
-    }
-
-    private void checkServerCompatibility() {
-        new Thread(() -> {
-
-            try {
-                Configuration configuration = settingsManager.getConfiguration();
-                ImmichApiService apiService = ApiServiceGenerator.createService(ImmichApiService.class, configuration.host, this, null);
-
-                Response<ImmichApiServerVersionResponse> serverVersionResponse = apiService.getServerVersion().execute();
-
-                if (serverVersionResponse.body() != null) {
-                    Semver serverVersion = serverVersionResponse.body().getVersion();
-
-                    runOnUiThread(() -> {
-                        String message = null;
-                        if (serverVersion == null) {
-                            message = "Unable to parse Immich server version.";
-                        } else if (serverVersion.isLowerThan(IMMICH_MIN_VERSION)) {
-                            message = String.format(Locale.US, "Immich server version %s is incompatible!", serverVersion);
-                        } else if (serverVersion.isGreaterThan(IMMICH_MAX_VERSION)) {
-                            message = String.format(Locale.US, "Immich server version %s is unsupported.", serverVersion);
-                        }
-
-                        if (message != null) {
-                            Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show();
-                            debugInformationProvided(new DebugInformation("serverVersion", message));
-                        }
-                    });
-                }
-            } catch (Exception e) {
-                handleException(e);
-            }
-
-        }).start();
     }
 
     @Override
@@ -648,6 +602,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         coreLoopStarted = false;
         networkWaitNotified = false;
         handler.removeCallbacks(timerTick);
+        mediaManager.invalidatePoolIfStale();
         startCoreLoopIfNetworkReady();
     }
 
@@ -795,6 +750,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (e.getClass() == NoMediaFoundException.class) {
                 Toast.makeText(MainActivity.this, "No Media found", Toast.LENGTH_LONG).show();
             }
+            if (e.getClass() == BackendUnavailableException.class) {
+                String cause = e.getCause() != null ? String.valueOf(e.getCause()) : "";
+                Toast.makeText(MainActivity.this,
+                        "Media backend unavailable: " + (cause.isEmpty() ? e.getMessage() : cause),
+                        Toast.LENGTH_LONG).show();
+            }
         });
         Log.e(TAG, e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : ""), e);
 
@@ -883,7 +844,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                             .listener(new RequestListener<GifDrawable>() {
                                 @Override
                                 public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<GifDrawable> target, boolean isFirstResource) {
-                                    assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
+                                    assetFallback(assetId, activityReference, false, file);
                                     return false;
                                 }
 
@@ -904,7 +865,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                             .listener(new RequestListener<Drawable>() {
                                 @Override
                                 public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
-                                    assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
+                                    assetFallback(assetId, activityReference, false, file);
                                     return false;
                                 }
 
@@ -922,7 +883,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
             catch (Exception e) {
                 handleException(e);
-                assetFallback(assetId, ImmichType.IMAGE, activityReference, false, file);
+                assetFallback(assetId, activityReference, false, file);
             }
         });
     }
@@ -943,38 +904,32 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastVisibleView = imageView;
     }
 
-    private void assetFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+    private void assetFallback(String assetId, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
         // assetId may be null for the /video/playback fallback stream; Objects.equals keeps
         // this guard null-safe (a bare assetId.equals() would NPE and kill the app).
         if (isVideo && !Objects.equals(assetId, activeVideoAssetId)) {
             return;
         }
-        immichPlaybackFallback(assetId, type, activityReference, isVideo, file);
+        playbackFallback(assetId, activityReference, isVideo, file);
     }
 
-    private void immichPlaybackFallback(String assetId, ImmichType type, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
+    private void playbackFallback(String assetId, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
         if (isVideo) {
             restoreImageViewAfterVideoFailure();
         }
         if (assetId != null) {
-            if (mediaManager.isLocalAssetId(assetId)) {
-                // Local upload: no Immich asset to fetch a thumbnail for or tag as incompatible.
-            } else {
-                MainActivity activity = activityReference.get();
-                if (activity != null) {
-                    mediaManager.displayThumbnailAsset(activity, assetId, type, isVideo);
-                }
-                mediaManager.tagAssetAsIncompatible(assetId);
+            MainActivity activity = activityReference.get();
+            if (activity != null) {
+                mediaManager.displayThumbnailAsset(activity, assetId, isVideo);
             }
+            mediaManager.tagAssetAsIncompatible(assetId);
         } else {
             showNextImage();
         }
-        // Local uploads: 'file' may be the persistent original in filesDir/uploaded whose
-        // name matches the UUID cache-file pattern; never delete it. isLocalAssetId(null)
-        // is false, preserving the defensive null-assetId path.
-        if (!mediaManager.isLocalAssetId(assetId)) {
-            mediaManager.removeFromCache(file);
-        }
+        // Local uploads may point at the persistent original in filesDir/uploaded;
+        // removeFromCache's file-based guards (cache-dir match + owned-name check) make
+        // this a no-op for those files.
+        mediaManager.removeFromCache(file);
     }
 
     private void cancelVideoWatchdog() {
@@ -1080,7 +1035,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
         restoreImageViewAfterVideoFailure();
-        assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
+        assetFallback(assetId, activityReference, true, file);
     }
 
     private String describeMediaInfo(int what, int extra) {
@@ -1122,7 +1077,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 startVideoOnController(videoPlayer, file, assetId, videoDurationMs, activityReference, true);
             } catch (Exception e) {
                 restoreImageViewAfterVideoFailure();
-                assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
+                assetFallback(assetId, activityReference, true, file);
                 handleException(e);
             }
         });
@@ -1218,7 +1173,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         return;
                     }
                     restoreImageViewAfterVideoFailure();
-                    assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
+                    assetFallback(assetId, activityReference, true, file);
                     handleException(e);
                 }
             }
@@ -1259,7 +1214,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     return true;
                 }
                 restoreImageViewAfterVideoFailure();
-                assetFallback(assetId, ImmichType.VIDEO, activityReference, true, file);
+                assetFallback(assetId, activityReference, true, file);
                 return false;
             }
 
@@ -1323,21 +1278,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             Log.d(TAG, "download: " + percent + "%");
         }
 
-        if (url != null && (url.toString().endsWith("video/playback") || url.toString().contains("/thumbnail"))) {
-
-            this.runOnUiThread(() -> {
-                if (done) {
-                    //reset update progress indicator UI
-                    progressIndicator.setProgressCompat(0, false);
-                    progressIndicator.setVisibility(View.INVISIBLE);
-                } else {
-                    //Update progress indicator UI percent
-                    progressIndicator.setMax(Math.toIntExact(contentLength));
-                    progressIndicator.setProgressCompat(Math.toIntExact(bytesRead), true);
-                    progressIndicator.setVisibility(View.VISIBLE);
-                }
-            });
-        }
+        // MediaManager only forwards progress events while a remote download is in
+        // flight (catalog fetches and local playback never reach this callback).
+        this.runOnUiThread(() -> {
+            if (done) {
+                //reset update progress indicator UI
+                progressIndicator.setProgressCompat(0, false);
+                progressIndicator.setVisibility(View.INVISIBLE);
+            } else {
+                //Update progress indicator UI percent
+                progressIndicator.setMax(Math.toIntExact(contentLength));
+                progressIndicator.setProgressCompat(Math.toIntExact(bytesRead), true);
+                progressIndicator.setVisibility(View.VISIBLE);
+            }
+        });
     }
 
     // ------------------------------------------------------------------
@@ -1381,16 +1335,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         app.addProperty("webPort", webServer != null ? webServer.getBoundPort() : -1);
         o.add("app", app);
 
-        JsonObject config = new JsonObject();
-        Configuration c = settingsManager.getConfiguration();
-        if (c != null) {
-            config.addProperty("host", c.host);
-            config.addProperty("intervalMinutes", c.interval);
-            config.addProperty("quietHours", c.startQuietHour + "-" + c.endQuietHour);
-            config.addProperty("timezone", c.selectedTimeZoneId);
-            config.addProperty("mqttHost", c.mqttHost);
-        }
-        o.add("config", config);
+        o.add("config", ConfigStateJson.configStateJson(settingsManager.getConfiguration()));
 
         JsonObject network = new JsonObject();
         network.addProperty("available", connectionManager.isNetworkAvailable());

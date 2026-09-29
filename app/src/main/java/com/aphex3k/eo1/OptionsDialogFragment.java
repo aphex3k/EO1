@@ -17,7 +17,7 @@ import com.google.android.material.tabs.TabLayout;
 import com.google.android.material.tabs.TabLayoutMediator;
 
 public class OptionsDialogFragment extends DialogFragment {
-    private static final String[] TAB_TITLES = {"Basic", "MQTT"};
+    private static final String[] TAB_TITLES = {"Media", "MQTT"};
     private SettingsManager settingsManager;
     private OptionsBasicFragment basicFragment;
     private OptionsMqttFragment mqttFragment;
@@ -42,7 +42,11 @@ public class OptionsDialogFragment extends DialogFragment {
         saveButton.setText("Save");
         ((ViewGroup) view).addView(saveButton);
         saveButton.setOnClickListener(v -> {
-            basicFragment.saveToConfiguration();
+            // The media tab validates first; on failure it toasts the offending backend
+            // and the dialog stays open.
+            if (!basicFragment.saveToConfiguration()) {
+                return;
+            }
             mqttFragment.saveToConfiguration();
             try {
                 settingsManager.saveConfiguration();
