@@ -79,8 +79,10 @@ public class SettingsManager {
 
         if (settingsManagerListener != null) {
             // Keep the file readable by older APKs: mirror the first immich backend into the
-            // legacy flat host/userid/password fields before serializing.
+            // legacy flat host/userid/password fields, and the quiet window into the legacy
+            // start/end hour fields, before serializing.
             mirrorLegacyHostFields();
+            Configuration.mirrorLegacyQuietHourFields(configuration);
 
             File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 

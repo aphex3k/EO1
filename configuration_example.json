@@ -1,7 +1,6 @@
 {
     "selectedTimeZoneId": "America/Los_Angeles",
-    "startQuietHour": 23,
-    "endQuietHour": 14,
+    "quietHours": ["* 22-23,0-6 * * *"],
     "interval": 15,
     "backends": [
         {

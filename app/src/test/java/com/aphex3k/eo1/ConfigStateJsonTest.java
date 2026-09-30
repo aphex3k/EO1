@@ -41,8 +41,7 @@ public class ConfigStateJsonTest {
         }
         c.backends = list;
         c.interval = 15;
-        c.startQuietHour = 22;
-        c.endQuietHour = 7;
+        c.quietHours = java.util.Arrays.asList("* 22-23,0-6 * * *");
         c.selectedTimeZoneId = "America/Los_Angeles";
         c.mqttHost = "mqtt.local";
         return c;
@@ -85,7 +84,9 @@ public class ConfigStateJsonTest {
         // Deprecated alias: first Immich host for older /state consumers.
         assertEquals("https://one.example/", json.get("host").getAsString());
         assertEquals(15, json.get("intervalMinutes").getAsInt());
-        assertEquals("22-7", json.get("quietHours").getAsString());
+        JsonArray quietHours = json.getAsJsonArray("quietHours");
+        assertEquals(1, quietHours.size());
+        assertEquals("* 22-23,0-6 * * *", quietHours.get(0).getAsString());
         assertEquals("America/Los_Angeles", json.get("timezone").getAsString());
         assertEquals("mqtt.local", json.get("mqttHost").getAsString());
     }

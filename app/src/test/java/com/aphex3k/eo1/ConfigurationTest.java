@@ -181,4 +181,127 @@ public class ConfigurationTest {
         assertFalse(Configuration.normalize(c));
         assertEquals(ConfigurationBackendEntry.API_VERSION_AUTO, c.backends.get(0).apiVersion);
     }
+
+    @Test
+    public void legacyQuietPairMigratesToOvernightCron() {
+        Configuration c = new Gson().fromJson(
+                "{\"startQuietHour\":23,\"endQuietHour\":14}", Configuration.class);
+
+        assertTrue(Configuration.normalize(c));
+        assertEquals(1, c.quietHoursOrEmpty().size());
+        assertEquals("* 23,0-13 * * *", c.quietHours.get(0));
+        assertFalse(Configuration.normalize(c)); // idempotent
+    }
+
+    @Test
+    public void legacyQuietPairMigratesToSameDayCron() {
+        Configuration c = new Configuration();
+        c.startQuietHour = 14;
+        c.endQuietHour = 17;
+
+        assertTrue(Configuration.normalize(c));
+        assertEquals("* 14-16 * * *", c.quietHours.get(0));
+    }
+
+    @Test
+    public void legacyQuietPairSingleHourMigrates() {
+        Configuration c = new Configuration();
+        c.startQuietHour = 5;
+        c.endQuietHour = 6;
+
+        Configuration.normalize(c);
+        assertEquals("* 5 * * *", c.quietHours.get(0));
+    }
+
+    @Test
+    public void legacyQuietPairStartEqualsEndMigratesToNothing() {
+        Configuration c = new Configuration();
+        c.startQuietHour = 10;
+        c.endQuietHour = 10; // legacy "configured but never quiet"
+
+        Configuration.normalize(c);
+        assertTrue(c.quietHoursOrEmpty().isEmpty());
+    }
+
+    @Test
+    public void quietHoursListWinsOverLegacyPair() {
+        Configuration c = new Gson().fromJson(
+                "{\"startQuietHour\":1,\"endQuietHour\":2,\"quietHours\":[\"0 22-23,0-6 * * *\"]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        assertEquals(1, c.quietHoursOrEmpty().size());
+        assertEquals("0 22-23,0-6 * * *", c.quietHours.get(0));
+    }
+
+    @Test
+    public void unparseableQuietHoursEntriesAreDropped() {
+        Configuration c = new Gson().fromJson(
+                "{\"quietHours\":[\" 0 22-23,0-6 * * * \",\"garbage\",\"\",\"0 5-4 * * *\"]}",
+                Configuration.class);
+
+        assertTrue(Configuration.normalize(c));
+        assertEquals(1, c.quietHoursOrEmpty().size());
+        assertEquals("0 22-23,0-6 * * *", c.quietHours.get(0)); // trimmed
+        assertFalse(Configuration.normalize(c)); // idempotent after cleanup
+    }
+
+    @Test
+    public void mirrorLegacyQuietHourFields_singleOvernightWindow() {
+        Configuration c = new Configuration();
+        c.quietHours = java.util.Arrays.asList("* 22-23,0-6 * * *");
+
+        Configuration.mirrorLegacyQuietHourFields(c);
+        assertEquals(22, c.startQuietHour);
+        assertEquals(7, c.endQuietHour);
+    }
+
+    @Test
+    public void mirrorLegacyQuietHourFields_singleSameDayWindow() {
+        Configuration c = new Configuration();
+        c.quietHours = java.util.Arrays.asList("0 14-16 * * *");
+
+        Configuration.mirrorLegacyQuietHourFields(c);
+        assertEquals(14, c.startQuietHour);
+        assertEquals(17, c.endQuietHour);
+    }
+
+    @Test
+    public void mirrorLegacyQuietHourFields_richerThanOneWindowDegradesToOff() {
+        Configuration c = new Configuration();
+        c.quietHours = java.util.Arrays.asList("0 22-23,0-6 * * *", "0 13-13 * * 1-5");
+
+        Configuration.mirrorLegacyQuietHourFields(c);
+        assertEquals(-1, c.startQuietHour);
+        assertEquals(-1, c.endQuietHour);
+    }
+
+    @Test
+    public void mirrorLegacyQuietHourFields_dayRestrictedWindowDegradesToOff() {
+        Configuration c = new Configuration();
+        c.quietHours = java.util.Arrays.asList("0 22-23,0-6 * * 1-5");
+
+        Configuration.mirrorLegacyQuietHourFields(c);
+        assertEquals(-1, c.startQuietHour);
+        assertEquals(-1, c.endQuietHour);
+    }
+
+    @Test
+    public void mirrorLegacyQuietHourFields_minuteWindowDegradesToOff() {
+        Configuration c = new Configuration();
+        c.quietHours = java.util.Arrays.asList("30 22-23,0-6 * * *");
+
+        Configuration.mirrorLegacyQuietHourFields(c);
+        assertEquals(-1, c.startQuietHour);
+        assertEquals(-1, c.endQuietHour);
+    }
+
+    @Test
+    public void mirrorLegacyQuietHourFields_noWindowsAreOff() {
+        Configuration c = new Configuration();
+
+        Configuration.mirrorLegacyQuietHourFields(c);
+        assertEquals(-1, c.startQuietHour);
+        assertEquals(-1, c.endQuietHour);
+    }
 }

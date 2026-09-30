@@ -27,8 +27,20 @@ public class Configuration {
     @Deprecated @Nullable public String password = "";
 
     @Nullable public String selectedTimeZoneId = "";
-    public int startQuietHour = -1;
-    public int endQuietHour = -1;
+
+    /**
+     * Quiet-hour windows as 5-field cron expressions
+     * (minute hour day-of-month month day-of-week); the screen is off whenever any
+     * expression matches the current minute in {@link #selectedTimeZoneId}. Overlapping
+     * windows simply OR together.
+     */
+    @Nullable public List<String> quietHours;
+
+    /** @deprecated migrated to {@link #quietHours} on load; mirrored on save for older APKs. */
+    @Deprecated public int startQuietHour = -1;
+    /** @deprecated migrated to {@link #quietHours} on load; mirrored on save for older APKs. */
+    @Deprecated public int endQuietHour = -1;
+
     public int interval = 5;
     // MQTT fields
     @Nullable public String mqttHost = "";
@@ -39,6 +51,10 @@ public class Configuration {
 
     public List<ConfigurationBackendEntry> backendsOrEmpty() {
         return backends != null ? backends : new ArrayList<ConfigurationBackendEntry>();
+    }
+
+    public List<String> quietHoursOrEmpty() {
+        return quietHours != null ? quietHours : new ArrayList<String>();
     }
 
     /** Number of backend entries complete enough to drive rotation. */
@@ -64,6 +80,10 @@ public class Configuration {
      *   <li>At most one local entry is kept (first wins); duplicate immich entries
      *       (same host + userid) are dropped.</li>
      *   <li>Immich hosts get a trailing "/" appended when missing (Retrofit baseUrl).</li>
+     *   <li>Quiet hours: when no {@code quietHours} list is present but the legacy
+     *       {@code startQuietHour}/{@code endQuietHour} pair is, migrate it to a single
+     *       cron expression. When a list is present, entries are trimmed and any
+     *       unparseable entry is dropped.</li>
      * </ol>
      */
     static boolean normalize(Configuration c) {
@@ -160,7 +180,110 @@ public class Configuration {
                 }
             }
         }
+
+        // 6. Quiet hours: migrate the legacy start/end pair; trim + drop bad entries.
+        if ((c.quietHours == null || c.quietHours.isEmpty())
+                && c.startQuietHour >= 0 && c.endQuietHour >= 0
+                && c.startQuietHour != c.endQuietHour) {
+            c.quietHours = new ArrayList<String>();
+            c.quietHours.add(legacyQuietHoursExpression(c.startQuietHour, c.endQuietHour));
+            changed = true;
+        }
+        if (c.quietHours != null) {
+            List<String> keptWindows = new ArrayList<String>();
+            for (String raw : c.quietHours) {
+                if (raw == null) {
+                    changed = true;
+                    continue;
+                }
+                String trimmed = raw.trim();
+                if (trimmed.isEmpty() || CronExpression.parse(trimmed) == null) {
+                    changed = true;
+                    continue;
+                }
+                if (!trimmed.equals(raw)) {
+                    changed = true;
+                }
+                keptWindows.add(trimmed);
+            }
+            c.quietHours = keptWindows;
+        }
         return changed;
+    }
+
+    /**
+     * Renders the legacy hour-granular quiet span as a cron expression: quiet from
+     * {@code start:00} until {@code end:00} (end-exclusive), wrapping midnight when
+     * {@code start > end}.
+     */
+    private static String legacyQuietHoursExpression(int start, int end) {
+        StringBuilder hours = new StringBuilder();
+        if (start < end) {
+            hours.append(hourRange(start, end - 1));
+        } else {
+            hours.append(hourRange(start, 23));
+            if (end > 1) {
+                hours.append(',');
+                hours.append(hourRange(0, end - 1));
+            } else if (end == 1) {
+                hours.append(",0");
+            }
+        }
+        return "* " + hours + " * * *";
+    }
+
+    private static String hourRange(int lo, int hi) {
+        return lo == hi ? String.valueOf(lo) : lo + "-" + hi;
+    }
+
+    /**
+     * Keeps the deprecated {@code startQuietHour}/{@code endQuietHour} fields in sync with
+     * {@code quietHours} so older APKs keep working. Only a single whole-hour window
+     * (minute 0, no day/month/dow restriction, contiguous hours) is mirrorable; anything
+     * richer degrades to "quiet hours off" (-1/-1) rather than wrong hours.
+     */
+    static void mirrorLegacyQuietHourFields(Configuration c) {
+        c.startQuietHour = -1;
+        c.endQuietHour = -1;
+        List<String> windows = c.quietHoursOrEmpty();
+        if (windows.size() != 1) {
+            return;
+        }
+        CronExpression e = CronExpression.parse(windows.get(0));
+        // Only a whole-hour window (minute field all minutes, or just minute 0) maps onto
+        // the legacy hour-granular fields; any other minute pattern has no legacy spelling.
+        if (e == null || (!e.isAllMinutes() && !e.isMinuteZeroOnly())
+                || !e.isDomUnrestricted() || !e.isMonthUnrestricted() || !e.isDowUnrestricted()) {
+            return;
+        }
+        int[] hours = e.matchedHours();
+        if (hours.length == 0 || hours.length == 24) {
+            return;
+        }
+        boolean[] present = new boolean[24];
+        for (int h : hours) {
+            present[h] = true;
+        }
+        // Window start = an hour in the set whose predecessor hour is not in the set
+        // (handles overnight windows, where hour 0 is NOT the start).
+        int start = -1;
+        for (int h = 0; h < 24; h++) {
+            if (present[h] && !present[(h + 23) % 24]) {
+                start = h;
+                break;
+            }
+        }
+        if (start < 0) {
+            return;
+        }
+        // Contiguity: every hour start..start+length-1 (mod 24) must be selected.
+        for (int i = 0; i < hours.length; i++) {
+            if (!present[(start + i) % 24]) {
+                return;
+            }
+        }
+        c.startQuietHour = start;
+        c.endQuietHour = (start + hours.length) % 24;
     }
 
     /** Trims the non-secret text fields of an entry; never touches the password. */
