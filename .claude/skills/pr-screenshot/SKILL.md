@@ -5,36 +5,43 @@ description: Attach a UI screenshot to a pull request whenever its diff changes 
 
 # PR screenshot
 
-Every PR with user-visible changes gets one screenshot of the changed UI, embedded in the
-PR description (the summary text). The shot must show the APK **built from the PR branch** —
-a screenshot of an older build proves nothing.
+Every PR with user-visible changes gets a screenshot of the changed UI attached to the PR
+description, composed together with the summary text. The shot must show the APK **built from
+the PR branch** — a screenshot of an older build proves nothing.
 
-Purely internal diffs (Immich client, config parsing, rotation order, build/CI) need no
-screenshot.
+Purely internal diffs (Immich client, config parsing, rotation order, build/CI, docs) need no
+screenshot. No PR ships silently screenshot-free without cause: when capture is impossible, the
+body says so and why.
+
+**Screenshots never enter git.** They are staged in the gitignored `.claude/pr-screenshots/`
+directory and uploaded to GitHub as user attachments. If `git status` shows a staged PNG, it is
+in the wrong place.
 
 ## 1. Pick the device
 
-```bash
-adb devices
-```
+`adb devices`:
 
 - **Physical frame attached** (serial usually `20061229`) → use it: `adb -s <serial> …`.
-- **No device attached** → use the local `EO1_API21` AVD (API 21, arm64-v8a, 1024 MB,
-  1080p skin — the closest match to the ~800 MB API-19 hardware that a macOS/Apple-Silicon
-  host can run; arm64 emulation starts at API 21). Launch it headless:
+- **No device attached** → start a headless `EO1_API21` AVD (API 21, arm64-v8a, 1024 MB, 1080p
+  — the closest match to the ~800 MB API-19 hardware a macOS/Apple-Silicon host can run; arm64
+  emulation starts at API 21):
 
   ```bash
   emulator -avd EO1_API21 -no-window -no-snapshot -memory 1024 -timezone America/Los_Angeles -no-boot-anim -no-audio &
   ```
 
-  Wait until `adb -s emulator-5554 shell getprop sys.boot_completed` prints `1`.
-  If the AVD is missing, create it:
+  Wait until `adb -s emulator-5554 shell getprop sys.boot_completed` prints `1`. If the AVD is
+  missing, create it:
 
   ```bash
   avdmanager create avd --name EO1_API21 --package 'system-images;android-21;default;arm64-v8a'
   ```
 
-## 2. Install this branch's build
+  Caveat: the AVD has no `libTsPlayer-jni.so` — video plays through the `MediaPlayer` fallback
+  there. For PRs about video playback or TsPlayer behavior prefer the physical frame; otherwise
+  note in the body that the shot is from the AVD.
+
+## 2. Install the branch build and show the changed UI
 
 ```bash
 ./gradlew assembleDebug
@@ -42,55 +49,88 @@ adb -s <serial> install -r app/build/outputs/apk/debug/app-debug.apk
 adb -s <serial> shell am start -n com.aphex3k.eo1/com.aphex3k.eo1.MainActivity
 ```
 
-The debug APK works on both targets and still ships the armeabi-v7a TsPlayer `.so`, so the
+The debug APK works on both targets and still ships the armeabi-v7a TsPlayer `.so`, so a
 physical frame exercises the real video path.
 
-## 3. Show the UI the PR changes
+- **Options dialog** — opens on first launch. Reopen it later via the web server:
+  `curl 'http://<device-ip>:8080/control?action=config'` (or `C` on a connected keyboard).
+- **Rotation display** — quiet hours may have the screen off: `…/control?action=screen` toggles
+  it, `…/control?action=next` steps to a fresh asset. Give the media a few seconds to render.
+- **LAN web pages** — no device capture needed; load the page in a browser and screenshot it
+  there.
 
-- **Options dialog** — opens on first launch; reopen later via the web server:
-  `curl 'http://<device-ip>:8080/control?action=config'` (or press `C` on a connected keyboard).
-- **Rotation display** — quiet hours may have switched the screen off; turn it back on:
-  `curl 'http://<device-ip>:8080/control?action=screen'`, then `...?action=next` to step to a
-  fresh asset. Wait a few seconds for the media to render.
-- **LAN web pages** (`/`, `/logs`, `/files`) — no device capture needed; load the page in a
-  browser and screenshot it there.
+The bound port is `app.webPort` in `GET http://<device-ip>:<port>/state` (80 when installed as
+a system app, 8080 otherwise). For the AVD: `adb forward tcp:8080 tcp:8080` first, then use
+`http://127.0.0.1:8080`.
 
-The bound web port is `app.webPort` in `GET http://<device-ip>:<port>/state` (80 when
-system-installed, 8080 otherwise). For the AVD, reach it via
-`adb forward tcp:8080 tcp:8080` → `http://127.0.0.1:8080`.
-
-## 4. Capture
+## 3. Capture into the staging dir
 
 ```bash
-adb -s <serial> exec-out screencap -p > docs/screenshots/<name>.png
+RUN=".claude/pr-screenshots/$(git rev-parse --abbrev-ref HEAD | tr -c 'A-Za-z0-9' '-')"
+rm -rf "$RUN" && mkdir -p "$RUN"
+adb -s <serial> exec-out screencap -p > "$RUN/<slug>.png"
 ```
 
-(older adb hosts: `adb shell screencap -p /sdcard/shot.png` then `adb pull`.) Choose `<name>`
-as a short kebab-case description of the UI state; images go in `docs/screenshots/` (create
-the directory if missing). Verify the PNG is not all-black — a black frame means the screen
-was off or the media had not rendered yet; retry after `?action=screen` / `?action=next`.
+(The `rm -rf` is scoped to this run's own tag inside this worktree, so it cannot touch anything
+else's. It matters: the dir persists between runs of the same branch, and a stale PNG from an
+earlier capture would otherwise upload into this PR's body.)
 
-## 5. Attach it to the PR when composing the summary
+On older adb without `exec-out`: `adb -s <serial> shell screencap -p /sdcard/shot.png` then
+`adb -s <serial> pull /sdcard/shot.png "$RUN/<slug>.png"`.
 
-`gh` cannot upload binaries to a PR body, so reference the image from the PR head ref:
+`<slug>` is a short kebab-case description of the UI state. 1080p PNGs are well under the 10 MB
+attachment cap; if one ever exceeds it, downscale with `sips -Z 1600 in.png --out out.png`
+(`sips` never upscales below target width, so point it at full captures only, not crops).
 
-1. Commit `docs/screenshots/<name>.png` to the PR branch and push it.
-2. In the PR description, embed it next to the summary of the change:
+Verify the PNG is not all black — a black frame means the screen was off or the media had not
+rendered yet; retry after `?action=screen` / `?action=next`.
 
-   ```markdown
-   ![<caption>](https://raw.githubusercontent.com/aphex3k/EO1/<head-branch>/docs/screenshots/<name>.png)
-   ```
+## 4. Attach to the PR when composing the summary
 
-If the user would rather not store screenshots in git, skip the commit: keep the PNG in the
-working tree, finish the PR without the image, and hand the user the file path to drag into
-the GitHub web UI.
+`gh` uploads attachments natively and rewrites matching body references to the resulting asset
+URL — the same canonical `github.com/user-attachments/assets/…` link the web UI's drag-and-drop
+produces. Visibility inherits from the repository (in private repos GitHub serves them through
+signed URLs), so no third-party hosting and no binary in git. Probe once per session:
 
-## Caveats
+```bash
+gh pr create --help | grep -q -- --attach
+```
 
-- The API-21 arm64 AVD has no `libTsPlayer-jni.so` — video there runs through the
-  `MediaPlayer` fallback. For PRs about video playback or TsPlayer behavior, prefer the
-  physical frame; otherwise note in the PR that the shot was taken on the AVD.
-- Clean up when done: kill an AVD you launched (`adb -s emulator-5554 emu kill`).
-- The real frame may be busy or unreachable (EO1 has no wireless adb and its single USB port
-  is shared with the OTG keyboard). If neither the device nor the AVD is usable, ask the user
-  for a photo of the frame instead of guessing.
+Compose the body with an inline reference to the staged path, then create or update the PR:
+
+```bash
+# Body contains:
+#   ## Screenshots
+#
+#   ![Options dialog with the new backend rows](.claude/pr-screenshots/<run>/options-dialog.png)
+gh pr create --base main --title "…" --body-file "$BODY" \
+  --attach ".claude/pr-screenshots/<run>/options-dialog.png#Options dialog with the new backend rows"
+```
+
+- Use the **exact same path string** in the body reference and the `--attach` argument; `gh`
+  rewrites that reference to the uploaded asset URL. Unreferenced attachments are appended at
+  the end of the body.
+- Updating an existing PR: `gh pr edit <n> --body-file "$BODY" --attach …`, or
+  `gh pr comment <n> --attach …` for follow-ups.
+- Limits: 50 attachments per command, 10 MB per image.
+- If `--attach` is missing (old `gh`), fall back to the user-attachments endpoint directly
+  (repo id 686441236) and embed the returned `url` in the body:
+
+  ```bash
+  curl -sS -X POST \
+    "https://uploads.github.com/user-attachments/assets?name=$(basename "$F")&content_type=image/png&repository_id=686441236" \
+    -H "Authorization: Bearer $(gh auth token)" -H "Accept: application/json" \
+    --data-binary @"$F" | jq -r .url
+  ```
+
+  That endpoint is undocumented and can change; use it only when the flag probe fails.
+
+## When you cannot capture
+
+If no device is attached and the AVD will not boot (or a state is genuinely unreachable), do
+not ship a PR that implies a visual pass. Write an unchecked line in the body instead, e.g.:
+
+```markdown
+- [ ] Screenshot — not captured: no device attached, AVD failed to boot. Verified by review of
+      the changed layout code and unit tests instead.
+```
