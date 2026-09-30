@@ -42,7 +42,11 @@ public final class ConfigStateJson {
         }
         config.addProperty("host", legacyHost);
         config.addProperty("intervalMinutes", c.interval);
-        config.addProperty("quietHours", c.startQuietHour + "-" + c.endQuietHour);
+        JsonArray quietWindows = new JsonArray();
+        for (String expression : c.quietHoursOrEmpty()) {
+            quietWindows.add(expression);
+        }
+        config.add("quietHours", quietWindows);
         config.addProperty("timezone", c.selectedTimeZoneId);
         config.addProperty("mqttHost", c.mqttHost);
         return config;

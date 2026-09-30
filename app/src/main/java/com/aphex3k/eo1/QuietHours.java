@@ -4,6 +4,7 @@ import androidx.annotation.Keep;
 import androidx.annotation.Nullable;
 
 import java.util.Calendar;
+import java.util.List;
 import java.util.Locale;
 import java.util.TimeZone;
 
@@ -13,21 +14,17 @@ public final class QuietHours {
     private QuietHours() {
     }
 
-    static boolean isConfigured(int start, int end) {
-        return start >= 0 && end >= 0;
-    }
-
-    static boolean isInQuietHours(int startHour, int endHour, int hourOfDay) {
-        if (!isConfigured(startHour, endHour)) {
+    /** The screen should be off when any configured cron expression matches the given moment. */
+    static boolean isQuiet(@Nullable List<CronExpression> expressions, Calendar now) {
+        if (expressions == null) {
             return false;
         }
-        if (startHour == endHour) {
-            return false;
+        for (CronExpression expression : expressions) {
+            if (expression.matches(now)) {
+                return true;
+            }
         }
-        if (startHour < endHour) {
-            return hourOfDay >= startHour && hourOfDay < endHour;
-        }
-        return hourOfDay >= startHour || hourOfDay < endHour;
+        return false;
     }
 
     /**

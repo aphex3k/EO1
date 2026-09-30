@@ -63,6 +63,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
@@ -106,6 +107,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private final Handler handler = new Handler();
     private PendingIntent pendingIntent;
     private Timer quietHoursTimer = new Timer(true);
+    /** Parsed quiet-hour cron windows, replaced atomically on each setupQuietHours() re-arm. */
+    private volatile List<CronExpression> quietCronExpressions = new ArrayList<CronExpression>();
+    /** Last quiet-state applied by the scheduler; edge-triggering avoids fighting manual toggles. */
+    private volatile boolean lastScheduledQuietState = false;
     private float lastScreenBrightness = 0.3f;
     private ConnectionManager connectionManager;
     private AppLogger appLogger;
@@ -612,17 +617,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         Configuration configuration = settingsManager.getConfiguration();
-        int start = configuration.startQuietHour;
-        int end = configuration.endQuietHour;
         String tzId = configuration.selectedTimeZoneId;
         Calendar localNow = QuietHours.calendarInTimeZone(tzId);
-        int now = localNow.get(Calendar.HOUR_OF_DAY);
-        boolean inQuietHours = QuietHours.isInQuietHours(start, end, now);
+        boolean inQuietHours = QuietHours.isQuiet(quietCronExpressions, localNow);
         boolean shouldBeOn = !inQuietHours;
 
         Log.i(TAG, "quietHours: tz=" + QuietHours.resolveTimeZone(tzId).getID()
-                + " localHour=" + now
-                + " window=" + start + "-" + end
+                + " localTime=" + String.format(Locale.US, "%02d:%02d",
+                        localNow.get(Calendar.HOUR_OF_DAY), localNow.get(Calendar.MINUTE))
+                + " windows=" + quietCronExpressions
                 + " inQuiet=" + inQuietHours
                 + " screenOn=" + shouldBeOn);
 
@@ -651,75 +654,65 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         final Configuration configuration = this.settingsManager.getConfiguration();
-        final int startQuietHour = configuration.startQuietHour;
-        final int endQuietHour = configuration.endQuietHour;
         final String tzId = configuration.selectedTimeZoneId;
-        final TimeZone quietTimeZone = QuietHours.resolveTimeZone(tzId);
 
-        if (!QuietHours.isConfigured(startQuietHour, endQuietHour) || startQuietHour == endQuietHour) {
+        final List<CronExpression> expressions = new ArrayList<>();
+        for (String raw : configuration.quietHoursOrEmpty()) {
+            CronExpression parsed = CronExpression.parse(raw);
+            if (parsed != null) {
+                expressions.add(parsed);
+            } else {
+                debugInformationProvided(new DebugInformation("quietHours", "Ignored invalid cron expression: " + raw));
+            }
+        }
+        this.quietCronExpressions = expressions;
+        this.lastScheduledQuietState = QuietHours.isQuiet(expressions, QuietHours.calendarInTimeZone(tzId));
+
+        if (expressions.isEmpty()) {
             return;
         }
 
         quietHoursTimer = new Timer(true);
 
-        final Calendar calendar = QuietHours.calendarInTimeZone(tzId);
-        final Date time = calendar.getTime();
-
-        final Calendar startCalendar = QuietHours.calendarInTimeZone(tzId);
-        startCalendar.set(Calendar.HOUR_OF_DAY, startQuietHour);
-        startCalendar.set(Calendar.MINUTE, 0);
-        startCalendar.set(Calendar.SECOND, 0);
-
-        if (startCalendar.getTime().before(time)) {
-            startCalendar.add(Calendar.DAY_OF_YEAR, 1);
-        }
-
-        final Calendar endCalendar = QuietHours.calendarInTimeZone(tzId);
-        endCalendar.set(Calendar.HOUR_OF_DAY, endQuietHour);
-        endCalendar.set(Calendar.MINUTE, 0);
-        endCalendar.set(Calendar.SECOND, 0);
-
-        if (endCalendar.getTime().before(time)) {
-            endCalendar.add(Calendar.DAY_OF_YEAR, 1);
-        }
-
-        final long period = 24 * 60 * MILLIS;
+        final TimeZone quietTimeZone = QuietHours.resolveTimeZone(tzId);
         final DateFormat debugDateFormatter = new SimpleDateFormat("MMM d, yyyy HH:mm a", Locale.US);
         debugDateFormatter.setTimeZone(quietTimeZone);
 
-        final Date startTime = startCalendar.getTime();
-        final Date endTime = endCalendar.getTime();
+        // Fire at the next whole-minute boundary in wall-clock time, then every minute after.
+        // Evaluating the wall clock each tick is DST-correct by construction (a fixed 24h
+        // period drifts across DST transitions), and cheap: one calendar fill + a few mask
+        // checks per minute. The state only changes at window boundaries, and the state
+        // applied there is idempotent, so a stray duplicate tick is harmless.
+        final long firstFire = (System.currentTimeMillis() / 60000L + 1L) * 60000L;
+        final List<String> summary = new ArrayList<>();
+        for (CronExpression expression : expressions) {
+            summary.add(expression.raw());
+        }
+        Log.i(TAG, "Quiet hours schedule armed: " + summary + " (" + quietTimeZone.getID() + ")");
 
         quietHoursTimer.schedule(new TimerTask() {
             @Override
             public void run() {
                 try {
-                    handler.post(MainActivity.this::applyScheduledScreenState);
-                    debugInformationProvided(new DebugInformation("startQuietHours", "Start of quiet hours triggered at " + debugDateFormatter.format(startCalendar.getTime())));
+                    boolean inQuiet = QuietHours.isQuiet(expressions, QuietHours.calendarInTimeZone(tzId));
+                    if (inQuiet != lastScheduledQuietState) {
+                        lastScheduledQuietState = inQuiet;
+                        handler.post(MainActivity.this::applyScheduledScreenState);
+                        String key = inQuiet ? "startQuietHours" : "endQuietHours";
+                        String text = (inQuiet ? "Quiet hours started at " : "Quiet hours ended at ")
+                                + debugDateFormatter.format(new Date())
+                                + " (" + quietTimeZone.getID() + ")";
+                        debugInformationProvided(new DebugInformation(key, text));
+                    }
                 }
                 catch (Exception e) {
                     handleException(e);
                 }
             }
-        }, startTime, period);
+        }, new Date(firstFire), 60000L);
 
-        quietHoursTimer.schedule(new TimerTask() {
-            @Override
-            public void run() {
-                try {
-                    handler.post(MainActivity.this::applyScheduledScreenState);
-                    debugInformationProvided(new DebugInformation("endQuietHours", "End of quiet hours triggered at " + debugDateFormatter.format(endCalendar.getTime())));
-                }
-                catch (Exception e) {
-                    handleException(e);
-                }
-            }
-        }, endTime, period);
-
-        debugInformationProvided(new DebugInformation("startCalendar",
-                "Start of quiet hours scheduled for " + debugDateFormatter.format(startTime) + " (" + quietTimeZone.getID() + ")"));
-        debugInformationProvided(new DebugInformation("endCalendar",
-                "End of quiet hours scheduled for " + debugDateFormatter.format(endTime) + " (" + quietTimeZone.getID() + ")"));
+        debugInformationProvided(new DebugInformation("quietHoursSchedule",
+                "Quiet hours armed (" + summary + "), checked every minute (" + quietTimeZone.getID() + ")"));
     }
 
 

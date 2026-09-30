@@ -39,13 +39,19 @@ public class OptionsBasicFragment extends Fragment {
     private Button addImmichButton;
     private Button addLocalButton;
     private EditText intervalField;
-    private Spinner startHourSpinner, endHourSpinner, tzSpinner;
+    private LinearLayout quietCronContainer;
+    private Button addQuietWindowButton;
+    private Spinner tzSpinner;
     private String[] allTimeZoneIds;
 
     /** Working copy of the configured backends; persisted on save. */
     private final List<ConfigurationBackendEntry> backends = new ArrayList<>();
     /** Rows currently shown in backendListContainer, in list order. */
     private final List<BackendRow> rows = new ArrayList<>();
+    /** Working copy of the quiet-hours cron expressions; persisted on save. */
+    private final List<String> quietWindows = new ArrayList<>();
+    /** Rows currently shown in quietCronContainer, in list order. */
+    private final List<QuietWindowRow> quietRows = new ArrayList<>();
 
     public OptionsBasicFragment(SettingsManager settingsManager) {
         this.settingsManager = settingsManager;
@@ -66,18 +72,9 @@ public class OptionsBasicFragment extends Fragment {
         addImmichButton = view.findViewById(R.id.btnAddImmich);
         addLocalButton = view.findViewById(R.id.btnAddLocal);
         intervalField = view.findViewById(R.id.editTextInterval);
-        startHourSpinner = view.findViewById(R.id.startHourSpinner);
-        endHourSpinner = view.findViewById(R.id.endHourSpinner);
+        quietCronContainer = view.findViewById(R.id.quietCronContainer);
+        addQuietWindowButton = view.findViewById(R.id.btnAddQuietWindow);
         tzSpinner = view.findViewById(R.id.tzSpinner);
-
-        String[] hours = new String[24];
-        for (int i = 0; i < 24; i++) {
-            hours[i] = String.format("%02d", i);
-        }
-        ArrayAdapter<String> hourAdapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, hours);
-        hourAdapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
-        startHourSpinner.setAdapter(hourAdapter);
-        endHourSpinner.setAdapter(hourAdapter);
 
         allTimeZoneIds = TimeZone.getAvailableIDs();
         ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, allTimeZoneIds);
@@ -86,6 +83,7 @@ public class OptionsBasicFragment extends Fragment {
 
         addImmichButton.setOnClickListener(v -> addImmichBackend());
         addLocalButton.setOnClickListener(v -> addLocalBackend());
+        addQuietWindowButton.setOnClickListener(v -> addQuietWindow());
 
         if (settingsManager != null) {
             Configuration config = settingsManager.getConfiguration();
@@ -93,12 +91,7 @@ public class OptionsBasicFragment extends Fragment {
                 backends.add(copyOf(entry));
             }
             intervalField.setText(String.valueOf(config.interval));
-            if (config.startQuietHour != -1) {
-                startHourSpinner.setSelection(config.startQuietHour);
-            }
-            if (config.endQuietHour != -1) {
-                endHourSpinner.setSelection(config.endQuietHour);
-            }
+            quietWindows.addAll(config.quietHoursOrEmpty());
             if (config.selectedTimeZoneId != null && !config.selectedTimeZoneId.isEmpty()) {
                 int tzIndex = Arrays.asList(allTimeZoneIds).indexOf(config.selectedTimeZoneId);
                 if (tzIndex >= 0) {
@@ -107,6 +100,7 @@ public class OptionsBasicFragment extends Fragment {
             }
         }
         renderBackendList();
+        renderQuietWindows();
     }
 
     private static ConfigurationBackendEntry copyOf(ConfigurationBackendEntry e) {
@@ -190,6 +184,28 @@ public class OptionsBasicFragment extends Fragment {
         renderBackendList();
     }
 
+    private void renderQuietWindows() {
+        quietCronContainer.removeAllViews();
+        quietRows.clear();
+        for (String window : quietWindows) {
+            QuietWindowRow row = new QuietWindowRow(window);
+            quietRows.add(row);
+            quietCronContainer.addView(row.container);
+        }
+    }
+
+    private void addQuietWindow() {
+        quietWindows.add("* 22-23,0-6 * * *");
+        renderQuietWindows();
+        // Open the new row's editor so the expression can be adjusted immediately.
+        quietRows.get(quietRows.size() - 1).openEditor();
+    }
+
+    private void removeQuietRow(QuietWindowRow row) {
+        quietWindows.remove(row.value);
+        renderQuietWindows();
+    }
+
     /**
      * Commits any open row editors, validates the working copy, and only then writes it
      * to the live configuration. Returns false with a naming Toast when an entry is
@@ -220,6 +236,12 @@ public class OptionsBasicFragment extends Fragment {
                 return false;
             }
         }
+        for (QuietWindowRow row : quietRows) {
+            if (row.editorOpen) {
+                row.applyEditor();
+                row.closeEditor();
+            }
+        }
         Configuration config = settingsManager.getConfiguration();
         config.backends = new ArrayList<>(backends);
         try {
@@ -227,8 +249,18 @@ public class OptionsBasicFragment extends Fragment {
             // reschedule itself in a tight loop.
             config.interval = Math.max(1, Integer.parseInt(intervalField.getText().toString()));
         } catch (Exception ignored) {}
-        config.startQuietHour = Integer.parseInt(startHourSpinner.getSelectedItem().toString());
-        config.endQuietHour = Integer.parseInt(endHourSpinner.getSelectedItem().toString());
+        List<String> windows = new ArrayList<>();
+        for (QuietWindowRow row : quietRows) {
+            String text = row.value;
+            if (CronExpression.parse(text) == null) {
+                Toast.makeText(requireContext(),
+                        "Invalid quiet window '" + text + "' — expected \"minute hour day month weekday\" (e.g. * 22-23,0-6 * * *)",
+                        Toast.LENGTH_LONG).show();
+                return false;
+            }
+            windows.add(text);
+        }
+        config.quietHours = windows;
         config.selectedTimeZoneId = tzSpinner.getSelectedItem().toString();
         return true;
     }
@@ -282,6 +314,24 @@ public class OptionsBasicFragment extends Fragment {
 
     private static String safe(String s) {
         return s == null ? "" : s;
+    }
+
+    /** Labeled horizontal row: a fixed-width label plus a weight-1 field, used by the in-place editors. */
+    private View fieldRow(Context context, String label, EditText field) {
+        LinearLayout row = new LinearLayout(context);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        TextView labelView = new TextView(context);
+        labelView.setText(label);
+        labelView.setTextSize(16);
+        LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        labelParams.setMarginEnd(dp(8));
+        labelView.setLayoutParams(labelParams);
+        field.setLayoutParams(new LinearLayout.LayoutParams(
+                0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(labelView);
+        row.addView(field);
+        return row;
     }
 
     /** One row in the backend list: a summary line and, for immich entries, an in-place editor. */
@@ -379,23 +429,6 @@ public class OptionsBasicFragment extends Fragment {
             editor.addView(buttons);
         }
 
-        private View fieldRow(Context context, String label, EditText field) {
-            LinearLayout row = new LinearLayout(context);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            TextView labelView = new TextView(context);
-            labelView.setText(label);
-            labelView.setTextSize(16);
-            LinearLayout.LayoutParams labelParams = new LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
-            labelParams.setMarginEnd(dp(8));
-            labelView.setLayoutParams(labelParams);
-            field.setLayoutParams(new LinearLayout.LayoutParams(
-                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
-            row.addView(labelView);
-            row.addView(field);
-            return row;
-        }
-
         void openEditor() {
             if (editor == null) {
                 return;
@@ -437,6 +470,102 @@ public class OptionsBasicFragment extends Fragment {
             }
             sb.append(" (API: ").append(api).append(")");
             summary.setText(sb.toString());
+        }
+    }
+
+    /** One row in the quiet-hours list: the cron expression plus an in-place editor. */
+    private class QuietWindowRow {
+        String value;
+        final LinearLayout container;
+        final TextView summary;
+        LinearLayout editor;
+        EditText expressionField;
+        boolean editorOpen;
+
+        QuietWindowRow(String value) {
+            this.value = safe(value);
+            Context context = requireContext();
+            this.container = new LinearLayout(context);
+            container.setOrientation(LinearLayout.VERTICAL);
+            container.setLayoutParams(new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            container.setPadding(0, dp(8), 0, dp(8));
+
+            LinearLayout header = new LinearLayout(context);
+            header.setOrientation(LinearLayout.HORIZONTAL);
+
+            this.summary = new TextView(context);
+            summary.setSingleLine(true);
+            summary.setEllipsize(TextUtils.TruncateAt.END);
+            summary.setTextSize(16);
+            summary.setTypeface(android.graphics.Typeface.MONOSPACE);
+            LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            summaryParams.setMarginEnd(dp(8));
+            summary.setLayoutParams(summaryParams);
+            header.addView(summary);
+
+            Button editButton = new Button(context);
+            editButton.setText("Edit");
+            editButton.setOnClickListener(v -> openEditor());
+            header.addView(editButton);
+            buildEditor(context);
+
+            Button removeButton = new Button(context);
+            removeButton.setText("Remove");
+            removeButton.setOnClickListener(v -> removeQuietRow(this));
+            header.addView(removeButton);
+
+            container.addView(header);
+            editor.setVisibility(View.GONE);
+            container.addView(editor);
+            summary.setText(value);
+        }
+
+        private void buildEditor(Context context) {
+            this.editor = new LinearLayout(context);
+            editor.setOrientation(LinearLayout.VERTICAL);
+
+            expressionField = new EditText(context);
+            expressionField.setHint("* 22-23,0-6 * * *");
+            editor.addView(fieldRow(context, "Cron", expressionField));
+
+            LinearLayout buttons = new LinearLayout(context);
+            buttons.setOrientation(LinearLayout.HORIZONTAL);
+            Button saveButton = new Button(context);
+            saveButton.setText("Save");
+            saveButton.setOnClickListener(v -> {
+                applyEditor();
+                closeEditor();
+            });
+            Button cancelButton = new Button(context);
+            cancelButton.setText("Cancel");
+            cancelButton.setOnClickListener(v -> closeEditor());
+            saveButton.setLayoutParams(new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f));
+            LinearLayout.LayoutParams cancelParams = new LinearLayout.LayoutParams(
+                    0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+            cancelParams.setMarginStart(dp(8));
+            cancelButton.setLayoutParams(cancelParams);
+            buttons.addView(saveButton);
+            buttons.addView(cancelButton);
+            editor.addView(buttons);
+        }
+
+        void openEditor() {
+            expressionField.setText(value);
+            editor.setVisibility(View.VISIBLE);
+            editorOpen = true;
+        }
+
+        void closeEditor() {
+            editorOpen = false;
+            editor.setVisibility(View.GONE);
+        }
+
+        void applyEditor() {
+            value = expressionField.getText().toString().trim();
+            summary.setText(value);
         }
     }
 }

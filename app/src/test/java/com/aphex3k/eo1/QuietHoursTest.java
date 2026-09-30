@@ -6,45 +6,73 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.List;
 import java.util.TimeZone;
 
 public class QuietHoursTest {
 
-    @Test
-    public void isConfigured_returnsFalseWhenDisabled() {
-        assertFalse(QuietHours.isConfigured(-1, 14));
-        assertFalse(QuietHours.isConfigured(23, -1));
-        assertFalse(QuietHours.isConfigured(-1, -1));
+    private static List<CronExpression> expressions(String... raw) {
+        List<CronExpression> out = new ArrayList<>();
+        for (String s : raw) {
+            out.add(CronExpression.parse(s));
+        }
+        return out;
+    }
+
+    private static Calendar moment(String hourMinute) {
+        return moment(4, hourMinute); // 2026-01-04 is a Sunday
+    }
+
+    private static Calendar moment(int dayOfMonth, String hourMinute) {
+        // Fixed January 2026 date (day 4 = Sunday, day 5 = Monday, day 6 = Tuesday).
+        Calendar c = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+        c.clear();
+        String[] hm = hourMinute.split(":");
+        c.set(2026, 0, dayOfMonth, Integer.parseInt(hm[0]), Integer.parseInt(hm[1]), 0);
+        return c;
     }
 
     @Test
-    public void isConfigured_returnsTrueForValidHours() {
-        assertTrue(QuietHours.isConfigured(0, 0));
-        assertTrue(QuietHours.isConfigured(23, 14));
+    public void isQuiet_nullOrEmptyListIsNeverQuiet() {
+        assertFalse(QuietHours.isQuiet(null, moment("12:00")));
+        assertFalse(QuietHours.isQuiet(new ArrayList<CronExpression>(), moment("12:00")));
     }
 
     @Test
-    public void isInQuietHours_overnightWindow() {
-        assertFalse(QuietHours.isInQuietHours(23, 14, 14));
-        assertFalse(QuietHours.isInQuietHours(23, 14, 22));
-        assertTrue(QuietHours.isInQuietHours(23, 14, 23));
-        assertTrue(QuietHours.isInQuietHours(23, 14, 0));
-        assertTrue(QuietHours.isInQuietHours(23, 14, 13));
+    public void isQuiet_matchesOvernightWindow() {
+        List<CronExpression> windows = expressions("* 22-23,0-6 * * *");
+        assertTrue(QuietHours.isQuiet(windows, moment("23:30")));
+        assertTrue(QuietHours.isQuiet(windows, moment("02:00")));
+        assertTrue(QuietHours.isQuiet(windows, moment("06:59")));
+        assertFalse(QuietHours.isQuiet(windows, moment("07:00")));
+        assertFalse(QuietHours.isQuiet(windows, moment("14:00")));
     }
 
     @Test
-    public void isInQuietHours_sameDayWindow() {
-        assertFalse(QuietHours.isInQuietHours(14, 17, 13));
-        assertFalse(QuietHours.isInQuietHours(14, 17, 17));
-        assertTrue(QuietHours.isInQuietHours(14, 17, 14));
-        assertTrue(QuietHours.isInQuietHours(14, 17, 16));
+    public void isQuiet_matchesSameDayWindow() {
+        List<CronExpression> windows = expressions("* 14-16 * * *");
+        assertTrue(QuietHours.isQuiet(windows, moment("14:00")));
+        assertTrue(QuietHours.isQuiet(windows, moment("16:59")));
+        assertFalse(QuietHours.isQuiet(windows, moment("13:59")));
+        assertFalse(QuietHours.isQuiet(windows, moment("17:00")));
     }
 
     @Test
-    public void isInQuietHours_disabled() {
-        assertFalse(QuietHours.isInQuietHours(-1, 14, 2));
-        assertFalse(QuietHours.isInQuietHours(23, -1, 23));
-        assertFalse(QuietHours.isInQuietHours(10, 10, 10));
+    public void isQuiet_overlappingWindowsOrTogether() {
+        List<CronExpression> windows = expressions("* 22-23,0-6 * * *", "* 5-8 * * *");
+        // 05:00 is covered by both windows; the OR must not double-apply or miss.
+        assertTrue(QuietHours.isQuiet(windows, moment("05:00")));
+        assertTrue(QuietHours.isQuiet(windows, moment("07:30")));
+        assertFalse(QuietHours.isQuiet(windows, moment("21:00")));
+    }
+
+    @Test
+    public void isQuiet_dayRestrictedWindowOnlyQuietsThoseDays() {
+        List<CronExpression> windows = expressions("0 14-16 * * 2"); // Tuesdays only
+        assertTrue(QuietHours.isQuiet(windows, moment(6, "15:00")));  // Tuesday 2026-01-06
+        assertFalse(QuietHours.isQuiet(windows, moment(4, "15:00"))); // Sunday 2026-01-04
     }
 
     @Test
