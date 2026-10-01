@@ -304,4 +304,89 @@ public class ConfigurationTest {
         assertEquals(-1, c.startQuietHour);
         assertEquals(-1, c.endQuietHour);
     }
+
+    // --------------------------------------------------------- self-update config
+
+    @Test
+    public void normalize_updateManifestUrlTrimsAndKeepsHttp() {
+        Configuration c = new Configuration();
+        c.updateManifestUrl = "  http://updates.local/manifest.json  ";
+        Configuration.normalize(c);
+        assertEquals("http://updates.local/manifest.json", c.updateManifestUrl);
+        assertTrue(c.updatesEnabled());
+    }
+
+    @Test
+    public void normalize_updateManifestUrlClearsNonHttpScheme() {
+        Configuration c = new Configuration();
+        c.updateManifestUrl = "ftp://updates.local/manifest.json";
+        Configuration.normalize(c);
+        assertEquals("", c.updateManifestUrl);
+        assertFalse(c.updatesEnabled());
+    }
+
+    @Test
+    public void normalize_updateManifestUrlBlankStaysDisabled() {
+        Configuration c = new Configuration();
+        c.updateManifestUrl = "   ";
+        Configuration.normalize(c);
+        assertEquals("", c.updateManifestUrl);
+        assertFalse(c.updatesEnabled());
+
+        Configuration nullUrl = new Configuration();
+        nullUrl.updateManifestUrl = null;
+        Configuration.normalize(nullUrl);
+        assertEquals(null, nullUrl.updateManifestUrl);
+        assertFalse(nullUrl.updatesEnabled());
+    }
+
+    @Test
+    public void normalize_updateIntervalClampsToDefaultWhenNonPositive() {
+        Configuration zero = new Configuration();
+        zero.updateCheckIntervalMinutes = 0;
+        Configuration.normalize(zero);
+        assertEquals(120, zero.updateCheckIntervalMinutes);
+
+        Configuration negative = new Configuration();
+        negative.updateCheckIntervalMinutes = -5;
+        Configuration.normalize(negative);
+        assertEquals(120, negative.updateCheckIntervalMinutes);
+    }
+
+    @Test
+    public void normalize_updateIntervalClampsToMinimumFive() {
+        Configuration c = new Configuration();
+        c.updateCheckIntervalMinutes = 3;
+        Configuration.normalize(c);
+        assertEquals(5, c.updateCheckIntervalMinutes);
+
+        Configuration boundary = new Configuration();
+        boundary.updateCheckIntervalMinutes = 5;
+        Configuration.normalize(boundary);
+        assertEquals(5, boundary.updateCheckIntervalMinutes);
+    }
+
+    @Test
+    public void normalize_updateIntervalClampsToMaximumDay() {
+        Configuration c = new Configuration();
+        c.updateCheckIntervalMinutes = 99999;
+        Configuration.normalize(c);
+        assertEquals(1440, c.updateCheckIntervalMinutes);
+
+        Configuration boundary = new Configuration();
+        boundary.updateCheckIntervalMinutes = 1440;
+        Configuration.normalize(boundary);
+        assertEquals(1440, boundary.updateCheckIntervalMinutes);
+    }
+
+    @Test
+    public void parsedConfig_updateFieldsSurviveGsonRoundTrip() {
+        Configuration c = new Gson().fromJson(
+                "{\"updateManifestUrl\":\"http://updates.local/manifest.json\","
+                        + "\"updateCheckIntervalMinutes\":30}",
+                Configuration.class);
+        assertEquals("http://updates.local/manifest.json", c.updateManifestUrl);
+        assertEquals(30, c.updateCheckIntervalMinutes);
+        assertTrue(c.updatesEnabled());
+    }
 }

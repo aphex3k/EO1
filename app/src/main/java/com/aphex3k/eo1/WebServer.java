@@ -561,7 +561,9 @@ public class WebServer {
         sb.append("<button onclick=\"ctrl('next')\">Next</button>")
                 .append("<button onclick=\"ctrl('screen')\">Screen</button>")
                 .append("<button onclick=\"ctrl('brightness')\">Brightness+</button>")
-                .append("<button onclick=\"ctrl('check-updates')\">Check updates</button>");
+                .append("<button onclick=\"ctrl('check-updates')\">Check updates</button>")
+                .append("<button onclick=\"ctrl('install-staged')\">Install staged</button>")
+                .append("<button onclick=\"ctrl('update-reset')\">Update reset</button>");
 
         sb.append("<script>");
         sb.append("function ctrl(a){fetch('/control?action='+a).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}");

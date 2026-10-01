@@ -43,7 +43,9 @@ public interface WebController {
      * Fires a device control action (mirrors a hardware key press).
      *
      * @param action one of {@code next}, {@code screen}, {@code brightness}, {@code config},
-     *               {@code settings}, {@code update-site}, {@code check-updates}.
+     *               {@code settings}, {@code update-site}, {@code check-updates},
+     *               {@code install-staged} (installs a staged self-update, screen on),
+     *               {@code update-reset} (drops staged update files and state).
      * @return {@code true} if a known action was dispatched.
      */
     boolean control(String action);

@@ -189,8 +189,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.brightnessManager = new BrightnessManager(this, (SensorManager) getSystemService(SENSOR_SERVICE));
         this.eventManager = new EventManager(this);
-        this.updateManager = new UpdateManager(this);
         this.settingsManager = new SettingsManager(this);
+        this.updateManager = new UpdateManager(this, this, this.settingsManager);
         this.mediaManager = new MediaManager(this, this.settingsManager, this);
         this.connectionManager = new ConnectionManager(this);
 
@@ -206,6 +206,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.webServer = new WebServer(this);
         this.webServer.start();
 
+        // Load config before the web server can answer /state and before startup update
+        // reconciliation; configureMqttManager() no longer owns the load.
+        settingsManager.loadConfiguration();
+        updateManager.reconcileOnStartup();
+
         Thread.setDefaultUncaughtExceptionHandler(this);
 
         pendingIntent = PendingIntent.getActivity(
@@ -219,8 +224,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     private void configureMqttManager() {
         try {
-            // Construct MQTT broker string from settings
-            settingsManager.loadConfiguration();
+            // Construct MQTT broker string from settings (loaded in onCreate, before this runs)
             String mqttProtocol = settingsManager.getConfiguration().mqttProtocol;
             String mqttHost = settingsManager.getConfiguration().mqttHost;
             int mqttPort = settingsManager.getConfiguration().mqttPort;
@@ -328,6 +332,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         } else {
             Log.i(TAG, "runOnTimer: skipping showNextImage (screen should be off / quiet hours)");
         }
+        // Self-update: interval-gated check, plus auto-retry of a staged-but-uninstalled APK.
+        updateManager.checkIfDue();
+        updateManager.installStaged(false);
     }
 
     @Override
@@ -344,6 +351,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     protected void onResume() {
         super.onResume();
+
+        // If this process fired an install and is still alive, the install did not take
+        // effect — roll the state back to STAGED so the next tick can retry.
+        updateManager.reconcileInstallOutcome();
 
         if (BuildConfig.DEBUG) { hideSystemUI(); }
 
@@ -598,7 +609,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void openUpdateWebsite() {
-        Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse("https://gitea.codingmerc.com/michael/EO1"));
+        Intent browserIntent = new Intent(Intent.ACTION_VIEW, Uri.parse("https://github.com/aphex3k/EO1/releases"));
         startActivity(browserIntent);
     }
 
@@ -1340,6 +1351,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
         o.add("media", media);
 
+        o.add("update", updateManager.stateJson());
+
         o.add("telemetry", DeviceTelemetry.snapshot(this));
 
         if (BuildConfig.DEBUG) {
@@ -1446,6 +1459,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 break;
             case "check-updates":
                 task = this::checkForUpdates;
+                break;
+            case "install-staged":
+                task = () -> {
+                    turnScreenOn();
+                    updateManager.installStaged(true);
+                };
+                break;
+            case "update-reset":
+                task = updateManager::resetUpdate;
                 break;
             default:
                 return false;

@@ -21,7 +21,7 @@ the server itself is unit-testable with a fake controller and never references t
 | Route | Method | Purpose |
 |---|---|---|
 | `/` | GET | One-page UI: upload form, file table (download/delete), control buttons |
-| `/state` | GET | JSON: device/app info, config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, rotation stats, battery/memory/uptime telemetry |
+| `/state` | GET | JSON: device/app info, config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, rotation stats, an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedApk{present,bytes}`, `installPermissionHeld`, `installMode`), battery/memory/uptime telemetry |
 | `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
 | `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
 | `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
@@ -41,8 +41,10 @@ the server itself is unit-testable with a fake controller and never references t
 | `brightness` | back button | bump the minimum brightness |
 | `config` | C | open the app configuration dialog |
 | `settings` | S | open system settings |
-| `update-site` | U | open the OTA release page |
-| `check-updates` | top + back | check Gitea for a new APK |
+| `update-site` | U | open the GitHub releases page |
+| `check-updates` | top + back | check the self-update manifest for a new APK |
+| `install-staged` | — | install a staged self-update (turns the screen on first) |
+| `update-reset` | — | drop the staged update files and reset the update state |
 
 All actions are posted to the UI thread. Unknown actions return `{"ok":false,"fired":false}`.
 
