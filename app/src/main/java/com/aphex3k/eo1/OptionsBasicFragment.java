@@ -42,6 +42,8 @@ public class OptionsBasicFragment extends Fragment {
     private LinearLayout quietCronContainer;
     private Button addQuietWindowButton;
     private Spinner tzSpinner;
+    private EditText updateUrlField;
+    private EditText updateIntervalField;
     private String[] allTimeZoneIds;
 
     /** Working copy of the configured backends; persisted on save. */
@@ -75,6 +77,8 @@ public class OptionsBasicFragment extends Fragment {
         quietCronContainer = view.findViewById(R.id.quietCronContainer);
         addQuietWindowButton = view.findViewById(R.id.btnAddQuietWindow);
         tzSpinner = view.findViewById(R.id.tzSpinner);
+        updateUrlField = view.findViewById(R.id.editTextUpdateManifestUrl);
+        updateIntervalField = view.findViewById(R.id.editTextUpdateCheckInterval);
 
         allTimeZoneIds = TimeZone.getAvailableIDs();
         ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, allTimeZoneIds);
@@ -91,6 +95,8 @@ public class OptionsBasicFragment extends Fragment {
                 backends.add(copyOf(entry));
             }
             intervalField.setText(String.valueOf(config.interval));
+            updateUrlField.setText(config.updateManifestUrl != null ? config.updateManifestUrl : "");
+            updateIntervalField.setText(String.valueOf(config.updateCheckIntervalMinutes));
             quietWindows.addAll(config.quietHoursOrEmpty());
             if (config.selectedTimeZoneId != null && !config.selectedTimeZoneId.isEmpty()) {
                 int tzIndex = Arrays.asList(allTimeZoneIds).indexOf(config.selectedTimeZoneId);
@@ -248,6 +254,18 @@ public class OptionsBasicFragment extends Fragment {
             // Clamp to >= 1: a 0/negative interval would make the rotation timer
             // reschedule itself in a tight loop.
             config.interval = Math.max(1, Integer.parseInt(intervalField.getText().toString()));
+        } catch (Exception ignored) {}
+        String updateUrl = updateUrlField.getText().toString().trim();
+        if (!updateUrl.isEmpty()
+                && !updateUrl.toLowerCase().startsWith("http://")
+                && !updateUrl.toLowerCase().startsWith("https://")) {
+            Toast.makeText(requireContext(), "Self-update URL must start with http:// or https://", Toast.LENGTH_LONG).show();
+            return false;
+        }
+        config.updateManifestUrl = updateUrl;
+        try {
+            config.updateCheckIntervalMinutes = Math.max(5, Math.min(1440,
+                    Integer.parseInt(updateIntervalField.getText().toString())));
         } catch (Exception ignored) {}
         List<String> windows = new ArrayList<>();
         for (QuietWindowRow row : quietRows) {

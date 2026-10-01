@@ -2,6 +2,18 @@ plugins {
     id 'com.android.application'
 }
 
+// Release-signing credentials live in the gitignored root local.properties:
+//   eo1.signing.store.file=/path/to/eo1-release.keystore
+//   eo1.signing.store.password=...
+//   eo1.signing.key.alias=EO1
+//   eo1.signing.key.password=...
+// Without the keystore the release build is unsigned.
+def signingProps = new java.util.Properties()
+def localPropsFile = rootProject.file('local.properties')
+if (localPropsFile.exists()) {
+    localPropsFile.withInputStream { signingProps.load(it) }
+}
+
 android {
     namespace 'com.aphex3k.eo1'
     compileSdk 34
@@ -13,19 +25,37 @@ android {
         targetSdk 19
         // maxSdk 19 applies to release only (see src/release/AndroidManifest.xml) so
         // debug APKs can install on the Apple Silicon API 21 fallback AVD.
-        if (project.hasProperty('BUILD_NUMBER')) {
-            versionCode = Integer.parseInt(project.BUILD_NUMBER)
+        // -PVERSION_CODE (publish-update.sh) wins, then the legacy BUILD_NUMBER, then 1.
+        if (project.hasProperty('VERSION_CODE')) {
+            versionCode = Integer.parseInt(project.VERSION_CODE.toString())
+        }
+        else if (project.hasProperty('BUILD_NUMBER')) {
+            versionCode = Integer.parseInt(project.BUILD_NUMBER.toString())
         }
         else {
             versionCode = 1
         }
-        versionName "1.3.0"
+        versionName project.hasProperty('VERSION_NAME') ? project.VERSION_NAME.toString() : "1.3.0"
         multiDexEnabled true
         // Prefer Amlogic TsPlayer when libTsPlayer-jni loads; MediaPlayer remains fallback.
         buildConfigField "boolean", "USE_TSPLAYER", "true"
     }
+    signingConfigs {
+        release {
+            if (signingProps.getProperty('eo1.signing.store.file')) {
+                storeFile file(signingProps.getProperty('eo1.signing.store.file'))
+                storePassword signingProps.getProperty('eo1.signing.store.password')
+                keyAlias signingProps.getProperty('eo1.signing.key.alias', 'EO1')
+                keyPassword signingProps.getProperty('eo1.signing.key.password')
+            }
+        }
+    }
     buildTypes {
         release {
+            // Unsigned release when no signing props are configured (publish-update.sh refuses to build anyway).
+            if (signingProps.getProperty('eo1.signing.store.file')) {
+                signingConfig signingConfigs.release
+            }
             ndk {
                 abiFilters 'armeabi-v7a'
             }

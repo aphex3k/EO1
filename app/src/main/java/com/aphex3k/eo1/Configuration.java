@@ -42,12 +42,24 @@ public class Configuration {
     @Deprecated public int endQuietHour = -1;
 
     public int interval = 5;
+
+    /** Self-update manifest URL; "" (default) disables self-update entirely. */
+    @Nullable public String updateManifestUrl = "";
+
+    /** Self-update check interval in minutes; clamped to [5, 1440] by {@link #normalize}. */
+    public int updateCheckIntervalMinutes = 120;
+
     // MQTT fields
     @Nullable public String mqttHost = "";
     public int mqttPort = 1883;
     @Nullable public String mqttProtocol = "";
     @Nullable public String mqttUser = "";
     @Nullable public String mqttPassword = "";
+
+    /** True when a self-update manifest URL is configured. */
+    public boolean updatesEnabled() {
+        return updateManifestUrl != null && !updateManifestUrl.trim().isEmpty();
+    }
 
     public List<ConfigurationBackendEntry> backendsOrEmpty() {
         return backends != null ? backends : new ArrayList<ConfigurationBackendEntry>();
@@ -84,6 +96,9 @@ public class Configuration {
      *       {@code startQuietHour}/{@code endQuietHour} pair is, migrate it to a single
      *       cron expression. When a list is present, entries are trimmed and any
      *       unparseable entry is dropped.</li>
+     *   <li>Self-update: the manifest URL is trimmed (a non-http(s) value is cleared,
+     *       disabling self-update); the check interval is clamped to [5, 1440] minutes
+     *       with a value &lt;= 0 defaulting to 120.</li>
      * </ol>
      */
     static boolean normalize(Configuration c) {
@@ -207,6 +222,28 @@ public class Configuration {
                 keptWindows.add(trimmed);
             }
             c.quietHours = keptWindows;
+        }
+
+        // 7. Self-update: trim the manifest URL (non-http(s) clears it); clamp the check interval.
+        if (c.updateManifestUrl != null) {
+            String url = c.updateManifestUrl.trim();
+            if (!url.isEmpty() && !hasHttpScheme(url)) {
+                url = "";
+            }
+            if (!url.equals(c.updateManifestUrl)) {
+                c.updateManifestUrl = url;
+                changed = true;
+            }
+        }
+        if (c.updateCheckIntervalMinutes <= 0) {
+            c.updateCheckIntervalMinutes = 120;
+            changed = true;
+        } else if (c.updateCheckIntervalMinutes < 5) {
+            c.updateCheckIntervalMinutes = 5;
+            changed = true;
+        } else if (c.updateCheckIntervalMinutes > 1440) {
+            c.updateCheckIntervalMinutes = 1440;
+            changed = true;
         }
         return changed;
     }

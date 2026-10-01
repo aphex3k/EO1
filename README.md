@@ -1,8 +1,6 @@
 # EO1 and EO2 Replacement APK
 
-[![Build Status](https://jenkins.codingmerc.com/buildStatus/icon?job=EO1%2Fmain)](https://jenkins.codingmerc.com/job/EO1/)
-
-This repository is a [rewrite](https://gitea.codingmerc.com/michael/EO1/issues/26) of [spalt/EO1](https://github.com/spalt/EO1). The goal is to ideally use a
+This repository is a rewrite of [spalt/EO1](https://github.com/spalt/EO1). The goal is to ideally use a
 self-hosted [immich.app](https://immich.app/) instance as a backend. This will allow **full self-custody** of the system.
 
 ![photo of eo1 custom app development](_img/IMG_1451.jpg) ![photo of eo1 running custom app](_img/IMG_1452.jpg)
@@ -50,9 +48,8 @@ Amongst other things, I had to disable PFS as well as enable TLSv1.2 in addition
 - You need to tell your EO1 to allow side-loading.
   1. Swipe down on the top right and go to **Settings > Security**
   2. Make sure "Unknown Sources" is checked
-- Go back to the browser and go to this URL: <http://gitea.codingmerc.com/michael/EO1/releases/download/v1.3.0/app-release.apk>
-  - You can build the app from this repository and host it yourself if you want to not use a precompiled APK
-- When it finished downloading, install the file by pulling down the notification bar on the top left and clicking it, then agreeing to the prompts
+- Go back to the browser and go to the URL where you host the APK. All builds are local (there is no CI anymore) — [publish-update.sh](#self-update) builds and signs a release APK and writes a matching `update-manifest.json` to `./update-out`; serve that directory from any plain-HTTP server on your LAN. Example: <http://your-host/update-out/eo1-release-1.apk>
+- When it finished downloading, install the file by pulling down the notification bar on the top left and clicking it, then agreeing to the install prompts. That's the one-time bootstrap: the app manifest declares `INSTALL_PACKAGES`, which on API 19 is a normal permission granted automatically at install — every later self-update then runs fully headless
 - Restart/power cycle your EO1 by unplugging and plugging only the power cable
   - At this point, the keyboard and mouse are still connected via OTG
 - Because this APK is designated as a "Home screen replacement", when EO1 boots, it will ask if you want to load the Electric Object app or the EO1 app. Select EO1 and choose "Always".
@@ -143,9 +140,111 @@ Modern Android Studio no longer supports the Gradle/SDK pins this project needs 
 ./debug.sh
 ```
 
-That builds the debug APK (armeabi-v7a carries the Amlogic TsPlayer `.so`; arm64-v8a is a native-lib-free emulator fallback), creates or reuses an AVD named `EO1` (API 19) constrained like the real hardware / Jenkins CI, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator.
+That builds the debug APK (armeabi-v7a carries the Amlogic TsPlayer `.so`; arm64-v8a is a native-lib-free emulator fallback), creates or reuses an AVD named `EO1` (API 19) constrained like the real hardware, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator.
 
 On **Apple Silicon**, API 19 images generally cannot boot, and 32-bit ARM emulators are unsupported. After API 19 fails, the script falls back to AVD `EO1_API21` (`system-images;android-21;default;arm64-v8a`). The committed LFS TsPlayer `.so` is **armeabi-v7a** only (EO1 hardware); the arm64-v8a fallback has no native player, so the app falls back to `MediaPlayer` there. That path is an approximation for development, not EO1 fidelity. Debug APKs omit `maxSdk` so they can install on the fallback AVD; **release** builds still use `maxSdk 19` and armeabi-v7a only for real devices.
+
+## Self-update
+
+The frame can check for, download, verify and install a new APK by itself — no adb, no OTG
+peripheral, no touch screen. Updates are forward-only (the manifest's `versionCode` must be
+strictly greater than the installed one) and nothing is installed before every verification
+gate passes.
+
+### Configuration
+
+Two fields in `configuration.json` (also in the options dialog, Media tab):
+
+- `updateManifestUrl` — plain-HTTP(S) URL of a small JSON manifest. Empty (the default)
+  disables self-update entirely.
+- `updateCheckIntervalMinutes` — poll interval in minutes (default 120, clamped to [5, 1440]).
+
+The manifest (exactly the fields `publish-update.sh` writes):
+
+```json
+{
+  "versionCode": 2,
+  "versionName": "1.3.1",
+  "apkUrl": "http://your-host/update-out/eo1-release-2.apk",
+  "sha256": "<64 hex chars>",
+  "sizeBytes": 12345678,
+  "notes": "EO1 1.3.1"
+}
+```
+
+### Verification chain
+
+1. **Manifest gate** — `apkUrl` must be http(s), `sha256` 64 hex chars, `sizeBytes` positive
+   and ≤ 100 MB, `versionCode` strictly greater than the installed one.
+2. **SHA-256** — the downloaded bytes are hashed in a 32 KB streaming loop and must match the
+   manifest before anything else is checked.
+3. **JAR signature** — `META-INF/MANIFEST.MF` + `.SF` + `.RSA` are verified in pure Java
+   (`com.aphex3k.update.ApkSignatureVerifier`): per-entry digests, the whole-manifest digest
+   and the PKCS#7 signer signature.
+4. **Signer-certificate match** — the leaf certificate extracted from the JAR signature must
+   byte-match the certificate of the *installed* APK, i.e. the update must be signed with the
+   same keystore as the current install. (An unsigned installed app has no certificate to
+   match against; updates then fail with `no-installed-cert`.)
+
+Only after all four gates does the APK get staged (private master in `filesDir/updates/` plus a
+world-readable copy at `/sdcard/Download/eo1-update.apk`, because the installer runs under a
+different uid) and then installed.
+
+### How the install runs
+
+- When the frame holds `INSTALL_PACKAGES` (a normal permission on API 19, granted
+  automatically at install time), the APK is installed headlessly via
+  `PackageManager.installPackage`. Without it the app falls back to the proven install intent
+  and wakes the screen — that only matters for a frame whose first install predates the
+  permission.
+- Before firing, a +120 s `AlarmManager` relaunch alarm (the same one the crash handler uses)
+  is armed, so a fatal crash mid-install still gets the frame back to a launchable state.
+- The installer kills this process on success, so success is detected by the *new* process on
+  startup: the persisted expected `versionCode` is compared against
+  `BuildConfig.VERSION_CODE` (`reconcileOnStartup`). A stuck or refused install rolls back to
+  the retryable `STAGED` state and is retried on the next timer tick.
+
+### Recovery (headless, via the LAN web server)
+
+| Symptom | Action |
+|---|---|
+| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode` |
+| Staged but not installed | `/control?action=install-staged` (turns the screen on and fires the install) |
+| Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
+| Force a re-check now | `/control?action=check-updates` |
+
+The index page exposes **Check updates** / **Install staged** / **Update reset** buttons.
+Recovery is forward-fix only: a failed update leaves the last good version running; the app
+never downgrades or uninstalls itself.
+
+### Publishing a new version (operator side)
+
+All builds are local — the old Jenkins/Gitea pipeline no longer exists. Signing uses the
+release keystore (alias `EO1`, the same one the old CI used) via the gitignored root
+`local.properties`:
+
+```properties
+eo1.signing.store.file=/path/to/eo1-release.keystore
+eo1.signing.store.password=...
+eo1.signing.key.alias=EO1
+eo1.signing.key.password=...
+```
+
+Then publish:
+
+```bash
+EO1_UPDATE_HOST=http://your-host/eo1 ./publish-update.sh 2 1.3.1
+```
+
+The script enforces a monotonic `versionCode` (strictly greater than the last published one),
+builds with `assembleRelease`, hashes with `shasum -a 256`, writes `update-manifest.json` and
+stages both files in `./update-out` (optionally rsync'd to `EO1_UPDATE_REMOTE`). Serve that
+directory from any plain-HTTP server the frames can reach and point `updateManifestUrl` at
+`…/update-manifest.json`.
+
+> The frames cannot validate TLS (device certificates are expired), so keep the update host on
+> a trusted LAN. A LAN attacker who can rewrite the manifest or APK is still stopped by the
+> signer-certificate match — a new APK must be signed with the release keystore.
 
 ## Further Reading
 
@@ -154,6 +253,6 @@ On **Apple Silicon**, API 19 images generally cannot boot, and 32-bit ARM emulat
 
 ## Contribution
 
-1. You can provide feedback by opening [Issues](https://gitea.codingmerc.com/michael/EO1/issues) and describing an idea or problem.
+1. You can provide feedback by opening [Issues](https://github.com/aphex3k/EO1/issues) and describing an idea or problem.
 1. You can donate in Dollar via [PayPal](https://www.paypal.me/aphex3k) or in [Bitcoin](https://getalby.com/p/michaelhenke).
 1. If you happen to have a working but no longer needed EO1/EO2 picture frame, please reach out via email!

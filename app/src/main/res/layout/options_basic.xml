@@ -96,6 +96,34 @@
             android:layout_height="wrap_content"
             android:inputType="number"
             android:hint="5" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Self-update"
+            android:layout_marginTop="20sp"
+            android:textAppearance="@style/TextAppearance.AppCompat.Large" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Manifest URL (leave empty to disable self-update):" />
+        <EditText
+            android:id="@+id/editTextUpdateManifestUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="textUri"
+            android:hint="http://your-host/eo1/update-manifest.json" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Check interval (in minutes):"
+            android:layout_marginTop="8dp" />
+        <EditText
+            android:id="@+id/editTextUpdateCheckInterval"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="number"
+            android:hint="120" />
     </LinearLayout>
 </ScrollView>
 

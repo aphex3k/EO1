@@ -48,3 +48,6 @@ tzdata filter=lfs diff=lfs merge=lfs -text
 # objects, so Actions checkouts 404 on the wrapper's LFS oid and ./gradlew
 # cannot start. The blanket *.jar LFS rule above must not re-capture it.
 gradle/wrapper/gradle-wrapper.jar -filter -diff -merge -text
+# Unit-test signature fixtures (small signed .zip files) must also be regular git
+# objects for the same fork/LFS reason: they are read on every test run.
+app/src/test/resources/update-fixtures/** -filter -diff -merge -text

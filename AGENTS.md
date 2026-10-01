@@ -16,7 +16,7 @@ Android home-screen replacement APK for Electric Objects **EO1** and **EO2** dig
 | Path | Treat as |
 |------|----------|
 | `app/` | **App product source** (Java Android module) |
-| Root Gradle files, `Jenkinsfile` | Build & CI |
+| Root Gradle files, `publish-update.sh` | Build (local) & release publishing |
 | `docs/TSPLAYER.md` | Amlogic TsPlayer playback + MediaPlayer fallback |
 | `configuration_example.json` | Config template (may drift; see below) |
 | `EO2/`, `ffmpeg/`, `.electric-objects/` | Local dumps / vendor reference — not app logic |
@@ -30,8 +30,8 @@ Git LFS (tracked): `app/src/main/jniLibs/armeabi-v7a/libTsPlayer-jni.so` (Amlogi
 
 - **Language:** Java only — no Kotlin
 - **SDK:** `minSdk` / `targetSdk` / `maxSdk` = **19** (KitKat 4.4.2); `compileSdk` 34
-- **Build:** Gradle + Android Gradle Plugin; CI via Jenkins (build, tests, signed APKs)
-- **Networking:** Retrofit + OkHttp + Gson; hand-rolled Immich client; Gitea client for OTA
+- **Build:** Gradle + Android Gradle Plugin; all builds are local (the old Jenkins CI is gone — `publish-update.sh` at the repo root builds + signs release APKs via `local.properties` signing props)
+- **Networking:** Retrofit + OkHttp + Gson; hand-rolled Immich client; self-update via `com.aphex3k.update` (plain-HTTP manifest + pure-Java JAR signature verification + headless `installPackage`)
 - **Immich server:** supported band **3.0.0–3.2.2** (verified against the 3.2.2 OpenAPI spec — no breaking changes to the endpoints this app uses). The band lives in `com.aphex3k.media.immich.ImmichClientRegistry` (the V3 client); each backend entry may pin its `apiVersion` (default `"auto"` = best-effort probe of `GET /api/server/version`). Immich’s API is not stable across releases — on a breaking change, add a new frozen `com.aphex3k.immichApi.vN` DTO package + `ImmichClientVN` + one registry band; never edit a frozen client package.
 - **TLS:** EO1 needs TLS 1.2 and weaker ciphers — see `Tls12SocketFactory.java` and `ApiServiceGenerator.java`
 - **Video:** Prefer Amlogic **TsPlayer** (`TsVideoView` + `libTsPlayer-jni.so`) on Geniatech EO1/EO2 when the native library loads; **automatic fallback** to platform `MediaPlayer` via `com.dd.crop.TextureVideoView`. **Do not use ExoPlayer** (including 2.19.x / Media3) — it triggers MediaCodec/GPU driver lockups that hang the whole device (ADB dies; requires power-cycle). See [docs/TSPLAYER.md](docs/TSPLAYER.md).
@@ -48,7 +48,7 @@ MainActivity
   ├── MediaManager          → com.aphex3k.media.MediaBackend (ImmichMediaBackend → ImmichClientV3 → com.aphex3k.immichApi | LocalMediaBackend)
   ├── Video playback        → TsPlayer (preferred) / MediaPlayer fallback
   ├── BrightnessManager / BrightnessSensorManager
-  └── UpdateManager         → com.aphex3k.giteaApi → Gitea releases
+  └── UpdateManager         → com.aphex3k.update (manifest-driven self-update: SHA-256 + JAR signature + cert match, headless installPackage)
 ```
 
 Open these first:
@@ -63,7 +63,7 @@ Open these first:
 | Config model (source of truth) | `app/src/main/java/com/aphex3k/eo1/Configuration.java` |
 | Immich HTTP API | `app/src/main/java/com/aphex3k/immichApi/ImmichApiService.java` |
 | HTTP / TLS / cookies | `app/src/main/java/com/aphex3k/eo1/ApiServiceGenerator.java`, `Tls12SocketFactory.java` |
-| OTA updates | `app/src/main/java/com/aphex3k/eo1/UpdateManager.java` |
+| Self-update | `app/src/main/java/com/aphex3k/eo1/UpdateManager.java`, `com.aphex3k.update/` (`UpdateManifest` DTO, `UpdateState`/`UpdateStateStore` persistence, `ApkSignatureVerifier` pure-Java JAR-signature check) |
 | LAN web server | `WebServer` (HTTP on port 80→8080), `WebController` (implemented by `MainActivity`), `MultipartParser` (streaming multipart), `UploadedMedia` (persistent `filesDir/uploaded`), `AppLogger` (ring buffer + rolling file), `DeviceTelemetry` (on-demand `/state` data) — see [docs/WEBSERVER.md](docs/WEBSERVER.md) |
 | HOME launcher role | `app/src/main/AndroidManifest.xml` |
 | Unit tests | `app/src/test/java/` |

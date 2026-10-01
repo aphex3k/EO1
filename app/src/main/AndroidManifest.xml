@@ -12,6 +12,10 @@
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.SET_TIME_ZONE" tools:ignore="ProtectedPermissions" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Normal permissions on API 19 (granted at install time, no prompt): INSTALL_PACKAGES
+         enables the headless self-update path; DELETE_PACKAGES is declared for completeness. -->
+    <uses-permission android:name="android.permission.INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.DELETE_PACKAGES" />
     
     <application
         android:requestLegacyExternalStorage="true"
