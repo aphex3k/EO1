@@ -27,7 +27,6 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.function.Supplier;
 
 import retrofit2.Call;
 import retrofit2.Response;
@@ -44,6 +43,13 @@ import retrofit2.Response;
  * <p>{@code @Keep}: the band table instantiates this class reflectively
  * ({@code ImmichMediaBackend#instantiate}), so the release build must not strip
  * its constructor.
+ *
+ * <p>Responses are never closed via {@code response.raw().close()}: after
+ * {@code execute()} returns, Retrofit 2.6 has already replaced the raw body with a
+ * placeholder whose {@code close()} throws {@code IllegalStateException}. The real
+ * body is closed by the Gson converter on 2xx and by Retrofit itself on error/204
+ * paths; for the {@code Call<okhttp3.ResponseBody>} streaming calls the returned
+ * stream is the body and the pipeline closes it.
  */
 @Keep
 public class ImmichClientV3 implements ImmichClient {
@@ -63,18 +69,29 @@ public class ImmichClientV3 implements ImmichClient {
         this.password = password;
     }
 
+    /**
+     * One-shot Retrofit call factory for {@link #withSession}. A plain app interface rather
+     * than {@code java.util.function.Supplier}, which does not exist on API 19 and would
+     * fail class linking on the device.
+     */
+    interface CallFactory<T> {
+        Call<T> newCall();
+    }
+
     @Override
     @Nullable
     public Semver probeServerVersion() {
         try {
             Response<com.aphex3k.immichApi.ImmichApiServerVersionResponse> response =
                     service.getServerVersion().execute();
-            try {
-                com.aphex3k.immichApi.ImmichApiServerVersionResponse body = response.body();
-                return body != null ? body.getVersion() : null;
-            } finally {
-                response.raw().close();
+            com.aphex3k.immichApi.ImmichApiServerVersionResponse body = response.body();
+            if (body == null) {
+                return null;
             }
+            Semver version = body.getVersion();
+            // All-zero fields mean major/minor/patch were absent from the payload; treat
+            // that as a failed probe instead of an out-of-band "0.0.0" server.
+            return version != null && !"0.0.0".equals(version.getValue()) ? version : null;
         } catch (Exception e) {
             return null;
         }
@@ -86,28 +103,22 @@ public class ImmichClientV3 implements ImmichClient {
             InvalidCredentialsException, IOException {
         Response<ImmichApiLoginResponse> response =
                 service.login(new ImmichApiLogin(userid, password)).execute();
-        try {
-            ImmichApiLoginResponse loginResponse = response.body();
-            if (response.code() == 401) {
-                throw new AuthenticationFailedException(response.code());
-            }
-            if (response.code() == 404) {
-                throw new AuthenticationUnavailableException(response.code());
-            }
-            if (response.isSuccessful() && loginResponse == null) {
-                throw new AuthenticationUnavailableException(response.code());
-            }
-            String userId;
-            if (loginResponse != null && !loginResponse.getUserId().isEmpty()) {
-                userId = loginResponse.getUserId();
-            } else {
-                throw new AuthenticationFailedException(-1);
-            }
-            if (userId == null || userId.isEmpty()) {
-                throw new InvalidCredentialsException();
-            }
-        } finally {
-            response.raw().close();
+        ImmichApiLoginResponse loginResponse = response.body();
+        if (response.code() == 401) {
+            throw new AuthenticationFailedException(response.code());
+        }
+        if (response.code() == 404) {
+            throw new AuthenticationUnavailableException(response.code());
+        }
+        if (response.isSuccessful() && loginResponse == null) {
+            throw new AuthenticationUnavailableException(response.code());
+        }
+        String userId = loginResponse != null ? loginResponse.getUserId() : null;
+        if (userId == null) {
+            throw new AuthenticationFailedException(-1);
+        }
+        if (userId.isEmpty()) {
+            throw new InvalidCredentialsException();
         }
         loggedIn = true;
     }
@@ -191,7 +202,6 @@ public class ImmichClientV3 implements ImmichClient {
         Response<okhttp3.ResponseBody> response = withSession(() -> call);
         if (!response.isSuccessful() || response.body() == null) {
             int code = response.code();
-            response.raw().close();
             throw new MediaDownloadFailedException("Failed downloading immich asset: HTTP " + code);
         }
         return response.body().byteStream();
@@ -233,17 +243,16 @@ public class ImmichClientV3 implements ImmichClient {
      * Executes an authenticated call; on a 401 the session is re-established once and the
      * call retried. Retrofit calls are one-shot, so the call factory is invoked again.
      */
-    private <T> Response<T> withSession(Supplier<Call<T>> callFactory) throws IOException {
-        Response<T> response = callFactory.get().execute();
+    private <T> Response<T> withSession(CallFactory<T> callFactory) throws IOException {
+        Response<T> response = callFactory.newCall().execute();
         if (response.code() == 401) {
-            response.raw().close();
             try {
                 loggedIn = false;
                 login();
             } catch (Exception e) {
                 throw new IOException("re-login failed", e);
             }
-            response = callFactory.get().execute();
+            response = callFactory.newCall().execute();
         }
         return response;
     }
