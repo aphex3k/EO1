@@ -27,8 +27,6 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.function.Supplier;
-
 import retrofit2.Call;
 import retrofit2.Response;
 
@@ -44,6 +42,12 @@ import retrofit2.Response;
  * <p>{@code @Keep}: the band table instantiates this class reflectively
  * ({@code ImmichMediaBackend#instantiate}), so the release build must not strip
  * its constructor.
+ *
+ * <p>Responses are never closed here. Retrofit 2.6's {@code parseResponse} drains
+ * the raw body on success (the converter reads to EOF) or buffers and closes it on
+ * error, then swaps it for a {@code NoContentResponseBody} whose {@code close()}
+ * throws {@code IllegalStateException} — so a {@code raw().close()} after
+ * {@code execute()} always throws.
  */
 @Keep
 public class ImmichClientV3 implements ImmichClient {
@@ -69,12 +73,8 @@ public class ImmichClientV3 implements ImmichClient {
         try {
             Response<com.aphex3k.immichApi.ImmichApiServerVersionResponse> response =
                     service.getServerVersion().execute();
-            try {
-                com.aphex3k.immichApi.ImmichApiServerVersionResponse body = response.body();
-                return body != null ? body.getVersion() : null;
-            } finally {
-                response.raw().close();
-            }
+            com.aphex3k.immichApi.ImmichApiServerVersionResponse body = response.body();
+            return body != null ? body.getVersion() : null;
         } catch (Exception e) {
             return null;
         }
@@ -86,28 +86,19 @@ public class ImmichClientV3 implements ImmichClient {
             InvalidCredentialsException, IOException {
         Response<ImmichApiLoginResponse> response =
                 service.login(new ImmichApiLogin(userid, password)).execute();
-        try {
-            ImmichApiLoginResponse loginResponse = response.body();
-            if (response.code() == 401) {
-                throw new AuthenticationFailedException(response.code());
-            }
-            if (response.code() == 404) {
-                throw new AuthenticationUnavailableException(response.code());
-            }
-            if (response.isSuccessful() && loginResponse == null) {
-                throw new AuthenticationUnavailableException(response.code());
-            }
-            String userId;
-            if (loginResponse != null && !loginResponse.getUserId().isEmpty()) {
-                userId = loginResponse.getUserId();
-            } else {
-                throw new AuthenticationFailedException(-1);
-            }
-            if (userId == null || userId.isEmpty()) {
-                throw new InvalidCredentialsException();
-            }
-        } finally {
-            response.raw().close();
+        ImmichApiLoginResponse loginResponse = response.body();
+        if (response.code() == 401) {
+            throw new AuthenticationFailedException(response.code());
+        }
+        if (response.code() == 404) {
+            throw new AuthenticationUnavailableException(response.code());
+        }
+        if (response.isSuccessful() && loginResponse == null) {
+            throw new AuthenticationUnavailableException(response.code());
+        }
+        if (loginResponse == null || loginResponse.getUserId() == null
+                || loginResponse.getUserId().isEmpty()) {
+            throw new InvalidCredentialsException();
         }
         loggedIn = true;
     }
@@ -191,7 +182,6 @@ public class ImmichClientV3 implements ImmichClient {
         Response<okhttp3.ResponseBody> response = withSession(() -> call);
         if (!response.isSuccessful() || response.body() == null) {
             int code = response.code();
-            response.raw().close();
             throw new MediaDownloadFailedException("Failed downloading immich asset: HTTP " + code);
         }
         return response.body().byteStream();
@@ -230,13 +220,20 @@ public class ImmichClientV3 implements ImmichClient {
     }
 
     /**
+     * One-shot call factory for {@link #withSession}. API-19-safe stand-in for
+     * {@code java.util.function.Supplier}, which does not exist on device.
+     */
+    private interface CallSupplier<T> {
+        Call<T> get();
+    }
+
+    /**
      * Executes an authenticated call; on a 401 the session is re-established once and the
      * call retried. Retrofit calls are one-shot, so the call factory is invoked again.
      */
-    private <T> Response<T> withSession(Supplier<Call<T>> callFactory) throws IOException {
+    private <T> Response<T> withSession(CallSupplier<T> callFactory) throws IOException {
         Response<T> response = callFactory.get().execute();
         if (response.code() == 401) {
-            response.raw().close();
             try {
                 loggedIn = false;
                 login();
