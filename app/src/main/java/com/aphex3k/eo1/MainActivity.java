@@ -165,6 +165,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private boolean timerStopped = false;
     /** Rotation ticks since process start; a spike here means the timer chain forked. */
     private int timerTickCount = 0;
+    /** Epoch ms of the next scheduled rotation tick; 0L when the rotation timer is stopped. */
+    private long nextRotationAtMs = 0L;
     /** Avoid spamming "Waiting for network…" while still offline. */
     private boolean networkWaitNotified = false;
 
@@ -352,6 +354,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         long delayMs = MILLIS * Math.max(1, settingsManager.getConfiguration().interval);
         Log.i(TAG, "runOnTimer: tick " + timerTickCount + " (next in " + delayMs + "ms)");
         handler.postDelayed(timerTick, delayMs);
+        nextRotationAtMs = System.currentTimeMillis() + delayMs;
+        logScreenAndTimerState();
         if (brightnessManager.getShouldTheScreenBeOn()) {
             brightnessChanged(lastScreenBrightness);
             mediaManager.showNextImage(this);
@@ -434,6 +438,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             Log.i(TAG, "startCoreLoop: re-arm timer in " + delayMs + "ms");
             handler.removeCallbacks(timerTick);
             handler.postDelayed(timerTick, delayMs);
+            nextRotationAtMs = System.currentTimeMillis() + delayMs;
             timerStopped = false;
             // onPause cancels quietHoursTimer; this resume path must restore the quiet-hours
             // schedule (and the current screen state), otherwise 22:00/07:00 transitions stop
@@ -451,6 +456,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         handler.removeCallbacks(timerTick);
         handler.post(timerTick);
+        nextRotationAtMs = System.currentTimeMillis();
         timerStopped = false;
         setupQuietHours();
         applyScheduledScreenState();
@@ -467,6 +473,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // showNextImage on every Wi-Fi blip.
         handler.removeCallbacks(timerTick);
         timerStopped = true;
+        nextRotationAtMs = 0L;
+        logScreenAndTimerState();
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "waiting for network"));
         if (!networkWaitNotified) {
             networkWaitNotified = true;
@@ -497,6 +505,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // kicking a second immediate showNextImage (cold-start pause/resume thrash).
         handler.removeCallbacks(timerTick);
         timerStopped = true;
+        nextRotationAtMs = 0L;
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
         this.connectionManager.unregisterListener(this);
@@ -664,6 +673,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         coreLoopStarted = false;
         networkWaitNotified = false;
         handler.removeCallbacks(timerTick);
+        nextRotationAtMs = 0L;
         mediaManager.invalidatePoolIfStale();
         startCoreLoopIfNetworkReady();
     }
@@ -693,6 +703,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             } else {
                 turnScreenOff();
             }
+        }
+        logScreenAndTimerState();
+    }
+
+    /** Logcat debug lines for the screen's should-be state and the rotation-timer state. */
+    private void logScreenAndTimerState() {
+        Log.i(TAG, "state: screen should be "
+                + (brightnessManager.getShouldTheScreenBeOn() ? "ON" : "OFF"));
+        if (timerStopped) {
+            Log.i(TAG, "state: rotation timer not running");
+        } else {
+            long remainingMs = Math.max(0L, nextRotationAtMs - System.currentTimeMillis());
+            Log.i(TAG, "state: next rotation in " + ((remainingMs + 999L) / 1000L) + "s");
         }
     }
 

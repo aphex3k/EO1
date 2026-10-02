@@ -1,8 +1,11 @@
 package com.aphex3k.media.local;
 
+import android.util.Log;
+
 import androidx.annotation.Nullable;
 
 import com.aphex3k.eo1.ConfigurationBackendEntry;
+import com.aphex3k.eo1.MediaCompatibility;
 import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaBackend;
 import com.aphex3k.media.MediaSource;
@@ -27,6 +30,8 @@ import java.util.UUID;
  * ({@link #localAssetIdFor}) keep cache file names stable across rescans.
  */
 public class LocalMediaBackend implements MediaBackend {
+
+    private static final String TAG = "EO1";
 
     /** Recognised video extensions for uploaded files (lowercase, no dot). */
     private static final Set<String> VIDEO_EXTENSIONS = Collections.unmodifiableSet(new HashSet<String>(
@@ -66,6 +71,14 @@ public class LocalMediaBackend implements MediaBackend {
             }
             MediaType type = mediaTypeForExtension(extensionOf(f.getName()));
             if (type == null) {
+                continue;
+            }
+            String reason = MediaCompatibility.incompatibleReason(type, f.getName(), null);
+            if (reason == null) {
+                reason = MediaCompatibility.incompatibleReasonForFile(type, f);
+            }
+            if (reason != null) {
+                Log.d(TAG, "Local backend '" + id + "': skipping " + f.getName() + " - " + reason);
                 continue;
             }
             assets.add(new MediaAsset(

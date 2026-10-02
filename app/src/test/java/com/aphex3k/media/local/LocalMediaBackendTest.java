@@ -130,6 +130,47 @@ public class LocalMediaBackendTest {
         assertNull(LocalMediaBackend.mediaTypeForExtension("txt"));
     }
 
+    @Test
+    public void fetchCatalogSkipsIncompatibleUploads() throws Exception {
+        writeFile("good.jpg");
+        writeFile("samsung.heic");
+        writeFile("still.avif");
+        writeFile("clip.h265");
+        writeFile("movie.hevc");
+        writeFile("lossless.av1");
+
+        List<MediaAsset> assets = backend.fetchCatalog();
+        assertEquals(1, assets.size());
+        assertEquals("good.jpg", assets.get(0).originalFileName);
+    }
+
+    @Test
+    public void fetchCatalogSkipsHeifContentNamedJpg() throws Exception {
+        // ftyp box with the "heic" major brand: undecodable despite the .jpg name.
+        byte[] heif = ftypBox("heic");
+        java.nio.file.Files.write(new File(uploadDir, "disguised.jpg").toPath(), heif);
+        writeFile("real.jpg");
+
+        List<MediaAsset> assets = backend.fetchCatalog();
+        assertEquals(1, assets.size());
+        assertEquals("real.jpg", assets.get(0).originalFileName);
+    }
+
+    /** ISO 14496-12 {@code ftyp} box: size + type + major brand + minor. */
+    private static byte[] ftypBox(String major) {
+        int size = 16;
+        byte[] b = new byte[size];
+        b[0] = (byte) (size >> 8);
+        b[1] = (byte) size;
+        put(b, 4, "ftyp");
+        put(b, 8, major);
+        return b;
+    }
+
+    private static void put(byte[] b, int off, String fourCc) {
+        System.arraycopy(fourCc.getBytes(java.nio.charset.StandardCharsets.US_ASCII), 0, b, off, 4);
+    }
+
     private File writeFile(String name) throws Exception {
         File f = new File(uploadDir, name);
         FileWriter w = new FileWriter(f);
