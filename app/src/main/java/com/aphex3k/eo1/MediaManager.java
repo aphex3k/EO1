@@ -70,6 +70,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private final ArrayList<MediaBackend> generation = new ArrayList<>();
     /** Video durations keyed by asset key ("backendId:rawId"); read from the UI thread. */
     private final ConcurrentHashMap<String, Integer> videoDurationMsByKey = new ConcurrentHashMap<>();
+    /**
+     * Asset keys whose original was byte-verified as undecodable on this device (e.g. HEIF
+     * content served under a .jpg name). Remembers the verdict across pool rebuilds for the
+     * life of this process, so those assets are skipped without re-downloading.
+     */
+    private final Set<String> knownIncompatibleKeys =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private volatile String currentPlaybackPath;
     /** Cache dir of the rotation currently in flight; guards removeFromCache's location check. */
     private volatile File mediaCacheDir;
@@ -447,12 +454,24 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     /**
      * Resolves one record to a playable file: local backends hand back their on-disk file,
      * remote backends go through the download + integrity gate. Null (not an exception) when the
-     * backend declines the asset (deleted file, no source).
+     * asset should be skipped: the backend declines it (deleted file, no source), it is known
+     * to be undecodable on this device (incompatible format by name), or it was byte-verified
+     * incompatible after a previous download.
      */
     private File acquireAsset(MediaAsset asset, File cacheDir) throws Exception {
         MediaBackend backend = backendById.get(asset.backendId);
         if (backend == null) {
             Log.w(TAG, "acquireAsset: no backend for asset " + asset.key());
+            return null;
+        }
+        if (knownIncompatibleKeys.contains(asset.key())) {
+            Log.i(TAG, "acquireAsset: skipping " + asset.key() + " (verified incompatible with this device's decoders)");
+            return null;
+        }
+        String incompatibleReason = MediaCompatibility.incompatibleReason(
+                asset.type, asset.originalFileName, asset.originalPath);
+        if (incompatibleReason != null) {
+            Log.w(TAG, "acquireAsset: skipping " + asset.key() + " - " + incompatibleReason);
             return null;
         }
         MediaSource source = backend.resolveOriginal(asset);
@@ -470,6 +489,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * after an integrity check (checksum/size against the backend's reference); fresh bytes are
      * digested in flight and a hex sidecar ({@code <file>.sha1}) is written. Mismatched files are
      * discarded and re-fetched once. Fallback streams are always re-fetched.
+     *
+     * <p>Returns {@code null} when the bytes turn out to be a format this device cannot decode
+     * (e.g. HEIF content served under a {@code .jpg} name): the file is discarded and the asset
+     * key is remembered in {@link #knownIncompatibleKeys} so it is skipped without
+     * re-downloading for the life of this process.
      */
     private File acquireRemoteFile(MediaAsset asset, MediaSource source, File cacheDir)
             throws MediaDownloadFailedException, IOException {
@@ -480,7 +504,15 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
         if (!fallback && cacheFile.exists() && cacheFile.length() > 0) {
             if (MediaIntegrity.isCacheFileUsable(cacheFile, source.expectedChecksum, source.expectedBytes)) {
-                return cacheFile;
+                String reason = MediaCompatibility.incompatibleReasonForFile(asset.type, cacheFile);
+                if (reason == null) {
+                    return cacheFile;
+                }
+                Log.w(TAG, "acquireRemoteFile: cached " + cacheFile.getName() + " is " + reason
+                        + "; discarding and skipping " + asset.key());
+                deleteCachedFile(cacheFile);
+                knownIncompatibleKeys.add(asset.key());
+                return null;
             }
             Log.w(TAG, "acquireRemoteFile: cached " + cacheFile.getName()
                     + " failed integrity check, discarding and re-downloading");
@@ -525,6 +557,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                         } catch (IOException e) {
                             Log.w(TAG, "acquireRemoteFile: failed to write integrity sidecar for "
                                     + cacheFile.getName(), e);
+                        }
+                        String reason = MediaCompatibility.incompatibleReasonForFile(asset.type, cacheFile);
+                        if (reason != null) {
+                            Log.w(TAG, "acquireRemoteFile: " + cacheFile.getName() + " is " + reason
+                                    + "; discarding and skipping " + asset.key());
+                            deleteCachedFile(cacheFile);
+                            knownIncompatibleKeys.add(asset.key());
+                            return null;
                         }
                     }
                     return cacheFile;

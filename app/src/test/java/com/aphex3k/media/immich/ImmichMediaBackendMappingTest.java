@@ -105,4 +105,46 @@ public class ImmichMediaBackendMappingTest {
         assertFalse(ImmichMediaBackend.isCompatibleAsset(
                 asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"exifInfo\":{}}")));
     }
+
+    @Test
+    public void compatibleRejectsHeifAndAvifImages() {
+        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo.heic\","
+                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo.heif\","
+                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo.avif\","
+                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
+    }
+
+    @Test
+    public void compatibleRejectsHevcAndAv1Videos() {
+        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"originalFileName\":\"clip.h265\","
+                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"originalFileName\":\"clip.hevc\","
+                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"originalFileName\":\"clip.av1\","
+                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
+    }
+
+    @Test
+    public void compatibleAcceptsContainerVideoAndExtensionFallbacks() {
+        // .mp4 can hold H.264: never flagged by the name check.
+        assertTrue(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"originalFileName\":\"clip.mp4\","
+                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        // HEIF extension only in the path, when the name has none.
+        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo\","
+                        + "\"originalPath\":\"/photos/photo.heic\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        // Decodable extension in the path passes.
+        assertTrue(ImmichMediaBackend.isCompatibleAsset(
+                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo\","
+                        + "\"originalPath\":\"/photos/photo.jpg\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
+    }
 }

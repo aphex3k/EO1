@@ -411,6 +411,84 @@ public class MediaManagerCyclingTest {
         assertEquals(2, a.fetchCount.get());
     }
 
+    /** Minimal ISO 14496-12 ftyp box with major brand {@code heic} (16 bytes). */
+    private static byte[] heicFtypBytes() {
+        byte[] b = new byte[16];
+        b[3] = 16; // big-endian box size 0x00000010
+        putFourCc(b, 4, "ftyp");
+        putFourCc(b, 8, "heic");
+        return b;
+    }
+
+    private static void putFourCc(byte[] b, int off, String fourCc) {
+        System.arraycopy(fourCc.getBytes(java.nio.charset.StandardCharsets.US_ASCII), 0, b, off, 4);
+    }
+
+    @Test
+    public void incompatibleExtensionIsSkippedBeforeDownload() throws Exception {
+        String heicId = "01234567-89ab-cdef-0123-456789abcdef";
+        MediaAsset heic = new MediaAsset(heicId, "fakeA", MediaType.IMAGE, -1, null,
+                heicId + ".heic", null, null, null);
+        FakeBackend a = new FakeBackend("fakeA", "immich", heic, remoteAsset("a0", "fakeA"));
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        int ticks = 0;
+        while (listener.displayedKeys.isEmpty() && ticks < 2) {
+            mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+            ticks++;
+        }
+
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a0", listener.displayedKeys.get(0));
+        // The .heic asset was never opened (no wasted download); the skip is silent.
+        assertEquals(1, a.openerCalls.get());
+        assertTrue(listener.exceptions.isEmpty());
+        assertFalse(new File(cacheDir, heicId + ".heic").exists());
+    }
+
+    @Test
+    public void byteVerifiedIncompatibleFileIsDiscardedAndRemembered() throws Exception {
+        String heicId = "01234567-89ab-cdef-0123-456789abcdef";
+        MediaAsset heic = new MediaAsset(heicId, "fakeA", MediaType.IMAGE, -1, null,
+                heicId + ".jpg", null, null, null); // HEIF content behind a .jpg name
+        final AtomicInteger heicOpens = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", heic) {
+            @Override
+            byte[] contentFor(String assetId) {
+                heicOpens.incrementAndGet();
+                return heicFtypBytes();
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        // Downloaded once, byte-checked and discarded; the exhaustion refetch already sees
+        // the remembered key, so no second download.
+        assertEquals(1, heicOpens.get());
+        assertEquals(2, a.fetchCount.get());
+        assertTrue(listener.displayedKeys.isEmpty());
+        int noMedia = 0;
+        for (Exception e : listener.exceptions) {
+            if (e instanceof NoMediaFoundException) {
+                noMedia++;
+            }
+        }
+        assertEquals(1, noMedia);
+        assertFalse(new File(cacheDir, heicId + ".jpg").exists());
+
+        // Next tick: pool rebuilt again, still no re-download.
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, heicOpens.get());
+        assertEquals(3, a.fetchCount.get());
+    }
+
     @Test
     public void corruptedDownloadFailsIntegrityAndSurfacesNoMediaFound() throws Exception {
         // UUID-shaped id so the cache file matches the owned-name regex and failed
