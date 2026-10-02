@@ -126,6 +126,8 @@ dependencies {
 
     testImplementation 'junit:junit:4.13.2'
     testImplementation "org.mockito:mockito-core:5.10.0"
+    // Pinned to the project's okhttp line; test-only fake HTTP server.
+    testImplementation 'com.squareup.okhttp3:mockwebserver:3.12.13'
 
 }
 

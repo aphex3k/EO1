@@ -8,8 +8,10 @@ import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.AlarmManager;
 import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.drawable.Drawable;
@@ -118,6 +120,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** True once the stale incoming_* cleanup has run for this process (first onCreate only). */
     private static volatile boolean sStaleIncomingCleaned = false;
     private PowerManager.WakeLock screenOffWakeLock;
+    /**
+     * Reconciles shouldTheScreenBeOn with the real panel. On the EO2 the physical button is a
+     * KEY_POWER intercepted by the OS (PhoneWindowManager), so the app's key handlers never fire
+     * and the two states drift apart. Broadcasts our own turnScreenOn/turnScreenOff cause arrive
+     * with the state already matching and no-op.
+     */
+    private final BroadcastReceiver displayStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            try {
+                reconcileScreenState(Intent.ACTION_SCREEN_ON.equals(intent.getAction()));
+            }
+            catch (Exception e) {
+                handleException(e);
+            }
+        }
+    };
     private Handler bannerHandler = new Handler(Looper.getMainLooper());
     private Runnable bannerFadeRunnable;
     private String currentTrackId = null;
@@ -222,6 +241,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 getIntent().getFlags());
 
         configureMqttManager();
+
+        // The physical button on the EO2 is an OS-intercepted KEY_POWER: the display can
+        // go dark or light without any key event reaching this activity. Watch for it.
+        IntentFilter displayStateFilter = new IntentFilter();
+        displayStateFilter.addAction(Intent.ACTION_SCREEN_ON);
+        displayStateFilter.addAction(Intent.ACTION_SCREEN_OFF);
+        registerReceiver(displayStateReceiver, displayStateFilter);
     }
 
     private void configureMqttManager() {
@@ -499,6 +525,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (this.webServer != null) {
             this.webServer.shutdown();
         }
+        unregisterReceiver(displayStateReceiver);
         super.onDestroy();
     }
 
@@ -536,6 +563,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             turnScreenOn();
         }
         else {
+            turnScreenOff();
+        }
+    }
+
+    /**
+     * Syncs app screen state with the display when they diverge. Only the physical power
+     * button can cause a divergence; every in-app path (F2/web toggle, quiet hours,
+     * brightness adjust) already leaves shouldTheScreenBeOn matching the panel it drives.
+     */
+    private void reconcileScreenState(boolean displayOn) {
+        boolean appOn = this.brightnessManager.getShouldTheScreenBeOn();
+        if (displayOn && !appOn) {
+            Log.i(TAG, "reconcileScreenState: display woken outside app control; turning screen on");
+            this.brightnessManager.setShouldTheScreenBeOn(true);
+            turnScreenOn();
+        }
+        else if (!displayOn && appOn) {
+            Log.i(TAG, "reconcileScreenState: display slept outside app control; turning screen off");
+            this.brightnessManager.setShouldTheScreenBeOn(false);
             turnScreenOff();
         }
     }
