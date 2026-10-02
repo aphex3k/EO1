@@ -21,9 +21,12 @@ public class MediaAsset {
      * (Immich: Base64 SHA-1). Null when the backend does not report one.
      */
     @Nullable public final String checksum;
-    /** Original file name as reported by the backend, or null. Used for cache-file naming. */
+    /**
+     * Original file name as reported by the backend, or null. Used for cache-file naming
+     * and for the pre-download codec compatibility check.
+     */
     @Nullable public final String originalFileName;
-    /** Original path as reported by the backend, or null. Secondary source for cache-file naming. */
+    /** Original path as reported by the backend, or null. Secondary source for cache-file naming and the compatibility check. */
     @Nullable public final String originalPath;
     /** Reported byte size of the original, or null when unknown. */
     @Nullable public final Long sizeBytes;

@@ -8,6 +8,7 @@ import androidx.annotation.Nullable;
 import com.aphex3k.eo1.ApiServiceGenerator;
 import com.aphex3k.eo1.BackendUnavailableException;
 import com.aphex3k.eo1.ConfigurationBackendEntry;
+import com.aphex3k.eo1.MediaCompatibility;
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichExifInfo;
 import com.aphex3k.immichApi.ImmichType;
@@ -89,10 +90,17 @@ public class ImmichMediaBackend implements MediaBackend {
     public List<MediaAsset> fetchCatalog() throws Exception {
         List<ImmichApiAssetResponse> raw = client.fetchCatalogAssets();
         List<MediaAsset> assets = new ArrayList<>(raw.size());
+        int skipped = 0;
         for (ImmichApiAssetResponse r : raw) {
             if (isCompatibleAsset(r)) {
                 assets.add(toMediaAsset(entry.id, r));
+            } else {
+                skipped++;
             }
+        }
+        if (skipped > 0) {
+            Log.d(TAG, "Catalog '" + entry.id + "': " + skipped
+                    + " asset(s) skipped as incompatible with this device");
         }
         return assets;
     }
@@ -149,7 +157,8 @@ public class ImmichMediaBackend implements MediaBackend {
 
     /**
      * Device compatibility gate for an Immich asset: exif present, file size within
-     * {@link #MAX_ASSET_BYTES}, not trashed, and a media type the pipeline can display.
+     * {@link #MAX_ASSET_BYTES}, not trashed, a media type the pipeline can display, and no
+     * known-unsupported codec by file name (checked before the original is downloaded).
      */
     public static boolean isCompatibleAsset(@NonNull ImmichApiAssetResponse asset) {
         ImmichExifInfo exif = asset.getExifInfo();
@@ -163,7 +172,12 @@ public class ImmichMediaBackend implements MediaBackend {
         if (Boolean.TRUE.equals(asset.getIsTrashed())) {
             return false;
         }
-        return asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO;
+        if (asset.getType() != ImmichType.IMAGE && asset.getType() != ImmichType.VIDEO) {
+            return false;
+        }
+        MediaType type = asset.getType() == ImmichType.VIDEO ? MediaType.VIDEO : MediaType.IMAGE;
+        return MediaCompatibility.incompatibleReason(
+                type, asset.getOriginalFileName(), asset.getOriginalPath()) == null;
     }
 
     /** Pure mapping from an Immich DTO to a compact pipeline record. */
