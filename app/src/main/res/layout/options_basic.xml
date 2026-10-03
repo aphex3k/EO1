@@ -124,6 +124,23 @@
             android:layout_height="wrap_content"
             android:inputType="number"
             android:hint="120" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Trusted network"
+            android:layout_marginTop="20sp"
+            android:textAppearance="@style/TextAppearance.AppCompat.Large" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="When on, the LAN web UI allows full configuration, including credentials and backend edits, plus export/import of the configuration file." />
+        <CheckBox
+            android:id="@+id/trustedNetworkCheckBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Trusted Network" />
     </LinearLayout>
 </ScrollView>
 

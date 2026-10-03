@@ -38,6 +38,14 @@ public class WebServerRoutingTest {
     }
 
     @Test
+    public void configRoutes() {
+        assertEquals("config", WebServer.route("GET", "/config"));
+        assertEquals("config", WebServer.route("POST", "/config"));
+        assertEquals("configDownload", WebServer.route("GET", "/config/download"));
+        assertEquals("configImport", WebServer.route("POST", "/config/import"));
+    }
+
+    @Test
     public void unknownRoutes() {
         // route() classifies by path only; method enforcement happens in dispatch().
         assertEquals("unknown", WebServer.route("GET", "/nope"));

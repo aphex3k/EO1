@@ -49,4 +49,22 @@ public interface WebController {
      * @return {@code true} if a known action was dispatched.
      */
     boolean control(String action);
+
+    /**
+     * Whether the device is on a trusted network (off by default, toggled in the on-device
+     * options dialog). Gates the configuration endpoints: full config incl. credentials,
+     * backend manipulation, export and import.
+     */
+    boolean trustedNetwork();
+
+    /** Serializes the live device configuration to JSON (credentials included). */
+    String exportConfigurationJson();
+
+    /**
+     * Applies {@code json} as the new device configuration (validated, normalized, written to
+     * the configuration file, live configuration replaced).
+     *
+     * @return a human-readable error message, or {@code null} on success.
+     */
+    String importConfigurationJson(String json);
 }

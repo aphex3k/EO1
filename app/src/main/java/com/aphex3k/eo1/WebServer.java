@@ -53,6 +53,8 @@ public class WebServer {
      * avoids pinning the socket through many small reads (see {@link #handleUpload}).
      */
     public static final long MAX_IN_MEMORY_UPLOAD_BYTES = 16L * 1024L * 1024L;
+    /** Body cap for POST /config and /config/import: a device configuration is a few KB at most. */
+    public static final long MAX_CONFIG_BODY_BYTES = 512L * 1024L;
 
     private static final int PORTS[] = {80, 8080};
     private static final int READ_TIMEOUT_MS = 60000;
@@ -198,6 +200,28 @@ public class WebServer {
         }
     }
 
+    /** The trusted-network gate; any failure from the controller closes the gate. */
+    private boolean trustedNetwork() {
+        try {
+            return controller.trustedNetwork();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * The full configuration JSON embedded in the index page, with {@code "</"} neutralized so a
+     * config value containing it cannot terminate the {@code <script>} block.
+     */
+    private String safeConfigJson() {
+        try {
+            String json = controller.exportConfigurationJson();
+            return json == null ? "{}" : json.replace("</", "<\\/");
+        } catch (Throwable t) {
+            return "{}";
+        }
+    }
+
     /**
      * Classifies a request into a route key. Pure and static so it is unit-testable.
      */
@@ -235,6 +259,15 @@ public class WebServer {
         }
         if (path.equals("/control")) {
             return "control";
+        }
+        if (path.equals("/config/download")) {
+            return "configDownload";
+        }
+        if (path.equals("/config/import")) {
+            return "configImport";
+        }
+        if (path.equals("/config")) {
+            return "config";
         }
         if (path.equals("/health")) {
             return "health";
@@ -412,6 +445,47 @@ public class WebServer {
                 break;
             }
 
+            case "config":
+                if (!trustedNetwork()) {
+                    sendJson(os, 403, errorJson("trusted network is off"));
+                    return;
+                }
+                if (method.equals("GET")) {
+                    send(os, 200, "application/json", safeConfigJson());
+                } else if (method.equals("POST")) {
+                    handleConfigPost(is, os);
+                } else {
+                    send(os, 405, "text/plain", "method not allowed");
+                }
+                break;
+
+            case "configDownload":
+                if (!trustedNetwork()) {
+                    sendJson(os, 403, errorJson("trusted network is off"));
+                    return;
+                }
+                if (!method.equals("GET")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                byte[] configBytes = safeConfigJson().getBytes(UTF_8);
+                writeHead(os, 200, "application/json", configBytes.length, "configuration.json");
+                os.write(configBytes);
+                os.flush();
+                break;
+
+            case "configImport":
+                if (!trustedNetwork()) {
+                    sendJson(os, 403, errorJson("trusted network is off"));
+                    return;
+                }
+                if (!method.equals("POST")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                handleConfigPost(is, os);
+                break;
+
             case "health":
                 send(os, 200, "text/plain", "ok");
                 break;
@@ -482,6 +556,50 @@ public class WebServer {
             cleanDir(incoming);
             incoming.delete();
         }
+    }
+
+    /**
+     * Applies a raw JSON configuration body (shared by {@code POST /config} and
+     * {@code POST /config/import}). The body is read off the socket with a hard cap before the
+     * controller touches it.
+     */
+    private void handleConfigPost(InputStream is, OutputStream os) throws IOException {
+        byte[] body = readBounded(is, MAX_CONFIG_BODY_BYTES);
+        if (body.length > MAX_CONFIG_BODY_BYTES) {
+            sendJson(os, 413, errorJson("configuration exceeds " + (MAX_CONFIG_BODY_BYTES / 1024L)
+                    + " KB size limit"));
+            return;
+        }
+        String error;
+        try {
+            error = controller.importConfigurationJson(new String(body, UTF_8));
+        } catch (Exception e) {
+            Log.e(TAG, "config import failed", e);
+            error = "internal error: " + e.getClass().getSimpleName();
+        }
+        if (error == null) {
+            sendJson(os, 200, okJson("configuration applied"));
+        } else {
+            sendJson(os, 400, errorJson(error));
+        }
+    }
+
+    /**
+     * Reads the whole request body into memory, stopping just past {@code limit} bytes so an
+     * oversized body is detected (and rejected by the caller) instead of pinning the socket or
+     * exhausting the heap.
+     */
+    private static byte[] readBounded(InputStream in, long limit) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) != -1) {
+            out.write(buf, 0, n);
+            if (out.size() > limit) {
+                break;
+            }
+        }
+        return out.toByteArray();
     }
 
     /** Parses a non-negative long, returning -1 for null/empty/invalid input. */
@@ -565,12 +683,152 @@ public class WebServer {
                 .append("<button onclick=\"ctrl('install-staged')\">Install staged</button>")
                 .append("<button onclick=\"ctrl('update-reset')\">Update reset</button>");
 
+        sb.append(renderConfigurationSection());
+
         sb.append("<script>");
         sb.append("function ctrl(a){fetch('/control?action='+a).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}");
         sb.append("function del(n){if(!confirm('Delete '+n+'?'))return;");
         sb.append("fetch('/files/'+n+'/delete',{method:'POST'}).then(r=>r.json()).then(j=>location.reload());}");
         sb.append("</script>");
         return sb.toString();
+    }
+
+    /**
+     * The Configuration section of the index page. With trusted network off it is a notice; on,
+     * it is the full editor: backends table (add/remove, credentials), interval, time zone,
+     * quiet-hour cron rows, self-update, MQTT, Save, plus Export/Import of the config file.
+     */
+    private String renderConfigurationSection() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<h2>Configuration</h2>");
+        if (!trustedNetwork()) {
+            sb.append("<p>Trusted network is <b>off</b> — full configuration (credentials, backends, "
+                    + "import/export) is disabled. Enable the <i>Trusted Network</i> checkbox in the "
+                    + "on-device options dialog to allow it. The read-only summary is in "
+                    + "<a href=\"/state\">state</a>.</p>");
+            return sb.toString();
+        }
+        sb.append("<p>Full device configuration — credentials are shown, stored cleartext on the "
+                + "device. Save applies to the running device (time zone re-applied, rotation "
+                + "restarted).</p>");
+        sb.append("<table id=\"cfgBackends\"></table>");
+        sb.append("<p><button onclick=\"addCfgBackend('immich')\">+ Add Immich backend</button> ")
+                .append("<button onclick=\"addCfgBackend('local')\">+ Add local uploads</button> ")
+                .append("<button onclick=\"location.href='/config/download'\">Export configuration</button> ")
+                .append("<button onclick=\"document.getElementById('cfgImportFile').click()\">Import configuration</button></p>");
+        sb.append("<input type=\"file\" id=\"cfgImportFile\" accept=\".json,application/json\" "
+                + "style=\"display:none\" onchange=\"importConfig(this)\">");
+        sb.append("<table>")
+                .append("<tr><th>Slideshow interval (minutes)</th><td><input id=\"cfgInterval\" type=\"number\" min=\"1\"></td></tr>")
+                .append("<tr><th>Time zone (IANA id)</th><td><input id=\"cfgTimezone\" size=\"30\" placeholder=\"America/Los_Angeles\"></td></tr>")
+                .append("<tr><th>Self-update manifest URL (empty = off)</th><td><input id=\"cfgUpdateUrl\" size=\"50\" placeholder=\"http://host/eo1/update-manifest.json\"></td></tr>")
+                .append("<tr><th>Update check interval (minutes)</th><td><input id=\"cfgUpdateCheck\" type=\"number\" min=\"5\" max=\"1440\"></td></tr>")
+                .append("<tr><th>MQTT host</th><td><input id=\"cfgMqttHost\" size=\"30\"></td></tr>")
+                .append("<tr><th>MQTT port</th><td><input id=\"cfgMqttPort\" type=\"number\"></td></tr>")
+                .append("<tr><th>MQTT protocol</th><td><input id=\"cfgMqttProtocol\" size=\"10\"></td></tr>")
+                .append("<tr><th>MQTT user</th><td><input id=\"cfgMqttUser\" size=\"20\"></td></tr>")
+                .append("<tr><th>MQTT password</th><td><input id=\"cfgMqttPassword\" type=\"password\" size=\"20\"></td></tr>")
+                .append("</table>");
+        sb.append("<h3>Quiet hours (cron: minute hour day month weekday)</h3>");
+        sb.append("<div id=\"cfgQuiet\"></div>");
+        sb.append("<button onclick=\"addCfgQuiet()\">+ Add quiet window</button><br>");
+        sb.append("<p><button onclick=\"saveConfig()\">Save configuration</button></p>");
+        sb.append("<script>");
+        sb.append("var CONFIG=").append(safeConfigJson()).append(";");
+        sb.append(cfgSectionJs());
+        sb.append("</script>");
+        return sb.toString();
+    }
+
+    private static String cfgSectionJs() {
+        return "function escCfg(s){s=(s===undefined||s===null)?'':String(s);"
+                + "return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;');}"
+                + "function cfgBackends(){return Array.isArray(CONFIG.backends)?CONFIG.backends:[];}"
+                + "function renderCfgBackends(){"
+                + "var t=document.getElementById('cfgBackends');"
+                + "t.innerHTML='<tr><th>ID</th><th>Type</th><th>Server</th><th>Username</th><th>Password</th><th>API</th><th></th></tr>';"
+                + "cfgBackends().forEach(function(b,i){"
+                + "var tr=document.createElement('tr');"
+                + "var h='<td>'+escCfg(b.id)+'</td><td>'+escCfg(b.type)+'</td>';"
+                + "if(b.type==='immich'){"
+                + "h+='<td><input class=\"cfgHost\" size=\"30\" value=\"'+escCfg(b.host)+'\" placeholder=\"http://immich:2283\"></td>'"
+                + "+'<td><input class=\"cfgUser\" size=\"15\" value=\"'+escCfg(b.userid)+'\"></td>'"
+                + "+'<td><input class=\"cfgPass\" type=\"password\" size=\"15\" value=\"'+escCfg(b.password)+'\"></td>'"
+                + "+'<td><input class=\"cfgApi\" size=\"10\" value=\"'+escCfg(b.apiVersion||'auto')+'\"></td>';"
+                + "}else{h+='<td colspan=\"4\">local uploads</td>';}"
+                + "h+='<td><button onclick=\"removeCfgBackend('+i+')\">Remove</button></td>';"
+                + "tr.innerHTML=h;t.appendChild(tr);});}"
+                + "function nextImmichId(){"
+                + "var max=0;"
+                + "cfgBackends().forEach(function(b){var m=/^immich-(\\d+)$/.exec(String(b.id||''));if(m){var n=parseInt(m[1],10);if(n>max)max=n;}});"
+                + "return 'immich-'+(max+1);}"
+                + "function addCfgBackend(type){"
+                + "if(type==='local'&&cfgBackends().some(function(b){return b.type==='local';})){alert('Local uploads backend already present');return;}"
+                + "if(!CONFIG.backends)CONFIG.backends=[];"
+                + "if(type==='immich'){CONFIG.backends.push({type:'immich',id:nextImmichId(),host:'',userid:'',password:'',apiVersion:'auto'});}"
+                + "else{CONFIG.backends.push({type:'local',id:'local'});}"
+                + "renderCfgBackends();}"
+                + "function removeCfgBackend(i){if(!CONFIG.backends)return;CONFIG.backends.splice(i,1);renderCfgBackends();}"
+                + "function renderCfgQuiet(){"
+                + "var c=document.getElementById('cfgQuiet');c.innerHTML='';"
+                + "(Array.isArray(CONFIG.quietHours)?CONFIG.quietHours:[]).forEach(function(w,i){"
+                + "var d=document.createElement('div');"
+                + "d.innerHTML='<input class=\"cfgQuietWin\" size=\"30\" style=\"font-family:monospace\" value=\"'+escCfg(w)+'\">'"
+                + "+' <button onclick=\"removeCfgQuiet('+i+')\">Remove</button>';"
+                + "c.appendChild(d);});}"
+                + "function addCfgQuiet(){if(!CONFIG.quietHours)CONFIG.quietHours=[];CONFIG.quietHours.push('* 22-23,0-6 * * *');renderCfgQuiet();}"
+                + "function removeCfgQuiet(i){if(!CONFIG.quietHours)return;CONFIG.quietHours.splice(i,1);renderCfgQuiet();}"
+                + "function collectCfg(){"
+                + "var rows=Array.prototype.slice.call(document.querySelectorAll('#cfgBackends tr')).slice(1);"
+                + "var cfg=JSON.parse(JSON.stringify(CONFIG));"
+                + "cfg.backends=rows.map(function(tr){"
+                + "var b={id:String(tr.cells[0].textContent),type:String(tr.cells[1].textContent)};"
+                + "if(b.type==='immich'){"
+                + "b.host=(tr.querySelector('.cfgHost').value||'').trim();"
+                + "b.userid=(tr.querySelector('.cfgUser').value||'').trim();"
+                + "b.password=tr.querySelector('.cfgPass').value||'';"
+                + "var api=(tr.querySelector('.cfgApi').value||'').trim();"
+                + "b.apiVersion=api||'auto';}"
+                + "return b;});"
+                + "cfg.quietHours=Array.prototype.map.call(document.querySelectorAll('.cfgQuietWin'),function(el){return (el.value||'').trim();})"
+                + ".filter(function(s){return s.length>0;});"
+                + "cfg.interval=Math.max(1,parseInt(document.getElementById('cfgInterval').value,10)||1);"
+                + "cfg.updateManifestUrl=(document.getElementById('cfgUpdateUrl').value||'').trim();"
+                + "var uc=parseInt(document.getElementById('cfgUpdateCheck').value,10);"
+                + "cfg.updateCheckIntervalMinutes=isNaN(uc)?120:Math.max(5,Math.min(1440,uc));"
+                + "cfg.selectedTimeZoneId=(document.getElementById('cfgTimezone').value||'').trim();"
+                + "cfg.mqttHost=(document.getElementById('cfgMqttHost').value||'').trim();"
+                + "var mp=parseInt(document.getElementById('cfgMqttPort').value,10);"
+                + "cfg.mqttPort=isNaN(mp)?1883:mp;"
+                + "cfg.mqttProtocol=(document.getElementById('cfgMqttProtocol').value||'').trim();"
+                + "cfg.mqttUser=(document.getElementById('cfgMqttUser').value||'').trim();"
+                + "cfg.mqttPassword=document.getElementById('cfgMqttPassword').value||'';"
+                + "return cfg;}"
+                + "function saveConfig(){"
+                + "fetch('/config',{method:'POST',body:JSON.stringify(collectCfg())})"
+                + ".then(function(r){return r.json();})"
+                + ".then(function(j){alert(j.ok?'Configuration saved':'Error: '+j.msg);if(j.ok)location.reload();})"
+                + ".catch(function(e){alert('Save failed: '+e);});}"
+                + "function importConfig(input){"
+                + "var f=input.files&&input.files[0];input.value='';"
+                + "if(!f)return;"
+                + "var rd=new FileReader();"
+                + "rd.onload=function(){"
+                + "fetch('/config/import',{method:'POST',body:rd.result})"
+                + ".then(function(r){return r.json();})"
+                + ".then(function(j){alert(j.ok?'Configuration imported':'Error: '+j.msg);if(j.ok)location.reload();})"
+                + ".catch(function(e){alert('Import failed: '+e);});};"
+                + "rd.readAsText(f);}"
+                + "document.getElementById('cfgInterval').value=CONFIG.interval||5;"
+                + "document.getElementById('cfgTimezone').value=CONFIG.selectedTimeZoneId||'';"
+                + "document.getElementById('cfgUpdateUrl').value=CONFIG.updateManifestUrl||'';"
+                + "document.getElementById('cfgUpdateCheck').value=CONFIG.updateCheckIntervalMinutes||120;"
+                + "document.getElementById('cfgMqttHost').value=CONFIG.mqttHost||'';"
+                + "document.getElementById('cfgMqttPort').value=CONFIG.mqttPort||1883;"
+                + "document.getElementById('cfgMqttProtocol').value=CONFIG.mqttProtocol||'';"
+                + "document.getElementById('cfgMqttUser').value=CONFIG.mqttUser||'';"
+                + "document.getElementById('cfgMqttPassword').value=CONFIG.mqttPassword||'';"
+                + "renderCfgBackends();renderCfgQuiet();";
     }
 
     private String renderLogsPage() {

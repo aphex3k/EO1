@@ -21,7 +21,7 @@ the server itself is unit-testable with a fake controller and never references t
 | Route | Method | Purpose |
 |---|---|---|
 | `/` | GET | One-page UI: upload form, file table (download/delete), control buttons |
-| `/state` | GET | JSON: device/app info, config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, rotation stats, an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedApk{present,bytes}`, `installPermissionHeld`, `installMode`), battery/memory/uptime telemetry |
+| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, rotation stats, an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedApk{present,bytes}`, `installPermissionHeld`, `installMode`), battery/memory/uptime telemetry |
 | `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
 | `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
 | `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
@@ -30,6 +30,10 @@ the server itself is unit-testable with a fake controller and never references t
 | `/files/<name>/delete` | DELETE / POST | Deletes an uploaded file |
 | `/upload` | POST | `multipart/form-data` upload, 512 MB cap per file, 2 GB cap per request, max 32 parts; stored in `filesDir/uploaded/` |
 | `/control?action=<a>` | GET / POST | Fires a hardware-key action (below) |
+| `/config` | GET | **Trusted network only.** Full device configuration JSON, credentials included |
+| `/config` | POST | **Trusted network only.** Applies the request body (≤ 512 KB JSON) as the new device configuration: parsed, normalized, written to `filesDir/configuration.json`, live config replaced, time zone re-applied, rotation restarted. `{"ok":false,"msg":...}` on validation failure (config unchanged) |
+| `/config/download` | GET | **Trusted network only.** Streams the configuration as a `configuration.json` attachment (same document as `POST /config` writes, legacy mirror fields included) |
+| `/config/import` | POST | **Trusted network only.** Same as `POST /config`; the web UI's file-picker import path |
 | `/health` | GET | `ok` |
 
 `/control` actions mirror the hardware buttons (`EventManager`):
@@ -47,6 +51,26 @@ the server itself is unit-testable with a fake controller and never references t
 | `update-reset` | — | drop the staged update files and reset the update state |
 
 All actions are posted to the UI thread. Unknown actions return `{"ok":false,"fired":false}`.
+
+## Trusted network
+
+The configuration endpoints (`/config*`) are gated by a **trusted-network** flag that is
+**deliberately not part of `configuration.json`**: it lives in the app's default
+SharedPreferences under the key `trusted_network`, defaults to **off** on a fresh install, and
+is toggled by the *Trusted Network* checkbox in the on-device options dialog (Media tab) — the
+toggle persists immediately, it is not saved through the dialog's Save button.
+
+While off, all four config endpoints answer `403` and the index page shows a note instead of the
+configuration editor; while on, the index page renders the full editor (backends with credentials,
+add/remove, interval, time zone, quiet-hour cron rows, self-update, MQTT, Save) plus
+**Export configuration** (GET `/config/download`, a `configuration.json` attachment) and
+**Import configuration** (file picker → `POST /config/import`). A successful apply mirrors the
+on-device Save flow: configuration written + live config replaced, time zone re-applied, and the
+rotation core loop restarted.
+
+Because the LAN server is unsecured plain-HTTP by design, treat this flag as "someone on the LAN
+may read and change this device's configuration, including its Immich credentials" — keep it off
+on untrusted networks. The flag is reported in `/state` as `app.trustedNetwork`.
 
 ## Uploads and rotation
 
