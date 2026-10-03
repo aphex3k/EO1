@@ -46,6 +46,7 @@ public class OptionsBasicFragment extends Fragment {
     private EditText updateUrlField;
     private EditText updateIntervalField;
     private CheckBox trustedNetworkCheckBox;
+    private TextView trustedNetworkTokenView;
     private String[] allTimeZoneIds;
 
     /** Working copy of the configured backends; persisted on save. */
@@ -82,6 +83,7 @@ public class OptionsBasicFragment extends Fragment {
         updateUrlField = view.findViewById(R.id.editTextUpdateManifestUrl);
         updateIntervalField = view.findViewById(R.id.editTextUpdateCheckInterval);
         trustedNetworkCheckBox = view.findViewById(R.id.trustedNetworkCheckBox);
+        trustedNetworkTokenView = view.findViewById(R.id.trustedNetworkTokenView);
 
         allTimeZoneIds = TimeZone.getAvailableIDs();
         ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, allTimeZoneIds);
@@ -109,8 +111,11 @@ public class OptionsBasicFragment extends Fragment {
             }
             // Not part of configuration.json: the toggle persists immediately (no Save button).
             trustedNetworkCheckBox.setChecked(settingsManager.isTrustedNetwork());
-            trustedNetworkCheckBox.setOnCheckedChangeListener((buttonView, isChecked) ->
-                    settingsManager.setTrustedNetwork(isChecked));
+            updateTrustedNetworkTokenView();
+            trustedNetworkCheckBox.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                settingsManager.setTrustedNetwork(isChecked);
+                updateTrustedNetworkTokenView();
+            });
         }
         renderBackendList();
         renderQuietWindows();
@@ -147,6 +152,23 @@ public class OptionsBasicFragment extends Fragment {
             }
         }
         addLocalButton.setEnabled(!hasLocal);
+    }
+
+    /**
+     * Shows the configuration token below the Trusted Network checkbox while the flag is on.
+     * The token is the only way to use the web UI's configuration endpoints, so it must be
+     * readable by someone standing in front of the device.
+     */
+    private void updateTrustedNetworkTokenView() {
+        if (settingsManager == null || trustedNetworkTokenView == null) {
+            return;
+        }
+        if (settingsManager.isTrustedNetwork()) {
+            trustedNetworkTokenView.setText("Configuration token: " + settingsManager.trustedNetworkToken());
+            trustedNetworkTokenView.setVisibility(View.VISIBLE);
+        } else {
+            trustedNetworkTokenView.setVisibility(View.GONE);
+        }
     }
 
     /** Smallest free "immich-N" number, starting at 1. */

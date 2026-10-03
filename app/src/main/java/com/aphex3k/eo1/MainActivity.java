@@ -1608,6 +1608,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
+    public String trustedNetworkToken() {
+        return settingsManager != null ? settingsManager.trustedNetworkToken() : "";
+    }
+
+    @Override
     public String exportConfigurationJson() {
         return settingsManager != null ? settingsManager.exportConfigurationJson() : "{}";
     }

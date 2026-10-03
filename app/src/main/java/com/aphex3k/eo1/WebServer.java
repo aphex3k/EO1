@@ -210,13 +210,26 @@ public class WebServer {
     }
 
     /**
-     * The full configuration JSON embedded in the index page, with {@code "</"} neutralized so a
-     * config value containing it cannot terminate the {@code <script>} block.
+     * The per-device configuration token. Any failure from the controller fails closed
+     * (an empty token rejects every request).
      */
-    private String safeConfigJson() {
+    private String trustedNetworkToken() {
+        try {
+            String t = controller.trustedNetworkToken();
+            return t == null ? "" : t;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * The full configuration JSON served by {@code GET /config} and
+     * {@code /config/download} (no longer embedded in the index page, so no HTML escaping).
+     */
+    private String configJson() {
         try {
             String json = controller.exportConfigurationJson();
-            return json == null ? "{}" : json.replace("</", "<\\/");
+            return json == null ? "{}" : json;
         } catch (Throwable t) {
             return "{}";
         }
@@ -286,6 +299,88 @@ public class WebServer {
             return false;
         }
         return !"keyevent".equals(action) || "POST".equals(method);
+    }
+
+    /**
+     * Compares a request's {@code token} parameter against the per-device configuration token,
+     * constant-time. Fails closed on a missing parameter or an empty expected token
+     * (settings unavailable).
+     */
+    static boolean configTokenOk(String provided, String expected) {
+        if (provided == null || expected == null || expected.isEmpty()) {
+            return false;
+        }
+        return java.security.MessageDigest.isEqual(
+                provided.getBytes(UTF_8), expected.getBytes(UTF_8));
+    }
+
+    /**
+     * Same-origin check for the state-changing config endpoints ({@code POST /config},
+     * {@code POST /config/import}). Browsers always send an {@code Origin} header (or at least
+     * {@code Referer}) on a POST issued from a page, so any request carrying one of those
+     * provenance headers must have been made from this frame's own origin (host of the
+     * {@code Host} header, the port the client used). A page on an attacker's host cannot
+     * match it. Requests without any provenance header (curl, other tools) pass — they are
+     * still token-gated.
+     */
+    static boolean configWriteAllowed(Map<String, String> headers, int serverPort) {
+        String origin = headers.get("origin");
+        String referer = headers.get("referer");
+        String url = origin != null ? origin : referer;
+        if (url == null) {
+            return true;
+        }
+        String hostHeader = headers.get("host");
+        if (hostHeader == null) {
+            return false;
+        }
+        int hostColon = hostHeader.lastIndexOf(':');
+        String hostHost = hostColon >= 0 ? hostHeader.substring(0, hostColon) : hostHeader;
+        int expectedPort = serverPort;
+        if (hostColon >= 0) {
+            try {
+                expectedPort = Integer.parseInt(hostHeader.substring(hostColon + 1));
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        int schemeEnd = url.indexOf("://");
+        if (schemeEnd < 0) {
+            return false;
+        }
+        String rest = url.substring(schemeEnd + 3);
+        int slash = rest.indexOf('/');
+        String authority = slash >= 0 ? rest.substring(0, slash) : rest;
+        int colon = authority.lastIndexOf(':');
+        String urlHost;
+        int urlPort;
+        if (colon >= 0) {
+            urlHost = authority.substring(0, colon);
+            try {
+                urlPort = Integer.parseInt(authority.substring(colon + 1));
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        } else {
+            urlHost = authority;
+            urlPort = 80;
+        }
+        return urlPort == expectedPort && urlHost.equalsIgnoreCase(hostHost);
+    }
+
+    /**
+     * The trusted-network + token gate shared by all {@code /config*} routes.
+     *
+     * @return {@code null} when the request may proceed, otherwise the 403 error message.
+     */
+    private String configGateError(Map<String, String> params) {
+        if (!trustedNetwork()) {
+            return "trusted network is off";
+        }
+        if (!configTokenOk(params.get("token"), trustedNetworkToken())) {
+            return "missing or invalid configuration token";
+        }
+        return null;
     }
 
     private final class ConnectionHandler implements Runnable {
@@ -458,46 +553,60 @@ public class WebServer {
                 break;
             }
 
-            case "config":
-                if (!trustedNetwork()) {
-                    sendJson(os, 403, errorJson("trusted network is off"));
+            case "config": {
+                String gateError = configGateError(params);
+                if (gateError != null) {
+                    sendJson(os, 403, errorJson(gateError));
                     return;
                 }
                 if (method.equals("GET")) {
-                    send(os, 200, "application/json", safeConfigJson());
+                    send(os, 200, "application/json", configJson());
                 } else if (method.equals("POST")) {
+                    if (!configWriteAllowed(headers, boundPort)) {
+                        sendJson(os, 403, errorJson("cross-origin request rejected"));
+                        return;
+                    }
                     handleConfigPost(is, os);
                 } else {
                     send(os, 405, "text/plain", "method not allowed");
                 }
                 break;
+            }
 
-            case "configDownload":
-                if (!trustedNetwork()) {
-                    sendJson(os, 403, errorJson("trusted network is off"));
+            case "configDownload": {
+                String gateError = configGateError(params);
+                if (gateError != null) {
+                    sendJson(os, 403, errorJson(gateError));
                     return;
                 }
                 if (!method.equals("GET")) {
                     send(os, 405, "text/plain", "method not allowed");
                     return;
                 }
-                byte[] configBytes = safeConfigJson().getBytes(UTF_8);
+                byte[] configBytes = configJson().getBytes(UTF_8);
                 writeHead(os, 200, "application/json", configBytes.length, "configuration.json");
                 os.write(configBytes);
                 os.flush();
                 break;
+            }
 
-            case "configImport":
-                if (!trustedNetwork()) {
-                    sendJson(os, 403, errorJson("trusted network is off"));
+            case "configImport": {
+                String gateError = configGateError(params);
+                if (gateError != null) {
+                    sendJson(os, 403, errorJson(gateError));
                     return;
                 }
                 if (!method.equals("POST")) {
                     send(os, 405, "text/plain", "method not allowed");
                     return;
                 }
+                if (!configWriteAllowed(headers, boundPort)) {
+                    sendJson(os, 403, errorJson("cross-origin request rejected"));
+                    return;
+                }
                 handleConfigPost(is, os);
                 break;
+            }
 
             case "health":
                 send(os, 200, "text/plain", "ok");
@@ -719,8 +828,10 @@ public class WebServer {
 
     /**
      * The Configuration section of the index page. With trusted network off it is a notice; on,
-     * it is the full editor: backends table (add/remove, credentials), interval, time zone,
-     * quiet-hour cron rows, self-update, MQTT, Save, plus Export/Import of the config file.
+     * it asks for the per-device configuration token and loads the full editor (backends
+     * table, credentials, interval, time zone, quiet-hour cron rows, self-update, MQTT, Save,
+     * Export/Import) from {@code GET /config} with the token. The configuration JSON is never
+     * embedded in the page itself.
      */
     private String renderConfigurationSection() {
         StringBuilder sb = new StringBuilder();
@@ -733,12 +844,19 @@ public class WebServer {
             return sb.toString();
         }
         sb.append("<p>Full device configuration — credentials are shown, stored cleartext on the "
-                + "device. Save applies to the running device (time zone re-applied, rotation "
-                + "restarted).</p>");
+                + "device. Loading and saving require the per-device <b>configuration token</b> "
+                + "(shown in the on-device options dialog next to the <i>Trusted Network</i> "
+                + "checkbox; the browser remembers it in localStorage). Save applies to the "
+                + "running device (time zone re-applied, rotation restarted).</p>");
+        sb.append("<p>Configuration token: "
+                + "<input id=\"cfgToken\" type=\"password\" size=\"32\" style=\"font-family:monospace\" "
+                + "placeholder=\"from the on-device options dialog\"> "
+                + "<button onclick=\"loadConfig()\">Load</button></p>");
+        sb.append("<div id=\"cfgEditor\" style=\"display:none\">");
         sb.append("<table id=\"cfgBackends\"></table>");
         sb.append("<p><button onclick=\"addCfgBackend('immich')\">+ Add Immich backend</button> ")
                 .append("<button onclick=\"addCfgBackend('local')\">+ Add local uploads</button> ")
-                .append("<button onclick=\"location.href='/config/download'\">Export configuration</button> ")
+                .append("<button onclick=\"exportConfig()\">Export configuration</button> ")
                 .append("<button onclick=\"document.getElementById('cfgImportFile').click()\">Import configuration</button></p>");
         sb.append("<input type=\"file\" id=\"cfgImportFile\" accept=\".json,application/json\" "
                 + "style=\"display:none\" onchange=\"importConfig(this)\">");
@@ -757,8 +875,9 @@ public class WebServer {
         sb.append("<div id=\"cfgQuiet\"></div>");
         sb.append("<button onclick=\"addCfgQuiet()\">+ Add quiet window</button><br>");
         sb.append("<p><button onclick=\"saveConfig()\">Save configuration</button></p>");
+        sb.append("</div>");
         sb.append("<script>");
-        sb.append("var CONFIG=").append(safeConfigJson()).append(";");
+        sb.append("var CONFIG=null;");
         sb.append(cfgSectionJs());
         sb.append("</script>");
         return sb.toString();
@@ -828,21 +947,16 @@ public class WebServer {
                 + "cfg.mqttUser=(document.getElementById('cfgMqttUser').value||'').trim();"
                 + "cfg.mqttPassword=document.getElementById('cfgMqttPassword').value||'';"
                 + "return cfg;}"
-                + "function saveConfig(){"
-                + "fetch('/config',{method:'POST',body:JSON.stringify(collectCfg())})"
-                + ".then(function(r){return r.json();})"
-                + ".then(function(j){alert(j.ok?'Configuration saved':'Error: '+j.msg);if(j.ok)location.reload();})"
-                + ".catch(function(e){alert('Save failed: '+e);});}"
-                + "function importConfig(input){"
-                + "var f=input.files&&input.files[0];input.value='';"
-                + "if(!f)return;"
-                + "var rd=new FileReader();"
-                + "rd.onload=function(){"
-                + "fetch('/config/import',{method:'POST',body:rd.result})"
-                + ".then(function(r){return r.json();})"
-                + ".then(function(j){alert(j.ok?'Configuration imported':'Error: '+j.msg);if(j.ok)location.reload();})"
-                + ".catch(function(e){alert('Import failed: '+e);});};"
-                + "rd.readAsText(f);}"
+                + "function cfgTokenValue(){return (document.getElementById('cfgToken').value||'').trim();}"
+                + "function rememberToken(t){try{localStorage.setItem('eo1.cfg.token',t);}catch(e){}}"
+                + "function loadConfig(){"
+                + "var t=cfgTokenValue();"
+                + "if(!t){alert('Enter the configuration token first (options dialog on the frame).');return;}"
+                + "fetch('/config?token='+encodeURIComponent(t))"
+                + ".then(function(r){return r.json().then(function(j){if(!r.ok)throw new Error(j.msg||('HTTP '+r.status));return j;});})"
+                + ".then(function(j){CONFIG=j;rememberToken(t);document.getElementById('cfgEditor').style.display='';fillCfg();})"
+                + ".catch(function(e){alert('Load failed: '+e);});}"
+                + "function fillCfg(){"
                 + "document.getElementById('cfgInterval').value=CONFIG.interval||5;"
                 + "document.getElementById('cfgTimezone').value=CONFIG.selectedTimeZoneId||'';"
                 + "document.getElementById('cfgUpdateUrl').value=CONFIG.updateManifestUrl||'';"
@@ -852,7 +966,34 @@ public class WebServer {
                 + "document.getElementById('cfgMqttProtocol').value=CONFIG.mqttProtocol||'';"
                 + "document.getElementById('cfgMqttUser').value=CONFIG.mqttUser||'';"
                 + "document.getElementById('cfgMqttPassword').value=CONFIG.mqttPassword||'';"
-                + "renderCfgBackends();renderCfgQuiet();";
+                + "renderCfgBackends();renderCfgQuiet();}"
+                + "function saveConfig(){"
+                + "if(!CONFIG){alert('Load the configuration first.');return;}"
+                + "var t=cfgTokenValue();"
+                + "if(!t){alert('Enter the configuration token first.');return;}"
+                + "fetch('/config?token='+encodeURIComponent(t),{method:'POST',body:JSON.stringify(collectCfg())})"
+                + ".then(function(r){return r.json();})"
+                + ".then(function(j){alert(j.ok?'Configuration saved':'Error: '+j.msg);if(j.ok)location.reload();})"
+                + ".catch(function(e){alert('Save failed: '+e);});}"
+                + "function exportConfig(){"
+                + "var t=cfgTokenValue();"
+                + "if(!t){alert('Enter the configuration token first.');return;}"
+                + "location.href='/config/download?token='+encodeURIComponent(t);}"
+                + "function importConfig(input){"
+                + "var f=input.files&&input.files[0];input.value='';"
+                + "if(!f)return;"
+                + "var t=cfgTokenValue();"
+                + "if(!t){alert('Enter the configuration token first.');return;}"
+                + "var rd=new FileReader();"
+                + "rd.onload=function(){"
+                + "fetch('/config/import?token='+encodeURIComponent(t),{method:'POST',body:rd.result})"
+                + ".then(function(r){return r.json();})"
+                + ".then(function(j){alert(j.ok?'Configuration imported':'Error: '+j.msg);if(j.ok)location.reload();})"
+                + ".catch(function(e){alert('Import failed: '+e);});};"
+                + "rd.readAsText(f);}"
+                + "(function(){var t='';"
+                + "try{t=localStorage.getItem('eo1.cfg.token')||'';}catch(e){}"
+                + "if(t){document.getElementById('cfgToken').value=t;loadConfig();}})();";
     }
 
     private String renderLogsPage() {

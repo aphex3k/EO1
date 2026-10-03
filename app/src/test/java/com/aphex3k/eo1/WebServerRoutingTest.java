@@ -6,6 +6,9 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.util.HashMap;
+import java.util.Map;
+
 public class WebServerRoutingTest {
 
     @Test
@@ -66,5 +69,72 @@ public class WebServerRoutingTest {
         assertTrue(WebServer.controlAllows("GET", "check-updates"));
         assertFalse(WebServer.controlAllows("GET", null));
         assertFalse(WebServer.controlAllows("POST", null));
+    }
+
+    @Test
+    public void configTokenOk() {
+        assertTrue(WebServer.configTokenOk("abc123", "abc123"));
+        assertFalse(WebServer.configTokenOk("abc124", "abc123"));
+        assertFalse(WebServer.configTokenOk("", "abc123"));
+        assertFalse(WebServer.configTokenOk(null, "abc123"));
+        // Fail closed: an empty expected token (settings unavailable) rejects everything.
+        assertFalse(WebServer.configTokenOk("abc123", ""));
+        assertFalse(WebServer.configTokenOk("abc123", null));
+    }
+
+    @Test
+    public void configWriteAllowsSameOriginAndNonBrowserClients() {
+        // No provenance header at all (curl, tools): token-gated, so allowed here.
+        assertTrue(WebServer.configWriteAllowed(new HashMap<String, String>(), 8080));
+
+        // Same-origin browser POST: Origin matches Host + port.
+        Map<String, String> ok = headers("host", "192.168.1.50:8080",
+                "origin", "http://192.168.1.50:8080");
+        assertTrue(WebServer.configWriteAllowed(ok, 8080));
+
+        // Same host via an explicit-80 Host header, default-port origin, server on 80.
+        Map<String, String> port80 = headers("host", "192.168.1.50",
+                "origin", "http://192.168.1.50");
+        assertTrue(WebServer.configWriteAllowed(port80, 80));
+
+        // No Origin (older browser): a matching Referer is enough.
+        Map<String, String> referer = headers("host", "192.168.1.50:8080",
+                "referer", "http://192.168.1.50:8080/?page=cfg");
+        assertTrue(WebServer.configWriteAllowed(referer, 8080));
+
+        // Host header is case-insensitive for the host part.
+        Map<String, String> hostCase = headers("host", "Frame.Local:8080",
+                "origin", "http://frame.local:8080");
+        assertTrue(WebServer.configWriteAllowed(hostCase, 8080));
+    }
+
+    @Test
+    public void configWriteRejectsCrossOrigin() {
+        // Attacker's page on another host.
+        assertFalse(WebServer.configWriteAllowed(headers("host", "192.168.1.50:8080",
+                "origin", "http://evil.example:8080"), 8080));
+        // Attacker's page on the same port, different host.
+        assertFalse(WebServer.configWriteAllowed(headers("host", "192.168.1.50:8080",
+                "origin", "http://attacker.local:8080"), 8080));
+        // Same host, different port.
+        assertFalse(WebServer.configWriteAllowed(headers("host", "192.168.1.50:8080",
+                "origin", "http://192.168.1.50:80"), 8080));
+        // Default-port origin hitting a non-default port.
+        assertFalse(WebServer.configWriteAllowed(headers("host", "192.168.1.50:8080",
+                "origin", "http://192.168.1.50"), 8080));
+        // Cross-origin referer (e.g. a page linking out and auto-submitting a form).
+        assertFalse(WebServer.configWriteAllowed(headers("host", "192.168.1.50:8080",
+                "referer", "http://evil.example/phish"), 8080));
+        // Provenance header present but no Host header to attribute it to.
+        assertFalse(WebServer.configWriteAllowed(headers(
+                "origin", "http://192.168.1.50:8080"), 8080));
+    }
+
+    private static Map<String, String> headers(String... kv) {
+        Map<String, String> m = new HashMap<String, String>();
+        for (int i = 0; i + 1 < kv.length; i += 2) {
+            m.put(kv[i], kv[i + 1]);
+        }
+        return m;
     }
 }

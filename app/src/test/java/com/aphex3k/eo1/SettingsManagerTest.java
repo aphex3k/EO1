@@ -143,6 +143,29 @@ public class SettingsManagerTest {
         assertNotNull(sm.importConfiguration("   "));
     }
 
+    @Test
+    public void trustedNetworkTokenIsGeneratedOnceAndStable() throws Exception {
+        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        String first = sm.trustedNetworkToken();
+        assertNotNull(first);
+        assertEquals(32, first.length());
+        assertTrue(first.matches("[0-9a-f]{32}"));
+        // Subsequent calls return the same persisted value.
+        assertEquals(first, sm.trustedNetworkToken());
+        assertEquals(first, sm.trustedNetworkToken());
+    }
+
+    @Test
+    public void trustedNetworkTokenIsNotPartOfConfigurationDocument() throws Exception {
+        File files = tmp.newFolder("files");
+        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        String token = sm.trustedNetworkToken();
+        assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
+
+        assertFalse(sm.exportConfigurationJson().contains(token));
+        assertFalse(readAll(new File(files, "configuration.json")).contains(token));
+    }
+
     private static String readAll(File f) throws Exception {
         FileInputStream in = new FileInputStream(f);
         try {
