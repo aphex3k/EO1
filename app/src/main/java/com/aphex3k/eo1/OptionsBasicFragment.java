@@ -1,6 +1,8 @@
 package com.aphex3k.eo1;
 
 import android.content.Context;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.text.InputType;
 import android.text.TextUtils;
@@ -47,6 +49,7 @@ public class OptionsBasicFragment extends Fragment {
     private EditText updateIntervalField;
     private CheckBox trustedNetworkCheckBox;
     private TextView trustedNetworkTokenView;
+    private TextView trustedNetworkIpView;
     private String[] allTimeZoneIds;
 
     /** Working copy of the configured backends; persisted on save. */
@@ -84,6 +87,7 @@ public class OptionsBasicFragment extends Fragment {
         updateIntervalField = view.findViewById(R.id.editTextUpdateCheckInterval);
         trustedNetworkCheckBox = view.findViewById(R.id.trustedNetworkCheckBox);
         trustedNetworkTokenView = view.findViewById(R.id.trustedNetworkTokenView);
+        trustedNetworkIpView = view.findViewById(R.id.trustedNetworkIpView);
 
         allTimeZoneIds = TimeZone.getAvailableIDs();
         ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, allTimeZoneIds);
@@ -155,8 +159,9 @@ public class OptionsBasicFragment extends Fragment {
     }
 
     /**
-     * Shows the configuration token below the Trusted Network checkbox while the flag is on.
-     * The token is the only way to use the web UI's configuration endpoints, so it must be
+     * Shows the configuration token and the current Wi-Fi IP below the Trusted Network
+     * checkbox while the flag is on. The token is the only way to use the web UI's
+     * configuration endpoints and the IP is where the web UI lives, so both must be
      * readable by someone standing in front of the device.
      */
     private void updateTrustedNetworkTokenView() {
@@ -166,9 +171,33 @@ public class OptionsBasicFragment extends Fragment {
         if (settingsManager.isTrustedNetwork()) {
             trustedNetworkTokenView.setText("Configuration token: " + settingsManager.trustedNetworkToken());
             trustedNetworkTokenView.setVisibility(View.VISIBLE);
+            trustedNetworkIpView.setText("Wi-Fi IP: " + wifiIp());
+            trustedNetworkIpView.setVisibility(View.VISIBLE);
         } else {
             trustedNetworkTokenView.setVisibility(View.GONE);
+            trustedNetworkIpView.setVisibility(View.GONE);
         }
+    }
+
+    /**
+     * @return the currently negotiated Wi-Fi address as dotted-quad, or "unknown" when not
+     *         connected — same source as the web server's /state telemetry.
+     */
+    private String wifiIp() {
+        try {
+            WifiManager wifiManager = (WifiManager) requireContext().getSystemService(Context.WIFI_SERVICE);
+            if (wifiManager != null) {
+                WifiInfo info = wifiManager.getConnectionInfo();
+                if (info != null) {
+                    int ip = info.getIpAddress();
+                    if (ip != 0) {
+                        return DeviceTelemetry.ipToString(ip);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return "unknown";
     }
 
     /** Smallest free "immich-N" number, starting at 1. */
