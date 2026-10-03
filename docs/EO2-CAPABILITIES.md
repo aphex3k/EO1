@@ -106,6 +106,9 @@ The capability differences above are now modeled in code as
 `ro.product.device`/`ro.product.model` contains "eo2"). `EventManager`,
 `BrightnessManager` and `MainActivity` gate their platform-specific paths on these
 flags, so unsupported features no-op instead of misfiring. The web server additionally
-exposes `GET /control?action=keyevent&code=<n>` (index page "Send key" form) for
-injection of arbitrary keycodes — the substitute for ADB on the frame, which allows
-verifying candidates like `KEYCODE_POWER` (26) on the EO1 manually.
+exposes `POST /control?action=keyevent&code=<n>` (index page "Send key" form, debug
+builds only) for injection of arbitrary keycodes — the substitute for ADB on the frame,
+which allows verifying candidates like `KEYCODE_POWER` (26) on the EO1 manually. It is
+deliberately POST-only and debug-build-only so a release build cannot be driven by a
+cross-origin GET from any web page (the rest of the server stays credential-free
+plain-HTTP on the trusted LAN).

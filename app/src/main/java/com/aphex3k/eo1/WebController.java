@@ -47,7 +47,8 @@ public interface WebController {
      *               {@code settings}, {@code update-site}, {@code check-updates},
      *               {@code install-staged} (installs a staged self-update, screen on),
      *               {@code update-reset} (drops staged update files and state),
-     *               {@code keyevent} (injects an arbitrary keycode, admin/debug).
+     *               {@code keyevent} (injects an arbitrary keycode; debug builds only,
+     *               and the web server accepts it only via POST).
      * @param params the request's query/form parameters; the {@code keyevent} action
      *               reads {@code code} from it.
      * @return {@code true} if a known action was dispatched.

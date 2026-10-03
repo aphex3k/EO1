@@ -1525,6 +1525,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * because most of them touch views or start activities — except {@code keyevent}, which
      * is injected from the calling web worker thread: {@code Instrumentation#sendKeyDownUpSync}
      * blocks on the UI thread's looper and would deadlock if posted to that thread.
+     *
+     * <p>{@code keyevent} is a debug-build-only admin action: it injects arbitrary keycodes,
+     * so a release build refuses it (the web server also requires POST for it).
      */
     @Override
     public boolean control(String action, Map<String, String> params) {
@@ -1532,6 +1535,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return false;
         }
         if ("keyevent".equals(action)) {
+            if (!BuildConfig.DEBUG) {
+                return false;
+            }
             String rawCode = params != null ? params.get("code") : null;
             int keyCode;
             try {
