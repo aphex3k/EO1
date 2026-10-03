@@ -403,7 +403,7 @@ public class WebServer {
                     return;
                 }
                 String action = params.get("action");
-                boolean fired = action != null && controller.control(action);
+                boolean fired = action != null && controller.control(action, params);
                 JsonObject o = new JsonObject();
                 o.addProperty("ok", fired);
                 o.addProperty("action", action);
@@ -564,9 +564,18 @@ public class WebServer {
                 .append("<button onclick=\"ctrl('check-updates')\">Check updates</button>")
                 .append("<button onclick=\"ctrl('install-staged')\">Install staged</button>")
                 .append("<button onclick=\"ctrl('update-reset')\">Update reset</button>");
+        sb.append("<br><br><b>Send key (admin)</b> <input type=\"number\" id=\"keycode\" min=\"0\" max=\"65535\" value=\"26\" style=\"width:5em\">")
+                .append("<button onclick=\"sendKey()\">Send</button>")
+                .append("<button onclick=\"fillKey(26)\">POWER</button>")
+                .append("<button onclick=\"fillKey(223)\">SLEEP</button>")
+                .append("<button onclick=\"fillKey(132)\">F2</button>")
+                .append("<button onclick=\"fillKey(134)\">F4</button>")
+                .append("<button onclick=\"fillKey(62)\">SPACE</button>");
 
         sb.append("<script>");
         sb.append("function ctrl(a){fetch('/control?action='+a).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}");
+        sb.append("function fillKey(n){document.getElementById('keycode').value=n;}");
+        sb.append("function sendKey(){var c=document.getElementById('keycode').value;fetch('/control?action=keyevent&code='+encodeURIComponent(c)).then(r=>r.json()).then(j=>alert('keyevent '+(document.getElementById('keycode').value)+':'+(j.fired?'fired':'failed')));}");
         sb.append("function del(n){if(!confirm('Delete '+n+'?'))return;");
         sb.append("fetch('/files/'+n+'/delete',{method:'POST'}).then(r=>r.json()).then(j=>location.reload());}");
         sb.append("</script>");

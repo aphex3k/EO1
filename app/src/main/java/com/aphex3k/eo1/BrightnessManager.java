@@ -36,22 +36,25 @@ public class BrightnessManager {
     private final WeakReference<BrightnessManagerListener> brightnessListener;
 
     public BrightnessManager(BrightnessManagerListener listener,
-                             SensorManager sensorManager)
+                             SensorManager sensorManager,
+                             HardwareCapabilities capabilities)
     {
         this.brightnessListener = new WeakReference<>(listener);
 
-        Sensor mLightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
-        SensorEventListener sensorEventListener = new SensorEventListener() {
-            @Override
-            public void onSensorChanged(SensorEvent event) {
-                adjustScreenBrightness(event.values[0]);
-            }
-            @Override
-            public void onAccuracyChanged(Sensor sensor, int i) {
-                sensorAccuracyChanged(sensor, i);
-            }
-        };
-        sensorManager.registerListener(sensorEventListener, mLightSensor, SensorManager.SENSOR_DELAY_UI);
+        if (capabilities.supportsLightSensor()) {
+            Sensor mLightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT);
+            SensorEventListener sensorEventListener = new SensorEventListener() {
+                @Override
+                public void onSensorChanged(SensorEvent event) {
+                    adjustScreenBrightness(event.values[0]);
+                }
+                @Override
+                public void onAccuracyChanged(Sensor sensor, int i) {
+                    sensorAccuracyChanged(sensor, i);
+                }
+            };
+            sensorManager.registerListener(sensorEventListener, mLightSensor, SensorManager.SENSOR_DELAY_UI);
+        }
     }
 
     /**
