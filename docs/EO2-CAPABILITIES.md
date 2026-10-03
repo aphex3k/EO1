@@ -97,3 +97,19 @@ Port 80 bind fails with `EACCES` (no root) → the designed fallback to **8080**
 - CEC end-to-end with a real CEC source.
 - PS4/gamepad `BTN_*` keys (no controller attached).
 - Note on observation method: TsPlayer renders on the Amlogic native video plane, so `screencap` shows the video area black even while playing — video state must be verified via logcat (`TsPlayer status=…`), not screenshots.
+
+## 10. Follow-up (2026-10-02)
+
+The capability differences above are now modeled in code as
+`com.aphex3k.eo1.HardwareCapabilities` with two implementations — `Eo1Capabilities`
+(full feature set) and `Eo2Capabilities` (power button only, selected when
+`ro.product.device`/`ro.product.model` contains "eo2"). `EventManager`,
+`BrightnessManager` and `MainActivity` gate their platform-specific paths on these
+flags, so unsupported features no-op instead of misfiring. The web server additionally
+exposes `POST /control?action=keyevent&code=<n>` (index page "Send key" form, debug
+builds only) for injection of arbitrary keycodes — the substitute for ADB on the frame,
+which allows verifying candidates like `KEYCODE_POWER` (26) on the EO1 manually. It is
+deliberately debug-build-only (a release build refuses it regardless of method) and
+POST-only (the method gate blocks the cross-origin `GET` drive-by, though POST-only is
+not CSRF protection on its own — see `docs/WEBSERVER.md`); the server stays
+credential-free plain-HTTP on the trusted LAN.

@@ -60,6 +60,7 @@ Open these first:
 | Asset acquisition / rotation pool | `app/src/main/java/com/aphex3k/eo1/MediaManager.java` |
 | Media layer (backend interface, assets, backends) | `app/src/main/java/com/aphex3k/media/` — `MediaBackend`, `MediaAsset`, `MediaSource`, `MediaType`; `media.immich` (`ImmichMediaBackend`, `ImmichClient(V3)`, `ImmichClientRegistry`); `media.local` (`LocalMediaBackend`) |
 | Settings I/O | `app/src/main/java/com/aphex3k/eo1/SettingsManager.java` |
+| Platform hardware caps | `HardwareCapabilities` / `Eo1Capabilities` / `Eo2Capabilities` / `HardwareCapabilitiesFactory` in `com.aphex3k.eo1` — runtime-detected feature flags (soft-touch buttons, light sensor, brightness, power button) selected from `Build.DEVICE`/`Build.MODEL` |
 | Config model (source of truth) | `app/src/main/java/com/aphex3k/eo1/Configuration.java` |
 | Immich HTTP API | `app/src/main/java/com/aphex3k/immichApi/ImmichApiService.java` |
 | HTTP / TLS / cookies | `app/src/main/java/com/aphex3k/eo1/ApiServiceGenerator.java`, `Tls12SocketFactory.java` |
@@ -106,6 +107,7 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 - Keep API 19 compatibility and existing Retrofit/OkHttp pin strategy
 - On a breaking Immich API change, add a new frozen `com.aphex3k.immichApi.vN` DTO package + `ImmichClientVN` + a registry band in `com.aphex3k.media.immich.ImmichClientRegistry` — never edit a frozen client package
 - Treat `app/src/main/java/com/aphex3k/eo1/` as the app core and `com.aphex3k.media` as the backend layer (per-backend client wiring; `MediaManager` only orchestrates)
+- Gate platform-specific hardware behavior (soft-touch buttons, light sensor, screen brightness, power button) on `HardwareCapabilities` flags — never add model-specific `if`s on `Build.MODEL`/`Build.DEVICE` elsewhere; unsupported features no-op
 - Keep the LAN web server dependency-free and resource-cheap (hand-rolled `ServerSocket`, `Connection: close`); every web-server thread must be defensively wrapped — a stray exception must never reach the global `UncaughtExceptionHandler` (which calls `System.exit(2)`)
 - Let `libTsPlayer-jni.so` loop a media file **natively** — create the TsPlayer once per asset and run no per-duration Java teardown loop; full `deletePlayer` + `createPlayer` only on asset handoff / `stop()` / `surfaceDestroyed` (see [docs/TSPLAYER.md](docs/TSPLAYER.md) “Looping (native)”)
 
