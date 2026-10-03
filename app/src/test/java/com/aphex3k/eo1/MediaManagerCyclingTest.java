@@ -276,6 +276,7 @@ public class MediaManagerCyclingTest {
         FakeBackend b = backendB(1);
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a, b), listener, 1L);
+        mm.prefetchEnabled = false; // keep this test's exact opener counts hermetic
         File cacheDir = tmp.newFolder("cache");
         File uploads = tmp.newFolder("uploads");
 
@@ -313,6 +314,7 @@ public class MediaManagerCyclingTest {
         FakeBackend remote = backendB(2);
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(local, remote), listener, 3L);
+        mm.prefetchEnabled = false; // keep this test's exact opener counts hermetic
         File cacheDir = tmp.newFolder("cache");
 
         int ticks = 0;
@@ -520,5 +522,115 @@ public class MediaManagerCyclingTest {
         assertEquals(1, noMedia);
         assertTrue(listener.displayedKeys.isEmpty());
         assertTrue(cacheDir.listFiles().length == 0);
+    }
+
+    /** Polls for up to {@code timeoutMs} milliseconds until {@code file} exists on disk. */
+    private static boolean awaitFile(File file, long timeoutMs) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline) {
+            if (file.isFile()) {
+                return true;
+            }
+            Thread.sleep(20);
+        }
+        return file.isFile();
+    }
+
+    @Test
+    public void nextAssetIsPrefetchedIntoCache() throws Exception {
+        // Seed 7 leaves the 2-element pool unshuffled: [a0, a1].
+        FakeBackend a = backendA(2);
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a0", listener.displayedKeys.get(0));
+
+        // Prefetch stages the next record (a1) while a0 is on screen: the sidecar is written
+        // only after a fully verified download, so awaiting it means the prefetch finished.
+        File sidecar = new File(cacheDir, "a1.jpg.sha1");
+        assertTrue("prefetch should stage the next asset's cache file + sidecar",
+                awaitFile(sidecar, 5000));
+        int opensAfterPrefetch = a.openerCalls.get();
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(2, listener.displayedKeys.size());
+        assertEquals("fakeA:a1", listener.displayedKeys.get(1));
+        // a1 was served from the prefetched cache: tick 2 adds no further open.
+        assertEquals(opensAfterPrefetch, a.openerCalls.get());
+    }
+
+    @Test
+    public void noPrefetchWhenPoolExhausted() throws Exception {
+        // Single-asset pool: after the tick the cursor is at the pool end, so the
+        // prefetch guard must not spawn a thread (or read past the end).
+        FakeBackend a = backendA(1);
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, listener.displayedKeys.size());
+        Thread.sleep(300);
+
+        assertEquals(1, a.openerCalls.get());
+        assertEquals(1, a.fetchCount.get());
+        assertTrue(listener.exceptions.isEmpty());
+    }
+
+    @Test
+    public void prefetchDisabledPerformsNoBackgroundDownloads() throws Exception {
+        // Seed 7 leaves the 2-element pool unshuffled: [a0, a1].
+        FakeBackend a = backendA(2);
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a0", listener.displayedKeys.get(0));
+        Thread.sleep(300);
+
+        assertEquals(1, a.openerCalls.get());
+        File[] cached = cacheDir.listFiles();
+        assertEquals(2, cached.length); // only a0.jpg + a0.jpg.sha1
+        for (File f : cached) {
+            assertTrue(f.getName().startsWith("a0"));
+        }
+        assertFalse(new File(cacheDir, "a1.jpg").isFile());
+    }
+
+    @Test
+    public void failedPrefetchPostsNothing() throws Exception {
+        // Seed 7 leaves the 2-element pool unshuffled: [a0, a1]; a1's opener always fails,
+        // so the background prefetch of a1 must fail silently.
+        FakeBackend a = backendA(2);
+        a.throwingOpeners.add("a1");
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a0", listener.displayedKeys.get(0));
+
+        // Wait for the failed prefetch attempt: a0's main-path open plus a1's failed open.
+        long deadline = System.currentTimeMillis() + 5000;
+        while (a.openerCalls.get() < 2 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(20);
+        }
+        assertTrue("prefetch should have attempted a1", a.openerCalls.get() >= 2);
+
+        // A failed prefetch must not surface through the listener and leaves no cache file.
+        assertTrue(listener.exceptions.isEmpty());
+        assertEquals(1, listener.displayedKeys.size());
+        assertFalse(new File(cacheDir, "a1.jpg").isFile());
     }
 }
