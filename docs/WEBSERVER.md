@@ -21,7 +21,7 @@ the server itself is unit-testable with a fake controller and never references t
 | Route | Method | Purpose |
 |---|---|---|
 | `/` | GET | One-page UI: upload form, file table (download/delete), control buttons |
-| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, rotation stats, an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedApk{present,bytes}`, `installPermissionHeld`, `installMode`), battery/memory/uptime telemetry |
+| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; device adds detected `platform`; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, rotation stats, an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedApk{present,bytes}`, `installPermissionHeld`, `installMode`), battery/memory/uptime telemetry |
 | `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
 | `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
 | `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
@@ -29,7 +29,7 @@ the server itself is unit-testable with a fake controller and never references t
 | `/files/<name>` | GET | Streams an uploaded file |
 | `/files/<name>/delete` | DELETE / POST | Deletes an uploaded file |
 | `/upload` | POST | `multipart/form-data` upload, 512 MB cap per file, 2 GB cap per request, max 32 parts; stored in `filesDir/uploaded/` |
-| `/control?action=<a>` | GET / POST | Fires a hardware-key action (below) |
+| `/control?action=<a>[&code=<n>]` | GET / POST | Fires a hardware-key action (below); `keyevent` (debug builds only) additionally requires POST and reads the `code` param |
 | `/config` | GET | **Trusted network only.** Full device configuration JSON, credentials included |
 | `/config` | POST | **Trusted network only.** Applies the request body (≤ 512 KB JSON) as the new device configuration: parsed, normalized, written to `filesDir/configuration.json`, live config replaced, time zone re-applied, rotation restarted. `{"ok":false,"msg":...}` on validation failure (config unchanged) |
 | `/config/download` | GET | **Trusted network only.** Streams the configuration as a `configuration.json` attachment (same document as `POST /config` writes, legacy mirror fields included) |
@@ -49,8 +49,20 @@ the server itself is unit-testable with a fake controller and never references t
 | `check-updates` | top + back | check the self-update manifest for a new APK |
 | `install-staged` | — | install a staged self-update (turns the screen on first) |
 | `update-reset` | — | drop the staged update files and reset the update state |
+| `keyevent?code=<n>` | — (admin/debug; **debug builds only**, POST only) | inject an arbitrary key press via `Instrumentation.sendKeyDownUpSync`; `code` must parse to an int in 0…65535. Lets you try keycodes (e.g. `26` POWER, `223` SLEEP, `132` F2) on a device without ADB. The index page shows a "Send key" form with quick-fill buttons in debug builds. |
 
-All actions are posted to the UI thread. Unknown actions return `{"ok":false,"fired":false}`.
+All actions are posted to the UI thread — except `keyevent`, which is injected directly on the
+web worker thread (`sendKeyDownUpSync` posts to the UI looper and would deadlock if posted
+to it). `keyevent` is a debug-build-only admin action that additionally requires POST: a
+release build refuses it entirely, and the method gate blocks the cross-origin `GET`
+drive-by. POST-only is **not** CSRF protection by itself — `/control` reads its parameters
+from the URL query string, so a page the user visits could still auto-submit a plain `POST`
+form and reach the action on a debug build; real CSRF resistance would need additional
+checks (an `Origin`/`Referer` validation, a non-simple content type, or a per-session
+token). The server deliberately has none of those — it remains credential-free plain HTTP
+by design (trusted LAN only) — so the security boundary is the trusted-LAN assumption plus
+the debug-build gate, not hardening against hostile pages. `keyevent` on a release build or
+via GET, an unknown action, or a malformed `code` returns `{"ok":false,"fired":false}`.
 
 ## Trusted network
 

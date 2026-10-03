@@ -39,6 +39,10 @@ import okhttp3.HttpUrl;
  * the original bytes (local file or download with integrity checks), and hands the result to the
  * UI. A per-backend failure disables only that backend for the cycle; all assets failing after a
  * refetch surfaces {@link NoMediaFoundException} as today.
+ *
+ * <p>After a successful display, the next pool record is prefetched in a background thread
+ * ({@link #prefetchNext}) so the fixed-interval tick normally finds it already cached and the
+ * on-screen display duration is independent of download time.
  */
 public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.ProgressListener {
 
@@ -82,6 +86,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private volatile File mediaCacheDir;
     private volatile boolean poolStale;
     private volatile String currentConfigurationFingerprint = "";
+    /**
+     * One-record-ahead warm-up: after each successful display the next pool record is
+     * staged in the background ({@link #prefetchNext}). Package-private so the cycling
+     * tests can switch it off for exact download-count assertions.
+     */
+    volatile boolean prefetchEnabled = true;
 
     /** Remote downloads currently in flight; gates progress forwarding to the UI. */
     private final AtomicInteger activeDownloads = new AtomicInteger(0);
@@ -236,6 +246,41 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 }
             }
         });
+        prefetchNext(cacheDir);
+    }
+
+    /**
+     * Stages the next pool record for the upcoming tick: runs it through the same
+     * {@link #acquireAsset} pipeline as the display path, in a background daemon thread, so
+     * its bytes land in the exact cache file + integrity sidecar the next tick checks. This
+     * keeps the fixed-interval display off the network: on a healthy link the next tick is a
+     * cache hit and the switch is effectively instant.
+     *
+     * <p>Strictly best-effort and side-effect free for the pipeline: it never advances
+     * {@link #poolCursor}, never fetches catalogs, and never posts to the listener — a failure
+     * is logged only and the next tick simply re-acquires normally. The record is snapshotted
+     * on the rotation worker (the only thread that mutates {@link #pool}) before the thread
+     * starts, so the prefetch thread never reads the pool concurrently.
+     */
+    private void prefetchNext(File cacheDir) {
+        if (!prefetchEnabled || poolCursor >= pool.size()) {
+            return;
+        }
+        final MediaAsset next = pool.get(poolCursor);
+        final File dir = cacheDir;
+        Thread prefetcher = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    acquireAsset(next, dir, false);
+                    Log.i(TAG, "prefetch: " + next.key() + " ready for next tick");
+                } catch (Exception e) {
+                    Log.i(TAG, "prefetch: " + next.key() + " not staged, next tick will fetch: " + e);
+                }
+            }
+        }, "media-prefetch");
+        prefetcher.setDaemon(true);
+        prefetcher.start();
     }
 
     // ---------------------------------------------------------------- pool
@@ -459,6 +504,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * incompatible after a previous download.
      */
     private File acquireAsset(MediaAsset asset, File cacheDir) throws Exception {
+        return acquireAsset(asset, cacheDir, true);
+    }
+
+    /**
+     * {@code reportProgress=false} is used by the background prefetch so its download does not
+     * move the UI progress bar ({@link #clientProgressUpdates} gates on {@link #activeDownloads}).
+     */
+    private File acquireAsset(MediaAsset asset, File cacheDir, boolean reportProgress) throws Exception {
         MediaBackend backend = backendById.get(asset.backendId);
         if (backend == null) {
             Log.w(TAG, "acquireAsset: no backend for asset " + asset.key());
@@ -481,7 +534,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (source.isLocal()) {
             return source.localFile;
         }
-        return acquireRemoteFile(asset, source, cacheDir);
+        return acquireRemoteFile(asset, source, cacheDir, reportProgress);
     }
 
     /**
@@ -496,6 +549,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * re-downloading for the life of this process.
      */
     private File acquireRemoteFile(MediaAsset asset, MediaSource source, File cacheDir)
+            throws MediaDownloadFailedException, IOException {
+        return acquireRemoteFile(asset, source, cacheDir, true);
+    }
+
+    /**
+     * {@code reportProgress=false} (background prefetch) leaves {@link #activeDownloads}
+     * untouched so the download does not drive the UI progress bar.
+     */
+    private File acquireRemoteFile(MediaAsset asset, MediaSource source, File cacheDir,
+                                   boolean reportProgress)
             throws MediaDownloadFailedException, IOException {
         boolean fallback = source.isFallback();
         ImmichType type = asset.type == MediaType.VIDEO ? ImmichType.VIDEO : ImmichType.IMAGE;
@@ -526,7 +589,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             throw new MediaDownloadFailedException("Insufficient cache space for asset download");
         }
 
-        activeDownloads.incrementAndGet();
+        if (reportProgress) {
+            activeDownloads.incrementAndGet();
+        }
         try {
             for (int attempt = 1; attempt <= 2; attempt++) {
                 final InputStream body;
@@ -575,7 +640,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 deleteCachedFile(cacheFile);
             }
         } finally {
-            activeDownloads.decrementAndGet();
+            if (reportProgress) {
+                activeDownloads.decrementAndGet();
+            }
         }
 
         throw new MediaDownloadFailedException("Downloaded asset " + asset.key() + " failed integrity check");

@@ -1,6 +1,8 @@
 package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -52,5 +54,17 @@ public class WebServerRoutingTest {
         assertEquals("unknown", WebServer.route("GET", null));
         assertEquals("unknown", WebServer.route("GET", "/filez"));
         assertEquals("state", WebServer.route("PATCH", "/state"));
+    }
+
+    @Test
+    public void keyeventIsPostOnly() {
+        assertTrue(WebServer.controlAllows("POST", "keyevent"));
+        assertFalse(WebServer.controlAllows("GET", "keyevent"));
+        // Every other action keeps its existing GET/POST behavior.
+        assertTrue(WebServer.controlAllows("GET", "next"));
+        assertTrue(WebServer.controlAllows("POST", "next"));
+        assertTrue(WebServer.controlAllows("GET", "check-updates"));
+        assertFalse(WebServer.controlAllows("GET", null));
+        assertFalse(WebServer.controlAllows("POST", null));
     }
 }

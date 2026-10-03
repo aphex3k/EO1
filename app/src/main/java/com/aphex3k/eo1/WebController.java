@@ -1,6 +1,7 @@
 package com.aphex3k.eo1;
 
 import java.io.File;
+import java.util.Map;
 
 /**
  * The app-facing surface the {@link WebServer} uses to reach state, logs, uploads, and controls.
@@ -45,10 +46,14 @@ public interface WebController {
      * @param action one of {@code next}, {@code screen}, {@code brightness}, {@code config},
      *               {@code settings}, {@code update-site}, {@code check-updates},
      *               {@code install-staged} (installs a staged self-update, screen on),
-     *               {@code update-reset} (drops staged update files and state).
+     *               {@code update-reset} (drops staged update files and state),
+     *               {@code keyevent} (injects an arbitrary keycode; debug builds only,
+     *               and the web server accepts it only via POST).
+     * @param params the request's query/form parameters; the {@code keyevent} action
+     *               reads {@code code} from it.
      * @return {@code true} if a known action was dispatched.
      */
-    boolean control(String action);
+    boolean control(String action, Map<String, String> params);
 
     /**
      * Whether the device is on a trusted network (off by default, toggled in the on-device
@@ -67,4 +72,13 @@ public interface WebController {
      * @return a human-readable error message, or {@code null} on success.
      */
     String importConfigurationJson(String json);
+
+    /**
+     * Injects a key press into the app (admin/debug: try keycodes on a device without ADB).
+     * Not called from the UI thread.
+     *
+     * @param keyCode an Android keycode, e.g. {@code android.view.KeyEvent.KEYCODE_POWER} (26).
+     * @return {@code true} if the injection was issued.
+     */
+    boolean sendKeyCode(int keyCode);
 }

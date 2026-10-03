@@ -7,6 +7,7 @@ import static android.os.PowerManager.SCREEN_DIM_WAKE_LOCK;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.AlarmManager;
+import android.app.Instrumentation;
 import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
@@ -101,6 +102,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
+    private HardwareCapabilities capabilities;
     private TextView debugOverlay;
     private EventManager eventManager;
     private UpdateManager updateManager;
@@ -209,8 +211,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             progressIndicator.setDrawingCacheBackgroundColor(Color.green(255));
         }
 
-        this.brightnessManager = new BrightnessManager(this, (SensorManager) getSystemService(SENSOR_SERVICE));
-        this.eventManager = new EventManager(this);
+        this.capabilities = HardwareCapabilitiesFactory.detect(Build.DEVICE, Build.MODEL);
+        Log.i(TAG, "hardware: " + capabilities.platform() + " (device=" + Build.DEVICE
+                + ", model=" + Build.MODEL + ")");
+        this.brightnessManager = new BrightnessManager(this,
+                (SensorManager) getSystemService(SENSOR_SERVICE), capabilities);
+        this.eventManager = new EventManager(this, capabilities);
         this.settingsManager = new SettingsManager(this);
         this.updateManager = new UpdateManager(this, this, this.settingsManager);
         this.mediaManager = new MediaManager(this, this.settingsManager, this);
@@ -245,10 +251,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // The physical button on the EO2 is an OS-intercepted KEY_POWER: the display can
         // go dark or light without any key event reaching this activity. Watch for it.
-        IntentFilter displayStateFilter = new IntentFilter();
-        displayStateFilter.addAction(Intent.ACTION_SCREEN_ON);
-        displayStateFilter.addAction(Intent.ACTION_SCREEN_OFF);
-        registerReceiver(displayStateReceiver, displayStateFilter);
+        if (capabilities.supportsPowerButton()) {
+            IntentFilter displayStateFilter = new IntentFilter();
+            displayStateFilter.addAction(Intent.ACTION_SCREEN_ON);
+            displayStateFilter.addAction(Intent.ACTION_SCREEN_OFF);
+            registerReceiver(displayStateReceiver, displayStateFilter);
+        }
     }
 
     private void configureMqttManager() {
@@ -526,7 +534,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (this.webServer != null) {
             this.webServer.shutdown();
         }
-        unregisterReceiver(displayStateReceiver);
+        if (capabilities.supportsPowerButton()) {
+            unregisterReceiver(displayStateReceiver);
+        }
         super.onDestroy();
     }
 
@@ -643,6 +653,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void adjustMinimumBrightness() {
+        if (!capabilities.supportsScreenBrightness()) {
+            Log.i(TAG, "adjustMinimumBrightness: ignored (" + capabilities.platform() + " has no screen brightness control)");
+            return;
+        }
         this.brightnessManager.setShouldTheScreenBeOn(true);
         this.brightnessManager.adjustMinimumBrightness();
         WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
@@ -1400,7 +1414,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         device.addProperty("manufacturer", Build.MANUFACTURER);
         device.addProperty("model", Build.MODEL);
         device.addProperty("android", Build.VERSION.RELEASE);
+        device.addProperty("platform", capabilities.platform());
         o.add("device", device);
+
+        JsonObject caps = new JsonObject();
+        caps.addProperty("lightSensor", capabilities.supportsLightSensor());
+        caps.addProperty("screenBrightness", capabilities.supportsScreenBrightness());
+        caps.addProperty("brightnessButton", capabilities.supportsBrightnessButton());
+        caps.addProperty("powerButton", capabilities.supportsPowerButton());
+        caps.addProperty("screenToggleKeyCode", capabilities.screenToggleKeyCode());
+        o.add("capabilities", caps);
 
         JsonObject app = new JsonObject();
         app.addProperty("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE);
@@ -1501,12 +1524,33 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     /**
      * Mirrors a hardware key press from the web UI. Every action is posted to the UI thread
-     * because most of them touch views or start activities.
+     * because most of them touch views or start activities — except {@code keyevent}, which
+     * is injected from the calling web worker thread: {@code Instrumentation#sendKeyDownUpSync}
+     * blocks on the UI thread's looper and would deadlock if posted to that thread.
+     *
+     * <p>{@code keyevent} is a debug-build-only admin action: it injects arbitrary keycodes,
+     * so a release build refuses it (the web server also requires POST for it).
      */
     @Override
-    public boolean control(String action) {
+    public boolean control(String action, Map<String, String> params) {
         if (action == null) {
             return false;
+        }
+        if ("keyevent".equals(action)) {
+            if (!BuildConfig.DEBUG) {
+                return false;
+            }
+            String rawCode = params != null ? params.get("code") : null;
+            int keyCode;
+            try {
+                keyCode = Integer.parseInt(rawCode);
+            } catch (NumberFormatException e) {
+                return false;
+            }
+            if (keyCode < 0 || keyCode > 0xFFFF) {
+                return false;
+            }
+            return sendKeyCode(keyCode);
         }
         final Runnable task;
         switch (action) {
@@ -1588,6 +1632,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             });
         }
         return error;
+    }
+
+    /**
+     * Injects a key press into the activity (web-admin keycode probe; ADB is not
+     * available on the frame). Runs on the web server's worker thread —
+     * {@code sendKeyDownUpSync()} posts to the UI thread's looper and would deadlock
+     * if called from that thread itself.
+     */
+    @Override
+    public boolean sendKeyCode(int keyCode) {
+        try {
+            Log.i(TAG, "web keyevent: injecting keyCode=" + keyCode);
+            new Instrumentation().sendKeyDownUpSync(keyCode);
+            return true;
+        }
+        catch (Exception e) {
+            Log.e(TAG, "web keyevent: injection failed for keyCode=" + keyCode, e);
+            return false;
+        }
     }
 
     private void hideSystemUI() {
