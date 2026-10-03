@@ -9,6 +9,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.Spinner;
@@ -44,6 +45,7 @@ public class OptionsBasicFragment extends Fragment {
     private Spinner tzSpinner;
     private EditText updateUrlField;
     private EditText updateIntervalField;
+    private CheckBox trustedNetworkCheckBox;
     private String[] allTimeZoneIds;
 
     /** Working copy of the configured backends; persisted on save. */
@@ -79,6 +81,7 @@ public class OptionsBasicFragment extends Fragment {
         tzSpinner = view.findViewById(R.id.tzSpinner);
         updateUrlField = view.findViewById(R.id.editTextUpdateManifestUrl);
         updateIntervalField = view.findViewById(R.id.editTextUpdateCheckInterval);
+        trustedNetworkCheckBox = view.findViewById(R.id.trustedNetworkCheckBox);
 
         allTimeZoneIds = TimeZone.getAvailableIDs();
         ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, allTimeZoneIds);
@@ -104,6 +107,10 @@ public class OptionsBasicFragment extends Fragment {
                     tzSpinner.setSelection(tzIndex);
                 }
             }
+            // Not part of configuration.json: the toggle persists immediately (no Save button).
+            trustedNetworkCheckBox.setChecked(settingsManager.isTrustedNetwork());
+            trustedNetworkCheckBox.setOnCheckedChangeListener((buttonView, isChecked) ->
+                    settingsManager.setTrustedNetwork(isChecked));
         }
         renderBackendList();
         renderQuietWindows();

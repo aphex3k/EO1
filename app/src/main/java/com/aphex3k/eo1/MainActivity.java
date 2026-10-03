@@ -13,6 +13,7 @@ import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.drawable.Drawable;
@@ -1429,6 +1430,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         app.addProperty("debug", BuildConfig.DEBUG);
         app.addProperty("tsPlayer", preferTsPlayer);
         app.addProperty("webPort", webServer != null ? webServer.getBoundPort() : -1);
+        app.addProperty("trustedNetwork", settingsManager != null && settingsManager.isTrustedNetwork());
         o.add("app", app);
 
         o.add("config", ConfigStateJson.configStateJson(settingsManager.getConfiguration()));
@@ -1587,6 +1589,49 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         runOnUiThread(task);
         return true;
+    }
+
+    @Override
+    public boolean trustedNetwork() {
+        return settingsManager != null && settingsManager.isTrustedNetwork();
+    }
+
+    /**
+     * The trusted-network flag lives in the app's default SharedPreferences (not in
+     * {@code configuration.json}). The stripped compile-time android.jar lacks
+     * {@code Context.getDefaultSharedPreferences()}, so use the PreferenceManager entry point.
+     */
+    @Override
+    @SuppressWarnings("deprecation")
+    public SharedPreferences getDefaultSharedPreferences() {
+        return android.preference.PreferenceManager.getDefaultSharedPreferences(this);
+    }
+
+    @Override
+    public String exportConfigurationJson() {
+        return settingsManager != null ? settingsManager.exportConfigurationJson() : "{}";
+    }
+
+    /**
+     * Imports a full device configuration from the web UI. On success the time zone is
+     * re-applied and the core loop restarted, mirroring the on-device Save flow.
+     */
+    @Override
+    public String importConfigurationJson(String json) {
+        if (settingsManager == null) {
+            return "settings manager unavailable";
+        }
+        final String error = settingsManager.importConfiguration(json);
+        if (error == null) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    settingsManager.updateTimeZone(MainActivity.this);
+                    settingsChanged();
+                }
+            });
+        }
+        return error;
     }
 
     /**

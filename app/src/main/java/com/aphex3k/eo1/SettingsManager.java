@@ -2,6 +2,7 @@ package com.aphex3k.eo1;
 
 import android.app.AlarmManager;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Build;
 
 import androidx.annotation.Keep;
@@ -22,9 +23,47 @@ public class SettingsManager {
 
     private final WeakReference<SettingsManagerListener> listener;
     private static final String CONFIG_FILENAME = "configuration.json";
+    /**
+     * SharedPreferences key for the trusted-network flag. The flag is intentionally NOT part of
+     * {@code configuration.json} (never serialized, never read back from the file); it defaults
+     * to off on a fresh install.
+     */
+    private static final String PREF_TRUSTED_NETWORK = "trusted_network";
     private Configuration configuration = new Configuration();
     public Configuration getConfiguration() {
         return this.configuration;
+    }
+
+    /**
+     * Whether the device is on a trusted network (off by default). Gates the LAN web server's
+     * configuration endpoints (full config incl. credentials, backend manipulation, export,
+     * import). Persisted in the app's default SharedPreferences, not in {@code configuration.json}.
+     */
+    public boolean isTrustedNetwork() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return false;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            return prefs != null && prefs.getBoolean(PREF_TRUSTED_NETWORK, false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public void setTrustedNetwork(boolean trusted) {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs != null) {
+                prefs.edit().putBoolean(PREF_TRUSTED_NETWORK, trusted).apply();
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     protected SettingsManager (SettingsManagerListener listener) {
@@ -81,59 +120,128 @@ public class SettingsManager {
             // Keep the file readable by older APKs: mirror the first immich backend into the
             // legacy flat host/userid/password fields, and the quiet window into the legacy
             // start/end hour fields, before serializing.
-            mirrorLegacyHostFields();
-            Configuration.mirrorLegacyQuietHourFields(configuration);
+            synchronized (this) {
+                mirrorLegacyHostFields(configuration);
+                Configuration.mirrorLegacyQuietHourFields(configuration);
 
-            File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
+                File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 
-            Objects.requireNonNull(file.getParentFile()).mkdirs();
+                Objects.requireNonNull(file.getParentFile()).mkdirs();
 
-            Gson gson = new GsonBuilder()
-                    .setPrettyPrinting()
-                    .serializeNulls()
-                    .create();
+                String jsonString = prettyGson().toJson(configuration);
 
-            String jsonString = gson.toJson(configuration);
-
-            try {
-                if (file.exists() && !file.delete()) {
-                    settingsManagerListener.debugInformationProvided(new DebugInformation("Failed to delete outdated configuration file", file.getAbsolutePath()));
-                }
-                if (!file.createNewFile()) {
-                    throw new IOException("Failed to create file: "+ file.getAbsolutePath());
-                }
-                try (FileOutputStream fOut = new FileOutputStream(file)) {
-                    try (OutputStreamWriter myOutWriter = new OutputStreamWriter(fOut)) {
-                        myOutWriter.append(jsonString);
+                try {
+                    if (file.exists() && !file.delete()) {
+                        settingsManagerListener.debugInformationProvided(new DebugInformation("Failed to delete outdated configuration file", file.getAbsolutePath()));
                     }
-                    fOut.flush();
+                    if (!file.createNewFile()) {
+                        throw new IOException("Failed to create file: "+ file.getAbsolutePath());
+                    }
+                    try (FileOutputStream fOut = new FileOutputStream(file)) {
+                        try (OutputStreamWriter myOutWriter = new OutputStreamWriter(fOut)) {
+                            myOutWriter.append(jsonString);
+                        }
+                        fOut.flush();
+                    }
+                } catch (IOException e) {
+                    settingsManagerListener.handleException(e);
                 }
-            } catch (IOException e) {
-                settingsManagerListener.handleException(e);
             }
         }
+    }
+
+    /**
+     * Serializes the live configuration to JSON exactly as {@link #saveConfiguration()} writes
+     * it to disk (same legacy mirror fields, credentials included). Safe to call from a web
+     * worker thread.
+     */
+    public String exportConfigurationJson() {
+        try {
+            Configuration snapshot;
+            synchronized (this) {
+                snapshot = this.configuration != null
+                        ? cloneConfiguration(this.configuration)
+                        : new Configuration();
+            }
+            mirrorLegacyHostFields(snapshot);
+            Configuration.mirrorLegacyQuietHourFields(snapshot);
+            return prettyGson().toJson(snapshot);
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    /**
+     * Parses {@code json} as a full device configuration, normalizes it, and writes it to the
+     * device's configuration file; the live in-memory configuration is replaced. The caller is
+     * responsible for notifying listeners (and updating the time zone) on a {@code null} return.
+     *
+     * @return a human-readable error message, or {@code null} on success.
+     */
+    public String importConfiguration(String json) {
+        if (json == null || json.trim().isEmpty()) {
+            return "configuration is empty";
+        }
+        Configuration imported;
+        try {
+            imported = new Gson().fromJson(json, Configuration.class);
+        } catch (Exception e) {
+            return "not valid JSON: " + e.getMessage();
+        }
+        if (imported == null) {
+            return "configuration is empty";
+        }
+        try {
+            Configuration.normalize(imported);
+        } catch (Exception e) {
+            return "invalid configuration: " + e.getMessage();
+        }
+        if (imported.validBackendCount() == 0) {
+            return "configuration has no usable backend";
+        }
+        synchronized (this) {
+            this.configuration = imported;
+            try {
+                saveConfiguration();
+            } catch (IOException e) {
+                return "failed to write configuration: " + e.getMessage();
+            }
+        }
+        return null;
+    }
+
+    /** Gson round-trip so export/never mutates the live object a UI thread may be editing. */
+    private static Configuration cloneConfiguration(Configuration c) {
+        return new Gson().fromJson(new Gson().toJson(c), Configuration.class);
+    }
+
+    private static Gson prettyGson() {
+        return new GsonBuilder()
+                .setPrettyPrinting()
+                .serializeNulls()
+                .create();
     }
 
     /**
      * Keeps the deprecated flat {@code host/userid/password} fields in sync with the first
      * immich backend so older APK versions can still read the config file.
      */
-    private void mirrorLegacyHostFields() {
+    private static void mirrorLegacyHostFields(Configuration c) {
         ConfigurationBackendEntry first = null;
-        for (ConfigurationBackendEntry entry : configuration.backendsOrEmpty()) {
+        for (ConfigurationBackendEntry entry : c.backendsOrEmpty()) {
             if (entry.isImmich()) {
                 first = entry;
                 break;
             }
         }
         if (first == null) {
-            configuration.host = "";
-            configuration.userid = "";
-            configuration.password = "";
+            c.host = "";
+            c.userid = "";
+            c.password = "";
         } else {
-            configuration.host = first.host;
-            configuration.userid = first.userid;
-            configuration.password = first.password;
+            c.host = first.host;
+            c.userid = first.userid;
+            c.password = first.password;
         }
     }
 

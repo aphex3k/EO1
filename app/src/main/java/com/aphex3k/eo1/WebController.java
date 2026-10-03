@@ -56,6 +56,24 @@ public interface WebController {
     boolean control(String action, Map<String, String> params);
 
     /**
+     * Whether the device is on a trusted network (off by default, toggled in the on-device
+     * options dialog). Gates the configuration endpoints: full config incl. credentials,
+     * backend manipulation, export and import.
+     */
+    boolean trustedNetwork();
+
+    /** Serializes the live device configuration to JSON (credentials included). */
+    String exportConfigurationJson();
+
+    /**
+     * Applies {@code json} as the new device configuration (validated, normalized, written to
+     * the configuration file, live configuration replaced).
+     *
+     * @return a human-readable error message, or {@code null} on success.
+     */
+    String importConfigurationJson(String json);
+
+    /**
      * Injects a key press into the app (admin/debug: try keycodes on a device without ADB).
      * Not called from the UI thread.
      *
