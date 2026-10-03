@@ -23,6 +23,7 @@ buildscript {
                 force 'org.jdom:jdom2:2.0.6.1'
                 force 'commons-io:commons-io:2.14.0'
                 force 'org.apache.commons:commons-compress:1.26.0'
+                force 'org.apache.commons:commons-lang3:3.18.0'
                 force 'com.google.protobuf:protobuf-java:3.25.5'
                 force 'com.google.protobuf:protobuf-java-util:3.25.5'
             }
