@@ -109,6 +109,7 @@ flags, so unsupported features no-op instead of misfiring. The web server additi
 exposes `POST /control?action=keyevent&code=<n>` (index page "Send key" form, debug
 builds only) for injection of arbitrary keycodes — the substitute for ADB on the frame,
 which allows verifying candidates like `KEYCODE_POWER` (26) on the EO1 manually. It is
-deliberately POST-only and debug-build-only so a release build cannot be driven by a
-cross-origin GET from any web page (the rest of the server stays credential-free
-plain-HTTP on the trusted LAN).
+deliberately debug-build-only (a release build refuses it regardless of method) and
+POST-only (the method gate blocks the cross-origin `GET` drive-by, though POST-only is
+not CSRF protection on its own — see `docs/WEBSERVER.md`); the server stays
+credential-free plain-HTTP on the trusted LAN.

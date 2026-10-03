@@ -49,10 +49,15 @@ the server itself is unit-testable with a fake controller and never references t
 
 All actions are posted to the UI thread — except `keyevent`, which is injected directly on the
 web worker thread (`sendKeyDownUpSync` posts to the UI looper and would deadlock if posted
-to it). `keyevent` is a debug-build-only admin action that additionally requires POST, so it
-cannot be triggered by a cross-origin GET from any web page the user visits; the server
-itself remains credential-free plain HTTP by design (trusted LAN only), so this gating —
-not a credentials/CSRF layer — is its security boundary. `keyevent` on a release build or
+to it). `keyevent` is a debug-build-only admin action that additionally requires POST: a
+release build refuses it entirely, and the method gate blocks the cross-origin `GET`
+drive-by. POST-only is **not** CSRF protection by itself — `/control` reads its parameters
+from the URL query string, so a page the user visits could still auto-submit a plain `POST`
+form and reach the action on a debug build; real CSRF resistance would need additional
+checks (an `Origin`/`Referer` validation, a non-simple content type, or a per-session
+token). The server deliberately has none of those — it remains credential-free plain HTTP
+by design (trusted LAN only) — so the security boundary is the trusted-LAN assumption plus
+the debug-build gate, not hardening against hostile pages. `keyevent` on a release build or
 via GET, an unknown action, or a malformed `code` returns `{"ok":false,"fired":false}`.
 
 ## Uploads and rotation
