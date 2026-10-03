@@ -30,10 +30,10 @@ the server itself is unit-testable with a fake controller and never references t
 | `/files/<name>/delete` | DELETE / POST | Deletes an uploaded file |
 | `/upload` | POST | `multipart/form-data` upload, 512 MB cap per file, 2 GB cap per request, max 32 parts; stored in `filesDir/uploaded/` |
 | `/control?action=<a>[&code=<n>]` | GET / POST | Fires a hardware-key action (below); `keyevent` (debug builds only) additionally requires POST and reads the `code` param |
-| `/config` | GET | **Trusted network only.** Full device configuration JSON, credentials included |
-| `/config` | POST | **Trusted network only.** Applies the request body (≤ 512 KB JSON) as the new device configuration: parsed, normalized, written to `filesDir/configuration.json`, live config replaced, time zone re-applied, rotation restarted. `{"ok":false,"msg":...}` on validation failure (config unchanged) |
-| `/config/download` | GET | **Trusted network only.** Streams the configuration as a `configuration.json` attachment (same document as `POST /config` writes, legacy mirror fields included) |
-| `/config/import` | POST | **Trusted network only.** Same as `POST /config`; the web UI's file-picker import path |
+| `/config?token=<t>` | GET | **Trusted network + configuration token.** Full device configuration JSON, credentials included |
+| `/config?token=<t>` | POST | **Trusted network + configuration token + same origin.** Applies the request body (≤ 512 KB JSON) as the new device configuration: parsed, normalized, written to `filesDir/configuration.json`, live config replaced, time zone re-applied, rotation restarted. `{"ok":false,"msg":...}` on validation failure (config unchanged) |
+| `/config/download?token=<t>` | GET | **Trusted network + configuration token.** Streams the configuration as a `configuration.json` attachment (same document as `POST /config` writes, legacy mirror fields included) |
+| `/config/import?token=<t>` | POST | **Trusted network + configuration token + same origin.** Same as `POST /config`; the web UI's file-picker import path |
 | `/health` | GET | `ok` |
 
 `/control` actions mirror the hardware buttons (`EventManager`):
@@ -66,23 +66,48 @@ via GET, an unknown action, or a malformed `code` returns `{"ok":false,"fired":f
 
 ## Trusted network
 
-The configuration endpoints (`/config*`) are gated by a **trusted-network** flag that is
-**deliberately not part of `configuration.json`**: it lives in the app's default
-SharedPreferences under the key `trusted_network`, defaults to **off** on a fresh install, and
-is toggled by the *Trusted Network* checkbox in the on-device options dialog (Media tab) — the
-toggle persists immediately, it is not saved through the dialog's Save button.
+The configuration endpoints (`/config*`) sit behind two gates, on top of the trusted-LAN
+assumption:
 
-While off, all four config endpoints answer `403` and the index page shows a note instead of the
-configuration editor; while on, the index page renders the full editor (backends with credentials,
-add/remove, interval, time zone, quiet-hour cron rows, self-update, MQTT, Save) plus
-**Export configuration** (GET `/config/download`, a `configuration.json` attachment) and
-**Import configuration** (file picker → `POST /config/import`). A successful apply mirrors the
-on-device Save flow: configuration written + live config replaced, time zone re-applied, and the
-rotation core loop restarted.
+1. **Trusted-network flag** — **deliberately not part of `configuration.json`**: it lives in the
+   app's default SharedPreferences under the key `trusted_network`, defaults to **off** on a
+   fresh install, and is toggled by the *Trusted Network* checkbox in the on-device options
+   dialog (Media tab) — the toggle persists immediately, it is not saved through the dialog's
+   Save button.
+2. **Per-device configuration token** — a 32-hex-character secret generated with
+   `java.security.SecureRandom` on first use and persisted in the same SharedPreferences under
+   the key `trusted_network_token`. Every `/config*` request must send it as the `token` query
+   parameter; the server compares it in constant time (`MessageDigest.isEqual`) and fails closed
+   (403) when the token is missing, wrong, or unavailable. It is displayed in exactly one
+   place: the on-device options dialog, below the checkbox, while the flag is on. It is not
+   part of the configuration document or its export, of `/state`, or of the app logs (the
+   logs are themselves readable via `/log.json`).
 
-Because the LAN server is unsecured plain-HTTP by design, treat this flag as "someone on the LAN
-may read and change this device's configuration, including its Immich credentials" — keep it off
-on untrusted networks. The flag is reported in `/state` as `app.trustedNetwork`.
+**Same-origin (CSRF) check.** `POST /config` and `POST /config/import` additionally reject
+requests whose `Origin` header (falling back to `Referer`) does not match the request's
+`Host` header, so a cross-origin page can no longer drive-by-write the configuration. The
+expected port is taken from the `Host` header when it carries one, otherwise from the bound
+port; a URL port defaults to 80 when omitted; the host comparison is case-insensitive; and the
+check fails closed on any unparseable piece. Clients that send no provenance header at all
+(curl, scripts) pass this check — they remain fully token-gated.
+
+While the flag is off, all four config endpoints answer `403` and the index page shows a note
+instead of the configuration editor. While on, the index page shows a token input with a
+**Load** button; on a successful `GET /config?token=...` the editor (backends with
+credentials, add/remove, interval, time zone, quiet-hour cron rows, self-update, MQTT, Save)
+becomes visible, together with **Export configuration** (`GET /config/download?token=...`,
+a `configuration.json` attachment) and **Import configuration** (file picker →
+`POST /config/import?token=...`). The index page no longer embeds the configuration in its
+HTML — the editor stays hidden until the load with the token succeeds — and remembers the
+token in `localStorage` (`eo1.cfg.token`) so subsequent visits reload without re-entry.
+A successful apply mirrors the on-device Save flow: configuration written + live config
+replaced, time zone re-applied, and the rotation core loop restarted.
+
+Because the LAN server is unsecured plain-HTTP by design, the token moves the threat model
+from "anyone on the LAN" to "someone who can read the token off the device's screen": with
+the flag on, keep the frame out of reach of people who could watch the options dialog, and
+keep the flag off on untrusted networks entirely. The flag is reported in `/state` as
+`app.trustedNetwork`; the token is not.
 
 ## Uploads and rotation
 

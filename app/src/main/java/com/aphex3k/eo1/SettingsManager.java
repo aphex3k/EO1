@@ -29,6 +29,13 @@ public class SettingsManager {
      * to off on a fresh install.
      */
     private static final String PREF_TRUSTED_NETWORK = "trusted_network";
+    /**
+     * SharedPreferences key for the per-device configuration token protecting the web
+     * {@code /config*} endpoints. Like the flag, it is never written to
+     * {@code configuration.json} and never exported — it is shown on the on-device options
+     * dialog only while the trusted-network flag is on.
+     */
+    private static final String PREF_TRUSTED_NETWORK_TOKEN = "trusted_network_token";
     private Configuration configuration = new Configuration();
     public Configuration getConfiguration() {
         return this.configuration;
@@ -64,6 +71,44 @@ public class SettingsManager {
             }
         } catch (Exception ignored) {
         }
+    }
+
+    /**
+     * The per-device configuration token that the web {@code /config*} endpoints require in
+     * addition to the trusted-network flag. Generated once (128-bit {@code SecureRandom}, 32
+     * hex chars) and persisted in the default SharedPreferences; every call returns the same
+     * value. Never included in the configuration document or its export.
+     */
+    public synchronized String trustedNetworkToken() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return "";
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs == null) {
+                return "";
+            }
+            String token = prefs.getString(PREF_TRUSTED_NETWORK_TOKEN, "");
+            if (token.isEmpty()) {
+                token = generateToken();
+                prefs.edit().putString(PREF_TRUSTED_NETWORK_TOKEN, token).apply();
+            }
+            return token;
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    private static String generateToken() {
+        byte[] random = new byte[16];
+        new java.security.SecureRandom().nextBytes(random);
+        StringBuilder sb = new StringBuilder(32);
+        for (byte b : random) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
     }
 
     protected SettingsManager (SettingsManagerListener listener) {

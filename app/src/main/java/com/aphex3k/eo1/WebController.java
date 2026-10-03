@@ -62,6 +62,14 @@ public interface WebController {
      */
     boolean trustedNetwork();
 
+    /**
+     * The per-device configuration token that {@code /config*} requests must send (as the
+     * {@code token} query parameter) in addition to the trusted-network flag. Lazily generated
+     * and persisted; shown in the on-device options dialog while the flag is on. Never part of
+     * the configuration document.
+     */
+    String trustedNetworkToken();
+
     /** Serializes the live device configuration to JSON (credentials included). */
     String exportConfigurationJson();
 
