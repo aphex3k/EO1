@@ -111,6 +111,9 @@ dependencies {
     implementation 'com.squareup.retrofit2:retrofit:2.6.0'
     implementation 'com.squareup.retrofit2:converter-gson:2.6.0'
     implementation 'com.squareup.okhttp3:okhttp:3.12.13'
+    // OkHttp 3.x transitively pulls okio 1.15.0 (CVE-2023-3635); 1.17.6 is the last 1.x
+    // release and is API-compatible with both okhttp 3.x and this app's direct okio usage.
+    implementation 'com.squareup.okio:okio:1.17.6'
     // https://mvnrepository.com/artifact/com.google.guava/guava
     implementation 'com.google.guava:guava:32.1.2-jre'
     // https://howtodoinjava.com/retrofit2/logging-with-retrofit2/

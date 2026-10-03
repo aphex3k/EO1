@@ -1,4 +1,35 @@
 // Top-level build file where you can add configuration options common to all sub-projects/modules.
+buildscript {
+    configurations {
+        classpath {
+            // Build-toolchain CVE pins: these jars live only in the AGP classpath, none
+            // ships in the APK. Each is the oldest patched release in its major line.
+            // Re-evaluate when a newer AGP ships fixed versions on its own.
+            resolutionStrategy {
+                force 'io.netty:netty-buffer:4.1.137.Final'
+                force 'io.netty:netty-codec:4.1.137.Final'
+                force 'io.netty:netty-codec-http:4.1.137.Final'
+                force 'io.netty:netty-codec-http2:4.1.137.Final'
+                force 'io.netty:netty-codec-socks:4.1.137.Final'
+                force 'io.netty:netty-common:4.1.137.Final'
+                force 'io.netty:netty-handler:4.1.137.Final'
+                force 'io.netty:netty-handler-proxy:4.1.137.Final'
+                force 'io.netty:netty-resolver:4.1.137.Final'
+                force 'io.netty:netty-transport:4.1.137.Final'
+                force 'io.netty:netty-transport-native-unix-common:4.1.137.Final'
+                force 'org.bouncycastle:bcprov-jdk18on:1.85'
+                force 'org.bouncycastle:bcpkix-jdk18on:1.85'
+                force 'org.bitbucket.b_c:jose4j:0.9.6'
+                force 'org.jdom:jdom2:2.0.6.1'
+                force 'commons-io:commons-io:2.14.0'
+                force 'org.apache.commons:commons-compress:1.26.0'
+                force 'com.google.protobuf:protobuf-java:3.25.5'
+                force 'com.google.protobuf:protobuf-java-util:3.25.5'
+            }
+        }
+    }
+}
+
 plugins {
     id 'com.android.application' version '8.7.3' apply false
     id 'com.android.library' version '8.7.3' apply false
