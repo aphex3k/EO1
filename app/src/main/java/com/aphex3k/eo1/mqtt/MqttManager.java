@@ -18,7 +18,6 @@ import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
-import org.eclipse.paho.client.mqttv3.MqttPingSender;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 
 import java.util.Objects;
@@ -27,8 +26,11 @@ import java.util.Arrays;
 /// https://www.hivemq.com/blog/mqtt-client-library-encyclopedia-eclipse-paho-java/
 public class MqttManager {
 
-    /** No-op logger to prevent Paho from using java.util.logging on API 19. */
-    private static class NoOpLogger implements org.eclipse.paho.client.mqttv3.logging.Logger {
+    // No-op logger to keep Paho off java.util.logging on API 19. Must stay
+    // public: Paho's LoggerFactory instantiates the setLogger() class from its
+    // own package via Class.forName(name).newInstance(); a non-public class
+    // surfaces as MissingResourceException("Error locating the logging class").
+    public static class NoOpLogger implements org.eclipse.paho.client.mqttv3.logging.Logger {
         @Override
         public void initialise(java.util.ResourceBundle bundle, String s, String s1) { }
         @Override
