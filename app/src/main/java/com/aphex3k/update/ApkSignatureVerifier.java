@@ -9,6 +9,7 @@ import java.security.GeneralSecurityException;
 import java.security.NoSuchAlgorithmException;
 import java.security.PublicKey;
 import java.security.Signature;
+import java.nio.charset.Charset;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
@@ -52,6 +53,7 @@ import java.util.zip.ZipFile;
 public final class ApkSignatureVerifier {
 
     private static final int BUFFER = 32 * 1024;
+    private static final Charset UTF_8 = Charset.forName("UTF-8");
 
     private static final String OID_SIGNED_DATA = "1.2.840.113549.1.7.2";
     private static final String OID_ATTR_MESSAGE_DIGEST = "1.2.840.113549.1.9.4";
@@ -171,8 +173,10 @@ public final class ApkSignatureVerifier {
 
     /**
      * Steps 1–3: digest integrity of the manifest entries (against the zip content),
-     * the manifest file itself, and the signature-file entries (against the canonical
-     * MANIFEST.MF sections — that is what the JAR signature format digests).
+     * the manifest file itself, and the signature-file entries (against the matching
+     * MANIFEST.MF section bytes as stored in the file — that is what jarsigner and
+     * apksigner actually sign: the raw section bytes with JAR line wrapping preserved,
+     * not a re-normalized unwrapped form).
      *
      * @return null when everything matches, otherwise the first failure reason.
      */
@@ -184,7 +188,7 @@ public final class ApkSignatureVerifier {
             return "signature-does-not-verify";
         }
 
-        // Whole-manifest digest from the .SF main section, over the canonicalized manifest.
+        // Whole-manifest digest from the .SF main section, over the raw manifest bytes.
         Section sfMain = sfSections.get(0);
         String manifestDigestKey = null;
         for (String key : sfMain.attrs.keySet()) {
@@ -202,7 +206,7 @@ public final class ApkSignatureVerifier {
         if (manifestAlg == null || manifestExpected == null) {
             return "signature-does-not-verify";
         }
-        if (!constantTimeEquals(digestOf(canonicalize(manifestRaw), manifestAlg), manifestExpected)) {
+        if (!constantTimeEquals(digestOf(manifestRaw, manifestAlg), manifestExpected)) {
             return "manifest-digest-mismatch";
         }
 
@@ -223,15 +227,19 @@ public final class ApkSignatureVerifier {
             }
         }
 
-        // Per-entry digests declared in the .SF cover the canonical form of the matching
-        // MANIFEST.MF section (each line CRLF-terminated, plus a trailing CRLF) — NOT the
-        // zip entry content. This is the chain that catches a tampered manifest.
+        // Per-entry digests declared in the .SF cover the matching MANIFEST.MF section
+        // exactly as stored in the file (wrapping preserved, original line endings, plus
+        // the section's terminating blank line) — NOT the zip entry content. This is the
+        // chain that catches a tampered manifest. Signers digest the raw section bytes
+        // they wrote, so re-serializing the parsed attributes would mismatch whenever a
+        // line was wrapped on disk (entry names over ~66 chars wrap at 72 columns).
+        Map<String, RawSection> rawSections = rawSectionRanges(manifestRaw);
         for (Section section : sfSections) {
             if (section.name == null) {
                 continue;
             }
-            Section manifestSection = findManifestSection(manifestSections, section.name);
-            if (manifestSection == null) {
+            RawSection raw = rawSections.get(section.name);
+            if (raw == null) {
                 return "entry-digest-mismatch:" + section.name;
             }
             for (Map.Entry<String, String> attr : section.attrs.entrySet()) {
@@ -242,7 +250,7 @@ public final class ApkSignatureVerifier {
                 String alg = jcaDigest(key.substring(0, key.length() - "-Digest".length()));
                 byte[] expected = base64Decode(attr.getValue());
                 byte[] actual = alg != null
-                        ? digestOf(canonicalSectionBytes(manifestSection), alg)
+                        ? digestOf(slice(manifestRaw, raw.start, raw.end), alg)
                         : null;
                 if (expected == null || !constantTimeEquals(actual, expected)) {
                     return "entry-digest-mismatch:" + section.name;
@@ -290,38 +298,108 @@ public final class ApkSignatureVerifier {
         return declared != null ? jcaDigest(declared) : null;
     }
 
-    private static Section findManifestSection(List<Section> manifestSections, String name) {
-        for (Section section : manifestSections) {
-            if (name.equals(section.name)) {
-                return section;
-            }
+    /**
+     * Byte range of one MANIFEST.MF section as stored in the file: from the start of its
+     * {@code Name:} line to the end of the blank line that terminates the section (inclusive).
+     * JAR signers compute the {@code .SF} per-entry digest over exactly these raw bytes —
+     * with line wrapping preserved — so the range must not be re-serialized.
+     */
+    private static final class RawSection {
+        final int start;
+        final int end;
+
+        RawSection(int start, int end) {
+            this.start = start;
+            this.end = end;
         }
-        return null;
     }
 
     /**
-     * Canonical bytes of a manifest entry section: each logical line CRLF-terminated,
-     * followed by one trailing CRLF — the exact form the JAR signature digests. Line
-     * wrapping in the on-disk manifest is a formatting detail and is normalized away.
+     * Maps each manifest entry's unwrapped name to the raw byte range of its section.
+     * Names are unwrapped by reassembling leading-space continuation lines, so long entry
+     * names that the jar tool wrapped at 72 columns still resolve to their full name.
      */
-    private static byte[] canonicalSectionBytes(Section section) {
-        StringBuilder sb = new StringBuilder(256);
-        sb.append("Name: ").append(section.name).append("\r\n");
-        for (Map.Entry<String, String> attr : section.attrs.entrySet()) {
-            if ("Name".equals(attr.getKey())) {
-                continue;
+    private static Map<String, RawSection> rawSectionRanges(byte[] raw) {
+        Map<String, RawSection> out = new LinkedHashMap<String, RawSection>();
+        int n = raw.length;
+        int i = 0;
+        int sectionStart = -1;
+        StringBuilder name = null;
+        boolean lastKeyWasName = false;
+        while (i < n) {
+            int nl = i;
+            while (nl < n && raw[nl] != '\n') {
+                nl++;
             }
-            sb.append(attr.getKey()).append(": ").append(attr.getValue()).append("\r\n");
+            int bodyEnd = nl; // exclusive; the '\n' is not part of the body
+            if (bodyEnd > i && raw[bodyEnd - 1] == '\r') {
+                bodyEnd--; // strip one trailing CR for parsing only
+            }
+            boolean blank = bodyEnd == i;
+            int lineEnd = nl < n ? nl + 1 : n; // section range includes the terminator
+            if (!blank && raw[i] == ' ') {
+                // Continuation of the previous line: it extends the section's raw bytes
+                // and, if the wrapped line was a Name: line, the entry name.
+                if (name != null && lastKeyWasName) {
+                    name.append(new String(raw, i + 1, bodyEnd - i - 1, UTF_8));
+                }
+            } else {
+                if (blank) {
+                    // The terminating blank line belongs to the section.
+                    if (sectionStart >= 0 && name != null) {
+                        out.put(name.toString(), new RawSection(sectionStart, lineEnd));
+                    }
+                    sectionStart = -1;
+                    name = null;
+                } else {
+                    int colon = i;
+                    while (colon < bodyEnd && raw[colon] != ':') {
+                        colon++;
+                    }
+                    if (colon > i && colon - i == 4
+                            && raw[i] == 'N' && raw[i + 1] == 'a'
+                            && raw[i + 2] == 'm' && raw[i + 3] == 'e') {
+                        if (sectionStart >= 0 && name != null) {
+                            // No blank line between sections (malformed): close at this line.
+                            out.put(name.toString(), new RawSection(sectionStart, i));
+                        }
+                        sectionStart = i;
+                        name = new StringBuilder();
+                        int valueStart = colon + 1;
+                        if (valueStart < bodyEnd && raw[valueStart] == ' ') {
+                            valueStart++;
+                        }
+                        name.append(new String(raw, valueStart, bodyEnd - valueStart, UTF_8));
+                        lastKeyWasName = true;
+                    } else {
+                        lastKeyWasName = false;
+                    }
+                }
+            }
+            i = lineEnd;
         }
-        sb.append("\r\n");
-        return sb.toString().getBytes(java.nio.charset.Charset.forName("US-ASCII"));
+        if (sectionStart >= 0 && name != null) {
+            // Final section without a terminating blank line.
+            out.put(name.toString(), new RawSection(sectionStart, n));
+        }
+        return out;
     }
 
     /**
-     * Steps 4–5: verify the PKCS#7 signature (the {@code messageDigest} attribute covers
-     * the raw signature-file bytes) and extract the embedded signer certificates.
+     * Steps 4–5: verify the PKCS#7 signature and extract the embedded signer
+     * certificates. Two SignerInfo shapes are accepted:
+     *
+     * <ul>
+     *   <li>With signed attributes (JDK jarsigner shape): the canonicalized attribute
+     *       TLVs are signed, and the {@code messageDigest} attribute is cross-checked
+     *       against the raw signature-file bytes.</li>
+     *   <li>Attribute-less (apksigner/AGP v1 shape): the signature covers the raw
+     *       signature-file bytes directly, under the effective algorithm formed from
+     *       {@code digestAlgorithm} + {@code signatureAlgorithm} (bare
+     *       {@code rsaEncryption} + sha256 → {@code SHA256withRSA}).</li>
+     * </ul>
      */
-    private static Pkcs7 verifyPkcs7(byte[] blob, byte[] canonicalSignedFile) {
+    private static Pkcs7 verifyPkcs7(byte[] blob, byte[] sfRaw) {
         Pkcs7 out = new Pkcs7();
         out.certificates = new X509Certificate[0];
         try {
@@ -370,34 +448,47 @@ public final class ApkSignatureVerifier {
                 out.failure = "signature-does-not-verify";
                 return out;
             }
-            int[] signedAttrs = si.tlv();
-            int signedAttrsStart = si.fullStart();
-            if ((blob[signedAttrsStart] & 0xFF) != 0xA0) {
-                out.failure = "signature-does-not-verify";
-                return out;
+            // The next element is either the [0] SignedAttributes wrapper or the
+            // signatureAlgorithm directly (an attribute-less SignerInfo).
+            int[] next = si.tlv();
+            int nextTag = blob[si.fullStart()] & 0xFF;
+            byte[] signedTarget;
+            int[] signatureAlg;
+            if (nextTag == 0xA0) {
+                byte[] signedAttrsRaw = slice(blob, si.fullStart(), next[1]);
+                // The JDK signer (sun.security.pkcs.PKCS9Attributes.getDerEncoding) signs the
+                // attribute TLVs as a DER SET OF (tag 0x31, byte-sorted) — not the [0] wrapper
+                // bytes stored in the file. Re-encode before verifying.
+                signedTarget = canonicalSignedAttributes(signedAttrsRaw);
+                if (signedTarget == null) {
+                    out.failure = "signature-does-not-verify";
+                    return out;
+                }
+                signatureAlg = si.tlv();
+                // Cross-check: the messageDigest attribute must cover the raw .SF bytes as
+                // stored in the zip (jarsigner digests the bytes it writes, not a
+                // re-normalized form).
+                byte[] messageDigest = extractMessageDigest(signedAttrsRaw);
+                if (messageDigest == null
+                        || !constantTimeEquals(messageDigest, digestOf(sfRaw, digestName))) {
+                    out.failure = "signature-does-not-verify";
+                    return out;
+                }
+            } else {
+                // Attribute-less SignerInfo (the shape apksigner/AGP v1 signing writes):
+                // the signature covers the raw .SF bytes directly, with the effective
+                // algorithm formed from digestAlgorithm + signatureAlgorithm
+                // (e.g. sha256 + rsaEncryption → SHA256withRSA).
+                signedTarget = sfRaw;
+                signatureAlg = next;
             }
-            byte[] signedAttrsRaw = slice(blob, signedAttrsStart, signedAttrs[1]);
-            // The JDK signer (sun.security.pkcs.PKCS9Attributes.getDerEncoding) signs the
-            // attribute TLVs as a DER SET OF (tag 0x31, byte-sorted) — not the [0] wrapper
-            // bytes stored in the file. Re-encode before verifying.
-            byte[] signedTarget = canonicalSignedAttributes(signedAttrsRaw);
-            if (signedTarget == null) {
-                out.failure = "signature-does-not-verify";
-                return out;
-            }
-            int[] signatureAlg = si.tlv();
             String signatureAlgorithm = sigAlgForOid(decodeOid(slice(blob, firstElement(blob, signatureAlg))));
+            if ("rsaEncryption".equals(signatureAlgorithm)) {
+                signatureAlgorithm = rsaWithDigest(digestName);
+            }
             int[] signatureValue = si.tlv();
             int signatureValueTag = blob[si.fullStart()] & 0xFF;
             if (signatureValueTag != 0x04 && signatureValueTag != 0x03) {
-                out.failure = "signature-does-not-verify";
-                return out;
-            }
-            // Cross-check: the messageDigest attribute must cover the raw .SF bytes as stored
-            // in the zip (jarsigner digests the bytes it writes, not a re-normalized form).
-            byte[] messageDigest = extractMessageDigest(signedAttrsRaw);
-            if (messageDigest == null
-                    || !constantTimeEquals(messageDigest, digestOf(canonicalSignedFile, digestName))) {
                 out.failure = "signature-does-not-verify";
                 return out;
             }
@@ -665,15 +756,6 @@ public final class ApkSignatureVerifier {
         }
     }
 
-    /** JAR canonical form: every line terminated by CRLF. */
-    private static byte[] canonicalize(byte[] raw) {
-        StringBuilder sb = new StringBuilder(raw.length + 64);
-        for (String line : lines(raw)) {
-            sb.append(line).append('\r').append('\n');
-        }
-        return sb.toString().getBytes(java.nio.charset.Charset.forName("US-ASCII"));
-    }
-
     /** Splits on {@code \n}, stripping one trailing {@code \r} per line. */
     private static List<String> lines(byte[] raw) {
         List<String> out = new ArrayList<String>();
@@ -697,7 +779,9 @@ public final class ApkSignatureVerifier {
     }
 
     private static final class Section {
-        final String name;
+        /** Non-final: JAR line wrapping splits the {@code Name:} line and the
+         *  continuation fragments are appended during parsing. */
+        String name;
         final Map<String, String> attrs = new LinkedHashMap<String, String>();
 
         Section(String name) {
@@ -725,7 +809,14 @@ public final class ApkSignatureVerifier {
             }
             if (line.charAt(0) == ' ') {
                 if (lastKey != null) {
-                    current.attrs.put(lastKey, current.attrs.get(lastKey) + line.substring(1));
+                    String continued = current.attrs.get(lastKey) + line.substring(1);
+                    current.attrs.put(lastKey, continued);
+                    if ("Name".equals(lastKey)) {
+                        // Wrapped "Name:" line: Section.name only holds the first fragment;
+                        // carry the continuation into the name so entry lookups use the
+                        // full unwrapped name.
+                        current.name = continued;
+                    }
                 }
                 continue;
             }
@@ -801,6 +892,10 @@ public final class ApkSignatureVerifier {
 
     private static String sigAlgForOid(String oid) {
         switch (oid) {
+            case "1.2.840.113549.1.1.1":
+                // Plain RSA (no digest in the OID): combined with the SignerInfo's
+                // digestAlgorithm by {@link #rsaWithDigest}.
+                return "rsaEncryption";
             case "1.2.840.113549.1.1.4":
                 return "MD5withRSA";
             case "1.2.840.113549.1.1.5":
@@ -823,6 +918,29 @@ public final class ApkSignatureVerifier {
                 return "ecdsa-with-SHA384";
             case "1.2.840.10045.4.3.4":
                 return "ecdsa-with-SHA512";
+            default:
+                return null;
+        }
+    }
+
+    /**
+     * JCA signature algorithm for the bare {@code rsaEncryption} OID combined with the
+     * SignerInfo's {@code digestAlgorithm} (e.g. SHA-256 → {@code SHA256withRSA}).
+     */
+    private static String rsaWithDigest(String digestName) {
+        switch (digestName) {
+            case "SHA-256":
+                return "SHA256withRSA";
+            case "SHA-384":
+                return "SHA384withRSA";
+            case "SHA-512":
+                return "SHA512withRSA";
+            case "SHA-224":
+                return "SHA224withRSA";
+            case "SHA-1":
+                return "SHA1withRSA";
+            case "MD5":
+                return "MD5withRSA";
             default:
                 return null;
         }

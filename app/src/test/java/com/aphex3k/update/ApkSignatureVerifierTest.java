@@ -27,6 +27,10 @@ public class ApkSignatureVerifierTest {
 
     private static final String FIXTURES = "src/test/resources/update-fixtures";
 
+    /** 86-char entry name: its `Name:` line wraps at 72 columns in MANIFEST.MF. */
+    private static final String LONG_ENTRY =
+            "META-INF/androidx.lifecycle_lifecycle-viewmodel-savedstate-aphex3k-regression-check.module.json";
+
     @Rule
     public TemporaryFolder folder = new TemporaryFolder();
 
@@ -132,23 +136,57 @@ public class ApkSignatureVerifierTest {
     @Test
     public void tamperedEntry_failsEntryDigest() throws Exception {
         File tampered = new File(folder.getRoot(), "tampered.zip");
-        rewriteWithTamperedHello(fixture("signed-sha256.zip"), tampered);
+        rewriteEntry(fixture("signed-sha256.zip"), tampered, "hello.txt",
+                "Hello EO1 fixture - doctored\n".getBytes("UTF-8"));
 
         ApkSignatureVerifier.Result r = ApkSignatureVerifier.verify(tampered);
         assertFalse(r.valid);
         assertEquals("entry-digest-mismatch:hello.txt", r.reason);
     }
 
-    /** Copies the zip, replacing {@code hello.txt} with different content (signature untouched). */
-    private static void rewriteWithTamperedHello(File source, File destination) throws Exception {
-        byte[] replacement = "Hello EO1 fixture - doctored\n".getBytes("UTF-8");
+    @Test
+    public void wrappedEntryName_isValid() {
+        ApkSignatureVerifier.Result r = ApkSignatureVerifier.verify(fixture("signed-wrapped-name.zip"));
+        assertTrue(r.valid);
+        assertEquals("", r.reason);
+        assertEquals(1, r.signerCertificates.length);
+        assertTrue(r.signerCertificates[0].getSubjectX500Principal().getName()
+                .contains("EO1 Fixture C"));
+    }
+
+    @Test
+    public void wrappedEntryName_matchesExpectedSigner() throws Exception {
+        X509Certificate certC = loadCert("cert-c.pem");
+        ApkSignatureVerifier.Result r = ApkSignatureVerifier.verify(fixture("signed-wrapped-name.zip"), certC);
+        assertTrue(r.valid);
+        assertEquals(1, r.signerCertificates.length);
+    }
+
+    @Test
+    public void tamperedWrappedEntry_failsEntryDigest() throws Exception {
+        File tampered = new File(folder.getRoot(), "tampered-wrapped.zip");
+        rewriteEntry(fixture("signed-wrapped-name.zip"), tampered, LONG_ENTRY,
+                "Wrapped-name fixture payload - doctored\n".getBytes("UTF-8"));
+
+        ApkSignatureVerifier.Result r = ApkSignatureVerifier.verify(tampered);
+        assertFalse(r.valid);
+        assertEquals("entry-digest-mismatch:" + LONG_ENTRY, r.reason);
+    }
+
+    /**
+     * Copies the zip, replacing the content of one entry (signature untouched). The
+     * wrapped-name fixture exercises this through an entry whose name was line-wrapped in
+     * MANIFEST.MF — lookup must use the fully unwrapped name.
+     */
+    private static void rewriteEntry(File source, File destination, String entryName,
+            byte[] replacement) throws Exception {
         ZipOutputStream out = new ZipOutputStream(new java.io.FileOutputStream(destination));
         try {
             ZipInputStream in = new ZipInputStream(new FileInputStream(source));
             ZipEntry entry;
             while ((entry = in.getNextEntry()) != null) {
                 out.putNextEntry(new ZipEntry(entry.getName()));
-                if ("hello.txt".equals(entry.getName())) {
+                if (entryName.equals(entry.getName())) {
                     out.write(replacement);
                 } else {
                     byte[] buffer = new byte[32 * 1024];
