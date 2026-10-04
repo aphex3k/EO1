@@ -33,3 +33,9 @@
 # Call<T> signature.
 -keep class retrofit2.Call { *; }
 
+# Paho's LoggerFactory instantiates the class passed to MqttManager's
+# LoggerFactory.setLogger() via Class.forName(name).newInstance(); without
+# this, R8 strips NoOpLogger's implicit public constructor and the release
+# build fails with MissingResourceException("Error locating the logging class").
+-keep class com.aphex3k.eo1.mqtt.MqttManager$NoOpLogger { public <init>(); }
+
