@@ -17,6 +17,9 @@ public interface WebController {
     /** The device's LAN IP address (dotted-quad) for display in the UI. */
     String localIp();
 
+    /** The hardware platform label ({@code "EO1"} or {@code "EO2"}) for display in the UI. */
+    String platform();
+
     /** Builds the full {@code /state} JSON document. */
     String buildStateJson();
 
