@@ -26,16 +26,25 @@ import com.example.tsplayer.TsPlayerNative;
  * createPlayer) happens only on asset handoff, {@link #stop()}, or surface destruction.
  * See docs/TSPLAYER.md ("Looping (native)").
  * <p>
- * Do NOT reintroduce a per-duration deletePlayer/createPlayer loop: each {@code createPlayer()}
- * costs ~200ms and clears the Amlogic plane → a visible black flash every cycle, and it fights
- * the native loop. Alternatives that also fail: start()-alone at EOS EBUSYs on
- * {@code /dev/amstream_vbuf}; create-without-delete wedges after ~12 gens.
+ * One-shot boundary reset: the native loop can wedge silently (the .so's getStatus() and
+ * getCurrentTime() are hardcoded stubs, so Java cannot observe a stalled playback thread),
+ * leaving a black screen until the next rotation asset. As a backstop, ~{@link #BOUNDARY_MARGIN_MS}
+ * after the first pass ends, the player is recreated <b>once</b> on the same file — the same
+ * teardown + recreate sequence used for asset handoff. It fires at most once per asset; it is
+ * not the rejected per-duration loop. See docs/TSPLAYER.md ("One-shot boundary reset").
+ * <p>
+ * Do NOT reintroduce a per-duration (per-pass) deletePlayer/createPlayer loop: each
+ * {@code createPlayer()} costs ~200ms and clears the Amlogic plane → a visible black flash every
+ * cycle, and it fights the native loop. Alternatives that also fail: start()-alone at EOS EBUSYs
+ * on {@code /dev/amstream_vbuf}; create-without-delete wedges after ~12 gens.
  */
 public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
 
     private static final String TAG = "TsVideoView";
     private static final long PROGRESS_POLL_MS = 1000L;
     private static final long SURFACE_TIMEOUT_MS = 3000L;
+    /** Margin after the first pass ends before the one-shot boundary reset fires. */
+    private static final long BOUNDARY_MARGIN_MS = 2000L;
 
     private static final long SURFACE_FALLBACK_MS = 500L;
 
@@ -54,6 +63,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     private Runnable surfaceTimeoutRunnable;
     private Runnable surfaceFallbackRunnable;
     private Runnable restartRunnable;
+    private Runnable boundaryResetRunnable;
 
     private int durationMs;
     /** Known duration (ms) supplied by the caller (Immich metadata); -1 if unknown. */
@@ -67,6 +77,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     // Updated on the UI thread. Counters persist in all builds; latencies are recorded for
     // DEBUG (logcat + /state "video" object). -1 means "not measured yet".
     private int videoErrorCount;
+    private int boundaryResets;                 // one-shot end-of-first-pass resets performed
     private int lastRestartLatencyMs = -1;      // rewind trigger -> restart done
     private int lastCreatePlayerMs = -1;        // native createPlayer() cost
     private int lastSetSurfaceMs = -1;          // native setSurface() cost
@@ -75,7 +86,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     private int lastEndToPlayingMs = -1;        // rewind trigger -> next pass playing (headline)
     private int lastLoopCycleMs = -1;           // previous pass start -> this one
     private int lastPosAtTriggerMs = -1;        // position read when the loop timer fired
-    private String lastRestartMethod;           // "native-loop" (no Java restart) | "seek-restart"
+    private String lastRestartMethod;           // "native-loop" | "seek-restart" | "boundary-reset"
     private long lastPassStartUptime;           // SystemClock.uptimeMillis at last (re)start
 
     public TsVideoView(Context context) {
@@ -131,6 +142,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         this.looping = looping;
         if (!looping) {
             cancelProgressPoll();
+            cancelBoundaryReset();
         }
     }
 
@@ -159,6 +171,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         cancelSurfaceTimeout();
         cancelSurfaceFallback();
         cancelRestart();
+        cancelBoundaryReset();
         tearDownPlayer();
         pendingPath = null;
         activePath = null;
@@ -199,6 +212,10 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
 
     public int getVideoErrorCount() {
         return videoErrorCount;
+    }
+
+    public int getBoundaryResets() {
+        return boundaryResets;
     }
 
     public boolean isPlayerCreated() {
@@ -279,22 +296,23 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     public void surfaceDestroyed(SurfaceHolder holder) {
         surfaceReady = false;
         Log.i("EO1", "TsPlayer surfaceDestroyed awaiting=" + awaitingSurfaceForStart);
+        cancelBoundaryReset();
         if (!awaitingSurfaceForStart && !recreatingForLoop) {
             cancelProgressPoll();
             tearDownPlayer();
         }
     }
 
-    private void startOrRestartPlayer() {
+    private boolean startOrRestartPlayer() {
         if (released || !TsPlayerNative.isAvailable()) {
             if (!TsPlayerNative.isAvailable()) {
                 notifyError();
             }
-            return;
+            return false;
         }
         String path = pendingPath != null ? pendingPath : activePath;
         if (path == null || path.isEmpty()) {
-            return;
+            return false;
         }
 
         Surface surface = getHolder().getSurface();
@@ -302,11 +320,12 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
             Log.w("EO1", "TsPlayer start deferred — surface not ready");
             awaitingSurfaceForStart = true;
             scheduleSurfaceTimeout();
-            return;
+            return false;
         }
 
         cancelSurfaceTimeout();
         cancelProgressPoll();
+        cancelBoundaryReset();
         // Ensure no previous native instance (idempotent if already torn down).
         tearDownPlayer();
 
@@ -330,7 +349,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
             if (!TsPlayerNative.createPlayer(path)) {
                 Log.e("EO1", "TsPlayer createPlayer failed");
                 notifyError();
-                return;
+                return false;
             }
             lastCreatePlayerMs = (int) (SystemClock.uptimeMillis() - tCreate);
             playerCreated = true;
@@ -344,7 +363,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
                     Log.e("EO1", "TsPlayer start failed");
                     tearDownPlayer();
                     notifyError();
-                    return;
+                    return false;
                 }
                 lastStartMs = (int) (SystemClock.uptimeMillis() - tStart);
                 recreatingForLoop = false;
@@ -355,11 +374,53 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
                 scheduleProgressPoll();
                 lastRestartMethod = "native-loop";
                 lastPassStartUptime = SystemClock.uptimeMillis();
+                scheduleBoundaryReset(path);
             }
         } catch (Throwable t) {
             Log.e(TAG, "startOrRestartPlayer failed", t);
             tearDownPlayer();
             notifyError();
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * One-shot backstop for the native loop: {@link #BOUNDARY_MARGIN_MS} after the first pass
+     * ends, recreate the player on the same file. The .so's playback thread can die or wedge
+     * with no observable signal to Java (getStatus()/getCurrentTime() are stubs), which leaves a
+     * black screen until the next rotation asset. The recreate is the same teardown + create
+     * sequence used for asset handoff; it fires at most once per asset, so the native loop stays
+     * in charge between passes (unlike the rejected per-duration loop).
+     */
+    private void scheduleBoundaryReset(String path) {
+        cancelBoundaryReset();
+        if (released || !looping || durationMs <= 0) {
+            return;
+        }
+        final long delayMs = durationMs + BOUNDARY_MARGIN_MS;
+        boundaryResetRunnable = () -> {
+            boundaryResetRunnable = null;
+            if (released || !looping || !playWhenReady || !playerCreated || !surfaceReady) {
+                return;
+            }
+            if (!path.equals(activePath)) {
+                return;
+            }
+            Log.i("EO1", "TsPlayer boundary reset — one-shot recreate after first pass"
+                    + " path=" + path + " delayMs=" + delayMs);
+            if (startOrRestartPlayer()) {
+                boundaryResets++;
+                lastRestartMethod = "boundary-reset";
+            }
+        };
+        handler.postDelayed(boundaryResetRunnable, delayMs);
+    }
+
+    private void cancelBoundaryReset() {
+        if (boundaryResetRunnable != null) {
+            handler.removeCallbacks(boundaryResetRunnable);
+            boundaryResetRunnable = null;
         }
     }
 
@@ -538,6 +599,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         cancelSurfaceTimeout();
         cancelSurfaceFallback();
         cancelRestart();
+        cancelBoundaryReset();
         videoErrorCount++;
         awaitingSurfaceForStart = false;
         recreatingForLoop = false;
