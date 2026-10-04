@@ -11,6 +11,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.io.Writer;
 import java.nio.charset.Charset;
 import java.text.SimpleDateFormat;
@@ -90,6 +92,21 @@ public final class AppLogger {
      */
     public synchronized void error(String tag, String msg) {
         append("E", tag, msg);
+    }
+
+    /**
+     * Records an ERROR event with the throwable's stack trace appended, so the /logs
+     * ring buffer and rolling file capture where the failure occurred (a bare
+     * {@code Throwable} toString is just the class name).
+     */
+    public synchronized void error(String tag, String msg, Throwable t) {
+        append("E", tag, t != null ? msg + " " + stackTraceToString(t) : msg);
+    }
+
+    private static String stackTraceToString(Throwable t) {
+        StringWriter sw = new StringWriter();
+        t.printStackTrace(new PrintWriter(sw));
+        return sw.toString().trim();
     }
 
     private void append(String level, String tag, String msg) {
