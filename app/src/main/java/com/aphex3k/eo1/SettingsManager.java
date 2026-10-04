@@ -133,7 +133,10 @@ public class SettingsManager {
                         // In-memory config is already usable; the on-disk rewrite is best effort.
                     }
                 }
-                this.configuration = loaded;
+                // An empty or corrupt file makes Gson return null; fall back to a blank config
+                // instead of null so getConfiguration() never hands out null (an empty backend
+                // list still routes startup into the setup dialog via validBackendCount()).
+                this.configuration = loaded != null ? loaded : new Configuration();
 
                 return true;
             } catch (Exception e) {

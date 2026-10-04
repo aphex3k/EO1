@@ -848,7 +848,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         Log.e(TAG, e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : ""), e);
 
         if (this.appLogger != null) {
-            this.appLogger.error(TAG, e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : e.toString()));
+            this.appLogger.error(TAG, e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : e.toString()), e);
         }
         debugInformationProvided(new DebugInformation("Last Exception", e.toString()));
     }
@@ -1327,7 +1327,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void uncaughtException(@NonNull Thread thread, @NonNull Throwable throwable) {
         if (this.appLogger != null) {
-            this.appLogger.error(TAG, "FATAL uncaught on " + thread.getName() + ": " + throwable);
+            // Include the stack trace: a bare toString() only says the exception type, and
+            // the device is often unreachable via adb — /logs is the only post-mortem source.
+            this.appLogger.error(TAG, "FATAL uncaught on " + thread.getName() + ":", throwable);
         }
         AlarmManager mgr = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
         mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 120000, pendingIntent);
