@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# publish-update.sh — build a signed release APK and stage it for the app's self-update.
+# publish-update.sh — build signed release and debug APKs and stage them for the app's self-update.
 #
 # Usage:
 #   ./publish-update.sh <VERSION_CODE> [VERSION_NAME]
@@ -16,9 +16,12 @@
 #   eo1.signing.store.file / eo1.signing.store.password /
 #   eo1.signing.key.alias (default EO1) / eo1.signing.key.password
 #
-# The APK is published as eo1-release-<VERSION_CODE>.apk next to update-manifest.json.
+# The release APK is published as eo1-release-<VERSION_CODE>.apk
+# The debug APK (signed with release key) is published as eo1-debug-<VERSION_CODE>.apk
+# Both are staged next to update-manifest.json.
 # VERSION_CODE must be strictly greater than the last published one (monotonic, recorded
 # in <UPDATE_DIR>/.last-published-version).
+#
 
 set -euo pipefail
 
@@ -75,17 +78,29 @@ else
     ./gradlew assembleRelease "-PVERSION_CODE=$VERSION_CODE"
 fi
 
-APK="$ROOT/app/build/outputs/apk/release/app-release.apk"
-if [ ! -f "$APK" ]; then
-    echo "ERROR: build did not produce $APK" >&2; exit 1
+echo "==> Building debug APK (signed with release key) (versionCode $VERSION_CODE${VERSION_NAME:+, versionName $VERSION_NAME})"
+if [ -n "$VERSION_NAME" ]; then
+    ./gradlew assembleDebug "-PVERSION_CODE=$VERSION_CODE" "-PVERSION_NAME=$VERSION_NAME" "-DUSE_RELEASE_SIGNING_FOR_DEBUG=true"
+else
+    ./gradlew assembleDebug "-PVERSION_CODE=$VERSION_CODE" "-DUSE_RELEASE_SIGNING_FOR_DEBUG=true"
+fi
+
+RELEASE_APK="$ROOT/app/build/outputs/apk/release/app-release.apk"
+if [ ! -f "$RELEASE_APK" ]; then
+    echo "ERROR: build did not produce $RELEASE_APK" >&2; exit 1
+fi
+
+DEBUG_APK="$ROOT/app/build/outputs/apk/debug/app-debug.apk"
+if [ ! -f "$DEBUG_APK" ]; then
+    echo "ERROR: build did not produce $DEBUG_APK" >&2; exit 1
 fi
 
 if command -v shasum >/dev/null 2>&1; then
-    SHA256=$(shasum -a 256 "$APK" | awk '{print $1}')
+    SHA256=$(shasum -a 256 "$RELEASE_APK" | awk '{print $1}')
 else
-    SHA256=$(sha256sum "$APK" | awk '{print $1}')
+    SHA256=$(sha256sum "$RELEASE_APK" | awk '{print $1}')
 fi
-SIZE=$(wc -c < "$APK" | tr -d '[:space:]')
+SIZE=$(wc -c < "$RELEASE_APK" | tr -d '[:space:]')
 
 json_escape() { printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'; }
 
@@ -94,15 +109,17 @@ if [ -z "$NOTES" ] && [ -n "$VERSION_NAME" ]; then
     NOTES="EO1 $VERSION_NAME"
 fi
 
-APK_NAME="eo1-release-$VERSION_CODE.apk"
-cp "$APK" "$UPDATE_DIR/$APK_NAME"
+RELEASE_APK_NAME="eo1-release-$VERSION_CODE.apk"
+DEBUG_APK_NAME="eo1-debug-$VERSION_CODE.apk"
+cp "$RELEASE_APK" "$UPDATE_DIR/$RELEASE_APK_NAME"
+cp "$DEBUG_APK" "$UPDATE_DIR/$DEBUG_APK_NAME"
 
 MANIFEST="$UPDATE_DIR/update-manifest.json"
 cat > "$MANIFEST" <<EOF
 {
   "versionCode": $VERSION_CODE,
   "versionName": "$(json_escape "$VERSION_NAME")",
-  "apkUrl": "$EO1_UPDATE_HOST/$APK_NAME",
+  "apkUrl": "$EO1_UPDATE_HOST/$RELEASE_APK_NAME",
   "sha256": "$SHA256",
   "sizeBytes": $SIZE,
   "notes": "$(json_escape "$NOTES")"
@@ -119,7 +136,8 @@ fi
 
 echo
 echo "Published (staged in $UPDATE_DIR):"
-echo "  $APK_NAME  sha256=$SHA256  size=$SIZE"
-echo "  update-manifest.json -> $EO1_UPDATE_HOST/$APK_NAME"
+echo "  $RELEASE_APK_NAME  sha256=$SHA256  size=$SIZE"
+echo "  $DEBUG_APK_NAME  (debug version, signed with release key)"
+echo "  update-manifest.json -> $EO1_UPDATE_HOST/$RELEASE_APK_NAME"
 echo
 cat "$MANIFEST"

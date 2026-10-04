@@ -50,7 +50,8 @@ android {
             }
         }
     }
-    buildTypes {
+    def useReleaseSigningForDebug = project.hasProperty('USE_RELEASE_SIGNING_FOR_DEBUG') && project.USE_RELEASE_SIGNING_FOR_DEBUG.toBoolean()
+buildTypes {
         release {
             // Unsigned release when no signing props are configured (publish-update.sh refuses to build anyway).
             if (signingProps.getProperty('eo1.signing.store.file')) {
@@ -81,6 +82,9 @@ android {
             // fallback AVD (MediaPlayer only — no TsPlayer .so for that ABI).
             ndk {
                 abiFilters 'armeabi-v7a', 'arm64-v8a'
+            }
+            if (useReleaseSigningForDebug && signingProps.getProperty('eo1.signing.store.file')) {
+                signingConfig signingConfigs.release
             }
             enableUnitTestCoverage true
             enableAndroidTestCoverage true
