@@ -1461,7 +1461,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (tsVideoView != null) {
                 video.addProperty("generation", tsVideoView.getLoopGeneration());
                 video.addProperty("errors", tsVideoView.getVideoErrorCount());
-                video.addProperty("boundaryResets", tsVideoView.getBoundaryResets());
                 video.addProperty("playerCreated", tsVideoView.isPlayerCreated());
                 video.addProperty("surfaceReady", tsVideoView.isSurfaceReady());
                 video.addProperty("recreatingForLoop", tsVideoView.isRecreatingForLoop());
