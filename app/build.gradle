@@ -87,6 +87,8 @@ buildTypes {
                 signingConfig signingConfigs.release
                 // When using release signing for debug build, make it non-debuggable for security
                 debuggable = false
+                // Override BuildConfig.DEBUG to false to disable debug-only code paths
+                buildConfigField "boolean", "DEBUG", "false"
                 // Disable test coverage instrumentation for non-debuggable builds
                 enableUnitTestCoverage false
                 enableAndroidTestCoverage false
