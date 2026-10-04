@@ -1410,6 +1410,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
+    public String platform() {
+        return capabilities != null ? capabilities.platform() : "EO1";
+    }
+
+    @Override
     public String buildStateJson() {
         JsonObject o = new JsonObject();
 

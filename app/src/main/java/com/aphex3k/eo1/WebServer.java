@@ -863,11 +863,13 @@ public class WebServer {
         File dir = controller.uploadedDir();
         UploadedMedia.FileInfo[] files = controller.listUploadedFiles();
         StringBuilder sb = new StringBuilder();
-        sb.append("<!doctype html><meta charset=\"utf-8\"><title>EO1</title>");
+        String platform = escapeHtml(controller.platform());
+        sb.append("<!doctype html><meta charset=\"utf-8\"><title>")
+                .append(platform).append("</title>");
         sb.append("<style>body{font:14px monospace;background:#111;color:#eee;padding:16px}"
                 + "table{border-collapse:collapse}td,th{padding:4px 8px;text-align:left}"
                 + "button{margin:2px}a{color:#8cf}</style>");
-        sb.append("<h1>EO1 frame @ ").append(escapeHtml(safeIp()))
+        sb.append("<h1>").append(platform).append(" frame @ ").append(escapeHtml(safeIp()))
                 .append(" (port ").append(boundPort).append(")</h1>");
         sb.append("<p><a href=\"/state\">state</a> · <a href=\"/logs\">logs</a> · <a href=\"/files\">files (json)</a></p>");
 
@@ -1158,7 +1160,9 @@ public class WebServer {
     }
 
     private String renderLogsPage() {
-        return "<!doctype html><meta charset=\"utf-8\"><title>EO1 logs</title>"
+        return "<!doctype html><meta charset=\"utf-8\"><title>"
+                + escapeHtml(controller.platform())
+                + " logs</title>"
                 + "<style>body{font:12px monospace;background:#111;color:#eee;padding:8px}"
                 + "a{color:#8cf}</style>"
                 + "<p><a href=\"/\">back</a> · <a href=\"/log/file?lines=500\">raw file</a></p>"
