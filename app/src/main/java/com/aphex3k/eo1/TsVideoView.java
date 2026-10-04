@@ -78,6 +78,8 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     // DEBUG (logcat + /state "video" object). -1 means "not measured yet".
     private int videoErrorCount;
     private int boundaryResets;                 // one-shot end-of-first-pass resets performed
+    /** Path the one-shot boundary reset is armed for; null = not armed. Reset only by setDataSource/stop. */
+    private String boundaryArmedFor;
     private int lastRestartLatencyMs = -1;      // rewind trigger -> restart done
     private int lastCreatePlayerMs = -1;        // native createPlayer() cost
     private int lastSetSurfaceMs = -1;          // native setSurface() cost
@@ -123,6 +125,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         playWhenReady = true;
         awaitingSurfaceForStart = false;
         recreatingForLoop = false;
+        boundaryArmedFor = null; // new asset → the one-shot may arm again
         if (getVisibility() != View.VISIBLE) {
             setVisibility(View.VISIBLE);
         }

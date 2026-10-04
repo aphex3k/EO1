@@ -92,7 +92,12 @@ the file again for the rest of the asset's display window.
 
 - Fires **at most once per asset** (`/state`: `video.boundaryResets`,
   `loopPerf.restartMethod = "boundary-reset"`). It is not a per-duration loop: there is no
-  recurring timer, so no per-pass black flash.
+  recurring timer, so no per-pass black flash. `TsVideoView` tracks the path the timer was
+  armed for (`boundaryArmedFor`), because the reset's own recreate re-enters
+  `startOrRestartPlayer` and would otherwise re-arm the timer every pass — a per-duration
+  recreate loop with a black flash on every pass (observed on device, fixed 2026-10-04).
+  `setDataSource` / `stop()` clear the flag, so a new display of the asset (even the same
+  file) gets a fresh one-shot.
 - Cost in the healthy case: one ~200 ms plane-clear per video asset when it first cycles.
 - If duration is unknown (no hint, retriever failed), no timer is scheduled and the old
   behavior (recovery at next asset) applies.
