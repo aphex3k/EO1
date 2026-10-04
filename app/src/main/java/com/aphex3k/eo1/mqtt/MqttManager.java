@@ -18,6 +18,7 @@ import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
 import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.MqttPingSender;
 import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 
 import java.util.Objects;
@@ -25,6 +26,66 @@ import java.util.Arrays;
 
 /// https://www.hivemq.com/blog/mqtt-client-library-encyclopedia-eclipse-paho-java/
 public class MqttManager {
+
+    /** No-op logger to prevent Paho from using java.util.logging on API 19. */
+    private static class NoOpLogger implements org.eclipse.paho.client.mqttv3.logging.Logger {
+        @Override
+        public void initialise(java.util.ResourceBundle bundle, String s, String s1) { }
+        @Override
+        public void setResourceName(String s) { }
+        @Override
+        public boolean isLoggable(int i) { return false; }
+        @Override
+        public void severe(String s, String s1, String s2) { }
+        @Override
+        public void severe(String s, String s1, String s2, Object[] objects) { }
+        @Override
+        public void severe(String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public void warning(String s, String s1, String s2) { }
+        @Override
+        public void warning(String s, String s1, String s2, Object[] objects) { }
+        @Override
+        public void warning(String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public void info(String s, String s1, String s2) { }
+        @Override
+        public void info(String s, String s1, String s2, Object[] objects) { }
+        @Override
+        public void info(String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public void config(String s, String s1, String s2) { }
+        @Override
+        public void config(String s, String s1, String s2, Object[] objects) { }
+        @Override
+        public void config(String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public void fine(String s, String s1, String s2) { }
+        @Override
+        public void fine(String s, String s1, String s2, Object[] objects) { }
+        @Override
+        public void fine(String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public void finer(String s, String s1, String s2) { }
+        @Override
+        public void finer(String s, String s1, String s2, Object[] objects) { }
+        @Override
+        public void finer(String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public void finest(String s, String s1, String s2) { }
+        @Override
+        public void finest(String s, String s1, String s2, Object[] objects) { }
+        @Override
+        public void finest(String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public void log(int i, String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public void trace(int i, String s, String s1, String s2, Object[] objects, Throwable throwable) { }
+        @Override
+        public String formatMessage(String s, Object[] objects) { return s; }
+        @Override
+        public void dumpTrace() { }
+    }
 
     public static final String PLAYING = "PLAYING";
     public static final String GROUP_PLAYING = "PLAYING";
@@ -55,6 +116,9 @@ public class MqttManager {
     public MqttManager (String uri, PlaybackListener playbackListener) throws MqttException {
 
         this.playbackListener = playbackListener;
+
+        // Use no-op logger to avoid MissingResourceException on API 19
+        org.eclipse.paho.client.mqttv3.logging.LoggerFactory.setLogger(MqttManager.NoOpLogger.class.getName());
 
         client = new MqttClient(
                 uri, //URI
