@@ -1,5 +1,7 @@
 package com.aphex3k.eo1;
 
+import com.aphex3k.update.ApkUploadResult;
+
 import java.io.File;
 import java.util.Map;
 
@@ -39,6 +41,25 @@ public interface WebController {
 
     /** Deletes an uploaded file by name. */
     boolean deleteUploadedFile(String name);
+
+    /**
+     * The self-update staging directory ({@code filesDir/updates}). The web server uses it as
+     * the temp dir for {@code POST /update} APK uploads — deliberately not the media upload
+     * dir, which feeds the local rotation pool.
+     */
+    File apkUploadDir();
+
+    /**
+     * Verifies an uploaded APK with the same gates as the self-update download path
+     * (SHA-256, JAR signature against the installed signing certificate, strictly newer
+     * versionCode) and stages it for install when it passes. Not auto-installed: the web UI
+     * shows the computed SHA-256 and the user confirms before firing {@code install-staged}.
+     *
+     * @param apk the uploaded file (temp location; moved into the updates dir on success,
+     *            deleted on rejection).
+     * @return the result (never null).
+     */
+    ApkUploadResult uploadApk(File apk);
 
     /**
      * Fires a device control action (mirrors a hardware key press).

@@ -15,7 +15,9 @@ import android.os.Process;
 import android.os.StatFs;
 import android.util.Log;
 
+import com.aphex3k.update.ApkManifestInfo;
 import com.aphex3k.update.ApkSignatureVerifier;
+import com.aphex3k.update.ApkUploadResult;
 import com.aphex3k.update.UpdateManifest;
 import com.aphex3k.update.UpdateState;
 import com.aphex3k.update.UpdateStateStore;
@@ -191,6 +193,16 @@ public class UpdateManager {
                     && !stagedMaster.exists()) {
                 // A staged state without its files can never install.
                 reconciled = withState(reconciled, UpdateState.State.IDLE, "staged-files-missing");
+            }
+            // Orphaned temp dirs from a process death mid POST /update (the web server's
+            // finally-block cleanup never got to run).
+            File[] entries = updatesDir.listFiles();
+            if (entries != null) {
+                for (File entry : entries) {
+                    if (entry.isDirectory() && entry.getName().startsWith("apk_tmp_")) {
+                        deleteDirQuiet(entry);
+                    }
+                }
             }
             state = reconciled;
             stateStore.write(state);
@@ -382,6 +394,161 @@ public class UpdateManager {
             stateStore.write(state);
         }
         notifyDebug("update reset");
+    }
+
+    // ------------------------------------------------------------- web apk upload
+
+    /** The staging directory ({@code filesDir/updates}); the web server uses it as the temp dir for APK uploads. */
+    public File updatesDir() {
+        return updatesDir;
+    }
+
+    /**
+     * Verifies an APK uploaded through {@code POST /update} with the same gates as the
+     * download path — size cap, SHA-256, {@link ApkSignatureVerifier} (signer-certificate
+     * match against the installed app), strictly-greater versionCode (read from the APK's
+     * own binary manifest) — and, when it passes, stages it for install (private master +
+     * world-readable public copy, state {@code STAGED}). No auto-install: the web UI shows
+     * the computed SHA-256 and the user decides whether to fire
+     * {@link #installStaged(boolean)}.
+     *
+     * <p>Called from a web worker thread. While verifying and staging, the state is held in
+     * {@code VERIFYING} (the same in-flight marker the download cycle uses) so the timer's
+     * install retry and a manual check-updates cannot run concurrently. A rejected upload
+     * restores the previous state — when it replaced a staged APK that is left untouched,
+     * otherwise the state goes to {@code FAILED}.
+     *
+     * @param apk the uploaded file; moved into the updates dir on success, deleted on rejection.
+     * @return the result (never null) with the computed SHA-256 for the user to verify
+     *         against the published release.
+     */
+    public ApkUploadResult stageUploadedApk(File apk) {
+        if (apk == null || !apk.isFile() || apk.length() <= 0) {
+            return ApkUploadResult.reject("", 0, false, "file-unavailable");
+        }
+        final long size = apk.length();
+        if (size > UpdateManifest.MAX_APK_BYTES) {
+            apk.delete();
+            return ApkUploadResult.reject("", size, false, "exceeds-size-cap");
+        }
+
+        boolean replacingStaged;
+        String previousLastError;
+        synchronized (this) {
+            if (installInFlight) {
+                apk.delete();
+                return ApkUploadResult.reject("", size, false, "install-in-flight");
+            }
+            switch (state.state) {
+                case CHECKING:
+                case DOWNLOADING:
+                case VERIFYING:
+                case INSTALL_PENDING:
+                    apk.delete();
+                    return ApkUploadResult.reject("", size, false, "update-cycle-in-flight");
+                default:
+                    break;
+            }
+            replacingStaged = state.state == UpdateState.State.STAGED;
+            previousLastError = state.lastError;
+            // Reserve the state as in-flight before the slow verification work, the same
+            // way startCycle() reserves CHECKING.
+            state = withState(state, UpdateState.State.VERIFYING, "");
+            stateStore.write(state);
+        }
+
+        boolean oldStagedGone = false;
+        ApkManifestInfo manifest = null;
+        String sha = "";
+        try {
+            sha = sha256Safe(apk);
+            if (sha.isEmpty()) {
+                return failUpload(apk, replacingStaged, previousLastError, sha, size, false, "sha256-failed");
+            }
+            X509Certificate installed = installedCert();
+            if (installed == null) {
+                return failUpload(apk, replacingStaged, previousLastError, sha, size, false, "no-installed-cert");
+            }
+            ApkSignatureVerifier.Result signature = ApkSignatureVerifier.verify(apk, installed);
+            if (!signature.valid) {
+                return failUpload(apk, replacingStaged, previousLastError, sha, size, false,
+                        "signature-rejected: " + signature.reason);
+            }
+            manifest = ApkManifestInfo.read(apk);
+            if (manifest == null || manifest.versionCode == null) {
+                return failUpload(apk, replacingStaged, previousLastError, sha, size, true, "version-code-unreadable");
+            }
+            if (manifest.versionCode <= BuildConfig.VERSION_CODE) {
+                return failUpload(apk, replacingStaged, previousLastError, sha, size, true,
+                        "not-newer: " + manifest.versionCode + " is not newer than installed " + BuildConfig.VERSION_CODE);
+            }
+            long required = size + STAGING_HEADROOM_BYTES;
+            if (freeBytes(updatesDir) < required || freeBytes(stagedPublic.getParentFile()) < required) {
+                return failUpload(apk, replacingStaged, previousLastError, sha, size, true, "insufficient-space");
+            }
+            // Swap: replace any previously staged update. Remember whether the old staged
+            // files are actually gone: a later failure must only restore the STAGED state
+            // when they are, otherwise the state would claim a staged APK that no longer
+            // exists on disk.
+            oldStagedGone = deleteStagedFiles();
+            if (!apk.renameTo(stagedMaster)) {
+                stagedMaster.delete();
+                if (!apk.renameTo(stagedMaster)) {
+                    return failUpload(null, oldStagedGone, previousLastError, sha, size, true,
+                            "stage-rename-failed");
+                }
+            }
+            if (!externalStorageWritable()) {
+                deleteStagedFiles();
+                return failUpload(null, oldStagedGone, previousLastError, sha, size, true,
+                        "external-storage-unavailable");
+            }
+            if (!copyFile(stagedMaster, stagedPublic) || stagedPublic.length() != stagedMaster.length()) {
+                deleteStagedFiles();
+                return failUpload(null, oldStagedGone, previousLastError, sha, size, true,
+                        "stage-copy-failed");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "upload staging crashed", e);
+            // Best effort: the file may or may not still exist at its temp location. The
+            // previous STAGED state is restorable only while its files are still on disk.
+            return failUpload(apk, replacingStaged && !oldStagedGone, previousLastError, "", size,
+                    false, "stage-crashed: " + e.getClass().getSimpleName());
+        }
+
+        synchronized (this) {
+            state.expectedVersionCode = manifest.versionCode;
+            state.expectedVersionName = manifest.versionName;
+            state.manifestSha256 = sha;
+            state.expectedSizeBytes = size;
+            state.lastCheckedMs = System.currentTimeMillis();
+            state = withState(state, UpdateState.State.STAGED, "");
+            stateStore.write(state);
+        }
+        String stagedMsg = "staged uploaded APK " + manifest.versionName + " ("
+                + manifest.versionCode + ", " + size + " B)";
+        Log.i(TAG, stagedMsg);
+        notifyDebug(stagedMsg);
+        return ApkUploadResult.staged(sha, size);
+    }
+
+    private ApkUploadResult failUpload(File apk, boolean restoringStaged, String previousLastError,
+            String sha, long size, boolean signatureValid, String reason) {
+        if (apk != null) {
+            apk.delete();
+        }
+        synchronized (this) {
+            if (restoringStaged) {
+                // The previously staged APK is still on disk with its original metadata.
+                state = withState(state, UpdateState.State.STAGED, previousLastError);
+            } else {
+                state = withState(state, UpdateState.State.FAILED, reason);
+            }
+            stateStore.write(state);
+        }
+        Log.w(TAG, "uploaded APK rejected: " + reason);
+        notifyDebug("uploaded APK rejected: " + reason);
+        return ApkUploadResult.reject(sha, size, signatureValid, reason);
     }
 
     // ---------------------------------------------------------------------- cycle
@@ -779,9 +946,30 @@ public class UpdateManager {
         }
     }
 
-    private void deleteStagedFiles() {
-        stagedPublic.delete();
-        stagedMaster.delete();
+    /** Deletes the staged files; reports whether every staged file that existed was removed. */
+    private boolean deleteStagedFiles() {
+        boolean ok = true;
+        if (stagedPublic.exists() && !stagedPublic.delete()) {
+            ok = false;
+        }
+        if (stagedMaster.exists() && !stagedMaster.delete()) {
+            ok = false;
+        }
+        return ok;
+    }
+
+    /** Recursively deletes a temp directory (best effort). */
+    private static void deleteDirQuiet(File dir) {
+        if (dir == null || !dir.exists()) {
+            return;
+        }
+        File[] children = dir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                child.delete();
+            }
+        }
+        dir.delete();
     }
 
     // --------------------------------------------------------------- state helpers
@@ -861,6 +1049,7 @@ public class UpdateManager {
         o.addProperty("lastCheckedMs", s.lastCheckedMs);
         o.addProperty("lastError", s.lastError);
         o.addProperty("attempts", s.attempts);
+        o.addProperty("stagedSha256", s.manifestSha256);
         JsonObject staged = new JsonObject();
         staged.addProperty("present", stagedPublic.exists() || stagedMaster.exists());
         staged.addProperty("bytes", stagedPublic.length());
