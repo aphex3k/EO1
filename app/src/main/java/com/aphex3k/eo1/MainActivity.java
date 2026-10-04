@@ -47,6 +47,7 @@ import androidx.core.view.ViewCompat;
 import com.aphex3k.eo1.mqtt.MqttManager;
 import com.aphex3k.eo1.mqtt.Payload;
 import com.aphex3k.eo1.mqtt.PlaybackListener;
+import com.aphex3k.update.ApkUploadResult;
 import com.bumptech.glide.Glide;
 import com.bumptech.glide.load.DataSource;
 import com.bumptech.glide.load.engine.GlideException;
@@ -1523,6 +1524,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public boolean deleteUploadedFile(String name) {
         return UploadedMedia.delete(UploadedMedia.dirFor(this), name);
+    }
+
+    @Override
+    public File apkUploadDir() {
+        return updateManager != null ? updateManager.updatesDir() : null;
+    }
+
+    /**
+     * Verifies an uploaded APK the same way as the self-update download path and stages it
+     * for install. Runs on the web server's worker thread; never auto-installs.
+     */
+    @Override
+    public ApkUploadResult uploadApk(File apk) {
+        if (updateManager == null || apk == null) {
+            return ApkUploadResult.reject("", 0, false, "update-manager-unavailable");
+        }
+        return updateManager.stageUploadedApk(apk);
     }
 
     /**

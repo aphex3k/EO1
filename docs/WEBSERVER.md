@@ -21,7 +21,7 @@ the server itself is unit-testable with a fake controller and never references t
 | Route | Method | Purpose |
 |---|---|---|
 | `/` | GET | One-page UI: upload form, file table (download/delete), control buttons |
-| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; device adds detected `platform`; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, rotation stats, an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedApk{present,bytes}`, `installPermissionHeld`, `installMode`), battery/memory/uptime telemetry |
+| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; device adds detected `platform`; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, rotation stats, an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld`, `installMode`), battery/memory/uptime telemetry |
 | `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
 | `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
 | `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
@@ -29,6 +29,7 @@ the server itself is unit-testable with a fake controller and never references t
 | `/files/<name>` | GET | Streams an uploaded file |
 | `/files/<name>/delete` | DELETE / POST | Deletes an uploaded file |
 | `/upload` | POST | `multipart/form-data` upload, 512 MB cap per file, 2 GB cap per request, max 32 parts; stored in `filesDir/uploaded/` |
+| `/update?token=<t>` | POST | **Trusted network + configuration token + same origin.** `multipart/form-data` upload of a single APK file (100 MB cap — `UpdateManifest.MAX_APK_BYTES`), staged as a self-update instead of added to the rotation pool. The APK is verified with the same gates as the self-update download path: SHA-256, JAR signature against the installed app's signing certificate (pure-Java `ApkSignatureVerifier`), and a strictly newer `versionCode` read from the APK's binary manifest. On success it lands in `filesDir/updates/` as the staged update (state `STAGED`) — **never auto-installed**. The JSON response carries the computed `sha256` so the user can check it against the published release before firing `install-staged`; the index page shows it and offers **Install staged** / **Discard staged** (a page reload re-shows it from `/state`) |
 | `/control?action=<a>[&code=<n>]` | GET / POST | Fires a hardware-key action (below); `keyevent` (debug builds only) additionally requires POST and reads the `code` param |
 | `/config?token=<t>` | GET | **Trusted network + configuration token.** Full device configuration JSON, credentials included |
 | `/config?token=<t>` | POST | **Trusted network + configuration token + same origin.** Applies the request body (≤ 512 KB JSON) as the new device configuration: parsed, normalized, written to `filesDir/configuration.json`, live config replaced, time zone re-applied, rotation restarted. `{"ok":false,"msg":...}` on validation failure (config unchanged) |
@@ -66,7 +67,8 @@ via GET, an unknown action, or a malformed `code` returns `{"ok":false,"fired":f
 
 ## Trusted network
 
-The configuration endpoints (`/config*`) sit behind two gates, on top of the trusted-LAN
+The configuration endpoints (`/config*`) and the APK update upload (`POST /update`) sit
+behind two gates, on top of the trusted-LAN
 assumption:
 
 1. **Trusted-network flag** — **deliberately not part of `configuration.json`**: it lives in the
@@ -77,22 +79,26 @@ assumption:
 2. **Per-device configuration token** — a 32-hex-character secret generated with
    `java.security.SecureRandom` on first use and persisted in the same SharedPreferences under
    the key `trusted_network_token`. Every `/config*` request must send it as the `token` query
-   parameter; the server compares it in constant time (`MessageDigest.isEqual`) and fails closed
-   (403) when the token is missing, wrong, or unavailable. It is displayed in exactly one
+   parameter, as does `POST /update`; the server compares it in constant time
+   (`MessageDigest.isEqual`) and fails closed (403) when the token is missing, wrong, or
+   unavailable. It is displayed in exactly one
    place: the on-device options dialog, below the checkbox, while the flag is on. It is not
    part of the configuration document or its export, of `/state`, or of the app logs (the
    logs are themselves readable via `/log.json`).
 
-**Same-origin (CSRF) check.** `POST /config` and `POST /config/import` additionally reject
+**Same-origin (CSRF) check.** `POST /config`, `POST /config/import` and `POST /update`
+additionally reject
 requests whose `Origin` header (falling back to `Referer`) does not match the request's
-`Host` header, so a cross-origin page can no longer drive-by-write the configuration. The
+`Host` header, so a cross-origin page can no longer drive-by-write the configuration or
+stage an update. The
 expected port is taken from the `Host` header when it carries one, otherwise from the bound
 port; a URL port defaults to 80 when omitted; the host comparison is case-insensitive; and the
 check fails closed on any unparseable piece. Clients that send no provenance header at all
 (curl, scripts) pass this check — they remain fully token-gated.
 
-While the flag is off, all four config endpoints answer `403` and the index page shows a note
-instead of the configuration editor. While on, the index page shows a token input with a
+While the flag is off, the four config endpoints answer `403`, `POST /update` is refused the
+same way, and the index page shows a note instead of the configuration editor (and instead of
+the APK upload form). While on, the index page shows a token input with a
 **Load** button; on a successful `GET /config?token=...` the editor (backends with
 credentials, add/remove, interval, time zone, quiet-hour cron rows, self-update, MQTT, Save)
 becomes visible, together with **Export configuration** (`GET /config/download?token=...`,
@@ -130,6 +136,10 @@ only touches its UUID-named cache-file pattern). Files deleted through `/files/<
 or on disk drop out of the pool on the next tick. When an Immich backend is unreachable or
 its credentials are wrong, that backend is skipped with a toast and the remaining backends
 (including local uploads) keep rotating.
+
+APK uploads via `POST /update` are the one exception: they land in `filesDir/updates/`
+(the self-update staging area), are verified before anything touches them, and never
+join the rotation pool.
 
 ## Logs / past state
 

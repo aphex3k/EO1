@@ -2,6 +2,8 @@ package com.aphex3k.eo1;
 
 import android.util.Log;
 
+import com.aphex3k.update.ApkUploadResult;
+import com.aphex3k.update.UpdateManifest;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
@@ -269,6 +271,9 @@ public class WebServer {
         }
         if (path.equals("/upload")) {
             return "upload";
+        }
+        if (path.equals("/update")) {
+            return "update";
         }
         if (path.equals("/control")) {
             return "control";
@@ -538,6 +543,24 @@ public class WebServer {
                 handleUpload(headers, is, os);
                 break;
 
+            case "update": {
+                if (!method.equals("POST")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                String updateGateError = configGateError(params);
+                if (updateGateError != null) {
+                    sendJson(os, 403, errorJson(updateGateError));
+                    return;
+                }
+                if (!configWriteAllowed(headers, boundPort)) {
+                    sendJson(os, 403, errorJson("cross-origin request rejected"));
+                    return;
+                }
+                handleUpdateUpload(headers, is, os);
+                break;
+            }
+
             case "control": {
                 if (!method.equals("GET") && !method.equals("POST")) {
                     send(os, 405, "text/plain", "method not allowed");
@@ -681,6 +704,77 @@ public class WebServer {
     }
 
     /**
+     * {@code POST /update}: stages an APK uploaded from the web UI. Verification runs on the
+     * device the same way as the self-update download path (size cap, SHA-256, signature
+     * against the installed certificate, strictly newer versionCode); on success the APK is
+     * moved into the update staging area, not installed. The response carries the computed
+     * SHA-256 so the user can confirm it against the published release before installing.
+     */
+    private void handleUpdateUpload(Map<String, String> headers, InputStream is, OutputStream os)
+            throws IOException {
+        String boundary = MultipartParser.boundaryFromContentType(headers.get("content-type"));
+        if (boundary == null) {
+            sendJson(os, 400, errorJson("expected multipart/form-data with a boundary"));
+            return;
+        }
+        File updatesDir = controller.apkUploadDir();
+        if (updatesDir == null || (!updatesDir.isDirectory() && !updatesDir.mkdirs())) {
+            sendJson(os, 500, errorJson("cannot create update dir"));
+            return;
+        }
+        File incoming = new File(updatesDir, "apk_tmp_" + System.nanoTime());
+        if (!incoming.isDirectory() && !incoming.mkdirs()) {
+            sendJson(os, 500, errorJson("cannot create update temp dir"));
+            return;
+        }
+
+        try {
+            InputStream bodyStream = is;
+            long contentLength = parseLongLenient(headers.get("content-length"));
+            if (contentLength >= 0 && contentLength <= MAX_IN_MEMORY_UPLOAD_BYTES) {
+                bodyStream = new ByteArrayInputStream(readAll(is, contentLength));
+            }
+            List<MultipartParser.Part> parsed = MultipartParser.parse(bodyStream, boundary, incoming,
+                    UpdateManifest.MAX_APK_BYTES, UpdateManifest.MAX_APK_BYTES, 4);
+
+            MultipartParser.Part apk = null;
+            int fileParts = 0;
+            for (MultipartParser.Part p : parsed) {
+                if (p.isFile()) {
+                    fileParts++;
+                    if (apk == null) {
+                        apk = p;
+                    }
+                }
+            }
+            if (apk == null) {
+                sendJson(os, 400, errorJson("no file in upload"));
+                return;
+            }
+            if (fileParts > 1) {
+                sendJson(os, 400, errorJson("expected exactly one file"));
+                return;
+            }
+
+            ApkUploadResult result = controller.uploadApk(apk.file);
+            if (result == null) {
+                sendJson(os, 500, errorJson("internal error: upload result unavailable"));
+                return;
+            }
+            JsonObject o = new JsonObject();
+            o.addProperty("ok", result.ok);
+            o.addProperty("sha256", result.sha256);
+            o.addProperty("sizeBytes", result.sizeBytes);
+            o.addProperty("signatureValid", result.signatureValid);
+            o.addProperty("reason", result.reason);
+            sendJson(os, result.ok ? 200 : 400, o);
+        } finally {
+            cleanDir(incoming);
+            incoming.delete();
+        }
+    }
+
+    /**
      * Applies a raw JSON configuration body (shared by {@code POST /config} and
      * {@code POST /config/import}). The body is read off the socket with a hard cap before the
      * controller touches it.
@@ -815,6 +909,7 @@ public class WebServer {
         }
 
         sb.append(renderConfigurationSection());
+        sb.append(renderUpdateSection());
 
         sb.append("<script>");
         sb.append("function ctrl(a){fetch('/control?action='+a).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}");
@@ -994,6 +1089,72 @@ public class WebServer {
                 + "(function(){var t='';"
                 + "try{t=localStorage.getItem('eo1.cfg.token')||'';}catch(e){}"
                 + "if(t){document.getElementById('cfgToken').value=t;loadConfig();}})();";
+    }
+
+    /**
+     * The "Update (APK upload)" section of the index page. With trusted network off it is a
+     * notice; on, it offers the APK upload form, gated by the same per-device configuration
+     * token as the config endpoints (same input, remembered in localStorage). After a
+     * successful upload the computed SHA-256 is shown so the user can check it against the
+     * published release; Install/Reset reuse the {@code /control} actions. When an APK is
+     * already staged, an on-load {@code /state} fetch re-shows the checksum and the buttons
+     * after a page reload.
+     */
+    private String renderUpdateSection() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<h2>Update (APK upload)</h2>");
+        if (!trustedNetwork()) {
+            sb.append("<p>APK upload is disabled — it requires the <i>Trusted Network</i> "
+                    + "checkbox in the on-device options dialog.</p>");
+            return sb.toString();
+        }
+        sb.append("<p>Upload a signed release APK to stage it for install. The upload is verified "
+                + "the same way as the self-update download (size cap, SHA-256, signature against "
+                + "the installed app, strictly newer versionCode). The computed SHA-256 is shown "
+                + "after upload — check it against the published release before installing. The "
+                + "staged APK is not installed automatically.</p>");
+        sb.append("<p><input type=\"file\" id=\"apkFile\" accept=\".apk,application/vnd.android.package-archive\"> "
+                + "<button onclick=\"uploadApk()\">Upload APK</button></p>");
+        sb.append("<div id=\"apkStatus\"></div>");
+        sb.append("<script>");
+        sb.append(updateSectionJs());
+        sb.append("</script>");
+        return sb.toString();
+    }
+
+    private static String updateSectionJs() {
+        return "function stagedBlock(sha,bytes){"
+                + "var h='<p><b>SHA-256: </b><code style=\"display:block;word-break:break-all\">'+sha+'</code><br>'"
+                + "+bytes+' bytes. Verify this checksum against the published release before installing.</p>'"
+                + "+'<p><button id=\"apkInstall\">Install staged</button> ';"
+                + "+'<button id=\"apkReset\">Discard staged</button></p>';"
+                + "document.getElementById('apkStatus').innerHTML=h;"
+                + "document.getElementById('apkInstall').onclick=function(){ctrl('install-staged');};"
+                + "document.getElementById('apkReset').onclick=function(){ctrl('update-reset');};}"
+                + "function uploadApk(){"
+                + "var f=document.getElementById('apkFile').files[0];"
+                + "if(!f){alert('Choose an APK file first.');return;}"
+                + "var t=(document.getElementById('cfgToken').value||'').trim();"
+                + "if(!t){try{t=localStorage.getItem('eo1.cfg.token')||'';}catch(e){}}"
+                + "if(!t){alert('Enter the configuration token first (options dialog on the frame).');return;}"
+                + "var fd=new FormData();fd.append('file',f);"
+                + "document.getElementById('apkStatus').innerHTML='Uploading...';"
+                + "fetch('/update?token='+encodeURIComponent(t),{method:'POST',body:fd})"
+                + ".then(function(r){return r.json();})"
+                + ".then(function(j){"
+                + "document.getElementById('apkFile').value='';"
+                + "if(j.ok){stagedBlock(j.sha256,j.sizeBytes);}"
+                + "else{document.getElementById('apkStatus').innerHTML='Rejected: '+j.reason;}})"
+                + ".catch(function(e){document.getElementById('apkStatus').innerHTML='Upload failed: '+e;});}"
+                + "(function(){"
+                + "fetch('/state')"
+                + ".then(function(r){return r.json();})"
+                + ".then(function(j){"
+                + "var u=j&&j.update;"
+                + "if(u&&u.stagedApk&&u.stagedApk.present&&u.stagedSha256){"
+                + "stagedBlock(u.stagedSha256,u.stagedApk.bytes);}})"
+                + ".catch(function(){});"
+                + "})();";
     }
 
     private String renderLogsPage() {

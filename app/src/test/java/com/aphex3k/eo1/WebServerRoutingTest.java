@@ -51,6 +51,13 @@ public class WebServerRoutingTest {
     }
 
     @Test
+    public void updateRoute() {
+        // route() classifies by path only; the POST-only gate lives in dispatch().
+        assertEquals("update", WebServer.route("POST", "/update"));
+        assertEquals("update", WebServer.route("GET", "/update"));
+    }
+
+    @Test
     public void unknownRoutes() {
         // route() classifies by path only; method enforcement happens in dispatch().
         assertEquals("unknown", WebServer.route("GET", "/nope"));
