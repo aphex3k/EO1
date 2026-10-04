@@ -50,6 +50,7 @@ android {
             }
         }
     }
+    def useReleaseSigningForDebug = project.hasProperty('USE_RELEASE_SIGNING_FOR_DEBUG') && project.USE_RELEASE_SIGNING_FOR_DEBUG.toBoolean()
 buildTypes {
         release {
             // Unsigned release when no signing props are configured (publish-update.sh refuses to build anyway).
@@ -82,8 +83,18 @@ buildTypes {
             ndk {
                 abiFilters 'armeabi-v7a', 'arm64-v8a'
             }
-            enableUnitTestCoverage true
-            enableAndroidTestCoverage true
+            if (useReleaseSigningForDebug && signingProps.getProperty('eo1.signing.store.file')) {
+                signingConfig signingConfigs.release
+                // When using release signing for debug build, make it non-debuggable for security
+                debuggable = false
+                // Disable test coverage instrumentation for non-debuggable builds
+                enableUnitTestCoverage false
+                enableAndroidTestCoverage false
+            } else {
+                // Default debug build behavior
+                enableUnitTestCoverage true
+                enableAndroidTestCoverage true
+            }
         }
     }
     compileOptions {
