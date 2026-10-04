@@ -9,7 +9,7 @@ Amlogic/Geniatech **TsPlayer** (`libTsPlayer-jni.so`) is the original Electric O
 | Immich **original** files via TsPlayer (no client re-encode) | Client video re-encode (removed 2026-09; EO CPU ~1 fps on libx264) |
 | `TsVideoView` (`SurfaceView`) → `TsPlayerNative` → `libTsPlayer-jni.so` | ExoPlayer / Media3 |
 | Automatic MediaPlayer fallback on load/play/surface failure | Non-Amlogic primary playback |
-| Native `.so` loop — create the player once per asset, no Java teardown loop | App-level video filters / ppmgr FX |
+| Native `.so` loop — create the player once per asset, no Java teardown loop; plus a one-shot boundary reset (below) | App-level video filters / ppmgr FX |
 
 There is no client-side transcoding or conversion — the downloaded Immich original is used as-is. Undecodable images (HEIC, corrupt) and incompatible videos fall back to the Immich preview / `/video/playback` via the display-error path.
 
@@ -36,12 +36,18 @@ download Immich original
   → no client re-encode — the downloaded original is played directly
   → displayVideo → TsVideoView (createPlayer → setSurface → start, once per asset)
   → loop: the .so loops the file natively (restarts at EOF; no Java intervention)
-  → deletePlayer + createPlayer only on asset handoff / stop() / surface destroy
+  → one-shot boundary reset: ~2s after the first pass ends, the player is recreated once
+    on the same file to clear any wedged codec state (see "One-shot boundary reset")
+  → deletePlayer + createPlayer only on asset handoff / stop() / surface destroy / boundary reset
   → on Ts error/surface-timeout: same original → MediaPlayer
   → on MediaPlayer failure: Immich /video/playback or thumbnail (not client re-encode)
 ```
 
-Note: on-device `getStatus()` often stays `IDLE (0)` while frames play (OEM only logged status, never branched on it). Do not use status for loop control.
+Note: on this firmware `getStatus()` always returns `0` and `getCurrentTime()` always returns
+`-1` — both are hardcoded stubs in the `.so` (verified by disassembly; `pause()`/`resume()` are
+also no-op stubs returning false). **Java cannot observe playback state at all.** Do not use
+status or position for any control logic; the only reliable recovery is a full teardown +
+recreate (asset handoff, or the one-shot boundary reset below).
 
 `SurfaceView` does **not** create a surface while `INVISIBLE`/`GONE`. The layout keeps `ImageView` above `TsVideoView` so the wallpaper covers video until `onVideoPrepared` hides the image.
 
@@ -56,7 +62,8 @@ Full teardown (`deletePlayer` + `createPlayer`) happens only:
 
 - on asset handoff (new `setDataSource`),
 - on `stop()`,
-- on `surfaceDestroyed`.
+- on `surfaceDestroyed`,
+- on the one-shot boundary reset (see below).
 
 This is the OEM's own mechanism: the stock `EoVideoView` also creates the player once and
 lets it loop, tearing down only when the cloud/UI swaps artwork (see
@@ -68,6 +75,27 @@ loop, which has been removed.
 
 Do **not** reintroduce a per-duration Java loop, `start()`-at-EOS, or create-without-delete
 looping — see [rejected approaches](#looping-rejected-approaches-do-not-revive).
+
+## One-shot boundary reset
+
+The native loop can fail **silently**. The `.so`'s playback thread (spawned by
+`start()`, disassembled at `0x4E070`) exits without any JNI notification when
+`codec_write` or `codec_get_vbuf_state` return an error other than EAGAIN (e.g. `EBUSY` on
+`/dev/amstream_vbuf`); since `getStatus()`/`getCurrentTime()` are stubs, Java has no way to
+detect the dead thread — the screen stays black until the next rotation asset.
+
+Backstop in `TsVideoView`: once a pass starts successfully, a **one-shot** timer fires at
+`durationHintMs + 2000ms` (≈ the end of the first pass). If the same asset is still active,
+the player is recreated on the same file — the exact teardown + recreate sequence used for
+asset handoff, which is the documented recovery for wedged assets. The native loop then owns
+the file again for the rest of the asset's display window.
+
+- Fires **at most once per asset** (`/state`: `video.boundaryResets`,
+  `loopPerf.restartMethod = "boundary-reset"`). It is not a per-duration loop: there is no
+  recurring timer, so no per-pass black flash.
+- Cost in the healthy case: one ~200 ms plane-clear per video asset when it first cycles.
+- If duration is unknown (no hint, retriever failed), no timer is scheduled and the old
+  behavior (recovery at next asset) applies.
 
 ## Looping: rejected approaches (do not revive)
 
@@ -106,7 +134,7 @@ Native strings also imply exclusive Amlogic resources (`/dev/amstream_*`, “cod
 
 ### Repeated `createPlayer` without `deletePlayer` (many generations)
 
-**May wedge** after ~12 gens (JNI success, frozen last frame). Do **not** use as a loop strategy. If an asset ever wedges under native looping, recover by moving to the next asset (asset handoff performs the full teardown) or falling back to MediaPlayer — never by adding a Java loop.
+**May wedge** after ~12 gens (JNI success, frozen last frame). Do **not** use as a loop strategy. If an asset ever wedges under native looping, recover by moving to the next asset (asset handoff performs the full teardown) or falling back to MediaPlayer — never by adding a Java loop. (The one-shot boundary reset is the sanctioned in-asset recovery; it fires once per asset, never per pass.)
 
 ## Forensic findings (original EO APK)
 
@@ -115,6 +143,8 @@ Source: `EoVideoView` / `TsPlayerNative` in `.electric-objects/apk/_forensic_ext
 ### API shape
 
 Same static natives we wrap today. `getCurrentTime` and `resume` exist on the JNI class but **are never invoked** anywhere in the EO dex — only `getStatus`, `pause`, `stop`, `deletePlayer`, `createPlayer`, `setSurface`, `start`.
+
+Disassembly of this `.so` (2026-10-03) confirms the query APIs are **hardcoded stubs**: `getStatus()` is `mov r0,#0` (always IDLE) and `getCurrentTime()` is `mvn r0,#0` (always −1); `pause()`/`resume()` are no-op stubs returning false. The only real work happens in `createPlayer`, `setSurface`, `start` (spawns the playback pthread), `stop` (`pthread_join` + `Demux::Close`), and `deletePlayer`. No playback state is observable from Java.
 
 ### OEM does not loop inside the view
 
@@ -149,12 +179,12 @@ timer is what introduced the black frames on EO1/EO2.
 
 | Idea | Verdict |
 |------|---------|
-| Native `.so` loop; full teardown only on asset handoff | **Current design** |
+| Native `.so` loop; full teardown only on handoff / stop / surface destroy / one-shot boundary reset | **Current design** |
 | Rolling A/B players | Impossible — no instance handles; exclusive amstream |
 | Surface GONE→VISIBLE between loops | Rejected — black flicker |
 | Mid-loop delete + create (per-duration timer) | Rejected — black frame each pass |
 | `start()`-alone at EOS | Rejected — EBUSY on amstream_vbuf, frozen |
-| Rely on `getStatus` / `getCurrentTime` for EOS | Unreliable / unused by OEM |
+| Rely on `getStatus` / `getCurrentTime` for EOS | **Unusable** — hardcoded stubs in this `.so` (0 and −1 respectively) |
 
 ## Looping status
 
@@ -163,6 +193,11 @@ passes, no wedge, no black flash. Watch long-term stability on real rotation (ma
 mixed durations). If an asset ever wedges under native looping, recover by moving to the next
 asset (asset handoff performs the full `deletePlayer` + `createPlayer`) or falling back to
 MediaPlayer — do **not** reintroduce a per-duration Java loop.
+
+Long-running rotation did surface a real failure mode: the `.so`'s playback thread can die
+silently on an Amcodec error, leaving a black screen for up to the whole rotation interval.
+The one-shot boundary reset ([above](#one-shot-boundary-reset)) now bounds the worst case to
+one extra ~200 ms recreate per video asset.
 
 ## Hard constraints (no client re-encode)
 
@@ -174,7 +209,10 @@ On a physical EO1/EO2:
 
 1. Logcat `EO1: video player: TsPlayer (USE_TSPLAYER=true native=true)`
 2. Play a known-good local H.264 from Immich cache full-screen
-3. Loop ≥2 minutes without surface loss **and without black flicker between passes** — `/state` shows `loopGen=0` and `lastRestartMethod=native-loop` (no Java recreate)
+3. Loop ≥2 minutes without surface loss. Expect a single brief (~200 ms) recreate ~2 s after
+   the first pass ends — the one-shot boundary reset (`/state`: `boundaryResets=1`,
+   `restartMethod=boundary-reset`). No other flicker: `boundaryResets` stays at 1 per asset
+   and no further Java recreates happen (`loopGen=0`).
 4. Image ↔ video handoff and screen off/on
 5. HEVC (or other incompatible) plays via TsPlayer/MediaPlayer; on failure it falls back to Immich /video/playback (images: preview thumbnail)
 6. Force Ts failure (corrupt file) → log `TsPlayer → MediaPlayer fallback` then thumbnail/next asset path
