@@ -923,51 +923,53 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             try {
                 videoPlayer.stop();
                 videoPlayer.setVisibility(View.INVISIBLE);
-                Glide.with(this).clear(imageView);
+                if (!MainActivity.this.isDestroyed()) {
+                    Glide.with(this).clear(imageView);
 
-                if (MediaTypeHelper.isGifFile(file)) {
-                    Glide.with(this)
-                            .asGif()
-                            .load(file)
-                            .centerCrop()
-                            .listener(new RequestListener<GifDrawable>() {
-                                @Override
-                                public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<GifDrawable> target, boolean isFirstResource) {
-                                    assetFallback(assetId, activityReference, false, file);
-                                    return false;
-                                }
+                    if (MediaTypeHelper.isGifFile(file)) {
+                        Glide.with(this)
+                                .asGif()
+                                .load(file)
+                                .centerCrop()
+                                .listener(new RequestListener<GifDrawable>() {
+                                    @Override
+                                    public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<GifDrawable> target, boolean isFirstResource) {
+                                        assetFallback(assetId, activityReference, false, file);
+                                        return false;
+                                    }
 
-                                @Override
-                                public boolean onResourceReady(@NonNull GifDrawable resource, @NonNull Object model, Target<GifDrawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
-                                    resource.setLoopCount(GifDrawable.LOOP_FOREVER);
-                                    imageView.setVisibility(View.VISIBLE);
-                                    lastVisibleView = imageView;
-                                    lastVisibleAsset = file.getAbsolutePath();
-                                    return false;
-                                }
-                            })
-                            .into(imageView);
-                } else {
-                    Glide.with(this)
-                            .load(file)
-                            .centerCrop()
-                            .listener(new RequestListener<Drawable>() {
-                                @Override
-                                public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
-                                    assetFallback(assetId, activityReference, false, file);
-                                    return false;
-                                }
+                                    @Override
+                                    public boolean onResourceReady(@NonNull GifDrawable resource, @NonNull Object model, Target<GifDrawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
+                                        resource.setLoopCount(GifDrawable.LOOP_FOREVER);
+                                        imageView.setVisibility(View.VISIBLE);
+                                        lastVisibleView = imageView;
+                                        lastVisibleAsset = file.getAbsolutePath();
+                                        return false;
+                                    }
+                                })
+                                .into(imageView);
+                    } else {
+                        Glide.with(this)
+                                .load(file)
+                                .centerCrop()
+                                .listener(new RequestListener<Drawable>() {
+                                    @Override
+                                    public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
+                                        assetFallback(assetId, activityReference, false, file);
+                                        return false;
+                                    }
 
-                                @Override
-                                public boolean onResourceReady(@NonNull Drawable resource, @NonNull Object model, Target<Drawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
-                                    imageView.setVisibility(View.VISIBLE);
-                                    lastVisibleView = imageView;
-                                    lastVisibleAsset = file.getAbsolutePath();
-                                    return false;
-                                }
-                            })
-                            .dontAnimate()
-                            .into(imageView);
+                                    @Override
+                                    public boolean onResourceReady(@NonNull Drawable resource, @NonNull Object model, Target<Drawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
+                                        imageView.setVisibility(View.VISIBLE);
+                                        lastVisibleView = imageView;
+                                        lastVisibleAsset = file.getAbsolutePath();
+                                        return false;
+                                    }
+                                })
+                                .dontAnimate()
+                                .into(imageView);
+                    }
                 }
             }
             catch (Exception e) {
@@ -1243,20 +1245,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     return;
                 }
                 try {
-                    Glide.with(MainActivity.this).clear(imageView);
-                    imageView.setVisibility(View.INVISIBLE);
-                    controller.setVisibility(View.VISIBLE);
-                    lastVisibleView = controller.getView();
-                    lastVisibleAsset = file.getAbsolutePath();
-                    controller.setLooping(true);
-                    controller.setFocusable(false);
-                    controller.setVolume(0, 0);
-                    controller.play();
-                    debugInformationProvided(new DebugInformation("video",
-                            "prepared duration=" + controller.getDuration()
+                    if (!MainActivity.this.isDestroyed()) {
+                        Glide.with(MainActivity.this).clear(imageView);
+                        imageView.setVisibility(View.INVISIBLE);
+                        controller.setVisibility(View.VISIBLE);
+                        lastVisibleView = controller.getView();
+                        lastVisibleAsset = file.getAbsolutePath();
+                        controller.setLooping(true);
+                        controller.setFocusable(false);
+                        controller.setVolume(0, 0);
+                        controller.play();
+                        debugInformationProvided(new DebugInformation("video",
+                                "prepared duration=" + controller.getDuration()
                                     + " player=" + (controller == tsPlayerController
                                     ? "TsPlayer" : "MediaPlayer")));
-                    startVideoWatchdog(assetId, file, activityReference);
+                        startVideoWatchdog(assetId, file, activityReference);
+                    }
                 } catch (Exception e) {
                     if (allowTsFallback && fallbackTsPlayerToMediaPlayer(assetId, file, activityReference)) {
                         return;
