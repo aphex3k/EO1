@@ -85,9 +85,9 @@ fi
 
 echo "==> Building debug APK (signed with release key) (versionCode $VERSION_CODE${VERSION_NAME:+, versionName $VERSION_NAME})"
 if [ -n "$VERSION_NAME" ]; then
-    ./gradlew assembleDebug "-PVERSION_CODE=$VERSION_CODE" "-PVERSION_NAME=$VERSION_NAME" "-DUSE_RELEASE_SIGNING_FOR_DEBUG=true"
+    ./gradlew assembleDebug "-PVERSION_CODE=$VERSION_CODE" "-PVERSION_NAME=$VERSION_NAME" "-PUSE_RELEASE_SIGNING_FOR_DEBUG=true"
 else
-    ./gradlew assembleDebug "-PVERSION_CODE=$VERSION_CODE" "-DUSE_RELEASE_SIGNING_FOR_DEBUG=true"
+    ./gradlew assembleDebug "-PVERSION_CODE=$VERSION_CODE" "-PUSE_RELEASE_SIGNING_FOR_DEBUG=true"
 fi
 
 RELEASE_APK="$ROOT/app/build/outputs/apk/release/app-release.apk"
