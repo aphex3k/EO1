@@ -118,7 +118,7 @@ public class LocalMediaBackendTest {
         assertEquals("local", backend.getType());
         assertNull(backend.describeVersion());
         MediaAsset a = new MediaAsset("x", "local", MediaType.IMAGE, -1, null, "x.jpg",
-                null, 4L, new File(uploadDir, "x.jpg").getAbsolutePath());
+                null, 4L, new File(uploadDir, "x.jpg").getAbsolutePath(), 0, 0);
         assertNull(backend.resolveThumbnailFallback(a));
     }
 

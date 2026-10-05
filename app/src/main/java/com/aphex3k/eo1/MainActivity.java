@@ -44,6 +44,8 @@ import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewCompat;
 
+import com.aphex3k.media.MediaAsset;
+import com.aphex3k.media.MediaType;
 import com.aphex3k.eo1.mqtt.MqttManager;
 import com.aphex3k.eo1.mqtt.Payload;
 import com.aphex3k.eo1.mqtt.PlaybackListener;
@@ -100,6 +102,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private TsPlayerController tsPlayerController;
     private boolean preferTsPlayer;
     private int tsFallbackCount;
+    /** Inputs of the last video routing decision, reported in the debug /state video block. */
+    private int lastVideoRotation = -1;
+    private int lastVideoWidth;
+    private int lastVideoHeight;
+    private String lastFrameOrientation;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
@@ -1163,7 +1170,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.runOnUiThread(() -> {
             try {
                 cancelVideoWatchdog();
-                selectVideoPlayer(true);
+                selectVideoPlayer(routingAllowsTsPlayer(file));
                 int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
                 startVideoOnController(videoPlayer, file, assetId, videoDurationMs, activityReference, true);
             } catch (Exception e) {
@@ -1172,6 +1179,54 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 handleException(e);
             }
         });
+    }
+
+    /**
+     * TsPlayer is the default, but its .so renders with fixed fit/letterbox scaling and exposes
+     * no rotation or scale-mode control (docs/TSPLAYER.md, "Scaling & orientation"). Route to
+     * the MediaPlayer fallback when the video's display-matrix rotation is non-identity, or when
+     * the video's display aspect is the opposite of the frame's current orientation (a landscape
+     * video on a portrait frame would letterbox instead of fill). Square or unknown aspect and
+     * unknown rotation keep today's TsPlayer default.
+     */
+    private boolean routingAllowsTsPlayer(File file) {
+        VideoHeaderProbe.Probe probe = VideoHeaderProbe.probe(file);
+        int rotation = probe.rotationDeg;
+        int width = probe.codedWidth;
+        int height = probe.codedHeight;
+        MediaAsset asset = mediaManager != null ? mediaManager.getCurrentAsset() : null;
+        if (asset != null) {
+            if (width <= 0) {
+                width = asset.width;
+            }
+            if (height <= 0) {
+                height = asset.height;
+            }
+        }
+        int effWidth = width;
+        int effHeight = height;
+        if (rotation == 90 || rotation == 270) {
+            int t = effWidth;
+            effWidth = effHeight;
+            effHeight = t;
+        }
+        boolean framePortrait = getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_PORTRAIT;
+        boolean forceFallback = rotation > 0
+                || (width > 0 && height > 0 && effWidth > effHeight && framePortrait)
+                || (width > 0 && height > 0 && effHeight > effWidth && !framePortrait);
+        lastVideoRotation = rotation;
+        lastVideoWidth = width;
+        lastVideoHeight = height;
+        lastFrameOrientation = framePortrait ? "portrait" : "landscape";
+        Log.i(TAG, "displayVideo routing: rotation=" + rotation + " coded=" + width + "x" + height
+                + " frame=" + lastFrameOrientation + " player="
+                + (forceFallback ? "MediaPlayer" : "TsPlayer"));
+        debugInformationProvided(new DebugInformation("videoRouting",
+                "rotation=" + rotation + " dims=" + width + "x" + height
+                        + " frame=" + lastFrameOrientation + " -> "
+                        + (forceFallback ? "MediaPlayer" : "TsPlayer")));
+        return !forceFallback;
     }
 
     /**
@@ -1455,6 +1510,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         JsonObject media = new JsonObject();
         media.addProperty("rotationAssets", mediaManager.rotationListSize());
         media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
+        MediaAsset currentAsset = mediaManager.getCurrentAsset();
+        if (currentAsset != null) {
+            JsonObject current = new JsonObject();
+            current.addProperty("key", currentAsset.key());
+            current.addProperty("type", currentAsset.type == MediaType.VIDEO ? "video" : "image");
+            current.addProperty("backendId", currentAsset.backendId);
+            if (currentAsset.originalFileName != null) {
+                current.addProperty("originalFileName", currentAsset.originalFileName);
+            }
+            current.addProperty("width", currentAsset.width);
+            current.addProperty("height", currentAsset.height);
+            current.addProperty("durationMs", currentAsset.durationMs);
+            if (currentAsset.sizeBytes != null) {
+                current.addProperty("sizeBytes", currentAsset.sizeBytes);
+            }
+            current.addProperty("local", currentAsset.localPath != null);
+            media.add("current", current);
+        }
         o.add("media", media);
 
         o.add("update", updateManager.stateJson());
@@ -1467,6 +1540,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             video.addProperty("preferTsPlayer", preferTsPlayer);
             video.addProperty("tsAvailable", TsPlayerNative.isAvailable());
             video.addProperty("tsFallbacks", tsFallbackCount);
+            video.addProperty("rotation", lastVideoRotation);
+            video.addProperty("width", lastVideoWidth);
+            video.addProperty("height", lastVideoHeight);
+            if (lastFrameOrientation != null) {
+                video.addProperty("frameOrientation", lastFrameOrientation);
+            }
             if (tsVideoView != null) {
                 video.addProperty("generation", tsVideoView.getLoopGeneration());
                 video.addProperty("errors", tsVideoView.getVideoErrorCount());

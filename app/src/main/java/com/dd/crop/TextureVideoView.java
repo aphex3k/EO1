@@ -97,22 +97,26 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         float viewHeight = getHeight();
         float pivotX = viewWidth / 2f;
         float pivotY = viewHeight / 2f;
-        float scale = rotationAwareAspectScale(viewWidth, viewHeight, mVideoWidth, mVideoHeight, mVideoRotation);
+        // TextureView maps the surface buffer stretched into the view bounds, so a uniform
+        // scale alone renders distorted/over-zoomed — compensate that anisotropic stretch
+        // with per-axis factors, then rotate.
+        float[] factors = cropScaleFactors(viewWidth, viewHeight, mVideoWidth, mVideoHeight, mVideoRotation);
 
         Matrix transformMatrix = new Matrix();
-        transformMatrix.setScale(scale, scale, pivotX, pivotY);
+        transformMatrix.setScale(factors[0], factors[1], pivotX, pivotY);
         transformMatrix.postRotate(mVideoRotation, pivotX, pivotY);
         setTransform(transformMatrix);
 
         if (BuildConfig.DEBUG) {
             log(String.format(
-                    "view=%dx%d video=%dx%d rotation=%d scale=%.3f",
+                    "view=%dx%d video=%dx%d rotation=%d scale=(%.3f,%.3f)",
                     getWidth(),
                     getHeight(),
                     (int) mVideoWidth,
                     (int) mVideoHeight,
                     mVideoRotation,
-                    scale));
+                    factors[0],
+                    factors[1]));
         }
     }
 
@@ -143,6 +147,20 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         float scaleY = viewHeight / contentHeight;
 
         return Math.max(scaleX, scaleY);
+    }
+
+    /**
+     * Per-axis transform factors that display the video with true center-crop (aspect-fill)
+     * in the view. TextureView stretches the surface buffer into the view bounds, so each
+     * axis must be compensated: factor = fillScale * videoDim / viewDim. For rotation 0 this
+     * reduces to the original dd-crop postScale formulas.
+     */
+    public static float[] cropScaleFactors(float viewWidth, float viewHeight,
+                                           float videoWidth, float videoHeight, int rotation) {
+        float fillScale = rotationAwareAspectScale(viewWidth, viewHeight, videoWidth, videoHeight, rotation);
+        float sx = fillScale * videoWidth / viewWidth;
+        float sy = fillScale * videoHeight / viewHeight;
+        return new float[]{sx, sy};
     }
 
     private int readVideoRotation(String path) {

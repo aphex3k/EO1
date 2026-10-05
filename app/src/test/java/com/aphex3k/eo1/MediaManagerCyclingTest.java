@@ -160,7 +160,7 @@ public class MediaManagerCyclingTest {
 
     private static MediaAsset remoteAsset(String id, String backendId) {
         return new MediaAsset(id, backendId, MediaType.IMAGE, -1, null,
-                id + ".jpg", null, null, null);
+                id + ".jpg", null, null, null, 0, 0);
     }
 
     private static FakeBackend backendA(int count) {
@@ -309,7 +309,7 @@ public class MediaManagerCyclingTest {
         Files.write(localFile.toPath(), localContent);
         String localAssetId = LocalMediaBackend.localAssetIdFor("upload.jpg");
         MediaAsset localAsset = new MediaAsset(localAssetId, "fakeL", MediaType.IMAGE, -1, null,
-                "upload.jpg", null, (long) localContent.length, localFile.getAbsolutePath());
+                "upload.jpg", null, (long) localContent.length, localFile.getAbsolutePath(), 0, 0);
         FakeBackend local = new FakeBackend("fakeL", "local", localAsset);
         FakeBackend remote = backendB(2);
         FakeListener listener = new FakeListener();
@@ -430,7 +430,7 @@ public class MediaManagerCyclingTest {
     public void incompatibleExtensionIsSkippedBeforeDownload() throws Exception {
         String heicId = "01234567-89ab-cdef-0123-456789abcdef";
         MediaAsset heic = new MediaAsset(heicId, "fakeA", MediaType.IMAGE, -1, null,
-                heicId + ".heic", null, null, null);
+                heicId + ".heic", null, null, null, 0, 0);
         FakeBackend a = new FakeBackend("fakeA", "immich", heic, remoteAsset("a0", "fakeA"));
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a), listener, 7L);
@@ -455,7 +455,7 @@ public class MediaManagerCyclingTest {
     public void byteVerifiedIncompatibleFileIsDiscardedAndRemembered() throws Exception {
         String heicId = "01234567-89ab-cdef-0123-456789abcdef";
         MediaAsset heic = new MediaAsset(heicId, "fakeA", MediaType.IMAGE, -1, null,
-                heicId + ".jpg", null, null, null); // HEIF content behind a .jpg name
+                heicId + ".jpg", null, null, null, 0, 0); // HEIF content behind a .jpg name
         final AtomicInteger heicOpens = new AtomicInteger();
         FakeBackend a = new FakeBackend("fakeA", "immich", heic) {
             @Override

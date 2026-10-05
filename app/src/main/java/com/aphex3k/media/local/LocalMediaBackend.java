@@ -1,5 +1,6 @@
 package com.aphex3k.media.local;
 
+import android.graphics.BitmapFactory;
 import android.util.Log;
 
 import androidx.annotation.Nullable;
@@ -81,9 +82,11 @@ public class LocalMediaBackend implements MediaBackend {
                 Log.d(TAG, "Local backend '" + id + "': skipping " + f.getName() + " - " + reason);
                 continue;
             }
+            int[] bounds = type == MediaType.IMAGE ? imageBounds(f) : new int[]{0, 0};
             assets.add(new MediaAsset(
                     localAssetIdFor(f.getName()), id, type, -1, null,
-                    f.getName(), null, f.length(), f.getAbsolutePath()));
+                    f.getName(), null, f.length(), f.getAbsolutePath(),
+                    bounds[0], bounds[1]));
         }
         return assets;
     }
@@ -100,6 +103,24 @@ public class LocalMediaBackend implements MediaBackend {
     /** Deterministic UUID derived from the file name; stable across rescans. */
     public static String localAssetIdFor(String filename) {
         return UUID.nameUUIDFromBytes(filename.getBytes(Charset.forName("UTF-8"))).toString();
+    }
+
+    /**
+     * Header-only image bounds ({@code {width, height}}) without allocating pixels.
+     * Returns {0, 0} when the decoder cannot determine them.
+     */
+    private static int[] imageBounds(File f) {
+        try {
+            BitmapFactory.Options opts = new BitmapFactory.Options();
+            opts.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(f.getAbsolutePath(), opts);
+            return (opts.outWidth > 0 && opts.outHeight > 0)
+                    ? new int[]{opts.outWidth, opts.outHeight}
+                    : new int[]{0, 0};
+        } catch (Exception e) {
+            Log.d(TAG, "Could not read image bounds for " + f.getName());
+            return new int[]{0, 0};
+        }
     }
 
     /** Maps an extension (with or without leading dot) to a media type, or null when unrecognized. */
