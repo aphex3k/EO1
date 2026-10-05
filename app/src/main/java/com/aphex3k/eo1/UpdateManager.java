@@ -53,11 +53,13 @@ import okhttp3.Response;
  * plus a world-readable public copy under {@code /sdcard/Download/}, because the installer
  * runs under a different uid) and installed.
  *
- * <p>Install dispatch: when the frame holds {@code INSTALL_PACKAGES} (a normal permission on
- * API 19, persisted from the one-time bootstrap install) the APK is installed headlessly via
- * a reflective call to {@code PackageManager.installPackage} with a proxied
- * {@code PackageManager$PackageInstallObserver}; otherwise the proven install-intent fallback
- * is used.
+ * <p>Install dispatch: when the frame holds {@code INSTALL_PACKAGES}, the APK is installed
+ * headlessly via a reflective call to {@code PackageManager.installPackage} with a proxied
+ * {@code PackageManager$PackageInstallObserver}. On this ROM that permission is
+ * signature|system, so sideloaded frames never hold it — they install headlessly through the
+ * device's own adbd on {@code 127.0.0.1:5555} instead ({@link AdbdInstallClient} runs
+ * {@code pm install} as the shell user — no confirmation UI). Only when adbd is
+ * unreachable does it fall back to the proven install-intent path.
  *
  * <p>Recovery across process death: the installer kills this process on success, so success
  * is detected only by the new process's {@link #reconcileOnStartup()}. A +120 s relaunch alarm
@@ -87,6 +89,7 @@ public class UpdateManager {
     private boolean installInFlight;
     private boolean installFiredInThisProcess;
     private long installFiredAtMs;
+    private volatile String lastInstallAttempt = "none";
     private OkHttpClient httpClient;
 
     public UpdateManager(UpdateManagerListener listener, Context context, SettingsManager settingsManager) {
@@ -342,6 +345,7 @@ public class UpdateManager {
         installFiredAtMs = System.currentTimeMillis();
 
         if (holdsInstallPermission()) {
+            lastInstallAttempt = "headless";
             Log.i(TAG, "installing staged update headlessly (version " + snapshot.expectedVersionCode + ")");
             try {
                 fireHeadlessInstall(Uri.fromFile(stagedPublic));
@@ -349,8 +353,13 @@ public class UpdateManager {
                 Log.e(TAG, "installPackage threw", t);
                 setStaged("installPackage-threw: " + t);
             }
+        } else if (installViaAdbd(snapshot)) {
+            // The adbd path settled the attempt: success (process replacement pending) or a
+            // pm failure already recorded as STAGED for the next tick.
         } else {
-            // One-time bootstrap frames without INSTALL_PACKAGES: proven intent fallback.
+            // No adbd on this frame: one-time bootstrap frames use the proven intent
+            // fallback (confirmation UI, operable via OTG keyboard/mouse).
+            lastInstallAttempt = "intent";
             wakeScreenForInstaller();
             Log.i(TAG, "installing staged update via install intent (version " + snapshot.expectedVersionCode + ")");
             try {
@@ -363,6 +372,35 @@ public class UpdateManager {
                 setStaged("install-intent-threw: " + t);
             }
         }
+    }
+
+    /**
+     * Installs the staged public copy through the device's own adbd
+     * ({@code 127.0.0.1:5555}, enabled by the ROM's {@code service.adb.tcp.port}) —
+     * no confirmation UI, which a headless frame cannot interact with.
+     *
+     * @return {@code true} when the attempt is settled (success, or a pm failure
+     *         already recorded as retryable {@code STAGED}); {@code false} when adbd
+     *         is unreachable and the caller should fall back to the install intent.
+     */
+    private boolean installViaAdbd(UpdateState snapshot) {
+        lastInstallAttempt = "adbd";
+        Log.i(TAG, "installing staged update via adbd (version " + snapshot.expectedVersionCode + ")");
+        AdbdInstallClient.Result result = new AdbdInstallClient().install(stagedPublic);
+        if (result.outcome == AdbdInstallClient.Outcome.PM_FAILED) {
+            Log.w(TAG, "adbd install failed: " + result.detail);
+            installFiredInThisProcess = false;
+            setStaged("install-failed: " + result.detail);
+            return true;
+        }
+        if (result.outcome != AdbdInstallClient.Outcome.SUCCESS) {
+            Log.w(TAG, "adbd unreachable (" + result.detail + "); falling back to install intent");
+            return false;
+        }
+        // pm replaces the package and kills this process; the new process's
+        // reconcileOnStartup() confirms (INSTALL_PENDING -> IDLE, staged files deleted).
+        Log.i(TAG, "adbd install succeeded (version " + snapshot.expectedVersionCode + "); awaiting process replacement");
+        return true;
     }
 
     /**
@@ -1040,6 +1078,8 @@ public class UpdateManager {
             Configuration config = settingsManager.getConfiguration();
             url = config != null ? config.updateManifestUrl : null;
         }
+        // Probe outside the monitor: the attempt can block up to a second.
+        boolean adbdReachable = AdbdInstallClient.probe();
         JsonObject o = new JsonObject();
         o.addProperty("state", s.state.name());
         o.addProperty("installedVersionCode", BuildConfig.VERSION_CODE);
@@ -1055,7 +1095,9 @@ public class UpdateManager {
         staged.addProperty("bytes", stagedPublic.length());
         o.add("stagedApk", staged);
         o.addProperty("installPermissionHeld", headless);
-        o.addProperty("installMode", headless ? "headless" : "intent-fallback");
+        o.addProperty("installMode", headless ? "headless" : (adbdReachable ? "adbd" : "intent-fallback"));
+        o.addProperty("lastInstallAttempt", lastInstallAttempt);
+        o.addProperty("adbdReachable", adbdReachable);
         return o;
     }
 

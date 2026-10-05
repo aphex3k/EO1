@@ -31,7 +31,7 @@ Git LFS (tracked): `app/src/main/jniLibs/armeabi-v7a/libTsPlayer-jni.so` (Amlogi
 - **Language:** Java only — no Kotlin
 - **SDK:** `minSdk` / `targetSdk` / `maxSdk` = **19** (KitKat 4.4.2); `compileSdk` 34
 - **Build:** Gradle + Android Gradle Plugin; all builds are local (the old Jenkins CI is gone — `publish-update.sh` at the repo root builds + signs release APKs via `local.properties` signing props)
-- **Networking:** Retrofit + OkHttp + Gson; hand-rolled Immich client; self-update via `com.aphex3k.update` (plain-HTTP manifest + pure-Java JAR signature verification + headless `installPackage`)
+- **Networking:** Retrofit + OkHttp + Gson; hand-rolled Immich client; self-update via `com.aphex3k.update` (plain-HTTP manifest + pure-Java JAR signature verification + headless install). Headless install: `installPackage` reflectively when the app holds `INSTALL_PACKAGES`, otherwise the device's own adbd on `127.0.0.1:5555` (`AdbdInstallClient` speaks the minimal adb wire protocol and runs `pm install` — the ROM starts adbd with TCP 5555 and `ro.adb.secure` unset, and sideloaded frames lack the signature-level `INSTALL_PACKAGES` permission); install-intent with confirmation UI is only the last-resort fallback when adbd is unreachable
 - **Immich server:** supported band **3.0.0–3.2.2** (verified against the 3.2.2 OpenAPI spec — no breaking changes to the endpoints this app uses). The band lives in `com.aphex3k.media.immich.ImmichClientRegistry` (the V3 client); each backend entry may pin its `apiVersion` (default `"auto"` = best-effort probe of `GET /api/server/version`). Immich’s API is not stable across releases — on a breaking change, add a new frozen `com.aphex3k.immichApi.vN` DTO package + `ImmichClientVN` + one registry band; never edit a frozen client package.
 - **TLS:** EO1 needs TLS 1.2 and weaker ciphers — see `Tls12SocketFactory.java` and `ApiServiceGenerator.java`
 - **Video:** Prefer Amlogic **TsPlayer** (`TsVideoView` + `libTsPlayer-jni.so`) on Geniatech EO1/EO2 when the native library loads; **automatic fallback** to platform `MediaPlayer` via `com.dd.crop.TextureVideoView`. **Do not use ExoPlayer** (including 2.19.x / Media3) — it triggers MediaCodec/GPU driver lockups that hang the whole device (ADB dies; requires power-cycle). See [docs/TSPLAYER.md](docs/TSPLAYER.md).
@@ -48,7 +48,7 @@ MainActivity
   ├── MediaManager          → com.aphex3k.media.MediaBackend (ImmichMediaBackend → ImmichClientV3 → com.aphex3k.immichApi | LocalMediaBackend)
   ├── Video playback        → TsPlayer (preferred) / MediaPlayer fallback
   ├── BrightnessManager / BrightnessSensorManager
-  └── UpdateManager         → com.aphex3k.update (manifest-driven self-update: SHA-256 + JAR signature + cert match, headless installPackage)
+  └── UpdateManager         → com.aphex3k.update (manifest-driven self-update: SHA-256 + JAR signature + cert match; headless install via installPackage, else adbd loopback `pm install` via AdbdInstallClient)
 ```
 
 Open these first:
@@ -64,7 +64,7 @@ Open these first:
 | Config model (source of truth) | `app/src/main/java/com/aphex3k/eo1/Configuration.java` |
 | Immich HTTP API | `app/src/main/java/com/aphex3k/immichApi/ImmichApiService.java` |
 | HTTP / TLS / cookies | `app/src/main/java/com/aphex3k/eo1/ApiServiceGenerator.java`, `Tls12SocketFactory.java` |
-| Self-update | `app/src/main/java/com/aphex3k/eo1/UpdateManager.java`, `com.aphex3k.update/` (`UpdateManifest` DTO, `UpdateState`/`UpdateStateStore` persistence, `ApkSignatureVerifier` pure-Java JAR-signature check) |
+| Self-update | `app/src/main/java/com/aphex3k/eo1/UpdateManager.java`, `AdbdInstallClient.java` (minimal adb wire-protocol client: `pm install` over the ROM's adbd on 127.0.0.1:5555, no confirmation UI), `com.aphex3k.update/` (`UpdateManifest` DTO, `UpdateState`/`UpdateStateStore` persistence, `ApkSignatureVerifier` pure-Java JAR-signature check) |
 | LAN web server | `WebServer` (HTTP on port 80→8080), `WebController` (implemented by `MainActivity`), `MultipartParser` (streaming multipart), `UploadedMedia` (persistent `filesDir/uploaded`), `AppLogger` (ring buffer + rolling file), `DeviceTelemetry` (on-demand `/state` data) — see [docs/WEBSERVER.md](docs/WEBSERVER.md) |
 | HOME launcher role | `app/src/main/AndroidManifest.xml` |
 | Unit tests | `app/src/test/java/` |
@@ -110,6 +110,7 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 - Gate platform-specific hardware behavior (soft-touch buttons, light sensor, screen brightness, power button) on `HardwareCapabilities` flags — never add model-specific `if`s on `Build.MODEL`/`Build.DEVICE` elsewhere; unsupported features no-op
 - Keep the LAN web server dependency-free and resource-cheap (hand-rolled `ServerSocket`, `Connection: close`); every web-server thread must be defensively wrapped — a stray exception must never reach the global `UncaughtExceptionHandler` (which calls `System.exit(2)`)
 - Let `libTsPlayer-jni.so` loop a media file **natively** — create the TsPlayer once per asset and run no per-duration Java teardown loop; full `deletePlayer` + `createPlayer` only on asset handoff / `stop()` / `surfaceDestroyed` (see [docs/TSPLAYER.md](docs/TSPLAYER.md) “Looping (native)”)
+- Keep the adbd install command (`AdbdInstallClient`) built only from the fixed staged public-copy path — never interpolate user/config input into the shell command line
 
 **Don’t**
 
