@@ -34,11 +34,15 @@ public class MediaAsset {
      * Absolute path of the on-disk file for local (on-device) assets; null for remote assets.
      */
     @Nullable public final String localPath;
+    /** Coded content width in pixels, or 0 when the backend does not report one. */
+    public final int width;
+    /** Coded content height in pixels, or 0 when the backend does not report one. */
+    public final int height;
 
     public MediaAsset(String id, String backendId, MediaType type, int durationMs,
                       @Nullable String checksum, @Nullable String originalFileName,
                       @Nullable String originalPath, @Nullable Long sizeBytes,
-                      @Nullable String localPath) {
+                      @Nullable String localPath, int width, int height) {
         this.id = id;
         this.backendId = backendId;
         this.type = type;
@@ -48,6 +52,8 @@ public class MediaAsset {
         this.originalPath = originalPath;
         this.sizeBytes = sizeBytes;
         this.localPath = localPath;
+        this.width = width;
+        this.height = height;
     }
 
     /**

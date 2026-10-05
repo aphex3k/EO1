@@ -82,6 +82,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private final Set<String> knownIncompatibleKeys =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private volatile String currentPlaybackPath;
+    /** Last successfully displayed asset; read on the UI thread by /state. */
+    private volatile MediaAsset currentAsset;
     /** Cache dir of the rotation currently in flight; guards removeFromCache's location check. */
     private volatile File mediaCacheDir;
     private volatile boolean poolStale;
@@ -227,6 +229,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
 
         currentPlaybackPath = playbackFile.getAbsolutePath();
+        currentAsset = acquired;
         if (acquired.type == MediaType.VIDEO && acquired.durationMs > 0) {
             videoDurationMsByKey.put(acquired.key(), acquired.durationMs);
         }
@@ -841,7 +844,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         String rawId = colon > 0 ? key.substring(colon + 1) : key;
         String backendId = colon > 0 ? key.substring(0, colon) : "";
         return new MediaAsset(rawId, backendId, isVideo ? MediaType.VIDEO : MediaType.IMAGE,
-                -1, null, null, null, null, null);
+                -1, null, null, null, null, null, 0, 0);
     }
 
     private void postDebugInformation(String key, String value) {
@@ -852,6 +855,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     // ---------------------------------------------------------------- misc accessors
+
+    /** Last successfully displayed asset, or null before the first display. */
+    public MediaAsset getCurrentAsset() {
+        return currentAsset;
+    }
 
     /** Duration in ms of a previously-shown video, or -1 when unknown. */
     public int getVideoDurationMs(String assetKey) {

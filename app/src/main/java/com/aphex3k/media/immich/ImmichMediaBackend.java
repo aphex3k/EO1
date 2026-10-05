@@ -183,7 +183,10 @@ public class ImmichMediaBackend implements MediaBackend {
     /** Pure mapping from an Immich DTO to a compact pipeline record. */
     public static MediaAsset toMediaAsset(String backendId, @NonNull ImmichApiAssetResponse asset) {
         Integer duration = asset.getDuration();
-        Long size = asset.getExifInfo() != null ? asset.getExifInfo().getFileSizeInByte() : null;
+        ImmichExifInfo exif = asset.getExifInfo();
+        Long size = exif != null ? exif.getFileSizeInByte() : null;
+        Integer width = exif != null ? exif.getExifImageWidth() : null;
+        Integer height = exif != null ? exif.getExifImageHeight() : null;
         return new MediaAsset(
                 asset.getId(),
                 backendId,
@@ -193,7 +196,9 @@ public class ImmichMediaBackend implements MediaBackend {
                 asset.getOriginalFileName(),
                 asset.getOriginalPath(),
                 size,
-                null);
+                null,
+                width != null ? width : 0,
+                height != null ? height : 0);
     }
 
     /**

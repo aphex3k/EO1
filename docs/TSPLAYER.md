@@ -45,6 +45,45 @@ Note: on-device `getStatus()` often stays `IDLE (0)` while frames play (OEM only
 
 `SurfaceView` does **not** create a surface while `INVISIBLE`/`GONE`. The layout keeps `ImageView` above `TsVideoView` so the wallpaper covers video until `onVideoPrepared` hides the image.
 
+## Scaling & orientation (routing)
+
+TsPlayer's `.so` renders with a **fixed fit/letterbox scale** and its JNI surface exposes
+only `createPlayer/setSurface/start/stop/pause/resume/deletePlayer/getStatus/getCurrentTime`
+— no scale-mode or rotation control is reachable from Java. Two defects follow:
+
+- **Rotated video plays upside-down/wrong-way** (the `.so` ignores display-matrix metadata).
+- **Landscape clips do not fill a portrait viewport** — they are squished/letterboxed instead
+  of aspect-filling and cropping the sides.
+
+So `MainActivity.displayVideo` routes each video before choosing a player. Inputs:
+
+- **Video rotation** — a bounded pure-Java ISOBMFF header probe (`VideoHeaderProbe`, no
+  `MediaMetadataRetriever`, which would EBUSY-starve a live TsPlayer on `/dev/amstream_vbuf`):
+  the `tkhd` 16.16 display matrix (v0/v1), overridden by an ISO 23001-8 `rot ` box when
+  present; coded width/height from the first `stsd` video sample entry.
+- **Video coded dimensions** — probe first; the `MediaAsset` exif dimensions when the probe
+  yields 0.
+- **Frame orientation** — the display's `Configuration.orientation` (verify on the EO2 that
+  physically turning the frame actually flips it; only a sensor path is warranted if not).
+
+Routing rule — force the MediaPlayer/`TextureVideoView` fallback when:
+
+```
+rotation ∈ {90, 180, 270}
+   or (effective W > effective H and frame is portrait)   // landscape video, portrait frame
+   or (effective H > effective W and frame is landscape)  // portrait video, landscape frame
+```
+
+where effective dimensions are the coded dimensions swapped for 90°/270° rotations.
+Square or unknown aspect, and unknown rotation, keep the TsPlayer default. The decision is
+logged and reported via `debugInformationProvided` plus the debug `/state` `video` block
+(`rotation`, `width`, `height`, `frameOrientation`; `active` shows the effective player).
+
+The fallback view performs rotation-aware **center-crop (aspect-fill)**:
+`TextureVideoView.updateTextureViewSize` compensates the TextureView's buffer-stretch mapping
+with per-axis factors (`cropScaleFactors`), so video fills the viewport, is cropped on the
+long axis, and is neither stretched nor over-zoomed.
+
 ## Looping (native)
 
 **The `.so` loops a media file natively.** After reaching EOF, `libTsPlayer-jni.so`
