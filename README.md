@@ -49,7 +49,7 @@ Amongst other things, I had to disable PFS as well as enable TLSv1.2 in addition
   1. Swipe down on the top right and go to **Settings > Security**
   2. Make sure "Unknown Sources" is checked
 - Go back to the browser and go to the URL where you host the APK. All builds are local (there is no CI anymore) — [publish-update.sh](#self-update) builds and signs a release APK and writes a matching `update-manifest.json` to `./update-out`; serve that directory from any plain-HTTP server on your LAN. Example: <http://your-host/update-out/eo1-release-1.apk>
-- When it finished downloading, install the file by pulling down the notification bar on the top left and clicking it, then agreeing to the install prompts. That's the one-time bootstrap: the app manifest declares `INSTALL_PACKAGES`, which on API 19 is a normal permission granted automatically at install — every later self-update then runs fully headless
+- When it finished downloading, install the file by pulling down the notification bar on the top left and clicking it, then agreeing to the install prompts. That's the one-time bootstrap — every later self-update then runs fully headless (no further manual steps; see [How the install runs](#how-the-install-runs))
 - Restart/power cycle your EO1 by unplugging and plugging only the power cable
   - At this point, the keyboard and mouse are still connected via OTG
 - Because this APK is designated as a "Home screen replacement", when EO1 boots, it will ask if you want to load the Electric Object app or the EO1 app. Select EO1 and choose "Always".
@@ -192,11 +192,12 @@ different uid) and then installed.
 
 ### How the install runs
 
-- When the frame holds `INSTALL_PACKAGES` (a normal permission on API 19, granted
-  automatically at install time), the APK is installed headlessly via
-  `PackageManager.installPackage`. Without it the app falls back to the proven install intent
-  and wakes the screen — that only matters for a frame whose first install predates the
-  permission.
+- When the frame holds `INSTALL_PACKAGES`, the APK is installed headlessly via
+  `PackageManager.installPackage`. On this ROM the permission is `signature|system`, so
+  sideloaded frames never hold it — for them the app instead runs `pm install -r` as the
+  shell user through the device's own adbd on `127.0.0.1:5555` (`AdbdInstallClient` speaks
+  the minimal adb wire protocol; no confirmation UI). Only when adbd is unreachable does
+  the app fall back to the proven install intent, waking the screen for a human to confirm.
 - Before firing, a +120 s `AlarmManager` relaunch alarm (the same one the crash handler uses)
   is armed, so a fatal crash mid-install still gets the frame back to a launchable state.
 - The installer kills this process on success, so success is detected by the *new* process on
@@ -208,7 +209,7 @@ different uid) and then installed.
 
 | Symptom | Action |
 |---|---|
-| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode` |
+| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode`, `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable` |
 | Staged but not installed | `/control?action=install-staged` (turns the screen on and fires the install) |
 | Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
 | Force a re-check now | `/control?action=check-updates` |
