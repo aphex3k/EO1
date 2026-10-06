@@ -89,6 +89,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long MILLIS = 60000;
     private static final long VIDEO_WATCHDOG_POLL_MS = 2000L;
     private static final long VIDEO_STALL_THRESHOLD_MS = 8000L;
+    /** Minimum gap between download-progress logcat lines. */
+    private static final long DOWNLOAD_PROGRESS_LOG_INTERVAL_MS = 5000L;
     /** Logcat tag matched by debug.sh follow_logcat filter. */
     private static final String TAG = "EO1";
     private View lastVisibleView;
@@ -180,6 +182,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private long nextRotationAtMs = 0L;
     /** Avoid spamming "Waiting for network…" while still offline. */
     private boolean networkWaitNotified = false;
+    /** Last percent value logged for the in-flight download; -1 until the first progress line. Guarded by downloadProgressLogLock. */
+    private long lastLoggedDownloadPercent = -1L;
+    /** Epoch ms of the last download-progress logcat line; 0L before the first. Guarded by downloadProgressLogLock. */
+    private long lastDownloadProgressLogAtMs = 0L;
+    private final Object downloadProgressLogLock = new Object();
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -1415,18 +1422,38 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         long percent =  Math.round((100.0 * bytesRead) / contentLength);
 
-        if (done) {
-            Log.i(TAG, "download: completed");
-        } else if (percent == 0.0) {
-            if (contentLength == -1) {
-                Log.i(TAG, "download: content-length unknown");
-            } else {
-                Log.i(TAG, "download: content-length " + contentLength);
+        // OkHttp invokes this on every read() of the response body, so logging every
+        // event floods logcat with repeated "download: 9%" lines. Log the content-length
+        // announcement once per download, a progress line only for a percent value not
+        // logged yet, and at most one progress line per DOWNLOAD_PROGRESS_LOG_INTERVAL_MS.
+        synchronized (downloadProgressLogLock) {
+            long nowMs = System.currentTimeMillis();
+            if (done || percent < lastLoggedDownloadPercent) {
+                // A completed download, or a percent below the last logged value (a new
+                // download after one that failed without a done event) resets the throttle.
+                if (done) {
+                    Log.i(TAG, "download: completed");
+                }
+                lastLoggedDownloadPercent = -1L;
+                lastDownloadProgressLogAtMs = 0L;
             }
-        }
-
-        if (contentLength != -1 && !done) {
-            Log.d(TAG, "download: " + percent + "%");
+            if (!done) {
+                if (percent == 0L && lastLoggedDownloadPercent < 0L) {
+                    if (contentLength == -1) {
+                        Log.i(TAG, "download: content-length unknown");
+                    } else {
+                        Log.i(TAG, "download: content-length " + contentLength);
+                    }
+                    lastLoggedDownloadPercent = 0L;
+                    lastDownloadProgressLogAtMs = nowMs;
+                } else if (contentLength != -1
+                        && percent != lastLoggedDownloadPercent
+                        && nowMs - lastDownloadProgressLogAtMs >= DOWNLOAD_PROGRESS_LOG_INTERVAL_MS) {
+                    Log.d(TAG, "download: " + percent + "%");
+                    lastLoggedDownloadPercent = percent;
+                    lastDownloadProgressLogAtMs = nowMs;
+                }
+            }
         }
 
         // MediaManager only forwards progress events while a remote download is in
