@@ -61,6 +61,11 @@ public class MediaPlayerController implements VideoPlayerController {
     }
 
     @Override
+    public void setDisplayRotation(int rotationDeg) {
+        videoView.setDisplayRotation(rotationDeg);
+    }
+
+    @Override
     public void play() {
         videoView.play();
     }
