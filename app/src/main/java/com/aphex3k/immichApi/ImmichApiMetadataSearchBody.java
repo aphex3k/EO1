@@ -34,6 +34,14 @@ public class ImmichApiMetadataSearchBody {
     @Nullable
     private List<String> albumIds;
 
+    /**
+     * Restricts the search to assets carrying one of these tag ids. Absent/null means "no
+     * tag filter" — servers across the supported 3.0.0–3.2.2 band accept this flat field.
+     */
+    @SerializedName("tagIds")
+    @Nullable
+    private List<String> tagIds;
+
     public ImmichApiMetadataSearchBody(Integer page, Integer size) {
         this.page = page;
         this.size = size;
@@ -53,6 +61,11 @@ public class ImmichApiMetadataSearchBody {
 
     public ImmichApiMetadataSearchBody withIsNotInAlbum(@Nullable Boolean isNotInAlbum) {
         this.isNotInAlbum = isNotInAlbum;
+        return this;
+    }
+
+    public ImmichApiMetadataSearchBody withTagIds(@Nullable List<String> tagIds) {
+        this.tagIds = tagIds;
         return this;
     }
 
@@ -85,5 +98,10 @@ public class ImmichApiMetadataSearchBody {
     @Nullable
     public List<String> getAlbumIds() {
         return albumIds;
+    }
+
+    @Nullable
+    public List<String> getTagIds() {
+        return tagIds;
     }
 }

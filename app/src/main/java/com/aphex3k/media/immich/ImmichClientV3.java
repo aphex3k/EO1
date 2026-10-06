@@ -163,7 +163,8 @@ public class ImmichClientV3 implements ImmichClient {
             ImmichApiMetadataSearchBody body = new ImmichApiMetadataSearchBody(page, pageSize)
                     .withAlbumIds(firstPage.getAlbumIds())
                     .withIsFavorite(firstPage.getIsFavorite())
-                    .withIsNotInAlbum(firstPage.getIsNotInAlbum());
+                    .withIsNotInAlbum(firstPage.getIsNotInAlbum())
+                    .withTagIds(firstPage.getTagIds());
 
             Response<ImmichApiMetadataSearchResponse> assetsResponse =
                     withSession(() -> service.getAllAssets(body));
@@ -180,6 +181,24 @@ public class ImmichClientV3 implements ImmichClient {
             page++;
             count = items != null ? items.size() : 0;
         }
+    }
+
+    @Override
+    public List<String> listTaggedAssetIds(String tagName) throws IOException {
+        final List<String> ids = new ArrayList<>();
+        String tagId = findTagId(tagName);
+        if (tagId == null) {
+            return ids;
+        }
+        final List<ImmichApiAssetResponse> tagged = new ArrayList<>();
+        addAssetsFromSearch(tagged, new ImmichApiMetadataSearchBody(1, SEARCH_PAGE_SIZE)
+                .withTagIds(Collections.singletonList(tagId)));
+        for (ImmichApiAssetResponse asset : tagged) {
+            if (asset.getId() != null) {
+                ids.add(asset.getId());
+            }
+        }
+        return ids;
     }
 
     @Override
@@ -210,17 +229,7 @@ public class ImmichClientV3 implements ImmichClient {
     @Override
     public void tagAssetIncompatible(String assetId, String tagName)
             throws IOException, com.aphex3k.eo1.ImmichApiTagException {
-        String tagId = null;
-        Response<List<ImmichApiTagResponse>> allTagsResponse =
-                withSession(() -> service.getAllTags());
-        if (allTagsResponse.isSuccessful() && allTagsResponse.body() != null) {
-            for (ImmichApiTagResponse tag : allTagsResponse.body()) {
-                if (tagName.equals(tag.getName())) {
-                    tagId = tag.getId();
-                    break;
-                }
-            }
-        }
+        String tagId = findTagId(tagName);
         if (tagId == null) {
             Response<ImmichApiTagResponse> createTag =
                     withSession(() -> service.createTag(new ImmichApiTag(tagName)));
@@ -237,6 +246,25 @@ public class ImmichClientV3 implements ImmichClient {
                 throw new com.aphex3k.eo1.ImmichApiTagException();
             }
         }
+    }
+
+    /**
+     * Finds the id of a tag with the given name via {@code GET /api/tags}.
+     *
+     * @return the tag id, or null when the server has no such tag
+     */
+    @Nullable
+    private String findTagId(String tagName) throws IOException {
+        Response<List<ImmichApiTagResponse>> allTagsResponse =
+                withSession(() -> service.getAllTags());
+        if (allTagsResponse.isSuccessful() && allTagsResponse.body() != null) {
+            for (ImmichApiTagResponse tag : allTagsResponse.body()) {
+                if (tagName.equals(tag.getName())) {
+                    return tag.getId();
+                }
+            }
+        }
+        return null;
     }
 
     /**
