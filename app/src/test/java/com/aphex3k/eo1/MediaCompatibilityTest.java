@@ -60,6 +60,54 @@ public class MediaCompatibilityTest {
     }
 
     @Test
+    public void rejectsOversizedVideoResolutions() {
+        // 4K and QHD: any side above 1920px.
+        assertVideoResolutionRejected(3840, 2160);
+        assertVideoResolutionRejected(2160, 3840); // portrait 4K
+        assertVideoResolutionRejected(2560, 1440); // QHD
+        assertVideoResolutionRejected(4096, 2160); // DCI 4K
+        assertVideoResolutionRejected(7680, 4320); // 8K
+        // Just over the limit on either side.
+        assertVideoResolutionRejected(1921, 1080);
+        assertVideoResolutionRejected(1080, 1921);
+    }
+
+    @Test
+    public void acceptsVideoResolutionsUpTo1080p() {
+        assertVideoResolutionAccepted(1920, 1080);
+        assertVideoResolutionAccepted(1080, 1920); // portrait 1080p
+        assertVideoResolutionAccepted(1280, 720);
+        assertVideoResolutionAccepted(853, 480);
+    }
+
+    @Test
+    public void unknownOrMissingResolutionDimsPass() {
+        // 0 means "the backend did not report a dimension" — conservative pass.
+        assertNull(MediaCompatibility.incompatibleVideoResolution(MediaType.VIDEO, 0, 0));
+        assertNull(MediaCompatibility.incompatibleVideoResolution(MediaType.VIDEO, 3840, 0));
+        assertNull(MediaCompatibility.incompatibleVideoResolution(MediaType.VIDEO, 0, 2160));
+        assertNull(MediaCompatibility.incompatibleVideoResolution(MediaType.VIDEO, -1, 1080));
+    }
+
+    @Test
+    public void resolutionGateAppliesToVideoOnly() {
+        // Images have their own (accepted OOM) path for oversized content.
+        assertNull(MediaCompatibility.incompatibleVideoResolution(MediaType.IMAGE, 3840, 2160));
+        assertNull(MediaCompatibility.incompatibleVideoResolution(null, 3840, 2160));
+    }
+
+    private static void assertVideoResolutionRejected(int width, int height) {
+        String reason = MediaCompatibility.incompatibleVideoResolution(
+                MediaType.VIDEO, width, height);
+        assertTrue("expected " + width + "x" + height + " video to be rejected", reason != null);
+    }
+
+    private static void assertVideoResolutionAccepted(int width, int height) {
+        assertNull(width + "x" + height + " video should pass the resolution check",
+                MediaCompatibility.incompatibleVideoResolution(MediaType.VIDEO, width, height));
+    }
+
+    @Test
     public void missingNamesPass() {
         assertNull(MediaCompatibility.incompatibleReason(MediaType.IMAGE, null, null));
         assertNull(MediaCompatibility.incompatibleReason(MediaType.VIDEO, "no-ext", null));

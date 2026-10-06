@@ -452,6 +452,80 @@ public class MediaManagerCyclingTest {
     }
 
     @Test
+    public void oversizedVideoIsRoutedToPlaybackFallback() throws Exception {
+        String videoId = "01234567-89ab-cdef-0123-456789abcdef";
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, null, null, 3840, 2160);
+        final AtomicInteger originalResolves = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                originalResolves.incrementAndGet();
+                return super.resolveOriginal(asset);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(
+                                "fallback-stream".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:" + videoId, listener.displayedKeys.get(0));
+        // The original is never resolved or downloaded; only the fallback stream is fetched.
+        assertEquals(0, originalResolves.get());
+        assertEquals(1, fallbackOpens.get());
+        File fallbackFile = new File(cacheDir, videoId + ".mp4");
+        assertTrue(fallbackFile.isFile());
+        assertEquals("fallback-stream",
+                new String(Files.readAllBytes(fallbackFile.toPath()), StandardCharsets.UTF_8));
+        assertFalse(new File(cacheDir, videoId + ".mov").exists());
+        // Fallback downloads get no integrity sidecar.
+        assertFalse(new File(cacheDir, videoId + ".mp4.sha1").exists());
+        assertTrue(listener.exceptions.isEmpty());
+    }
+
+    @Test
+    public void oversizedVideoWithoutFallbackIsSkipped() throws Exception {
+        String videoId = "01234567-89ab-cdef-0123-456789abcdef";
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, null, null, 3840, 2160);
+        // No resolveThumbnailFallback override: the backend has no fallback source.
+        FakeBackend a = new FakeBackend("fakeA", "immich", video, remoteAsset("a0", "fakeA"));
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        // The oversized video is skipped silently; the remaining asset plays.
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a0", listener.displayedKeys.get(0));
+        // Only a0's original was opened; the oversized video's bytes were never fetched.
+        assertEquals(1, a.openerCalls.get());
+        assertTrue(listener.exceptions.isEmpty());
+        assertFalse(new File(cacheDir, videoId + ".mov").exists());
+        assertFalse(new File(cacheDir, videoId + ".mp4").exists());
+    }
+
+    @Test
     public void byteVerifiedIncompatibleFileIsDiscardedAndRemembered() throws Exception {
         String heicId = "01234567-89ab-cdef-0123-456789abcdef";
         MediaAsset heic = new MediaAsset(heicId, "fakeA", MediaType.IMAGE, -1, null,
