@@ -235,7 +235,9 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     }
 
     public void setVolume (int leftVolume, int rightVolume) {
-        mMediaPlayer.setVolume(leftVolume, rightVolume);
+        if (mMediaPlayer != null) {
+            mMediaPlayer.setVolume(leftVolume, rightVolume);
+        }
     }
 
     /**
@@ -430,6 +432,9 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
      * Pause video. If video is already paused, stopped or ended nothing will happen.
      */
     public void pause() {
+        if (mMediaPlayer == null) {
+            return;
+        }
         if (mState == State.PAUSE) {
             log("pause() was called but video already paused.");
             return;
@@ -456,6 +461,9 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
      * happen.
      */
     public void stop() {
+        if (mMediaPlayer == null) {
+            return;
+        }
         if (mState == State.STOP) {
             log("stop() was called but video already stopped.");
             return;
@@ -474,23 +482,61 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     }
 
     /**
+     * Release the native MediaPlayer. A merely stopped player stays prepared and keeps its
+     * decoder — and with it the exclusive Amlogic video pipeline — which starves a TsPlayer
+     * started afterwards. The instance is unusable after release(), so it is discarded and the
+     * next {@link #setDataSource(String)} creates a fresh one.
+     */
+    public void release() {
+        if (mMediaPlayer != null) {
+            try {
+                mMediaPlayer.release();
+            } catch (Exception e) {
+                if (e.getMessage() != null) {
+                    Log.d(TAG, e.getMessage());
+                }
+            }
+            mMediaPlayer = null;
+        }
+        if (mVideoSurface != null) {
+            mVideoSurface.release();
+            mVideoSurface = null;
+        }
+        mIsDataSourceSet = false;
+        mIsVideoPrepared = false;
+        mIsPlayCalled = false;
+        mVideoWidth = 0;
+        mVideoHeight = 0;
+        mVideoRotation = 0;
+        mDisplayRotationHint = -1;
+        mState = State.UNINITIALIZED;
+    }
+
+    /**
      * @see android.media.MediaPlayer#setLooping(boolean)
      */
     public void setLooping(boolean looping) {
-        mMediaPlayer.setLooping(looping);
+        if (mMediaPlayer != null) {
+            mMediaPlayer.setLooping(looping);
+        }
     }
 
     /**
      * @see android.media.MediaPlayer#seekTo(int)
      */
     public void seekTo(int milliseconds) {
-        mMediaPlayer.seekTo(milliseconds);
+        if (mMediaPlayer != null) {
+            mMediaPlayer.seekTo(milliseconds);
+        }
     }
 
     /**
      * @see android.media.MediaPlayer#getDuration()
      */
     public int getDuration() {
+        if (mMediaPlayer == null) {
+            return 0;
+        }
         return mMediaPlayer.getDuration();
     }
 

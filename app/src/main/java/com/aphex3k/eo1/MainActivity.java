@@ -928,7 +928,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
             try {
-                videoPlayer.stop();
+                // Release so a previous fallback video frees the exclusive Amlogic video
+                // pipeline before the next asset may run on TsPlayer.
+                videoPlayer.release();
                 videoPlayer.setVisibility(View.INVISIBLE);
                 if (!MainActivity.this.isDestroyed()) {
                     Glide.with(this).clear(imageView);
@@ -996,7 +998,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private void restoreImageViewAfterVideoFailure() {
         cancelVideoWatchdog();
-        videoPlayer.stop();
+        videoPlayer.release();
         videoPlayer.setVisibility(View.INVISIBLE);
         imageView.setVisibility(View.VISIBLE);
         lastVisibleView = imageView;
@@ -1238,7 +1240,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         boolean useTs = allowTsPlayer && preferTsPlayer;
         VideoPlayerController next = useTs ? tsPlayerController : mediaPlayerController;
         if (videoPlayer != null && videoPlayer != next) {
-            videoPlayer.stop();
+            // Release, don't just stop: a stopped platform MediaPlayer stays prepared and keeps
+            // the exclusive Amlogic video pipeline, which would starve the incoming TsPlayer.
+            videoPlayer.release();
             videoPlayer.setVisibility(View.GONE);
         }
         videoPlayer = next;

@@ -92,6 +92,8 @@ public class TsPlayerController implements VideoPlayerController {
     @Override
     public void release() {
         videoView.setListener(null);
-        videoView.release();
+        // stop() already performs the full native teardown (deletePlayer) and leaves the view
+        // reusable; TsVideoView.release() would permanently retire it.
+        videoView.stop();
     }
 }
