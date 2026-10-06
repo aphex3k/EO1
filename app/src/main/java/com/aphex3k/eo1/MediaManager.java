@@ -503,8 +503,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * Resolves one record to a playable file: local backends hand back their on-disk file,
      * remote backends go through the download + integrity gate. Null (not an exception) when the
      * asset should be skipped: the backend declines it (deleted file, no source), it is known
-     * to be undecodable on this device (incompatible format by name), or it was byte-verified
-     * incompatible after a previous download.
+     * to be undecodable on this device (incompatible format by name), it was byte-verified
+     * incompatible after a previous download, or it is an oversized video whose backend has
+     * no playback fallback. Videos above the device's decode limit are not skipped but
+     * re-routed to the backend's playback fallback (e.g. Immich's transcoded
+     * {@code /video/playback} stream), which is then acquired like any other fallback source.
      */
     private File acquireAsset(MediaAsset asset, File cacheDir) throws Exception {
         return acquireAsset(asset, cacheDir, true);
@@ -529,6 +532,19 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (incompatibleReason != null) {
             Log.w(TAG, "acquireAsset: skipping " + asset.key() + " - " + incompatibleReason);
             return null;
+        }
+        String oversizedReason = MediaCompatibility.incompatibleVideoResolution(
+                asset.type, asset.width, asset.height);
+        if (oversizedReason != null) {
+            Log.w(TAG, "acquireAsset: " + asset.key() + " - " + oversizedReason
+                    + "; routing to playback fallback");
+            MediaSource fallbackSource = backend.resolveThumbnailFallback(asset);
+            if (fallbackSource == null) {
+                Log.w(TAG, "acquireAsset: skipping " + asset.key()
+                        + " - oversized video and no playback fallback available");
+                return null;
+            }
+            return acquireRemoteFile(asset, fallbackSource, cacheDir, reportProgress);
         }
         MediaSource source = backend.resolveOriginal(asset);
         if (source == null) {

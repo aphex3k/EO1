@@ -20,12 +20,18 @@ import java.util.Set;
  * HEVC-encoded ones) or AV1; HEVC (h265) video support is uncertain. This class lets the
  * rotation pipeline skip such assets instead of wasting a download or a decoder attempt on them.
  *
- * <p>Two tiers:
+ * <p>Three tiers:
  * <ul>
  *   <li>{@link #incompatibleReason(MediaType, String, String)} — an extension check that can
  *       run <em>before</em> a remote download, because the file name comes from backend
  *       metadata. Container extensions ({@code .mp4}, {@code .mov}, ...) that can also hold
  *       H.264 are deliberately not flagged.</li>
+ *   <li>{@link #incompatibleVideoResolution(MediaType, int, int)} — a coded-dimension check
+ *       that can run <em>before</em> a remote download, because the dimensions come from
+ *       backend metadata. Videos with a side above {@link #MAX_VIDEO_SIDE_PX} (the panel is
+ *       1080p) garble on the SoC's decoder; the pipeline routes them to the backend's
+ *       playback fallback (e.g. Immich's transcoded {@code /video/playback} stream) instead
+ *       of downloading the original.</li>
  *   <li>{@link #incompatibleReasonForFile(MediaType, File)} — a content check for a file that
  *       already exists locally (uploaded, or already downloaded). It detects HEIF/AVIF
  *       containers from the leading {@code ftyp} box even when the extension lies
@@ -68,6 +74,12 @@ public final class MediaCompatibility {
                     Arrays.asList("heic", "heix", "hevc", "hevx", "hevm", "hevs", "heif",
                             "mif1", "msf1", "mif2", "msf2", "miaf", "misf", "avif", "avis")));
 
+    /**
+     * Longest coded side (px) this device's video decoder reliably handles; the panel is
+     * 1920x1080, so anything above adds decode load without visible detail.
+     */
+    public static final int MAX_VIDEO_SIDE_PX = 1920;
+
     private MediaCompatibility() {
     }
 
@@ -102,6 +114,34 @@ public final class MediaCompatibility {
             return "unsupported video codec " + extension + " cannot be decoded on this device";
         }
         return null;
+    }
+
+    /**
+     * Coded-resolution check that can run before a remote download. The panel is 1920x1080
+     * and the SoC decoder garbles (rather than fails cleanly) on video with a coded side
+     * above {@link #MAX_VIDEO_SIDE_PX}, so such originals must not be downloaded: the
+     * pipeline routes the asset to the backend's playback fallback instead.
+     *
+     * <p>Conservative like the other tiers: when either dimension is unknown ({@code <= 0})
+     * the asset passes and is left to the display-error path.
+     *
+     * @param type media type of the asset
+     * @param width coded content width in pixels, or 0 when the backend does not report one
+     * @param height coded content height in pixels, or 0 when the backend does not report one
+     * @return a human-readable reason when the original exceeds the device's decode limit,
+     *         or {@code null} when it fits (or cannot be judged from the given dimensions)
+     */
+    @Nullable
+    public static String incompatibleVideoResolution(@Nullable MediaType type, int width, int height) {
+        if (type != MediaType.VIDEO || width <= 0 || height <= 0) {
+            return null;
+        }
+        int longSide = Math.max(width, height);
+        if (longSide <= MAX_VIDEO_SIDE_PX) {
+            return null;
+        }
+        return "video resolution " + width + "x" + height
+                + " exceeds this device's decode limit (" + MAX_VIDEO_SIDE_PX + "px side)";
     }
 
     /**
