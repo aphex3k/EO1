@@ -118,6 +118,6 @@ public class MediaPlayerController implements VideoPlayerController {
     @Override
     public void release() {
         videoView.setListener(null);
-        videoView.stop();
+        videoView.release();
     }
 }
