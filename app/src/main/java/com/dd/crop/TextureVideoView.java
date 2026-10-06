@@ -56,6 +56,8 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     private float mVideoHeight;
     private float mVideoWidth;
     private int mVideoRotation;
+    // Display rotation supplied by the app (VideoHeaderProbe); -1 when unknown.
+    private int mDisplayRotationHint = -1;
 
     private boolean mIsDataSourceSet;
     private boolean mIsViewAvailable;
@@ -204,6 +206,15 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     /**
      * @see android.media.MediaPlayer#setDataSource(String)
      */
+    /**
+     * Supply the display rotation (clockwise degrees, 0/90/180/270, or -1 when unknown) before
+     * {@link #setDataSource(String)}. Taken from the app's own ISOBMFF header probe — the
+     * platform MediaMetadataRetriever is unreliable on some devices — and preferred over it.
+     */
+    public void setDisplayRotation(int rotationDeg) {
+        mDisplayRotationHint = rotationDeg;
+    }
+
     public void setDataSource(String path) {
         initPlayer();
 
@@ -212,7 +223,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
             transformMatrix.setScale(1, 1, 0, 0);
             setTransform(transformMatrix);
 
-            mVideoRotation = readVideoRotation(path);
+            mVideoRotation = mDisplayRotationHint >= 0 ? mDisplayRotationHint : readVideoRotation(path);
             mMediaPlayer.setDataSource(path);
             mIsDataSourceSet = true;
             prepare();

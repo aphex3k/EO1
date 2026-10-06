@@ -34,6 +34,12 @@ public class TsPlayerController implements VideoPlayerController {
     }
 
     @Override
+    public void setDisplayRotation(int rotationDeg) {
+        // No-op: routing only sends identity-rotation videos to TsPlayer, and the .so has no
+        // rotation control anyway.
+    }
+
+    @Override
     public void play() {
         videoView.play();
     }

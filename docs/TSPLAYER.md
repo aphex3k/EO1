@@ -84,6 +84,14 @@ The fallback view performs rotation-aware **center-crop (aspect-fill)**:
 with per-axis factors (`cropScaleFactors`), so video fills the viewport, is cropped on the
 long axis, and is neither stretched nor over-zoomed.
 
+The fallback also applies the display rotation via a `postRotate` on the TextureView
+transform. The angle is the probe's value, handed down per asset through
+`VideoPlayerController.setDisplayRotation` → `TextureVideoView.setDisplayRotation` — the
+platform `MediaMetadataRetriever` read inside `TextureVideoView` is unreliable on the EO
+frames (returns 0 for files whose `tkhd` matrix is non-identity), so it is only consulted
+when the probe yields "unknown" (-1). This keeps the displayed rotation identical to the
+rotation that drove the routing decision.
+
 ## Looping (native)
 
 **The `.so` loops a media file natively.** After reaching EOF, `libTsPlayer-jni.so`

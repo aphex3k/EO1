@@ -22,6 +22,12 @@ public interface VideoPlayerController {
      */
     void setDurationHint(int durationMs);
 
+    /**
+     * Set the display rotation in clockwise degrees (0/90/180/270, or -1 when unknown) before
+     * {@link #setDataSource(String)}. Implementations that cannot apply a rotation may no-op.
+     */
+    void setDisplayRotation(int rotationDeg);
+
     void play();
 
     void stop();

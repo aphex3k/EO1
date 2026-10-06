@@ -1380,6 +1380,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
         });
         controller.setDurationHint(durationHintMs);
+        controller.setDisplayRotation(lastVideoRotation);
         controller.setDataSource(file.getPath());
         controller.setLooping(true);
     }
