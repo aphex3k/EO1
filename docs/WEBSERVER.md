@@ -137,6 +137,27 @@ or on disk drop out of the pool on the next tick. When an Immich backend is unre
 its credentials are wrong, that backend is skipped with a toast and the remaining backends
 (including local uploads) keep rotating.
 
+#### Compatibility sidecar reports
+
+When a local upload fails a device compatibility check on its first scan (HEIF/AV1 still,
+h265/hevc/av1 video — `MediaCompatibility`), `LocalMediaBackend` writes a plaintext report
+next to the file: `<name>.incompat.txt` (`CompatibilitySidecar`). The report contains the
+exact failure reason, a user-actionable fix (convert / re-encode and re-upload), and a JSON
+diagnostic block (asset name/size/dimensions, failing check, reason, UTC timestamp, device
+model/Android/app version).
+
+- Sidecars are **never part of the rotation** (`.txt` is not a media extension) and are
+  written only once — the first failure is authoritative, the app never rewrites or deletes
+  them.
+- While `<name>.incompat.txt` exists, `<name>` is excluded from the rotation pool. Deleting
+  the sidecar (Files table → **Delete**, or `POST /files/<name>.incompat.txt/delete`) re-checks
+  the asset on the next rotation tick; placing a sidecar manually is a supported way to keep
+  an asset out of the rotation.
+- Like any uploaded file, a sidecar is listed in `GET /files` and the index page's file table,
+  and is served by `GET /files/<name>.incompat.txt` as `text/plain`.
+- The app never deletes files from `filesDir/uploaded` — neither media nor sidecars. Removal
+  happens only through an explicit user action (the web UI's Delete button or on disk).
+
 APK uploads via `POST /update` are the one exception: they land in `filesDir/updates/`
 (the self-update staging area), are verified before anything touches them, and never
 join the rotation pool.

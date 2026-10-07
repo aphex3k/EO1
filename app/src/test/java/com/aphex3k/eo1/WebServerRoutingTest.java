@@ -137,6 +137,15 @@ public class WebServerRoutingTest {
                 "origin", "http://192.168.1.50:8080"), 8080));
     }
 
+    @Test
+    public void contentTypeForTextAndMedia() {
+        assertEquals("text/plain; charset=utf-8", WebServer.contentTypeFor("report.txt"));
+        assertEquals("text/plain; charset=utf-8", WebServer.contentTypeFor("a.jpg.incompat.txt"));
+        assertEquals("image/jpeg", WebServer.contentTypeFor("photo.jpg"));
+        assertEquals("video/mp4", WebServer.contentTypeFor("clip.mp4"));
+        assertEquals("application/octet-stream", WebServer.contentTypeFor("data.bin"));
+    }
+
     private static Map<String, String> headers(String... kv) {
         Map<String, String> m = new HashMap<String, String>();
         for (int i = 0; i + 1 < kv.length; i += 2) {
