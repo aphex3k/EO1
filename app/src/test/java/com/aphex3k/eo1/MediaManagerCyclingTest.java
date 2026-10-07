@@ -16,15 +16,20 @@ import org.junit.rules.TemporaryFolder;
 
 import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.ProtocolException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -86,6 +91,15 @@ public class MediaManagerCyclingTest {
         volatile Exception fetchError;
         /** When set, the remote source reports a checksum the served bytes never match. */
         volatile boolean corruptChecksum;
+        /** Openers that fail this many times with a transient IOException, then succeed. */
+        final Map<String, AtomicInteger> failFirstNOpens = new HashMap<>();
+        /**
+         * Per-asset stream faults, popped per open: serve at most this many bytes, then throw
+         * {@link ProtocolException} (OkHttp's truncated-body shape). Absent/exhausted = healthy.
+         */
+        final Map<String, LinkedList<Integer>> streamFaults = new HashMap<>();
+        /** Openers that fail with a non-retryable {@link MediaDownloadFailedException}. */
+        final Set<String> mdfEOpeners = new HashSet<>();
 
         FakeBackend(String id, String type, MediaAsset... assets) {
             this.id = id;
@@ -132,17 +146,47 @@ public class MediaManagerCyclingTest {
                     }
                 }, "bad-checksum", 10L);
             }
+            if (mdfEOpeners.contains(asset.id)) {
+                final String assetId = asset.id;
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() throws Exception {
+                        openerCalls.incrementAndGet();
+                        throw new MediaDownloadFailedException("HTTP 404 for " + assetId);
+                    }
+                }, "bad-checksum", 10L);
+            }
+            final String assetId = asset.id;
             final byte[] content = contentFor(asset.id);
             final String checksum = corruptChecksum
                     ? sha1Base64("some-other-bytes".getBytes(StandardCharsets.UTF_8))
                     : sha1Base64(content);
+            final AtomicInteger failFirst = failFirstNOpens.get(assetId);
             return MediaSource.remoteOriginal(new MediaSource.Opener() {
                 @Override
                 public InputStream open() throws Exception {
                     openerCalls.incrementAndGet();
+                    if (failFirst != null && failFirst.decrementAndGet() >= 0) {
+                        throw new IOException("transient open failure for " + assetId);
+                    }
+                    Integer fault = popStreamFault(assetId);
+                    if (fault != null) {
+                        return new FailingStream(new ByteArrayInputStream(content), fault, assetId);
+                    }
                     return new ByteArrayInputStream(content);
                 }
             }, checksum, (long) content.length);
+        }
+
+        /** Pops this asset's next stream fault (byte limit) or null when none remain. */
+        private Integer popStreamFault(String assetId) {
+            synchronized (streamFaults) {
+                LinkedList<Integer> faults = streamFaults.get(assetId);
+                if (faults == null || faults.isEmpty()) {
+                    return null;
+                }
+                return faults.removeFirst();
+            }
         }
 
         byte[] contentFor(String assetId) {
@@ -155,6 +199,48 @@ public class MediaManagerCyclingTest {
             } catch (Exception e) {
                 throw new RuntimeException(e);
             }
+        }
+    }
+
+    /** Serves at most {@code limit} bytes from the wrapped stream, then throws {@link ProtocolException}. */
+    private static final class FailingStream extends FilterInputStream {
+        private final int limit;
+        private final String assetId;
+        private int served;
+
+        FailingStream(InputStream in, int limit, String assetId) {
+            super(in);
+            this.limit = limit;
+            this.assetId = assetId;
+        }
+
+        @Override
+        public int read() throws IOException {
+            if (served >= limit) {
+                throw new ProtocolException("unexpected end of stream for " + assetId);
+            }
+            int b = in.read();
+            if (b >= 0) {
+                served++;
+            }
+            return b;
+        }
+
+        @Override
+        public int read(byte[] buf, int off, int len) throws IOException {
+            if (served >= limit) {
+                throw new ProtocolException("unexpected end of stream for " + assetId);
+            }
+            int n = in.read(buf, off, Math.min(len, limit - served));
+            if (n > 0) {
+                served += n;
+            }
+            return n;
+        }
+
+        @Override
+        public int available() throws IOException {
+            return Math.max(0, Math.min(in.available(), limit - served));
         }
     }
 
@@ -277,6 +363,7 @@ public class MediaManagerCyclingTest {
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a, b), listener, 1L);
         mm.prefetchEnabled = false; // keep this test's exact opener counts hermetic
+        mm.downloadRetryBackoffMs = 0;
         File cacheDir = tmp.newFolder("cache");
         File uploads = tmp.newFolder("uploads");
 
@@ -297,8 +384,8 @@ public class MediaManagerCyclingTest {
             }
         }
         assertEquals(1, downloadFailures);
-        // a1's opener failed once (no retry after a hard open failure); a2 opened once.
-        assertEquals(2, a.openerCalls.get());
+        // a1's hard open failure is retried to the full budget; a2 opened once.
+        assertEquals(4, a.openerCalls.get());
     }
 
     @Test
@@ -580,8 +667,8 @@ public class MediaManagerCyclingTest {
 
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
 
-        // Two attempts in the first pass, two after the exhaustion refetch.
-        assertEquals(4, a.openerCalls.get());
+        // Three attempts in the first pass, three after the exhaustion refetch.
+        assertEquals(6, a.openerCalls.get());
         int mdFailures = 0;
         int noMedia = 0;
         for (Exception e : listener.exceptions) {
@@ -688,6 +775,7 @@ public class MediaManagerCyclingTest {
         a.throwingOpeners.add("a1");
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.downloadRetryBackoffMs = 0;
         File cacheDir = tmp.newFolder("cache");
         File uploads = tmp.newFolder("uploads");
 
@@ -706,5 +794,211 @@ public class MediaManagerCyclingTest {
         assertTrue(listener.exceptions.isEmpty());
         assertEquals(1, listener.displayedKeys.size());
         assertFalse(new File(cacheDir, "a1.jpg").isFile());
+    }
+
+    @Test
+    public void transientOpenFailureIsRetriedAndAssetDisplays() throws Exception {
+        // Seed 7 leaves the 2-element pool unshuffled: [a0, a1].
+        FakeBackend a = backendA(2);
+        a.failFirstNOpens.put("a0", new AtomicInteger(2));
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.downloadRetryBackoffMs = 0;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a0", listener.displayedKeys.get(0));
+        // a0: two failed opens plus the successful one; a1 untouched.
+        assertEquals(3, a.openerCalls.get());
+        assertTrue(listener.exceptions.isEmpty());
+        assertTrue(new File(cacheDir, "a0.jpg").isFile());
+        assertEquals(1, a.fetchCount.get());
+    }
+
+    @Test
+    public void truncatedStreamIsRetriedAndSucceeds() throws Exception {
+        // UUID-shaped id so the partial file is actually deleted between attempts.
+        String a0Id = "01234567-89ab-cdef-0123-456789abcdef";
+        FakeBackend a = new FakeBackend("fakeA", "immich",
+                remoteAsset(a0Id, "fakeA"), remoteAsset("a1", "fakeA"));
+        // The first stream dies after 3 bytes (the device's ProtocolException shape);
+        // the retry downloads the full file.
+        a.streamFaults.put(a0Id, new LinkedList<Integer>(Arrays.asList(3)));
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.downloadRetryBackoffMs = 0;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:" + a0Id, listener.displayedKeys.get(0));
+        assertEquals(2, a.openerCalls.get());
+        assertTrue(listener.exceptions.isEmpty());
+        // The full, un-truncated bytes survive in the cache with a fresh integrity sidecar.
+        byte[] served = a.contentFor(a0Id);
+        File cached = new File(cacheDir, a0Id + ".jpg");
+        assertEquals(served.length, cached.length());
+        assertEquals(new String(served, StandardCharsets.UTF_8),
+                new String(Files.readAllBytes(cached.toPath()), StandardCharsets.UTF_8));
+        assertTrue(new File(cacheDir, a0Id + ".jpg.sha1").isFile());
+        assertEquals(1, a.fetchCount.get());
+    }
+
+    @Test
+    public void persistentStreamFailureExhaustsRetries() throws Exception {
+        String a0Id = "01234567-89ab-cdef-0123-456789abcdef";
+        FakeBackend a = new FakeBackend("fakeA", "immich",
+                remoteAsset(a0Id, "fakeA"), remoteAsset("a1", "fakeA"));
+        LinkedList<Integer> faults = new LinkedList<Integer>();
+        for (int i = 0; i < 10; i++) {
+            faults.add(0);
+        }
+        a.streamFaults.put(a0Id, faults);
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.downloadRetryBackoffMs = 0;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        // a0 burns exactly 3 attempts, then rotation continues with a1.
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a1", listener.displayedKeys.get(0));
+        assertEquals(4, a.openerCalls.get());
+        assertEquals(1, listener.exceptions.size());
+        assertTrue(listener.exceptions.get(0) instanceof ProtocolException);
+        // Each partial download is deleted; nothing is left behind for a0.
+        assertFalse(new File(cacheDir, a0Id + ".jpg").exists());
+        assertTrue(new File(cacheDir, "a1.jpg").isFile());
+        assertEquals(1, a.fetchCount.get());
+    }
+
+    @Test
+    public void mediaDownloadFailedExceptionIsNotRetried() throws Exception {
+        FakeBackend a = backendA(2);
+        a.mdfEOpeners.add("a0");
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.downloadRetryBackoffMs = 0;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        // MediaDownloadFailedException (an HTTP status error) is not transient: one open,
+        // no retry.
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a1", listener.displayedKeys.get(0));
+        assertEquals(2, a.openerCalls.get());
+        assertEquals(1, listener.exceptions.size());
+        assertTrue(listener.exceptions.get(0) instanceof MediaDownloadFailedException);
+        assertEquals(1, a.fetchCount.get());
+    }
+
+    @Test
+    public void consecutiveFailureCapDefersTickWithoutRefetch() throws Exception {
+        FakeBackend a = backendA(6);
+        for (int i = 0; i < 6; i++) {
+            a.throwingOpeners.add("a" + i);
+        }
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.downloadRetryBackoffMs = 0;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        // Three consecutive failures stop the sweep: nothing is displayed, the catalogs are
+        // not refetched, no NoMediaFound is posted, and the cursor is preserved.
+        assertTrue(listener.displayedKeys.isEmpty());
+        assertEquals(3, listener.exceptions.size());
+        for (Exception e : listener.exceptions) {
+            assertTrue(e instanceof MediaDownloadFailedException);
+        }
+        assertEquals(1, a.fetchCount.get());
+        assertEquals(3, mm.rotationListSize());
+        // Each of the three swept assets burned its full retry budget.
+        assertEquals(9, a.openerCalls.get());
+
+        // Once the failures clear, the next tick resumes from the preserved cursor without
+        // refetching the catalogs.
+        a.throwingOpeners.clear();
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals(1, a.fetchCount.get());
+        assertEquals(2, mm.rotationListSize());
+        assertEquals(3, listener.exceptions.size());
+    }
+
+    @Test
+    public void nullResolveSkipsDoNotCountTowardFailureCap() throws Exception {
+        // Seed 12 reorders the 7-element pool to [f1, n3, f0, n0, n1, n2, ok]: failures and
+        // null-resolve skips are interleaved, with exactly two real failures.
+        FakeBackend a = new FakeBackend("fakeA", "immich",
+                remoteAsset("n0", "fakeA"), remoteAsset("n1", "fakeA"),
+                remoteAsset("n2", "fakeA"), remoteAsset("n3", "fakeA"),
+                remoteAsset("f0", "fakeA"), remoteAsset("f1", "fakeA"),
+                remoteAsset("ok", "fakeA"));
+        a.nullResolve.add("n0");
+        a.nullResolve.add("n1");
+        a.nullResolve.add("n2");
+        a.nullResolve.add("n3");
+        a.throwingOpeners.add("f0");
+        a.throwingOpeners.add("f1");
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 12L);
+        mm.prefetchEnabled = false;
+        mm.downloadRetryBackoffMs = 0;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        // Null-resolve skips are legitimate skips, not failures: the sweep passes through
+        // four of them plus two real failures and still reaches "ok" on this tick.
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:ok", listener.displayedKeys.get(0));
+        assertEquals(2, listener.exceptions.size());
+        for (Exception e : listener.exceptions) {
+            assertTrue(e instanceof MediaDownloadFailedException);
+        }
+        assertEquals(1, a.fetchCount.get());
+    }
+
+    @Test
+    public void isUsableLocalVideoChecksFileAndSidecar() throws Exception {
+        MediaManager mm = manager(Arrays.<MediaBackend>asList(), new FakeListener(), 7L);
+        File cacheDir = tmp.newFolder("cache");
+
+        byte[] content = "video-bytes".getBytes(StandardCharsets.UTF_8);
+        File file = new File(cacheDir, "11111111-2222-3333-4444-555555555555.mp4");
+        Files.write(file.toPath(), content);
+
+        // A non-empty file without a sidecar is trusted; missing or empty files are not.
+        assertTrue(mm.isUsableLocalVideo(file));
+        assertFalse(mm.isUsableLocalVideo(
+                new File(cacheDir, "22222222-2222-3333-4444-555555555555.mp4")));
+        File empty = new File(cacheDir, "33333333-2222-3333-4444-555555555555.mp4");
+        empty.createNewFile();
+        assertFalse(mm.isUsableLocalVideo(empty));
+
+        // A matching sidecar keeps it usable; a mismatched one does not.
+        MediaIntegrity.writeSidecar(file,
+                MediaIntegrity.toHex(MessageDigest.getInstance("SHA-1").digest(content)));
+        assertTrue(mm.isUsableLocalVideo(file));
+        MediaIntegrity.writeSidecar(file, "0000000000000000000000000000000000000000");
+        assertFalse(mm.isUsableLocalVideo(file));
     }
 }

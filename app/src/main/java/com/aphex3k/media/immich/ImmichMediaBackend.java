@@ -19,7 +19,10 @@ import com.aphex3k.media.MediaType;
 import com.vdurmont.semver4j.Semver;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * Immich implementation of {@link MediaBackend}: one configured host with one
@@ -89,18 +92,34 @@ public class ImmichMediaBackend implements MediaBackend {
     @Override
     public List<MediaAsset> fetchCatalog() throws Exception {
         List<ImmichApiAssetResponse> raw = client.fetchCatalogAssets();
+        // Best-effort: assets this device already tagged as undecodable stay out of the
+        // pool. A failed tag lookup must never cost the whole catalog.
+        Set<String> excludedIds = Collections.emptySet();
+        try {
+            excludedIds = new HashSet<>(client.listTaggedAssetIds(INCOMPATIBLE_TAG_NAME));
+        } catch (Exception e) {
+            Log.w(TAG, "Backend '" + entry.id + "': could not load " + INCOMPATIBLE_TAG_NAME
+                    + " asset list, including all assets: " + e);
+        }
         List<MediaAsset> assets = new ArrayList<>(raw.size());
         int skipped = 0;
+        int excluded = 0;
         for (ImmichApiAssetResponse r : raw) {
-            if (isCompatibleAsset(r)) {
-                assets.add(toMediaAsset(entry.id, r));
-            } else {
+            if (!isCompatibleAsset(r)) {
                 skipped++;
+            } else if (excludedIds.contains(r.getId())) {
+                excluded++;
+            } else {
+                assets.add(toMediaAsset(entry.id, r));
             }
         }
         if (skipped > 0) {
             Log.d(TAG, "Catalog '" + entry.id + "': " + skipped
                     + " asset(s) skipped as incompatible with this device");
+        }
+        if (excluded > 0) {
+            Log.d(TAG, "Catalog '" + entry.id + "': " + excluded
+                    + " asset(s) excluded as tagged " + INCOMPATIBLE_TAG_NAME);
         }
         return assets;
     }

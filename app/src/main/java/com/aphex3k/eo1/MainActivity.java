@@ -1025,18 +1025,33 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             restoreImageViewAfterVideoFailure();
         }
         if (assetId != null) {
+            mediaManager.tagAssetAsIncompatible(assetId);
+            if (isVideo && file != null && mediaManager.isUsableLocalVideo(file)) {
+                // The original's bytes are already on disk (routing is content-deterministic,
+                // so a re-fetch through /video/playback would be the same bytes): replay the
+                // cached original on the fallback path instead of a full re-download.
+                Log.i(TAG, "playbackFallback: reusing local original for " + assetId);
+                lastVisibleAsset = "";
+                displayVideo(file, null);
+                return;
+            }
             MainActivity activity = activityReference.get();
             if (activity != null) {
                 mediaManager.displayThumbnailAsset(activity, assetId, isVideo);
             }
-            mediaManager.tagAssetAsIncompatible(assetId);
-        } else {
-            showNextImage();
+            // Local uploads may point at the persistent original in filesDir/uploaded;
+            // removeFromCache's file-based guards (cache-dir match + owned-name check) make
+            // this a no-op for those files.
+            mediaManager.removeFromCache(file);
+            return;
         }
-        // Local uploads may point at the persistent original in filesDir/uploaded;
-        // removeFromCache's file-based guards (cache-dir match + owned-name check) make
-        // this a no-op for those files.
-        mediaManager.removeFromCache(file);
+        // Fallback stream itself failed: don't rotate off-tick — the next scheduled tick
+        // takes over (also bounds the undecodable-thumbnail image loop). Keep a failed
+        // video's file so the next cycle is a cache hit; drop failed image thumbnails.
+        Log.i(TAG, "playbackFallback: fallback stream failed; deferring rotation to next tick");
+        if (!isVideo) {
+            mediaManager.removeFromCache(file);
+        }
     }
 
     private void cancelVideoWatchdog() {

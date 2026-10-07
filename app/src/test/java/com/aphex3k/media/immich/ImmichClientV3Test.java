@@ -82,6 +82,39 @@ public class ImmichClientV3Test {
         assertEquals(new Semver("3.2.2"), version);
     }
 
+    @Test
+    public void listTaggedAssetIdsReturnsIdsWhenTagExists() throws Exception {
+        server.enqueue(json(200,
+                "[{\"id\":\"tag-1\",\"name\":\"EO1_INCOMPATIBLE\",\"type\":\"user\",\"userId\":\"user-1\"}]"));
+        server.enqueue(json(200,
+                "{\"assets\":{\"count\":2,\"items\":[{\"id\":\"a-1\"},{\"id\":\"a-2\"}]}}"));
+
+        ImmichClientV3 client = new ImmichClientV3(server.url("/").toString(), "user-1", "secret", null);
+        java.util.List<String> ids = client.listTaggedAssetIds("EO1_INCOMPATIBLE");
+        assertEquals(2, ids.size());
+        assertEquals("a-1", ids.get(0));
+        assertEquals("a-2", ids.get(1));
+
+        assertEquals("/api/tags", server.takeRequest().getPath());
+        RecordedRequest search = server.takeRequest();
+        assertEquals("POST", search.getMethod());
+        assertEquals("/api/search/metadata", search.getPath());
+        // The search must be filtered by the resolved tag id, not by tag name.
+        assertTrue(search.getBody().readUtf8().contains("\"tagIds\":[\"tag-1\"]"));
+    }
+
+    @Test
+    public void listTaggedAssetIdsIsEmptyWithoutASearchCallWhenTagAbsent() throws Exception {
+        server.enqueue(json(200,
+                "[{\"id\":\"tag-2\",\"name\":\"other\",\"type\":\"user\",\"userId\":\"user-1\"}]"));
+
+        ImmichClientV3 client = new ImmichClientV3(server.url("/").toString(), "user-1", "secret", null);
+        java.util.List<String> ids = client.listTaggedAssetIds("EO1_INCOMPATIBLE");
+        assertTrue("no such tag must yield an empty list", ids.isEmpty());
+        // Only the tag lookup ran — no metadata search when the tag does not exist.
+        assertEquals(1, server.getRequestCount());
+    }
+
     private static MockResponse json(int code, String body) {
         return new MockResponse().setResponseCode(code)
                 .setHeader("Content-Type", "application/json")

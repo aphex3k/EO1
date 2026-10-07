@@ -72,4 +72,10 @@ public interface ImmichClient {
      * @throws com.aphex3k.eo1.ImmichApiTagException when tagging the asset fails.
      */
     void tagAssetIncompatible(String assetId, String tagName) throws Exception;
+
+    /**
+     * Lists the raw ids of every asset carrying the tag named {@code tagName} (paginated
+     * metadata search filtered by tag id). Empty list when the server has no such tag.
+     */
+    List<String> listTaggedAssetIds(String tagName) throws IOException;
 }

@@ -52,6 +52,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     public static final long MAX_ASSET_BYTES = 1073741824L;
 
     /**
+     * Transient download failures (truncated streams, timeouts) are retried this many times
+     * per acquire; integrity-check failures consume the same budget.
+     */
+    private static final int MAX_DOWNLOAD_ATTEMPTS = 3;
+
+    /**
+     * One rotation tick gives up after this many consecutive acquire failures and defers to
+     * the next tick instead of sweeping (and possibly refetching) the whole pool.
+     */
+    private static final int MAX_CONSECUTIVE_ACQUIRE_FAILURES = 3;
+
+    /**
      * Serializes cache-file writes so a download stream and the UI-side cache removal can never
      * truncate or read each other's file.
      */
@@ -81,6 +93,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     private final Set<String> knownIncompatibleKeys =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    /**
+     * Keys for which the backend's incompatible tag was already posted in this process. A
+     * failing asset is re-flagged every rotation cycle until the pool rebuild excludes it, so
+     * the tag write (tag lookup + POST) stays at one attempt per process.
+     */
+    private final Set<String> tagIncompatibleAttempted =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private volatile String currentPlaybackPath;
     /** Last successfully displayed asset; read on the UI thread by /state. */
     private volatile MediaAsset currentAsset;
@@ -94,6 +113,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * tests can switch it off for exact download-count assertions.
      */
     volatile boolean prefetchEnabled = true;
+
+    /**
+     * Delay between retry attempts of a transient download failure. Package-private so the
+     * cycling tests can zero it out.
+     */
+    volatile long downloadRetryBackoffMs = 1000L;
 
     /** Remote downloads currently in flight; gates progress forwarding to the UI. */
     private final AtomicInteger activeDownloads = new AtomicInteger(0);
@@ -195,7 +220,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
         MediaAsset acquired = null;
         File playbackFile = null;
+        int consecutiveAcquireFailures = 0;
+        boolean failureCapHit = false;
         while (poolCursor < pool.size()) {
+            if (consecutiveAcquireFailures >= MAX_CONSECUTIVE_ACQUIRE_FAILURES) {
+                failureCapHit = true;
+                break;
+            }
             MediaAsset asset = pool.get(poolCursor);
             poolCursor++;
             try {
@@ -203,6 +234,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             } catch (Exception e) {
                 Log.w(TAG, "showNextImage: asset " + asset.key() + " failed", e);
                 postException(ui, e);
+                consecutiveAcquireFailures++;
+                continue;
             }
             if (playbackFile != null) {
                 acquired = asset;
@@ -211,6 +244,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
 
         if (acquired == null) {
+            if (failureCapHit) {
+                // Stream trouble, not a stale pool: deferring to the next tick avoids a
+                // refetch plus second sweep of the same failing assets on this tick.
+                Log.w(TAG, "showNextImage: " + MAX_CONSECUTIVE_ACQUIRE_FAILURES
+                        + " consecutive acquire failures; deferring to next tick");
+                return;
+            }
             if (!refetched) {
                 // The whole remaining pool failed: refetch every backend's catalog once, retry.
                 Log.w(TAG, "showNextImage: all assets failed, refetching backend catalogs");
@@ -612,12 +652,27 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             activeDownloads.incrementAndGet();
         }
         try {
-            for (int attempt = 1; attempt <= 2; attempt++) {
+            for (int attempt = 1; attempt <= MAX_DOWNLOAD_ATTEMPTS; attempt++) {
+                if (attempt > 1) {
+                    try {
+                        Thread.sleep(downloadRetryBackoffMs);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new MediaDownloadFailedException(e);
+                    }
+                }
                 final InputStream body;
                 try {
                     body = source.opener.open();
                 } catch (MediaDownloadFailedException e) {
                     throw e;
+                } catch (IOException e) {
+                    if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
+                        Log.w(TAG, "acquireRemoteFile: open of " + asset.key()
+                                + " failed, attempt " + attempt + "/" + MAX_DOWNLOAD_ATTEMPTS + ": " + e);
+                        continue;
+                    }
+                    throw new MediaDownloadFailedException(e);
                 } catch (Exception e) {
                     throw new MediaDownloadFailedException(e);
                 }
@@ -628,6 +683,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     digest = MediaIntegrity.writeStreamToFile(cacheFile, in);
                 } catch (IOException e) {
                     deleteCachedFile(cacheFile);
+                    if (attempt < MAX_DOWNLOAD_ATTEMPTS) {
+                        Log.w(TAG, "acquireRemoteFile: download of " + asset.key()
+                                + " truncated mid-stream, attempt " + attempt + "/"
+                                + MAX_DOWNLOAD_ATTEMPTS + ": " + e);
+                        continue;
+                    }
                     throw e;
                 } finally {
                     downloadMutex.unlock();
@@ -655,7 +716,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 }
 
                 Log.w(TAG, "acquireRemoteFile: download of " + cacheFile.getName()
-                        + " failed integrity check, attempt " + attempt + "/2");
+                        + " failed integrity check, attempt " + attempt + "/" + MAX_DOWNLOAD_ATTEMPTS);
                 deleteCachedFile(cacheFile);
             }
         } finally {
@@ -754,6 +815,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
     }
 
+    /**
+     * True when {@code file} is a complete local media file the rotation pipeline would reuse
+     * as a cache hit: non-empty and digest-matching when an integrity sidecar exists. The
+     * fallback path uses this to replay a failed video's original instead of re-downloading
+     * the same bytes through the backend's fallback stream.
+     */
+    public boolean isUsableLocalVideo(File file) {
+        return MediaIntegrity.isCacheFileUsable(file, null, null);
+    }
+
     /** Paths the cache manager must never evict while a download is reserving space. */
     private Set<String> protectedCachePaths(File extra) {
         Set<String> paths = new HashSet<>();
@@ -826,9 +897,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     /**
      * Marks a failed asset with the backend's incompatible tag (Immich: find-or-create
      * EO1_INCOMPATIBLE). Local backends no-op. No-op for unknown keys.
+     *
+     * <p>At most one tag POST per key per process: assets that keep failing are re-flagged
+     * every rotation cycle until the pool rebuild excludes them, so a dedup set keeps the
+     * request traffic to a single tag lookup + write per key.
      */
     @Override
     public void tagAssetAsIncompatible(final String assetKey) {
+        if (!tagIncompatibleAttempted.add(assetKey)) {
+            return;
+        }
         new Thread(new Runnable() {
             @Override
             public void run() {
