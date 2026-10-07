@@ -1287,12 +1287,15 @@ public class WebServer {
         return m;
     }
 
-    private static String contentTypeFor(String name) {
+    static String contentTypeFor(String name) {
         int dot = name.lastIndexOf('.');
         if (dot < 0) {
             return "application/octet-stream";
         }
         String e = name.substring(dot + 1).toLowerCase(Locale.US);
+        if (e.equals("txt")) {
+            return "text/plain; charset=utf-8";
+        }
         if (e.equals("jpg") || e.equals("jpeg")) {
             return "image/jpeg";
         }

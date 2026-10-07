@@ -156,6 +156,68 @@ public class LocalMediaBackendTest {
         assertEquals("real.jpg", assets.get(0).originalFileName);
     }
 
+    @Test
+    public void fetchCatalogWritesSidecarForIncompatibleUpload() throws Exception {
+        writeFile("samsung.heic");
+
+        List<MediaAsset> assets = backend.fetchCatalog();
+        assertEquals(0, assets.size());
+
+        File sidecar = new File(uploadDir, "samsung.heic.incompat.txt");
+        assertTrue("sidecar not written", sidecar.isFile());
+        String content = new String(java.nio.file.Files.readAllBytes(sidecar.toPath()),
+                java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(content.contains("unsupported image format .heic"));
+        assertTrue(content.contains("How to fix"));
+        assertTrue(content.contains("samsung.heic.incompat.txt"));
+        assertTrue(content.contains("\"check\":\"extension\""));
+        assertTrue(content.contains("\"mediaType\":\"image\""));
+
+        // The sidecar itself is not media and must never enter the catalog.
+        List<MediaAsset> second = backend.fetchCatalog();
+        assertEquals(0, second.size());
+    }
+
+    @Test
+    public void existingSidecarExcludesAssetEvenWhenChecksPass() throws Exception {
+        writeFile("ok.jpg");
+        new File(uploadDir, "ok.jpg.incompat.txt").createNewFile();
+
+        List<MediaAsset> assets = backend.fetchCatalog();
+        assertEquals(0, assets.size());
+    }
+
+    @Test
+    public void sidecarIsWrittenOnceAndNeverRewritten() throws Exception {
+        writeFile("clip.h265");
+
+        assertEquals(0, backend.fetchCatalog().size());
+        File sidecar = new File(uploadDir, "clip.h265.incompat.txt");
+        byte[] first = java.nio.file.Files.readAllBytes(sidecar.toPath());
+
+        // A later scan must not overwrite or truncate the report (first failure is
+        // authoritative; the user may even edit it).
+        assertEquals(0, backend.fetchCatalog().size());
+        byte[] second = java.nio.file.Files.readAllBytes(sidecar.toPath());
+        assertEquals(first.length, second.length);
+    }
+
+    @Test
+    public void fetchCatalogWritesContentCheckSidecarForHeifNamedJpg() throws Exception {
+        byte[] heif = ftypBox("heic");
+        java.nio.file.Files.write(new File(uploadDir, "disguised.jpg").toPath(), heif);
+
+        List<MediaAsset> assets = backend.fetchCatalog();
+        assertEquals(0, assets.size());
+
+        File sidecar = new File(uploadDir, "disguised.jpg.incompat.txt");
+        assertTrue(sidecar.isFile());
+        String content = new String(java.nio.file.Files.readAllBytes(sidecar.toPath()),
+                java.nio.charset.StandardCharsets.UTF_8);
+        assertTrue(content.contains("unsupported image container heic"));
+        assertTrue(content.contains("\"check\":\"content\""));
+    }
+
     /** ISO 14496-12 {@code ftyp} box: size + type + major brand + minor. */
     private static byte[] ftypBox(String major) {
         int size = 16;

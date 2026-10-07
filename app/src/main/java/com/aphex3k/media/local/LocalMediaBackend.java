@@ -13,6 +13,7 @@ import com.aphex3k.media.MediaSource;
 import com.aphex3k.media.MediaType;
 
 import java.io.File;
+import java.io.IOException;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -74,11 +75,26 @@ public class LocalMediaBackend implements MediaBackend {
             if (type == null) {
                 continue;
             }
+            if (CompatibilitySidecar.exists(f)) {
+                Log.d(TAG, "Local backend '" + id + "': skipping " + f.getName()
+                        + " (compatibility sidecar present)");
+                continue;
+            }
             String reason = MediaCompatibility.incompatibleReason(type, f.getName(), null);
+            String checkTier = "extension";
             if (reason == null) {
                 reason = MediaCompatibility.incompatibleReasonForFile(type, f);
+                checkTier = "content";
             }
             if (reason != null) {
+                int[] bounds = type == MediaType.IMAGE ? imageBounds(f) : new int[]{0, 0};
+                try {
+                    CompatibilitySidecar.writeIfAbsent(f, type, checkTier, reason,
+                            f.length(), bounds[0], bounds[1], id);
+                } catch (IOException e) {
+                    Log.w(TAG, "Local backend '" + id + "': could not write sidecar for "
+                            + f.getName(), e);
+                }
                 Log.d(TAG, "Local backend '" + id + "': skipping " + f.getName() + " - " + reason);
                 continue;
             }
