@@ -391,6 +391,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return generation;
         }
         for (ConfigurationBackendEntry entry : configuration.backendsOrEmpty()) {
+            if (!entry.enabled) {
+                Log.i(TAG, "rebuildPool: backend entry '" + entry.id + "' (" + entry.type
+                        + ") is disabled, skipping");
+                continue;
+            }
             if (!entry.isValid()) {
                 Log.w(TAG, "rebuildPool: backend entry '" + entry.id + "' (" + entry.type
                         + ") is incomplete, skipping");
@@ -497,7 +502,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return new Configuration();
     }
 
-    /** SHA-1 over the valid backend entries' type/id/host/userid/apiVersion/password. */
+    /** SHA-1 over the valid backend entries' type/id/enabled/host/userid/apiVersion/password. */
     private static String fingerprint(Configuration configuration) {
         StringBuilder sb = new StringBuilder();
         for (ConfigurationBackendEntry e : configuration.backendsOrEmpty()) {
@@ -506,6 +511,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             }
             sb.append(e.type).append('|')
                     .append(e.id).append('|')
+                    .append(e.enabled).append('|')
                     .append(e.host).append('|')
                     .append(e.userid).append('|')
                     .append(e.apiVersion).append('|')

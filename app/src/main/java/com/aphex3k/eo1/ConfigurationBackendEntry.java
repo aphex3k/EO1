@@ -31,6 +31,12 @@ public class ConfigurationBackendEntry {
     @Nullable public String password = "";
     /** "auto" (default) or a pinned server version such as "3.1.0". Immich entries only. */
     public String apiVersion = API_VERSION_AUTO;
+    /**
+     * Whether this backend participates in rotation. Default {@code true} so configuration files
+     * written before the flag existed (no {@code "enabled"} key) keep their backends active.
+     * Orthogonal to {@link #isValid()}: a disabled entry still counts as configured.
+     */
+    public boolean enabled = true;
 
     public boolean isLocal() {
         return TYPE_LOCAL.equalsIgnoreCase(type);

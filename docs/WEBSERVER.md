@@ -21,7 +21,7 @@ the server itself is unit-testable with a fake controller and never references t
 | Route | Method | Purpose |
 |---|---|---|
 | `/` | GET | One-page UI: upload form, file table (download/delete), control buttons |
-| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; device adds detected `platform`; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, a `media` block (`rotationAssets`, `screenOn`, and — once an asset is on screen — `current` with `key`, `type` (`image`/`video`), `backendId`, `width`, `height` (0 when unknown), `durationMs`, `local` (bool), plus `originalFileName`/`sizeBytes` when the backend reports them), an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld` (bool — whether the frame holds `INSTALL_PACKAGES`), `installMode` (path the next install dispatch will take: `headless` when that permission is held, else `adbd` when the ROM's adbd is reachable, else `intent-fallback`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent` — which path the most recent install dispatch used), `adbdReachable` (bool, on-demand probe of the ROM's adbd on 127.0.0.1:5555 — the headless-install precondition)), battery/memory/uptime telemetry; debug builds add a `video` block (active player, TsPlayer loop telemetry, and the last video routing inputs: `rotation`, `width`, `height`, `frameOrientation`) |
+| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; device adds detected `platform`; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`enabled`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, a `media` block (`rotationAssets`, `screenOn`, and — once an asset is on screen — `current` with `key`, `type` (`image`/`video`), `backendId`, `width`, `height` (0 when unknown), `durationMs`, `local` (bool), plus `originalFileName`/`sizeBytes` when the backend reports them), an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld` (bool — whether the frame holds `INSTALL_PACKAGES`), `installMode` (path the next install dispatch will take: `headless` when that permission is held, else `adbd` when the ROM's adbd is reachable, else `intent-fallback`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent` — which path the most recent install dispatch used), `adbdReachable` (bool, on-demand probe of the ROM's adbd on 127.0.0.1:5555 — the headless-install precondition)), battery/memory/uptime telemetry; debug builds add a `video` block (active player, TsPlayer loop telemetry, and the last video routing inputs: `rotation`, `width`, `height`, `frameOrientation`) |
 | `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
 | `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
 | `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
@@ -100,7 +100,8 @@ While the flag is off, the four config endpoints answer `403`, `POST /update` is
 same way, and the index page shows a note instead of the configuration editor (and instead of
 the APK upload form). While on, the index page shows a token input with a
 **Load** button; on a successful `GET /config?token=...` the editor (backends with
-credentials, add/remove, interval, time zone, quiet-hour cron rows, self-update, MQTT, Save)
+credentials, add/remove, a per-backend **Enabled** toggle for non-local backends, interval, time
+zone, quiet-hour cron rows, self-update, MQTT, Save)
 becomes visible, together with **Export configuration** (`GET /config/download?token=...`,
 a `configuration.json` attachment) and **Import configuration** (file picker →
 `POST /config/import?token=...`). The index page no longer embeds the configuration in its
@@ -135,7 +136,10 @@ hosts: they are peers in the same merged pool and are **played/displayed directl
 only touches its UUID-named cache-file pattern). Files deleted through `/files/<name>/delete`
 or on disk drop out of the pool on the next tick. When an Immich backend is unreachable or
 its credentials are wrong, that backend is skipped with a toast and the remaining backends
-(including local uploads) keep rotating.
+(including local uploads) keep rotating. A backend can also be turned off entirely with the
+**Enabled** toggle in the configuration editor: the entry (and its credentials) stay in
+`configuration.json`, but `MediaManager` skips it when building the rotation pool — the pool
+is rebuilt on the next tick whenever an `enabled` flag changes.
 
 #### Compatibility sidecar reports
 
