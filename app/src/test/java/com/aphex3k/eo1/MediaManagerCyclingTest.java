@@ -471,6 +471,64 @@ public class MediaManagerCyclingTest {
     }
 
     @Test
+    public void togglingBackendEnabledInvalidatesPool() throws Exception {
+        Configuration config = new Configuration();
+        ConfigurationBackendEntry e = new ConfigurationBackendEntry();
+        e.type = ConfigurationBackendEntry.TYPE_IMMICH;
+        e.id = "immich-1";
+        e.host = "https://one.example/";
+        e.userid = "u";
+        e.password = "p";
+        e.apiVersion = ConfigurationBackendEntry.API_VERSION_AUTO;
+        config.backends = new ArrayList<>();
+        config.backends.add(e);
+
+        FakeBackend a = backendA(3);
+        FakeListener listener = new FakeListener();
+        MediaManager mm = new MediaManager(listener, Arrays.asList(a), config, new Random(7L),
+                new MediaCacheManager(dir -> Long.MAX_VALUE));
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, a.fetchCount.get());
+
+        // The enabled flag is part of the backend fingerprint: toggling it refetches.
+        e.enabled = false;
+        mm.invalidatePoolIfStale();
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(2, a.fetchCount.get());
+    }
+
+    @Test
+    public void disabledBackendIsSkippedWithoutBeingConstructed() throws Exception {
+        File files = tmp.newFolder("files");
+        File conf = new File(files, "configuration.json");
+        java.io.FileOutputStream out = new java.io.FileOutputStream(conf);
+        try {
+            String json = "{\"backends\":[{\"type\":\"immich\",\"id\":\"immich-1\","
+                    + "\"host\":\"https://off.example/\",\"userid\":\"u\",\"password\":\"p\","
+                    + "\"enabled\":false}]}";
+            out.write(json.getBytes(StandardCharsets.UTF_8));
+        } finally {
+            out.close();
+        }
+
+        FakeListener listener = new FakeListener();
+        MediaManager mm = new MediaManager(listener, new SettingsManager(new StubSettingsListener(files)),
+                null, new MediaCacheManager(dir -> Long.MAX_VALUE));
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        // The disabled backend was never constructed (no network attempt): only the
+        // empty-pool error is posted, never a BackendUnavailableException.
+        assertEquals(1, listener.exceptions.size());
+        assertTrue(listener.exceptions.get(0) instanceof NoMediaFoundException);
+    }
+
+    @Test
     public void remoteDownloadWritesCacheAndReusesIt() throws Exception {
         FakeBackend a = backendA(1);
         FakeListener listener = new FakeListener();
@@ -1000,5 +1058,24 @@ public class MediaManagerCyclingTest {
         assertTrue(mm.isUsableLocalVideo(file));
         MediaIntegrity.writeSidecar(file, "0000000000000000000000000000000000000000");
         assertFalse(mm.isUsableLocalVideo(file));
+    }
+
+    /** Minimal {@link SettingsManagerListener} stub: real files dir, everything else no-op. */
+    private static class StubSettingsListener implements SettingsManagerListener {
+        private final File filesDir;
+
+        StubSettingsListener(File filesDir) {
+            this.filesDir = filesDir;
+        }
+
+        @Override public void settingsChanged() {}
+        @Override public File getFilesDir() { return filesDir; }
+        @Override public android.view.LayoutInflater getLayoutInflater() { return null; }
+        @Override public Object getSystemService(String name) { return null; }
+        @Override public android.content.SharedPreferences getDefaultSharedPreferences() { return null; }
+        @Override public void handleException(Exception e) {}
+        @Override public void debugInformationProvided(DebugInformation info) {}
+        @Override public void displayPicture(File file, String assetKey) {}
+        @Override public void displayVideo(File file, String assetKey) {}
     }
 }

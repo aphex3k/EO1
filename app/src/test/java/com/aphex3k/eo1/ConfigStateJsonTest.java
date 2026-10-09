@@ -64,6 +64,7 @@ public class ConfigStateJsonTest {
         assertEquals("https://one.example/", first.get("host").getAsString());
         assertEquals("auto", first.get("apiVersion").getAsString());
         assertTrue(first.get("valid").getAsBoolean());
+        assertTrue(first.get("enabled").getAsBoolean()); // default true
 
         JsonObject second = backends.get(1).getAsJsonObject();
         assertEquals("3.1.0", second.get("apiVersion").getAsString());
@@ -97,6 +98,17 @@ public class ConfigStateJsonTest {
         JsonObject json = ConfigStateJson.configStateJson(c);
         assertEquals("", json.get("host").getAsString());
         assertEquals(1, json.getAsJsonArray("backends").size());
+    }
+
+    @Test
+    public void disabledBackendIsFlagged() {
+        ConfigurationBackendEntry disabled = immich("immich-1", "https://one.example/", ConfigurationBackendEntry.API_VERSION_AUTO);
+        disabled.enabled = false;
+        JsonObject json = ConfigStateJson.configStateJson(config(disabled));
+        JsonObject entry = json.getAsJsonArray("backends").get(0).getAsJsonObject();
+        assertFalse(entry.get("enabled").getAsBoolean());
+        // Still valid: disabling is orthogonal to credential completeness.
+        assertTrue(entry.get("valid").getAsBoolean());
     }
 
     @Test

@@ -149,6 +149,30 @@ public class ConfigurationTest {
     }
 
     @Test
+    public void enabledDefaultsToTrueWhenMissing() {
+        Configuration c = new Gson().fromJson(
+                "{\"backends\":[{\"type\":\"immich\",\"id\":\"x\",\"host\":\"https://h.example/\",\"userid\":\"u\","
+                        + "\"password\":\"p\"}]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        assertTrue(c.backends.get(0).enabled);
+    }
+
+    @Test
+    public void enabledFalseSurvivesParseAndNormalize() {
+        Configuration c = new Gson().fromJson(
+                "{\"backends\":[{\"type\":\"immich\",\"id\":\"x\",\"host\":\"https://h.example/\",\"userid\":\"u\","
+                        + "\"password\":\"p\",\"enabled\":false}]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        assertFalse(c.backends.get(0).enabled);
+        assertTrue(c.backends.get(0).isValid()); // still configured; only rotation skips it
+        assertEquals(1, c.validBackendCount());
+    }
+
+    @Test
     public void incompleteImmichEntryIsInvalidButKept() {
         Configuration c = new Gson().fromJson(
                 "{\"backends\":[{\"type\":\"immich\",\"id\":\"x\",\"host\":\"https://h.example/\",\"userid\":\"\"}]}",

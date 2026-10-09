@@ -28,6 +28,7 @@ public final class ConfigStateJson {
                 backend.addProperty("host", entry.host);
                 backend.addProperty("apiVersion", entry.apiVersion);
             }
+            backend.addProperty("enabled", entry.enabled);
             backend.addProperty("valid", entry.isValid());
             backends.add(backend);
         }
