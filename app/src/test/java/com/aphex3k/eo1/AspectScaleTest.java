@@ -61,15 +61,31 @@ public class AspectScaleTest {
         assertEquals(1.0f, sameAspect[0], 0.0001);
         assertEquals(1.0f, sameAspect[1], 0.0001);
 
-        // 90-degree rotated 1920x1080 content in a 1080x1920 view: net uniform 1.0 after
-        // the postRotate, exact fit.
-        float[] rotated = TextureVideoView.cropScaleFactors(1080, 1920, 1920, 1080, 90);
-        assertEquals(1.7777778f, rotated[0], 0.0001);
-        assertEquals(0.5625f, rotated[1], 0.0001);
+        // 90/270-degree rotated 1920x1080 content in a 1080x1920 view: the coded axes swap,
+        // so sx/sy use the swapped dims — combined with the postRotate this is a clean,
+        // undistorted 1.0 exact fit (not the 3:1 squash the un-swapped factors produce).
+        float[] rotated90 = TextureVideoView.cropScaleFactors(1080, 1920, 1920, 1080, 90);
+        assertEquals(0.5625f, rotated90[0], 0.0001);
+        assertEquals(1.7777778f, rotated90[1], 0.0001);
+
+        float[] rotated270 = TextureVideoView.cropScaleFactors(1080, 1920, 1920, 1080, 270);
+        assertEquals(0.5625f, rotated270[0], 0.0001);
+        assertEquals(1.7777778f, rotated270[1], 0.0001);
 
         // Oversized 4K landscape source downscales to fill the portrait view (crop sides).
         float[] downscale = TextureVideoView.cropScaleFactors(1080, 1920, 4096, 2160, 0);
         assertEquals(3.3711934f, downscale[0], 0.0001);
         assertEquals(1.0f, downscale[1], 0.0001);
+    }
+
+    @Test
+    public void postRotateAngleTest() {
+        // The probe reports the display rotation in counter-clockwise degrees, but
+        // Matrix.postRotate is clockwise-positive, so the applied angle is 360 - value.
+        assertEquals(0, TextureVideoView.postRotateAngle(0));
+        assertEquals(90, TextureVideoView.postRotateAngle(270));
+        assertEquals(270, TextureVideoView.postRotateAngle(90));
+        assertEquals(180, TextureVideoView.postRotateAngle(180));
+        assertEquals(0, TextureVideoView.postRotateAngle(-1));
     }
 }

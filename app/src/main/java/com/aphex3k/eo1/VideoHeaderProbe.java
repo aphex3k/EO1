@@ -10,9 +10,10 @@ import java.util.Locale;
  *
  * <p>Reports two facts about a video file without touching the media stack:
  * <ul>
- *   <li>the display-matrix rotation in degrees clockwise (0/90/180/270, or -1 when unknown) —
- *       read from the {@code tkhd} 16.16 matrix, overridden by an ISO 23001-8 {@code rot } box
- *       when one is present;</li>
+ *   <li>the display-matrix rotation in degrees counter-clockwise (0/90/180/270, or -1 when
+ *       unknown) — read from the {@code tkhd} 16.16 matrix, overridden by an ISO 23001-8
+ *       {@code rot } box when one is present; apply it with
+ *       {@code Matrix.postRotate(360 - value)} since Android's postRotate is clockwise;</li>
  *   <li>the coded video dimensions, from the first video sample entry in
  *       {@code moov/trak/mdia/minf/stbl/stsd}.</li>
  * </ul>
@@ -248,8 +249,10 @@ public final class VideoHeaderProbe {
     }
 
     /**
-     * Rotation (clockwise degrees) from the tkhd matrix. The 9x16.16 matrix sits at box offset
-     * 48 in version 0 and 60 in version 1. Diagonal (1,1)=0, (-1,-1)=180, off-diagonal =90/270.
+     * Rotation (counter-clockwise degrees) from the tkhd matrix: the value is the CCW display
+     * rotation the matrix encodes, so it can be applied with Matrix.postRotate(360 - value).
+     * The 9x16.16 matrix sits at box offset 48 in version 0 and 60 in version 1. Diagonal
+     * (1,1)=0, (-1,-1)=180, off-diagonal =90/270.
      */
     private static int parseTkhdRotation(byte[] data, int start, int end) {
         int off = start + 8 + 4; // past version+flags

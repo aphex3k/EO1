@@ -82,15 +82,21 @@ logged and reported via `debugInformationProvided` plus the debug `/state` `vide
 The fallback view performs rotation-aware **center-crop (aspect-fill)**:
 `TextureVideoView.updateTextureViewSize` compensates the TextureView's buffer-stretch mapping
 with per-axis factors (`cropScaleFactors`), so video fills the viewport, is cropped on the
-long axis, and is neither stretched nor over-zoomed.
+long axis, and is neither stretched nor over-zoomed. For a 90°/270° display rotation the coded
+axes are swapped relative to the view, so `cropScaleFactors` uses the swapped dimensions for
+`sx`/`sy` — using the un-swapped denominators renders a rotated clip ~3:1 squished instead of
+a clean 90° turn.
 
 The fallback also applies the display rotation via a `postRotate` on the TextureView
-transform. The angle is the probe's value, handed down per asset through
-`VideoPlayerController.setDisplayRotation` → `TextureVideoView.setDisplayRotation` — the
-platform `MediaMetadataRetriever` read inside `TextureVideoView` is unreliable on the EO
-frames (returns 0 for files whose `tkhd` matrix is non-identity), so it is only consulted
-when the probe yields "unknown" (-1). This keeps the displayed rotation identical to the
-rotation that drove the routing decision.
+transform. The probe's value is a **counter-clockwise** display rotation, but
+`Matrix.postRotate` is clockwise-positive, so the applied angle is
+`360 − value` (via `TextureVideoView.postRotateAngle`): probe `270` → `postRotate(90)`,
+probe `90` → `postRotate(270)`, `0`/`180` unchanged. The value is handed down per asset
+through `VideoPlayerController.setDisplayRotation` →
+`TextureVideoView.setDisplayRotation` — the platform `MediaMetadataRetriever` read inside
+`TextureVideoView` is unreliable on the EO frames (returns 0 for files whose `tkhd` matrix
+is non-identity), so it is only consulted when the probe yields "unknown" (-1). This keeps
+the displayed rotation identical to the rotation that drove the routing decision.
 
 ## Looping (native)
 
