@@ -87,16 +87,15 @@ axes are swapped relative to the view, so `cropScaleFactors` uses the swapped di
 `sx`/`sy` — using the un-swapped denominators renders a rotated clip ~3:1 squished instead of
 a clean 90° turn.
 
-The fallback also applies the display rotation via a `postRotate` on the TextureView
-transform. The probe's value is a **counter-clockwise** display rotation, but
-`Matrix.postRotate` is clockwise-positive, so the applied angle is
-`360 − value` (via `TextureVideoView.postRotateAngle`): probe `270` → `postRotate(90)`,
-probe `90` → `postRotate(270)`, `0`/`180` unchanged. The value is handed down per asset
-through `VideoPlayerController.setDisplayRotation` →
+The fallback deliberately applies **no** `postRotate` of its own: device testing on the EO
+frames showed the platform MediaPlayer decoder rotates display-rotated video itself, so any
+app-side `postRotate` doubles up. The probe's **clockwise** value therefore drives only the
+routing decision and the swapped `cropScaleFactors` dimensions for 90°/270° content. It is
+handed down per asset through `VideoPlayerController.setDisplayRotation` →
 `TextureVideoView.setDisplayRotation` — the platform `MediaMetadataRetriever` read inside
 `TextureVideoView` is unreliable on the EO frames (returns 0 for files whose `tkhd` matrix
 is non-identity), so it is only consulted when the probe yields "unknown" (-1). This keeps
-the displayed rotation identical to the rotation that drove the routing decision.
+the scale decision identical to the rotation that drove the routing decision.
 
 ## Looping (native)
 

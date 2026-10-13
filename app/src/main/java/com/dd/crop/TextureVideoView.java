@@ -101,14 +101,15 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         float pivotY = viewHeight / 2f;
         // TextureView maps the surface buffer stretched into the view bounds, so a uniform
         // scale alone renders distorted/over-zoomed — compensate that anisotropic stretch
-        // with per-axis factors, then rotate.
+        // with per-axis factors.
         float[] factors = cropScaleFactors(viewWidth, viewHeight, mVideoWidth, mVideoHeight, mVideoRotation);
 
         Matrix transformMatrix = new Matrix();
         transformMatrix.setScale(factors[0], factors[1], pivotX, pivotY);
-        // The probe reports the display rotation counter-clockwise; Matrix.postRotate is
-        // clockwise-positive, so convert before applying.
-        transformMatrix.postRotate(postRotateAngle(mVideoRotation), pivotX, pivotY);
+        // No app-side rotation: the EO frames' platform MediaPlayer applies the display
+        // rotation itself when decoding, so postRotate(mVideoRotation) here would
+        // double-rotate. The probe value still selects the swapped scale factors.
+        transformMatrix.postRotate(0, pivotX, pivotY);
         setTransform(transformMatrix);
 
         if (BuildConfig.DEBUG) {
@@ -176,21 +177,6 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         return new float[]{sx, sy};
     }
 
-    /**
-     * Converts the probe's counter-clockwise display rotation to the clockwise angle that
-     * {@link Matrix#postRotate(float)} expects. A -1 (unknown) hint yields 0.
-     */
-    public static int postRotateAngle(int probeDisplayRotationCcw) {
-        if (probeDisplayRotationCcw < 0) {
-            return 0;
-        }
-        int r = probeDisplayRotationCcw % 360;
-        if (r < 0) {
-            r += 360;
-        }
-        return (360 - r) % 360;
-    }
-
     private int readVideoRotation(String path) {
         MediaMetadataRetriever retriever = new MediaMetadataRetriever();
         try {
@@ -230,12 +216,11 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     }
 
     /**
-     * @see android.media.MediaPlayer#setDataSource(String)
-     */
-    /**
      * Supply the display rotation (clockwise degrees, 0/90/180/270, or -1 when unknown) before
      * {@link #setDataSource(String)}. Taken from the app's own ISOBMFF header probe — the
      * platform MediaMetadataRetriever is unreliable on some devices — and preferred over it.
+     * Used only to pick the swapped scale factors for 90/270 content; the rotation itself is
+     * applied by the platform decoder, not by this view.
      */
     public void setDisplayRotation(int rotationDeg) {
         mDisplayRotationHint = rotationDeg;
