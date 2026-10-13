@@ -106,7 +106,9 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
         Matrix transformMatrix = new Matrix();
         transformMatrix.setScale(factors[0], factors[1], pivotX, pivotY);
-        transformMatrix.postRotate(mVideoRotation, pivotX, pivotY);
+        // The probe reports the display rotation counter-clockwise; Matrix.postRotate is
+        // clockwise-positive, so convert before applying.
+        transformMatrix.postRotate(postRotateAngle(mVideoRotation), pivotX, pivotY);
         setTransform(transformMatrix);
 
         if (BuildConfig.DEBUG) {
@@ -152,17 +154,41 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     }
 
     /**
-     * Per-axis transform factors that display the video with true center-crop (aspect-fill)
-     * in the view. TextureView stretches the surface buffer into the view bounds, so each
-     * axis must be compensated: factor = fillScale * videoDim / viewDim. For rotation 0 this
-     * reduces to the original dd-crop postScale formulas.
+     * Per-axis transform factors that display the video with true center-crop (aspect-fill),
+     * undistorted, in the view. TextureView first stretches the surface buffer into the view
+     * bounds, so each axis is then compensated by an inverse of that stretch — but for a 90/270
+     * display rotation the coded axes are swapped relative to the view, so the two factors must
+     * use the swapped dimensions. Using the same denominators for every rotation makes a rotated
+     * video render ~3:1 squished instead of a clean 90° turn.
      */
     public static float[] cropScaleFactors(float viewWidth, float viewHeight,
                                            float videoWidth, float videoHeight, int rotation) {
         float fillScale = rotationAwareAspectScale(viewWidth, viewHeight, videoWidth, videoHeight, rotation);
-        float sx = fillScale * videoWidth / viewWidth;
-        float sy = fillScale * videoHeight / viewHeight;
+        float sx;
+        float sy;
+        if (rotation == 90 || rotation == 270) {
+            sx = fillScale * videoHeight / viewHeight;
+            sy = fillScale * videoWidth / viewWidth;
+        } else {
+            sx = fillScale * videoWidth / viewWidth;
+            sy = fillScale * videoHeight / viewHeight;
+        }
         return new float[]{sx, sy};
+    }
+
+    /**
+     * Converts the probe's counter-clockwise display rotation to the clockwise angle that
+     * {@link Matrix#postRotate(float)} expects. A -1 (unknown) hint yields 0.
+     */
+    public static int postRotateAngle(int probeDisplayRotationCcw) {
+        if (probeDisplayRotationCcw < 0) {
+            return 0;
+        }
+        int r = probeDisplayRotationCcw % 360;
+        if (r < 0) {
+            r += 360;
+        }
+        return (360 - r) % 360;
     }
 
     private int readVideoRotation(String path) {
