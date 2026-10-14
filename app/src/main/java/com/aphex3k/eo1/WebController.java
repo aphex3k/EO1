@@ -71,10 +71,12 @@ public interface WebController {
      *               {@code settings}, {@code update-site}, {@code check-updates},
      *               {@code install-staged} (installs a staged self-update, screen on),
      *               {@code update-reset} (drops staged update files and state),
+     *               {@code watchdog} (forces one kiosk-watchdog rung, 1..5; debug builds only,
+     *               POST-only — rung 5 reboots the device),
      *               {@code keyevent} (injects an arbitrary keycode; debug builds only,
      *               and the web server accepts it only via POST).
-     * @param params the request's query/form parameters; the {@code keyevent} action
-     *               reads {@code code} from it.
+     * @param params the request's query/form parameters; {@code keyevent} reads {@code code} and
+     *               {@code watchdog} reads {@code level} from it.
      * @return {@code true} if a known action was dispatched.
      */
     boolean control(String action, Map<String, String> params);

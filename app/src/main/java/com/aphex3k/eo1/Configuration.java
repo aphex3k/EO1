@@ -49,6 +49,14 @@ public class Configuration {
     /** Self-update check interval in minutes; clamped to [5, 1440] by {@link #normalize}. */
     public int updateCheckIntervalMinutes = 120;
 
+    /**
+     * Whether the kiosk watchdog may reboot the whole device as its last resort (off by default,
+     * and absent from any configuration file written before it existed). Everything earlier in the
+     * ladder — re-rotating, tearing the player down, cycling Wi-Fi, restarting the app — runs
+     * regardless of this flag.
+     */
+    public boolean autoReboot = false;
+
     // MQTT fields
     @Nullable public String mqttHost = "";
     public int mqttPort = 1883;

@@ -47,6 +47,7 @@ public final class ConfigStateJson {
         }
         config.addProperty("host", legacyHost);
         config.addProperty("intervalMinutes", c.interval);
+        config.addProperty("autoReboot", c.autoReboot);
         JsonArray quietWindows = new JsonArray();
         for (String expression : c.quietHoursOrEmpty()) {
             quietWindows.add(expression);

@@ -58,6 +58,12 @@ public final class AdbdInstallClient {
     private static final int PROBE_TIMEOUT_MS = 1000;
     /** {@code pm install} can be slow on the frame's storage. */
     private static final int READ_TIMEOUT_MS = 5 * 60 * 1000;
+    /**
+     * Repair commands are quick. A hung adbd must not hold the watchdog worker for minutes — on the
+     * EO2, adbd accepted the loopback connection but never answered while a USB adb client was
+     * attached, and 20s per command turned one repair into 80s of silence.
+     */
+    private static final int EXEC_TIMEOUT_MS = 8000;
     private static final int MAX_OUTPUT_BYTES = 256 * 1024;
     private static final Charset UTF_8 = Charset.forName("UTF-8");
     private static final Charset US_ASCII = Charset.forName("US-ASCII");
@@ -87,36 +93,60 @@ public final class AdbdInstallClient {
         // user adbd spawns can read it; quoting is belt-and-braces (the file
         // name is a fixed constant, no spaces today).
         String command = "shell:pm install -r '" + apk.getAbsolutePath() + "'; echo EO1PM_RC=$?";
+        try {
+            return classify(openAndRun(command, READ_TIMEOUT_MS));
+        } catch (IOException e) {
+            return unreachable(e);
+        }
+    }
+
+    /**
+     * Runs one shell command line through adbd and classifies it by exit status. Used by
+     * {@link DeviceRepair}; callers must pass a fixed constant, never interpolated input.
+     *
+     * <p>adbd's shell user is root on this ROM, which is what makes the repair vocabulary
+     * ({@code svc wifi …}, {@code setprop ctl.start …}, {@code reboot}) possible at all.
+     */
+    public Result exec(String command) {
+        try {
+            return classifyExec(openAndRun("shell:" + command + "; echo EO1RC=$?", EXEC_TIMEOUT_MS));
+        } catch (IOException e) {
+            return unreachable(e);
+        }
+    }
+
+    /** Performs the adb handshake, runs {@code command}, and returns everything it printed. */
+    private String openAndRun(String command, int readTimeoutMs) throws IOException {
         Socket socket = null;
         try {
             socket = new Socket();
             socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
-            socket.setSoTimeout(READ_TIMEOUT_MS);
+            socket.setSoTimeout(readTimeoutMs);
             OutputStream out = socket.getOutputStream();
             InputStream in = socket.getInputStream();
 
             sendCommand(out, "host:version");
             String status = readStatus(in);
             if (!"OKAY".equals(status)) {
-                return new Result(Outcome.UNREACHABLE,
-                        "handshake rejected: " + status + readFailReason(in, socket));
+                throw new IOException("handshake rejected: " + status + readFailReason(in, socket));
             }
             readPayload(in); // protocol version; not needed further
 
             sendCommand(out, command);
             status = readStatus(in);
             if (!"OKAY".equals(status)) {
-                return new Result(Outcome.UNREACHABLE,
-                        "command rejected: " + status + readFailReason(in, socket));
+                throw new IOException("command rejected: " + status + readFailReason(in, socket));
             }
 
-            return classify(readUntilEof(in));
-        } catch (IOException e) {
-            String msg = e.getMessage() == null ? "" : ": " + e.getMessage();
-            return new Result(Outcome.UNREACHABLE, e.getClass().getSimpleName() + msg);
+            return readUntilEof(in);
         } finally {
             closeQuietly(socket);
         }
+    }
+
+    private static Result unreachable(IOException e) {
+        String msg = e.getMessage() == null ? "" : ": " + e.getMessage();
+        return new Result(Outcome.UNREACHABLE, e.getClass().getSimpleName() + msg);
     }
 
     /** True when adbd accepts a connection on the default loopback endpoint. */
@@ -156,12 +186,42 @@ public final class AdbdInstallClient {
         if (pmOutput.indexOf("Success") >= 0) {
             return new Result(Outcome.SUCCESS, "");
         }
-        String oneLine = pmOutput.replace('\n', ' ').trim();
+        return new Result(Outcome.PM_FAILED, oneLineTail(pmOutput, "pm produced no output"));
+    }
+
+    /**
+     * Classifies {@link #exec} output by the exit status of the command. A missing marker means
+     * the channel closed while the command was still running — which is exactly what {@code reboot}
+     * does — so it counts as success; the caller re-checks the effect on the next rung anyway.
+     */
+    static Result classifyExec(String output) {
+        int marker = output.lastIndexOf("EO1RC=");
+        if (marker < 0) {
+            return new Result(Outcome.SUCCESS, oneLineTail(output, ""));
+        }
+        String commandOutput = oneLineTail(output.substring(0, marker), "");
+        int rc = -1;
+        StringBuilder digits = new StringBuilder();
+        int digitsEnd = Math.min(output.length(), marker + 6 + 3); // exit status is 0..255
+        for (int i = marker + 6; i < digitsEnd && Character.isDigit(output.charAt(i)); i++) {
+            digits.append(output.charAt(i));
+        }
+        if (digits.length() > 0) {
+            rc = Integer.parseInt(digits.toString());
+        }
+        if (rc == 0) {
+            return new Result(Outcome.SUCCESS, commandOutput);
+        }
+        return new Result(Outcome.PM_FAILED,
+                commandOutput.isEmpty() ? "exit status " + rc : commandOutput + " (exit status " + rc + ")");
+    }
+
+    private static String oneLineTail(String output, String whenEmpty) {
+        String oneLine = output.replace('\n', ' ').replace('\r', ' ').trim();
         if (oneLine.length() > 200) {
             oneLine = oneLine.substring(oneLine.length() - 200);
         }
-        return new Result(Outcome.PM_FAILED,
-                oneLine.isEmpty() ? "pm produced no output" : oneLine);
+        return oneLine.isEmpty() ? whenEmpty : oneLine;
     }
 
     // ------------------------------------------------------------------ wire I/O
