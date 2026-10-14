@@ -88,10 +88,11 @@ public class Configuration {
      *       host/userid/password triple is present, synthesize one immich entry.</li>
      *   <li>Trims string fields; blank {@code apiVersion} becomes "auto"; an unparseable
      *       pinned version is relaxed to "auto" rather than silently disabling the backend.</li>
-     *   <li>Blank ids get auto-ids ("immich-N" 1-based, "local").</li>
+     *   <li>Blank ids get auto-ids ("immich-N" / "web-N" 1-based, "local").</li>
      *   <li>At most one local entry is kept (first wins); duplicate immich entries
-     *       (same host + userid) are dropped.</li>
-     *   <li>Immich hosts get a trailing "/" appended when missing (Retrofit baseUrl).</li>
+     *       (same host + userid) and duplicate web entries (same page URL) are dropped.</li>
+     *   <li>Immich hosts get a trailing "/" appended when missing (Retrofit baseUrl); web
+     *       page URLs are left exactly as configured.</li>
      *   <li>Quiet hours: when no {@code quietHours} list is present but the legacy
      *       {@code startQuietHour}/{@code endQuietHour} pair is, migrate it to a single
      *       cron expression. When a list is present, entries are trimmed and any
@@ -151,10 +152,12 @@ public class Configuration {
             }
         }
 
-        // 4. Dedupe: at most one local entry; drop duplicate (host, userid) immich entries.
+        // 4. Dedupe: at most one local entry; drop duplicate (host, userid) immich entries and
+        //    duplicate web entries (one page twice would show twice per cycle).
         List<ConfigurationBackendEntry> kept = new ArrayList<ConfigurationBackendEntry>();
         boolean sawLocal = false;
         Set<String> seenImmich = new HashSet<String>();
+        Set<String> seenWeb = new HashSet<String>();
         for (ConfigurationBackendEntry e : c.backends) {
             if (e.isLocal()) {
                 if (sawLocal) {
@@ -162,6 +165,13 @@ public class Configuration {
                     continue;
                 }
                 sawLocal = true;
+            } else if (e.isWeb()) {
+                // Compared exactly, case included: a URL path is case-sensitive, so folding case
+                // here would silently drop a page the user configured on purpose.
+                if (e.isValid() && !seenWeb.add(e.host)) {
+                    changed = true;
+                    continue;
+                }
             } else if (e.isImmich()) {
                 String key = e.host + "\u0000" + e.userid;
                 if (!seenImmich.add(key)) {
@@ -175,14 +185,23 @@ public class Configuration {
             c.backends = kept;
         }
 
-        // 5. Auto-ids and trailing slash for immich hosts.
+        // 5. Auto-ids, plus a trailing slash for immich base URLs only.
         int immichCount = 0;
+        int webCount = 0;
         for (ConfigurationBackendEntry e : c.backends) {
             if (e.isLocal()) {
                 if (e.id.isEmpty()) {
                     e.id = "local";
                     changed = true;
                 }
+            } else if (e.isWeb()) {
+                webCount++;
+                if (e.id.isEmpty()) {
+                    e.id = "web-" + webCount;
+                    changed = true;
+                }
+                // No trailing slash here: an immich host is a Retrofit base URL, while a slash
+                // on a page address is part of the resource path and would change what loads.
             } else if (e.isImmich()) {
                 immichCount++;
                 if (e.id.isEmpty()) {

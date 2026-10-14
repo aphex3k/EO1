@@ -99,6 +99,12 @@ public final class MediaCompatibility {
         if (type == null) {
             return null;
         }
+        if (type == MediaType.WEB) {
+            // A web page is rendered, not decoded, so codec gates never apply. Guarded
+            // explicitly because a page address ends in a file-looking suffix often enough
+            // (".../feed.php", ".../photo.jpg") for extension sniffing to say something silly.
+            return null;
+        }
         String extension = MediaManager.extensionFromFileName(originalFileName);
         if (extension == null) {
             extension = MediaManager.extensionFromFileName(originalPath);

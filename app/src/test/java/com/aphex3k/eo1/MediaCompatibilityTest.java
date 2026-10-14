@@ -60,6 +60,15 @@ public class MediaCompatibilityTest {
     }
 
     @Test
+    public void webPagesAreNeverCodecChecked() {
+        // A page address is not a file: ".../photo.jpg" must not trip the image-extension tier,
+        // and no resolution gate applies to something rendered rather than decoded.
+        assertNull(MediaCompatibility.incompatibleReason(MediaType.WEB, "http://h/photo.jpg", null));
+        assertNull(MediaCompatibility.incompatibleReason(MediaType.WEB, "http://h/feed.php", null));
+        assertNull(MediaCompatibility.incompatibleVideoResolution(MediaType.WEB, 4000, 4000));
+    }
+
+    @Test
     public void rejectsOversizedVideoResolutions() {
         // 4K and QHD: any side above 1920px.
         assertVideoResolutionRejected(3840, 2160);

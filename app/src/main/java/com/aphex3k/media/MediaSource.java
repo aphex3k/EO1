@@ -13,6 +13,9 @@ import java.io.InputStream;
  * integrity check); remote sources carry a one-shot stream opener plus the integrity
  * reference the download gate uses. The opener must return a fresh, open stream each
  * call — the pipeline closes it.
+ *
+ * <p>{@link Kind#REMOTE_URL} carries no bytes: the asset is a web page, and the display side
+ * loads {@link #url} itself. The pipeline never caches or integrity-checks such a source.
  */
 public final class MediaSource {
 
@@ -20,7 +23,12 @@ public final class MediaSource {
         LOCAL_FILE,
         REMOTE_ORIGINAL,
         REMOTE_THUMBNAIL_FALLBACK,
-        REMOTE_VIDEO_PLAYBACK_FALLBACK
+        REMOTE_VIDEO_PLAYBACK_FALLBACK,
+        /**
+         * The asset is a web page: no bytes to fetch here, the display side loads
+         * {@link MediaSource#url} in a browser view. Never cached.
+         */
+        REMOTE_URL
     }
 
     /**
@@ -41,32 +49,41 @@ public final class MediaSource {
     @Nullable public final String expectedChecksum;
     /** Expected byte size of the original, or null when unknown. */
     @Nullable public final Long expectedBytes;
+    /** Page address for {@link Kind#REMOTE_URL} only; null for every other kind. */
+    @Nullable public final String url;
 
     public MediaSource(Kind kind, @Nullable File localFile, @Nullable Opener opener,
-                       @Nullable String expectedChecksum, @Nullable Long expectedBytes) {
+                       @Nullable String expectedChecksum, @Nullable Long expectedBytes,
+                       @Nullable String url) {
         this.kind = kind;
         this.localFile = localFile;
         this.opener = opener;
         this.expectedChecksum = expectedChecksum;
         this.expectedBytes = expectedBytes;
+        this.url = url;
     }
 
     public static MediaSource localFile(@NonNull File file) {
-        return new MediaSource(Kind.LOCAL_FILE, file, null, null, null);
+        return new MediaSource(Kind.LOCAL_FILE, file, null, null, null, null);
     }
 
     public static MediaSource remoteOriginal(@NonNull Opener opener,
                                              @Nullable String expectedChecksum,
                                              @Nullable Long expectedBytes) {
-        return new MediaSource(Kind.REMOTE_ORIGINAL, null, opener, expectedChecksum, expectedBytes);
+        return new MediaSource(Kind.REMOTE_ORIGINAL, null, opener, expectedChecksum, expectedBytes,
+                null);
     }
 
     public static MediaSource remoteThumbnail(@NonNull Opener opener) {
-        return new MediaSource(Kind.REMOTE_THUMBNAIL_FALLBACK, null, opener, null, null);
+        return new MediaSource(Kind.REMOTE_THUMBNAIL_FALLBACK, null, opener, null, null, null);
     }
 
     public static MediaSource remoteVideoPlayback(@NonNull Opener opener) {
-        return new MediaSource(Kind.REMOTE_VIDEO_PLAYBACK_FALLBACK, null, opener, null, null);
+        return new MediaSource(Kind.REMOTE_VIDEO_PLAYBACK_FALLBACK, null, opener, null, null, null);
+    }
+
+    public static MediaSource remoteUrl(@NonNull String url) {
+        return new MediaSource(Kind.REMOTE_URL, null, null, null, null, url);
     }
 
     public boolean isLocal() {

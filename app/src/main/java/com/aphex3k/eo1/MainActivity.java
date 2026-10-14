@@ -32,6 +32,13 @@ import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.animation.AlphaAnimation;
+import android.webkit.DownloadListener;
+import android.webkit.JsPromptResult;
+import android.webkit.JsResult;
+import android.webkit.WebChromeClient;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
 import android.widget.ImageView;
 import android.widget.RelativeLayout;
 import android.widget.TextView;
@@ -89,6 +96,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long MILLIS = 60000;
     private static final long VIDEO_WATCHDOG_POLL_MS = 2000L;
     private static final long VIDEO_STALL_THRESHOLD_MS = 8000L;
+    /**
+     * How long a page may take to show signs of life. Loads that neither paint nor report an error
+     * (a black-holed TCP connect) are caught here rather than left covering the screen.
+     */
+    private static final long WEB_LOAD_TIMEOUT_MS = 30000L;
     /** Minimum gap between download-progress logcat lines. */
     private static final long DOWNLOAD_PROGRESS_LOG_INTERVAL_MS = 5000L;
     /** Logcat tag matched by debug.sh follow_logcat filter. */
@@ -99,6 +111,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private ImageView imageView;
     private TextureVideoView mediaPlayerVideoView;
     private TsVideoView tsVideoView;
+    /** Chrome-less browser view for web-page assets; created on first use only. */
+    private WebView webView;
+    private String activeWebAssetId = "";
+    /** Page currently on screen; "" once it has been abandoned. Its url identifies live callbacks. */
+    private String webUrlOnScreen = "";
+    /** Set once the current load has painted, so a dead sub-resource is not a failed page. */
+    private boolean webLoadProducedPaint;
+    private Runnable webLoadWatchdogRunnable;
+    /** Sticky: this ROM offered no usable WebView provider, so web assets are skipped from here on. */
+    private boolean webViewUnavailable;
     private VideoPlayerController videoPlayer;
     private MediaPlayerController mediaPlayerController;
     private TsPlayerController tsPlayerController;
@@ -414,6 +436,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         debugOverlay.setVisibility(BuildConfig.DEBUG ? View.VISIBLE : View.GONE);
 
+        if (webView != null && lastVisibleView == webView) {
+            webView.onResume();
+            // A page left mid-load by onPause gets its fall-through timer back; without it a
+            // stalled load would hold the screen with nothing on it.
+            if (!webLoadProducedPaint && !webUrlOnScreen.isEmpty()) {
+                startWebLoadWatchdog();
+            }
+        }
+
         int permissionCheckStorage = ContextCompat.checkSelfPermission(MainActivity.this, WRITE_EXTERNAL_STORAGE);
         if (permissionCheckStorage != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions( MainActivity.this, new String[]{WRITE_EXTERNAL_STORAGE}, 0);
@@ -525,6 +556,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     protected void onPause() {
         cancelVideoWatchdog();
+        cancelWebLoadWatchdog();
+        if (webView != null && lastVisibleView == webView) {
+            webView.onPause();
+        }
         // Keep coreLoopStarted so onResume only re-arms the timer instead of
         // kicking a second immediate showNextImage (cold-start pause/resume thrash).
         handler.removeCallbacks(timerTick);
@@ -546,6 +581,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     protected void onDestroy() {
+        if (webView != null) {
+            WebView view = webView;
+            webView = null;
+            view.stopLoading();
+            view.destroy();
+        }
         if (this.webServer != null) {
             this.webServer.shutdown();
         }
@@ -628,6 +669,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         videoPlayer.setVisibility(View.INVISIBLE);
         imageView.setVisibility(View.INVISIBLE);
+        // Also stops the page's JavaScript and repaints for the whole quiet window.
+        hideWebView();
     }
 
     /**
@@ -654,6 +697,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         if (lastVisibleView != null) {
             lastVisibleView.setVisibility(View.VISIBLE);
+        }
+        if (webView != null && lastVisibleView == webView) {
+            // hideWebView() paused the page; making it visible again would not unfreeze it.
+            webView.onResume();
         }
         brightnessChanged(lastScreenBrightness);
     }
@@ -957,6 +1004,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                     @Override
                                     public boolean onResourceReady(@NonNull GifDrawable resource, @NonNull Object model, Target<GifDrawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
                                         resource.setLoopCount(GifDrawable.LOOP_FOREVER);
+                                        hideWebView();
                                         imageView.setVisibility(View.VISIBLE);
                                         lastVisibleView = imageView;
                                         lastVisibleAsset = file.getAbsolutePath();
@@ -977,6 +1025,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
                                     @Override
                                     public boolean onResourceReady(@NonNull Drawable resource, @NonNull Object model, Target<Drawable> target, @NonNull DataSource dataSource, boolean isFirstResource) {
+                                        hideWebView();
                                         imageView.setVisibility(View.VISIBLE);
                                         lastVisibleView = imageView;
                                         lastVisibleAsset = file.getAbsolutePath();
@@ -995,6 +1044,274 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         });
     }
 
+    // ------------------------------------------------------------- web-page assets
+
+    /** How a media type is named in the {@code /state} payload. */
+    private static String mediaTypeName(@Nullable MediaType type) {
+        if (type == MediaType.VIDEO) {
+            return "video";
+        }
+        if (type == MediaType.WEB) {
+            return "web";
+        }
+        return type == MediaType.IMAGE ? "image" : "unknown";
+    }
+
+    /**
+     * Displays a configured web page fullscreen in the chrome-less browser view. Unlike the two
+     * file-based display methods, whether this succeeded is only known later: a page that fails to
+     * load or render is reported back through {@link MediaManager#webDisplayFailed} so the cycle
+     * advances to a photo. The page is re-fetched on every call — that is the point of showing it.
+     */
+    @Override
+    public void displayWebsite(String url, String assetId) {
+        if (url == null || url.isEmpty()) {
+            Log.w(TAG, "displayWebsite: no page address for asset " + assetId);
+            return;
+        }
+        if (!this.brightnessManager.getShouldTheScreenBeOn()) {
+            Log.i(TAG, "displayWebsite: skip (screen should be off) asset=" + assetId);
+            return;
+        }
+
+        debugInformationProvided(new DebugInformation("displayWebsite", url));
+
+        this.runOnUiThread(() -> {
+            if (isDestroyed()) {
+                return;
+            }
+            cancelVideoWatchdog();
+            // No video is active while a page shows; a stale video callback must not match.
+            activeVideoAssetId = "";
+            // Asset handoff: free the exclusive Amlogic video pipeline before the browser view.
+            videoPlayer.release();
+            videoPlayer.setVisibility(View.INVISIBLE);
+
+            if (!ensureWebView()) {
+                mediaManager.webDisplayFailed(MainActivity.this, assetId);
+                return;
+            }
+
+            activeWebAssetId = assetId;
+            webUrlOnScreen = url;
+            webLoadProducedPaint = false;
+            // The image stays loaded (and visible) underneath, so a page that fails to render
+            // reveals the last photo instead of a black panel.
+            showWebView();
+            lastVisibleView = webView;
+            lastVisibleAsset = url;
+
+            try {
+                webView.loadUrl(url);
+            } catch (Exception e) {
+                Log.w(TAG, "displayWebsite: could not start loading " + url, e);
+                abandonWebPage();
+                return;
+            }
+            startWebLoadWatchdog();
+        });
+    }
+
+    /**
+     * Creates the browser view on first use, inserted just above {@link #imageView} so a page is
+     * never covered by the wallpaper while staying underneath the debug overlay and progress bar.
+     * Deliberately not in the layout file: a frame with no web backend must never pay for a WebView
+     * (it drags in the ROM's browser provider on an ~800MB device).
+     *
+     * @return false when this ROM has no usable WebView provider; remembered, so the failure does
+     *         not repeat on every tick
+     */
+    private boolean ensureWebView() {
+        if (webView != null) {
+            return true;
+        }
+        if (webViewUnavailable) {
+            return false;
+        }
+        try {
+            WebView view = new WebView(this);
+            WebSettings settings = view.getSettings();
+            settings.setJavaScriptEnabled(true);
+            settings.setJavaScriptCanOpenWindowsAutomatically(false);
+            settings.setSupportZoom(false);
+            settings.setBuiltInZoomControls(false);
+            settings.setDisplayZoomControls(false);
+            settings.setTextZoom(100);
+            // Fit the page to the 1920x1080 panel instead of a 980px viewport with scrollbars.
+            settings.setUseWideViewPort(true);
+            settings.setLoadWithOverviewMode(true);
+            settings.setGeolocationEnabled(false);
+            settings.setDomStorageEnabled(true);
+            settings.setDatabaseEnabled(false);
+            settings.setAllowFileAccess(false);
+            settings.setAllowContentAccess(false);
+            settings.setSaveFormData(false);
+            settings.setCacheMode(WebSettings.LOAD_DEFAULT);
+            settings.setDefaultTextEncodingName("utf-8");
+
+            view.setBackgroundColor(Color.BLACK);
+            view.setHorizontalScrollBarEnabled(false);
+            view.setVerticalScrollBarEnabled(false);
+            view.setOverScrollMode(View.OVER_SCROLL_NEVER);
+            // Keys belong to EventManager; a focused WebView would eat them.
+            view.setFocusable(false);
+            view.setFocusableInTouchMode(false);
+            view.setVisibility(View.INVISIBLE);
+            view.setWebViewClient(new KioskWebViewClient());
+            view.setWebChromeClient(new KioskWebChromeClient());
+            view.setDownloadListener(new DownloadListener() {
+                @Override
+                public void onDownloadStart(String url, String userAgent, String contentDisposition,
+                                           String mimetype, long contentLength) {
+                    Log.i(TAG, "web: ignored download request for " + url);
+                }
+            });
+
+            RelativeLayout root = (RelativeLayout) imageView.getParent();
+            root.addView(view, root.indexOfChild(imageView) + 1, new RelativeLayout.LayoutParams(
+                    RelativeLayout.LayoutParams.MATCH_PARENT, RelativeLayout.LayoutParams.MATCH_PARENT));
+            webView = view;
+            Log.i(TAG, "ensureWebView: kiosk browser view ready");
+            return true;
+        } catch (Throwable t) {
+            // Must not escape: the default handler restarts the process, which on every tick would
+            // look like a crash loop caused by the photo pipeline.
+            webViewUnavailable = true;
+            Log.e(TAG, "ensureWebView: no usable WebView provider on this device; web assets will be skipped", t);
+            debugInformationProvided(new DebugInformation("web", "WebView unavailable: " + t));
+            return false;
+        }
+    }
+
+    /** Keeps the page inside the kiosk and reports a page that never rendered. */
+    private final class KioskWebViewClient extends WebViewClient {
+
+        @Override
+        public boolean shouldOverrideUrlLoading(WebView view, String url) {
+            String lower = url == null ? "" : url.toLowerCase(Locale.ROOT);
+            // Stay inside the kiosk: at this API level any other scheme is handed to an external
+            // activity (market:, tel:, intent:, mailto:), which would eject the frame from home.
+            return !(lower.startsWith("http://") || lower.startsWith("https://"));
+        }
+
+        @Override
+        public void onPageFinished(WebView view, String url) {
+            if (!Objects.equals(url, webUrlOnScreen)) {
+                return;
+            }
+            webLoadProducedPaint = true;
+            cancelWebLoadWatchdog();
+            Log.i(TAG, "web: rendered " + url);
+            debugInformationProvided(new DebugInformation("web", "rendered " + url));
+        }
+
+        @Override
+        @SuppressWarnings("deprecation") // the non-deprecated overload is API 23+
+        public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+            if (webLoadProducedPaint || !Objects.equals(failingUrl, webUrlOnScreen)) {
+                Log.w(TAG, "web: sub-resource failure in " + failingUrl + " (" + errorCode
+                        + " " + description + ") — page stays");
+                return;
+            }
+            Log.w(TAG, "web: " + failingUrl + " failed (" + errorCode + "): " + description);
+            debugInformationProvided(new DebugInformation("web", "failed " + failingUrl
+                    + ": " + description));
+            abandonWebPage();
+        }
+    }
+
+    /** An unattended frame must never wait on a script dialog nobody can dismiss. */
+    private final class KioskWebChromeClient extends WebChromeClient {
+
+        @Override
+        public boolean onJsAlert(WebView view, String url, String message, JsResult result) {
+            result.cancel();
+            return true;
+        }
+
+        @Override
+        public boolean onJsConfirm(WebView view, String url, String message, JsResult result) {
+            result.cancel();
+            return true;
+        }
+
+        @Override
+        public boolean onJsPrompt(WebView view, String url, String message, String defaultValue,
+                                  JsPromptResult result) {
+            result.cancel();
+            return true;
+        }
+    }
+
+    /**
+     * Gives up on the page that was on screen: the browser view goes away, whatever image is still
+     * loaded underneath reappears, and the rotation moves on to the next asset.
+     */
+    private void abandonWebPage() {
+        cancelWebLoadWatchdog();
+        String failedAssetId = activeWebAssetId;
+        webUrlOnScreen = "";
+        activeWebAssetId = "";
+        hideWebView();
+        imageView.setVisibility(View.VISIBLE);
+        lastVisibleView = imageView;
+        // Cleared, not set to the image: the screen content changed behind the display methods'
+        // same-asset check, so the next tick must be allowed to re-show this very photo.
+        lastVisibleAsset = "";
+        if (mediaManager != null) {
+            mediaManager.webDisplayFailed(this, failedAssetId);
+        }
+    }
+
+    /** Shows the browser view and lets its page run. */
+    private void showWebView() {
+        if (webView == null) {
+            return;
+        }
+        webView.setVisibility(View.VISIBLE);
+        webView.onResume();
+    }
+
+    /**
+     * Hides the browser view and stops its page from consuming the CPU.
+     *
+     * <p>{@code onPause()}/{@code onResume()} rather than {@code pauseTimers()}/{@code
+     * resumeTimers()}: those two are static on API 19 and instance methods from API 29 on, so
+     * against this compileSdk they would link to a virtual call that does not exist on the frame.
+     */
+    private void hideWebView() {
+        if (webView == null) {
+            return;
+        }
+        webView.onPause();
+        webView.setVisibility(View.INVISIBLE);
+    }
+
+    private void startWebLoadWatchdog() {
+        cancelWebLoadWatchdog();
+        webLoadWatchdogRunnable = new Runnable() {
+            @Override
+            public void run() {
+                webLoadWatchdogRunnable = null;
+                if (webUrlOnScreen.isEmpty() || webLoadProducedPaint) {
+                    return;
+                }
+                Log.w(TAG, "web: " + webUrlOnScreen + " showed nothing within "
+                        + WEB_LOAD_TIMEOUT_MS / 1000L + "s; advancing to the next asset");
+                debugInformationProvided(new DebugInformation("web", "timeout " + webUrlOnScreen));
+                abandonWebPage();
+            }
+        };
+        handler.postDelayed(webLoadWatchdogRunnable, WEB_LOAD_TIMEOUT_MS);
+    }
+
+    private void cancelWebLoadWatchdog() {
+        if (webLoadWatchdogRunnable != null) {
+            handler.removeCallbacks(webLoadWatchdogRunnable);
+            webLoadWatchdogRunnable = null;
+        }
+    }
+
     /**
      * If the image produces an error of any kind during playback attempt, try to switch to the
      * thumbnail. If that fails as well, load the next asset instead
@@ -1007,6 +1324,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         cancelVideoWatchdog();
         videoPlayer.release();
         videoPlayer.setVisibility(View.INVISIBLE);
+        hideWebView();
         imageView.setVisibility(View.VISIBLE);
         lastVisibleView = imageView;
     }
@@ -1327,6 +1645,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 }
                 try {
                     if (!MainActivity.this.isDestroyed()) {
+                        hideWebView();
                         Glide.with(MainActivity.this).clear(imageView);
                         imageView.setVisibility(View.INVISIBLE);
                         controller.setVisibility(View.VISIBLE);
@@ -1561,8 +1880,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (currentAsset != null) {
             JsonObject current = new JsonObject();
             current.addProperty("key", currentAsset.key());
-            current.addProperty("type", currentAsset.type == MediaType.VIDEO ? "video" : "image");
+            current.addProperty("type", mediaTypeName(currentAsset.type));
             current.addProperty("backendId", currentAsset.backendId);
+            if (currentAsset.type == MediaType.WEB) {
+                current.addProperty("url", webUrlOnScreen);
+            }
             if (currentAsset.originalFileName != null) {
                 current.addProperty("originalFileName", currentAsset.originalFileName);
             }

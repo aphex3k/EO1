@@ -12,6 +12,7 @@ import com.aphex3k.media.MediaSource;
 import com.aphex3k.media.MediaType;
 import com.aphex3k.media.immich.ImmichMediaBackend;
 import com.aphex3k.media.local.LocalMediaBackend;
+import com.aphex3k.media.web.WebsiteBackend;
 
 import java.io.File;
 import java.io.IOException;
@@ -22,6 +23,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -34,11 +36,13 @@ import okhttp3.HttpUrl;
 /**
  * Drives rotation across every configured {@link MediaBackend}.
  *
- * <p>The pool holds compact {@link MediaAsset} records from all backends (N Immich hosts plus an
- * optional local uploads backend). Each rotation tick consumes one record, asks its backend for
- * the original bytes (local file or download with integrity checks), and hands the result to the
- * UI. A per-backend failure disables only that backend for the cycle; all assets failing after a
- * refetch surfaces {@link NoMediaFoundException} as today.
+ * <p>The pool holds compact {@link MediaAsset} records from all backends (N Immich hosts, an
+ * optional local uploads backend, and any number of web-page backends). Each rotation tick consumes
+ * one record, asks its backend for the original bytes (local file or download with integrity
+ * checks), and hands the result to the UI. A web record is the exception: it has no bytes, so it
+ * goes straight to the browser view and its failure is reported back later through
+ * {@link #webDisplayFailed}. A per-backend failure disables only that backend for the cycle; all
+ * assets failing after a refetch surfaces {@link NoMediaFoundException} as today.
  *
  * <p>After a successful display, the next pool record is prefetched in a background thread
  * ({@link #prefetchNext}) so the fixed-interval tick normally finds it already cached and the
@@ -62,6 +66,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * the next tick instead of sweeping (and possibly refetching) the whole pool.
      */
     private static final int MAX_CONSECUTIVE_ACQUIRE_FAILURES = 3;
+
+    /**
+     * How many dead web pages one rotation cycle will walk past. Page failures arrive long after
+     * the tick that dispatched them ({@link #webDisplayFailed}), so the acquire-failure cap above
+     * cannot cover them; without a cap, a pool of nothing but unreachable pages advances forever.
+     */
+    private static final int MAX_WEB_FALLBACKS_PER_CYCLE = 3;
 
     /**
      * Serializes cache-file writes so a download stream and the UI-side cache removal can never
@@ -103,6 +114,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private volatile String currentPlaybackPath;
     /** Last successfully displayed asset; read on the UI thread by /state. */
     private volatile MediaAsset currentAsset;
+    /** Dead web pages walked past so far in this rotation cycle; see {@link #MAX_WEB_FALLBACKS_PER_CYCLE}. */
+    private volatile int webFallbackDepth;
     /** Cache dir of the rotation currently in flight; guards removeFromCache's location check. */
     private volatile File mediaCacheDir;
     private volatile boolean poolStale;
@@ -163,6 +176,15 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
     @Override
     public void showNextImage(Activity activity) {
+        startRotation(activity, false);
+    }
+
+    /**
+     * @param afterWebFailure {@code true} when this rotation was triggered by a page that failed to
+     *        render: it continues the current cycle's web-fallback count instead of starting a new
+     *        cycle and resetting it.
+     */
+    private void startRotation(final Activity activity, final boolean afterWebFailure) {
         MediaManagerListener mediaManagerListener = this.listener.get();
         if (mediaManagerListener == null) {
             Log.i(TAG, "showNextImage: no listener, abort");
@@ -184,12 +206,46 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                                     activity.runOnUiThread(action);
                                 }
                             },
-                            false);
+                            false, afterWebFailure);
                 } finally {
                     showNextInFlight.set(false);
                 }
             }
         }).start();
+    }
+
+    /**
+     * Called from the UI thread when the kiosk browser reports that the page it was handed did not
+     * render. Advances to the next asset of the same rotation cycle rather than holding a blank
+     * panel, up to {@link #MAX_WEB_FALLBACKS_PER_CYCLE} dead pages per cycle.
+     */
+    @Override
+    public void webDisplayFailed(Activity activity, String assetKey) {
+        if (consumeWebFallbackSlot(assetKey)) {
+            startRotation(activity, true);
+        }
+    }
+
+    /**
+     * Decides whether a page that failed to render may advance the rotation, and counts it if so.
+     * Split out from {@link #webDisplayFailed} so the cap is testable without an {@code Activity}.
+     */
+    boolean consumeWebFallbackSlot(String assetKey) {
+        MediaAsset shown = currentAsset;
+        if (shown == null || shown.type != MediaType.WEB || !Objects.equals(assetKey, shown.key())) {
+            Log.i(TAG, "webDisplayFailed: ignoring report for " + assetKey
+                    + " (no longer the displayed web asset)");
+            return false;
+        }
+        if (webFallbackDepth >= MAX_WEB_FALLBACKS_PER_CYCLE) {
+            Log.w(TAG, "webDisplayFailed: " + webFallbackDepth + " pages failed this cycle; "
+                    + "waiting for the next tick instead of sweeping the pool again");
+            return false;
+        }
+        webFallbackDepth++;
+        Log.i(TAG, "webDisplayFailed: " + shown.key() + " did not render, advancing ("
+                + webFallbackDepth + "/" + MAX_WEB_FALLBACKS_PER_CYCLE + " this cycle)");
+        return true;
     }
 
     /**
@@ -200,11 +256,24 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         void post(Runnable action);
     }
 
+    /** A tick that starts here rather than walking on from a failed page: resets the fallback count. */
+    void showNextImageLocked(File cacheDir, File uploadsDir, UiPoster ui, boolean refetched) {
+        showNextImageLocked(cacheDir, uploadsDir, ui, refetched, false);
+    }
+
     /**
      * One rotation tick. Runs on the caller's thread (production: rotation worker; tests: the
-     * test thread). Consumes records from the merged pool until one resolves to a playable file.
+     * test thread). Consumes records from the merged pool until one resolves to something
+     * displayable: a playable file, or — for a {@link MediaType#WEB} record — a page address.
+     *
+     * @param afterWebFailure true when this sweep continues a cycle that a failed page walked on
+     *        from; keeps {@link #webFallbackDepth} counting instead of resetting it
      */
-    void showNextImageLocked(File cacheDir, File uploadsDir, UiPoster ui, boolean refetched) {
+    void showNextImageLocked(File cacheDir, File uploadsDir, UiPoster ui, boolean refetched,
+                             boolean afterWebFailure) {
+        if (!afterWebFailure) {
+            webFallbackDepth = 0;
+        }
         mediaCacheDir = cacheDir;
         Configuration configuration = loadConfiguration();
 
@@ -220,6 +289,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
         MediaAsset acquired = null;
         File playbackFile = null;
+        String playbackUrl = null;
         int consecutiveAcquireFailures = 0;
         boolean failureCapHit = false;
         while (poolCursor < pool.size()) {
@@ -229,6 +299,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             }
             MediaAsset asset = pool.get(poolCursor);
             poolCursor++;
+            if (asset.type == MediaType.WEB) {
+                // Nothing to acquire: a page has no bytes on this device. The browser view on the
+                // UI thread is what finds out whether it actually rendered.
+                playbackUrl = resolvePageUrl(asset);
+                if (playbackUrl != null) {
+                    acquired = asset;
+                    break;
+                }
+                continue;
+            }
             try {
                 playbackFile = acquireAsset(asset, cacheDir);
             } catch (Exception e) {
@@ -260,7 +340,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     postException(ui, new NoMediaFoundException());
                     return;
                 }
-                showNextImageLocked(cacheDir, uploadsDir, ui, true);
+                showNextImageLocked(cacheDir, uploadsDir, ui, true, afterWebFailure);
                 return;
             }
             Log.e(TAG, "showNextImage: all assets failed after refetch, deferring to next tick");
@@ -268,13 +348,15 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return;
         }
 
-        currentPlaybackPath = playbackFile.getAbsolutePath();
+        // A page has no path; null keeps it out of the cache-eviction guard.
+        currentPlaybackPath = playbackFile != null ? playbackFile.getAbsolutePath() : null;
         currentAsset = acquired;
         if (acquired.type == MediaType.VIDEO && acquired.durationMs > 0) {
             videoDurationMsByKey.put(acquired.key(), acquired.durationMs);
         }
         final MediaAsset shown = acquired;
         final File shownFile = playbackFile;
+        final String shownUrl = playbackUrl;
         ui.post(new Runnable() {
             @Override
             public void run() {
@@ -286,6 +368,10 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     mediaManagerListener.displayPicture(shownFile, shown.key());
                 } else if (shown.type == MediaType.VIDEO) {
                     mediaManagerListener.displayVideo(shownFile, shown.key());
+                } else if (shown.type == MediaType.WEB) {
+                    mediaManagerListener.displayWebsite(shownUrl, shown.key());
+                } else {
+                    Log.e(TAG, "showNextImage: no display path for media type " + shown.type);
                 }
             }
         });
@@ -304,12 +390,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * is logged only and the next tick simply re-acquires normally. The record is snapshotted
      * on the rotation worker (the only thread that mutates {@link #pool}) before the thread
      * starts, so the prefetch thread never reads the pool concurrently.
+     *
+     * <p>A {@link MediaType#WEB} next asset is skipped outright: there is nothing to stage, and
+     * pre-loading it would render a page nobody asked to see yet.
      */
     private void prefetchNext(File cacheDir) {
         if (!prefetchEnabled || poolCursor >= pool.size()) {
             return;
         }
         final MediaAsset next = pool.get(poolCursor);
+        if (next.type == MediaType.WEB) {
+            return;
+        }
         final File dir = cacheDir;
         Thread prefetcher = new Thread(new Runnable() {
             @Override
@@ -406,6 +498,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 backend = new LocalMediaBackend(entry.id, uploadsDir);
             } else if (entry.isImmich()) {
                 backend = new ImmichMediaBackend(entry, this);
+            } else if (entry.isWeb()) {
+                backend = new WebsiteBackend(entry);
             }
             if (backend == null) {
                 Log.w(TAG, "rebuildPool: unknown backend type '" + entry.type + "' for '"
@@ -600,6 +694,27 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return source.localFile;
         }
         return acquireRemoteFile(asset, source, cacheDir, reportProgress);
+    }
+
+    /**
+     * Resolves a {@link MediaType#WEB} asset to the page address its backend holds for it. Deliberately
+     * outside {@link #acquireAsset}: a page has no bytes, so it must never reach the download, cache
+     * or integrity paths.
+     */
+    @Nullable
+    private String resolvePageUrl(MediaAsset asset) {
+        MediaBackend backend = backendById.get(asset.backendId);
+        if (backend == null) {
+            Log.w(TAG, "resolvePageUrl: no backend for asset " + asset.key());
+            return null;
+        }
+        MediaSource source = backend.resolveOriginal(asset);
+        if (source == null || source.kind != MediaSource.Kind.REMOTE_URL || source.url == null) {
+            Log.w(TAG, "resolvePageUrl: backend '" + asset.backendId
+                    + "' gave no page address for " + asset.key());
+            return null;
+        }
+        return source.url;
     }
 
     /**

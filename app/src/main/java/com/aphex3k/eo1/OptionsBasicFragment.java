@@ -41,6 +41,7 @@ public class OptionsBasicFragment extends Fragment {
     private LinearLayout backendListContainer;
     private Button addImmichButton;
     private Button addLocalButton;
+    private Button addWebButton;
     private EditText intervalField;
     private LinearLayout quietCronContainer;
     private Button addQuietWindowButton;
@@ -79,6 +80,7 @@ public class OptionsBasicFragment extends Fragment {
         backendListContainer = view.findViewById(R.id.backendListContainer);
         addImmichButton = view.findViewById(R.id.btnAddImmich);
         addLocalButton = view.findViewById(R.id.btnAddLocal);
+        addWebButton = view.findViewById(R.id.btnAddWeb);
         intervalField = view.findViewById(R.id.editTextInterval);
         quietCronContainer = view.findViewById(R.id.quietCronContainer);
         addQuietWindowButton = view.findViewById(R.id.btnAddQuietWindow);
@@ -96,6 +98,7 @@ public class OptionsBasicFragment extends Fragment {
 
         addImmichButton.setOnClickListener(v -> addImmichBackend());
         addLocalButton.setOnClickListener(v -> addLocalBackend());
+        addWebButton.setOnClickListener(v -> addWebBackend());
         addQuietWindowButton.setOnClickListener(v -> addQuietWindow());
 
         if (settingsManager != null) {
@@ -133,6 +136,7 @@ public class OptionsBasicFragment extends Fragment {
         copy.userid = e.userid;
         copy.password = e.password;
         copy.apiVersion = e.apiVersion;
+        copy.enabled = e.enabled;
         return copy;
     }
 
@@ -200,14 +204,14 @@ public class OptionsBasicFragment extends Fragment {
         return "unknown";
     }
 
-    /** Smallest free "immich-N" number, starting at 1. */
-    private int nextImmichNumber() {
+    /** Smallest free "{prefix}-N" number, starting at 1. */
+    private int nextBackendNumber(String prefix) {
         int max = backends.size() + 1;
         boolean[] used = new boolean[max + 1];
         for (ConfigurationBackendEntry entry : backends) {
             if (entry.id != null) {
                 for (int n = 1; n <= max; n++) {
-                    if (entry.id.equals("immich-" + n)) {
+                    if (entry.id.equals(prefix + "-" + n)) {
                         used[n] = true;
                     }
                 }
@@ -224,7 +228,7 @@ public class OptionsBasicFragment extends Fragment {
     private void addImmichBackend() {
         ConfigurationBackendEntry entry = new ConfigurationBackendEntry();
         entry.type = ConfigurationBackendEntry.TYPE_IMMICH;
-        entry.id = "immich-" + nextImmichNumber();
+        entry.id = "immich-" + nextBackendNumber(ConfigurationBackendEntry.TYPE_IMMICH);
         entry.host = "";
         entry.userid = "";
         entry.password = "";
@@ -241,6 +245,18 @@ public class OptionsBasicFragment extends Fragment {
         entry.id = ConfigurationBackendEntry.TYPE_LOCAL;
         backends.add(entry);
         renderBackendList();
+    }
+
+    /** One website per entry: {@code host} holds the page address. */
+    private void addWebBackend() {
+        ConfigurationBackendEntry entry = new ConfigurationBackendEntry();
+        entry.type = ConfigurationBackendEntry.TYPE_WEB;
+        entry.id = "web-" + nextBackendNumber(ConfigurationBackendEntry.TYPE_WEB);
+        entry.host = "";
+        backends.add(entry);
+        renderBackendList();
+        // Open the new row's editor so the address can be typed straight away.
+        rows.get(rows.size() - 1).openEditor();
     }
 
     private void removeRow(BackendRow row) {
@@ -289,6 +305,8 @@ public class OptionsBasicFragment extends Fragment {
             String problem;
             if (entry.isImmich()) {
                 problem = invalidImmichEntry(entry);
+            } else if (entry.isWeb()) {
+                problem = invalidWebEntry(entry);
             } else if (entry.isLocal()) {
                 problem = null;
             } else {
@@ -339,6 +357,21 @@ public class OptionsBasicFragment extends Fragment {
         config.quietHours = windows;
         config.selectedTimeZoneId = tzSpinner.getSelectedItem().toString();
         return true;
+    }
+
+    /**
+     * @return null when the entry names a usable page, otherwise a short description of the
+     *         problem. The address is trimmed in place, so a saved URL never carries stray spaces.
+     */
+    private static String invalidWebEntry(ConfigurationBackendEntry entry) {
+        entry.host = entry.host == null ? "" : entry.host.trim();
+        if (entry.host.isEmpty()) {
+            return "page URL is required";
+        }
+        if (!ConfigurationBackendEntry.isHttpUrl(entry.host)) {
+            return "page URL must start with http:// or https://";
+        }
+        return null;
     }
 
     /**
@@ -444,7 +477,7 @@ public class OptionsBasicFragment extends Fragment {
             summary.setLayoutParams(summaryParams);
             header.addView(summary);
 
-            if (entry.isImmich()) {
+            if (entry.isImmich() || entry.isWeb()) {
                 Button editButton = new Button(context);
                 editButton.setText("Edit");
                 editButton.setOnClickListener(v -> openEditor());
@@ -470,6 +503,13 @@ public class OptionsBasicFragment extends Fragment {
             editor.setOrientation(LinearLayout.VERTICAL);
 
             hostField = new EditText(context);
+            if (entry.isWeb()) {
+                // A web entry has only the page address; hostField holds it.
+                hostField.setHint("http://host/page");
+                editor.addView(fieldRow(context, "Page URL", hostField));
+                addEditorButtons(context);
+                return;
+            }
             editor.addView(fieldRow(context, "Server", hostField));
 
             userIdField = new EditText(context);
@@ -483,6 +523,10 @@ public class OptionsBasicFragment extends Fragment {
             apiVersionField.setHint("auto");
             editor.addView(fieldRow(context, "API version", apiVersionField));
 
+            addEditorButtons(context);
+        }
+
+        private void addEditorButtons(Context context) {
             LinearLayout buttons = new LinearLayout(context);
             buttons.setOrientation(LinearLayout.HORIZONTAL);
             Button saveButton = new Button(context);
@@ -510,9 +554,11 @@ public class OptionsBasicFragment extends Fragment {
                 return;
             }
             hostField.setText(safe(entry.host));
-            userIdField.setText(safe(entry.userid));
-            passwordField.setText(safe(entry.password));
-            apiVersionField.setText(entry.apiVersion != null ? entry.apiVersion : "");
+            if (!entry.isWeb()) {
+                userIdField.setText(safe(entry.userid));
+                passwordField.setText(safe(entry.password));
+                apiVersionField.setText(entry.apiVersion != null ? entry.apiVersion : "");
+            }
             editor.setVisibility(View.VISIBLE);
             editorOpen = true;
         }
@@ -526,6 +572,12 @@ public class OptionsBasicFragment extends Fragment {
 
         void applyEditor() {
             entry.host = hostField.getText().toString().trim();
+            if (entry.isWeb()) {
+                // No credentials on a web entry: leave userid/password/apiVersion untouched
+                // rather than blanking fields the row never rendered.
+                updateSummary();
+                return;
+            }
             entry.userid = userIdField.getText().toString().trim();
             entry.password = passwordField.getText().toString().trim();
             String api = apiVersionField.getText().toString().trim();
@@ -536,6 +588,11 @@ public class OptionsBasicFragment extends Fragment {
         void updateSummary() {
             if (entry.isLocal()) {
                 summary.setText("Local uploads");
+                return;
+            }
+            if (entry.isWeb()) {
+                String url = entry.host == null ? "" : entry.host.trim();
+                summary.setText(url.isEmpty() ? "Website (no URL set)" : "Website — " + url);
                 return;
             }
             String host = entry.host == null ? "" : entry.host.trim();

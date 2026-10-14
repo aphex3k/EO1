@@ -102,7 +102,7 @@ The app will only be able to see content from your immich database that is share
 
 ### Multiple media backends
 
-The frame's configuration holds a list of **media backends**; the rotation pool merges the catalogs of all of them and picks randomly across the combined set. Any number of Immich hosts is allowed, plus one optional **local** backend for files uploaded through the frame's [LAN web server](docs/WEBSERVER.md) — it joins the rotation as an equal peer and needs no account.
+The frame's configuration holds a list of **media backends**; the rotation pool merges the catalogs of all of them and picks randomly across the combined set. Any number of Immich hosts is allowed, plus one optional **local** backend for files uploaded through the frame's [LAN web server](docs/WEBSERVER.md) — it joins the rotation as an equal peer and needs no account — plus any number of **web** backends, each showing one web page.
 
 Template: [`configuration_example.json`](configuration_example.json).
 
@@ -114,17 +114,20 @@ Template: [`configuration_example.json`](configuration_example.json).
   "backends": [
     { "type": "immich", "id": "immich-1", "host": "http://immich.local/", "userid": "frame1@example.com", "password": "secret", "apiVersion": "auto" },
     { "type": "immich", "id": "immich-2", "host": "https://other.example.com:3001/", "userid": "frame2@example.com", "password": "secret", "apiVersion": "3.1.0" },
-    { "type": "local", "id": "local" }
+    { "type": "local", "id": "local" },
+    { "type": "web", "id": "web-1", "host": "http://192.168.1.20/dashboard/" }
   ]
 }
 ```
 
 - **`apiVersion`** — per backend, so one frame can point at servers of different vintages. `"auto"` (the default) probes the server's version on first contact and uses the matching client; a pinned semver like `"3.1.0"` skips the probe and selects the client for that band (the current band is **3.0.0–3.2.2**). A pin or probed version outside the supported band disables just that backend with a toast; the others keep rotating.
 - **Local backend** — optional, at most one (`"type": "local"`). Files uploaded through the web server appear in the rotation on the next interval tick, no restart; deleting a file drops it out.
+- **Website backend** — `"type": "web"`, **one entry per page**, and `host` is that page's address (`http://` or `https://`; nothing else is needed — no account, and the address is used exactly as written, so no trailing `/` is added). Each entry contributes one asset to the pool, so with 300 photos and 2 pages every page shows about once every 150 intervals. Nothing is downloaded or cached: the page is loaded fresh in a fullscreen, chrome-free browser view every time it comes up, and it holds the screen for the normal `interval`.
+- **Which pages work** — the frame renders with the browser built into Android 4.4 (a 2014 Chromium), so plan on LAN-hosted pages, static pages, or pages written for old engines. A modern JavaScript app will usually fail. `http://` works out of the box; `https://` depends on the certificates the frame's system trust store already has, and an untrusted one fails to load like any other dead page.
 - **Quiet hours** — `quietHours` is a list of 5-field cron expressions (`minute hour day month weekday`); the screen is off whenever any entry matches the current minute in `selectedTimeZoneId`, so overlapping windows simply OR. `* 22-23,0-6 * * *` = off every night 22:00–06:59; `0 13 * * 1-5` = off weekdays at 13:00. Old `startQuietHour`/`endQuietHour` values are migrated to the equivalent expression on load; a single whole-hour window is mirrored back into those fields on save so older APKs keep working.
 - **Legacy configs** — an old file with flat `host`/`userid`/`password` is migrated on load to a single `immich-1` backend and rewritten on disk; the flat fields are kept mirrored on save so older APK versions can still read the file.
-- **Editing** — the options dialog's Media tab (press **C** on a connected keyboard on EO1) manages the list: add/remove Immich backends, add/remove the local one, and edit host/username/password/API version per row. Or edit `configuration.json` directly and reboot (EO2).
-- If a backend's server is unreachable or a credential is wrong, that backend is skipped for the cycle and the rest keep rotating.
+- **Editing** — the options dialog's Media tab (press **C** on a connected keyboard on EO1) manages the list: add/remove Immich backends, add/remove the local one, add/remove websites, and edit host/username/password/API version (or just the page address) per row. Or edit `configuration.json` directly and reboot (EO2).
+- If a backend's server is unreachable or a credential is wrong, that backend is skipped for the cycle and the rest keep rotating. A web page that fails to load is abandoned the same way: the frame shows the next asset in the pool instead of a blank panel and retries the page on its next turn.
 
 ### Local debug (emulator)
 

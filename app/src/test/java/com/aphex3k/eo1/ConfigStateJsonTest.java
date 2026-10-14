@@ -33,6 +33,14 @@ public class ConfigStateJsonTest {
         return e;
     }
 
+    private static ConfigurationBackendEntry web(String id, String url) {
+        ConfigurationBackendEntry e = new ConfigurationBackendEntry();
+        e.type = ConfigurationBackendEntry.TYPE_WEB;
+        e.id = id;
+        e.host = url;
+        return e;
+    }
+
     private static Configuration config(ConfigurationBackendEntry... backends) {
         Configuration c = new Configuration();
         List<ConfigurationBackendEntry> list = new ArrayList<>();
@@ -95,6 +103,27 @@ public class ConfigStateJsonTest {
     @Test
     public void localOnlyConfigHasEmptyLegacyHostAlias() {
         Configuration c = config(local());
+        JsonObject json = ConfigStateJson.configStateJson(c);
+        assertEquals("", json.get("host").getAsString());
+        assertEquals(1, json.getAsJsonArray("backends").size());
+    }
+
+    @Test
+    public void webBackendShowsItsPageUrlWithoutAnApiVersion() {
+        Configuration c = config(web("web-1", "http://192.168.1.20/dash/"));
+        JsonObject backend = ConfigStateJson.configStateJson(c)
+                .getAsJsonArray("backends").get(0).getAsJsonObject();
+
+        assertEquals("web", backend.get("type").getAsString());
+        assertEquals("http://192.168.1.20/dash/", backend.get("host").getAsString());
+        assertTrue(backend.get("valid").getAsBoolean());
+        assertFalse(backend.has("apiVersion"));
+    }
+
+    /** A page address must never be mistaken for an Immich server by an older APK. */
+    @Test
+    public void webOnlyConfigHasEmptyLegacyHostAlias() {
+        Configuration c = config(web("web-1", "http://host/page"));
         JsonObject json = ConfigStateJson.configStateJson(c);
         assertEquals("", json.get("host").getAsString());
         assertEquals(1, json.getAsJsonArray("backends").size());
