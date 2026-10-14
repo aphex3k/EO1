@@ -36,6 +36,11 @@ public class SettingsManager {
      * dialog only while the trusted-network flag is on.
      */
     private static final String PREF_TRUSTED_NETWORK_TOKEN = "trusted_network_token";
+    /**
+     * SharedPreferences key for the watchdog's last-resort reboot permission. Like the other two,
+     * never part of {@code configuration.json} and off on a fresh install.
+     */
+    private static final String PREF_AUTO_REBOOT = "kiosk_auto_reboot";
     private Configuration configuration = new Configuration();
     public Configuration getConfiguration() {
         return this.configuration;
@@ -68,6 +73,38 @@ public class SettingsManager {
             SharedPreferences prefs = listener.getDefaultSharedPreferences();
             if (prefs != null) {
                 prefs.edit().putBoolean(PREF_TRUSTED_NETWORK, trusted).apply();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * Whether the frame may reboot itself as the last rung of the kiosk watchdog ladder (off by
+     * default). Persisted in the app's default SharedPreferences like the trusted-network flag, so
+     * it never enters {@code configuration.json} and survives an APK update.
+     */
+    public boolean isAutoRebootEnabled() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return false;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            return prefs != null && prefs.getBoolean(PREF_AUTO_REBOOT, false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public void setAutoRebootEnabled(boolean enabled) {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs != null) {
+                prefs.edit().putBoolean(PREF_AUTO_REBOOT, enabled).apply();
             }
         } catch (Exception ignored) {
         }

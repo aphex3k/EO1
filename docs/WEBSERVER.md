@@ -21,7 +21,7 @@ the server itself is unit-testable with a fake controller and never references t
 | Route | Method | Purpose |
 |---|---|---|
 | `/` | GET | One-page UI: upload form, file table (download/delete), control buttons |
-| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; device adds detected `platform`; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`enabled`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, a `media` block (`rotationAssets`, `screenOn`, and — once an asset is on screen — `current` with `key`, `type` (`image`/`video`), `backendId`, `width`, `height` (0 when unknown), `durationMs`, `local` (bool), plus `originalFileName`/`sizeBytes` when the backend reports them), an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld` (bool — whether the frame holds `INSTALL_PACKAGES`), `installMode` (path the next install dispatch will take: `headless` when that permission is held, else `adbd` when the ROM's adbd is reachable, else `intent-fallback`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent` — which path the most recent install dispatch used), `adbdReachable` (bool, on-demand probe of the ROM's adbd on 127.0.0.1:5555 — the headless-install precondition)), battery/memory/uptime telemetry; debug builds add a `video` block (active player, TsPlayer loop telemetry, and the last video routing inputs: `rotation`, `width`, `height`, `frameOrientation`) |
+| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; device adds detected `platform`; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`enabled`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, a `media` block (`rotationAssets`, `screenOn`, and — once an asset is on screen — `current` with `key`, `type` (`image`/`video`), `backendId`, `width`, `height` (0 when unknown), `durationMs`, `local` (bool), plus `originalFileName`/`sizeBytes` when the backend reports them), an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld` (bool — whether the frame holds `INSTALL_PACKAGES`), `installMode` (path the next install dispatch will take: `headless` when that permission is held, else `adbd` when the ROM's adbd is reachable, else `intent-fallback`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent` — which path the most recent install dispatch used), `adbdReachable` (bool, on-demand probe of the ROM's adbd on 127.0.0.1:5555 — the headless-install precondition)), a `watchdog` block (`staleMs`/`staleLimitMs` — how long nothing has been on screen and when that counts as wedged; `level`/`lastAction`/`lastActionAtMs` — how far down the recovery ladder this wedge has already gone; `repairAttempts`, `probeMisses`, `ticks`; `paused`, `mainLoopAlive`/`mainLoopStallMs`, `downloadInFlightMs`, `offlineMs`, `autoReboot`), battery/memory/uptime telemetry; debug builds add a `video` block (active player, TsPlayer loop telemetry, and the last video routing inputs: `rotation`, `width`, `height`, `frameOrientation`) |
 | `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
 | `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
 | `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
@@ -51,19 +51,23 @@ the server itself is unit-testable with a fake controller and never references t
 | `install-staged` | — | install a staged self-update (turns the screen on first) |
 | `update-reset` | — | drop the staged update files and reset the update state |
 | `keyevent?code=<n>` | — (admin/debug; **debug builds only**, POST only) | inject an arbitrary key press via `Instrumentation.sendKeyDownUpSync`; `code` must parse to an int in 0…65535. Lets you try keycodes (e.g. `26` POWER, `223` SLEEP, `132` F2) on a device without ADB. The index page shows a "Send key" form with quick-fill buttons in debug builds. |
+| `watchdog?level=<1..5>` | — (**debug builds only**, POST only) | run one rung of the kiosk watchdog ladder immediately, as if its threshold had been reached: 1 force a rotation, 2 redraw the current asset, 3 Wi-Fi repair through adbd, 4 restart the app process, 5 reboot the device (rung 5 still respects the *Reboot the frame* option and only reboots when it is on). The way to prove a rung works without waiting for a wedge. |
 
 All actions are posted to the UI thread — except `keyevent`, which is injected directly on the
 web worker thread (`sendKeyDownUpSync` posts to the UI looper and would deadlock if posted
-to it). `keyevent` is a debug-build-only admin action that additionally requires POST: a
-release build refuses it entirely, and the method gate blocks the cross-origin `GET`
+to it), and `watchdog`, which runs on the web worker thread precisely so it can still act when
+the UI thread is the thing that is stuck (each rung dispatches to whatever thread owns the work).
+`keyevent` and `watchdog` are debug-build-only admin actions that additionally require POST: a
+release build refuses them entirely, and the method gate blocks the cross-origin `GET`
 drive-by. POST-only is **not** CSRF protection by itself — `/control` reads its parameters
 from the URL query string, so a page the user visits could still auto-submit a plain `POST`
 form and reach the action on a debug build; real CSRF resistance would need additional
 checks (an `Origin`/`Referer` validation, a non-simple content type, or a per-session
 token). The server deliberately has none of those — it remains credential-free plain HTTP
 by design (trusted LAN only) — so the security boundary is the trusted-LAN assumption plus
-the debug-build gate, not hardening against hostile pages. `keyevent` on a release build or
-via GET, an unknown action, or a malformed `code` returns `{"ok":false,"fired":false}`.
+the debug-build gate, not hardening against hostile pages. `keyevent`/`watchdog` on a release
+build or via GET, an unknown action, or a malformed `code`/`level` returns
+`{"ok":false,"fired":false}`.
 
 ## Trusted network
 
@@ -166,6 +170,37 @@ APK uploads via `POST /update` are the one exception: they land in `filesDir/upd
 (the self-update staging area), are verified before anything touches them, and never
 join the rotation pool.
 
+## Self-recovery (kiosk watchdog)
+
+`KioskWatchdog` guards one invariant: **while the screen should be on, the frame keeps putting new
+content on it.** It ticks once a minute on its own `Timer` thread — deliberately not the activity's
+`Handler`, because the failure it was written for blocked the main thread for 15 minutes in a binder
+call into a deadlocked WindowManager, and a handler-based watchdog would have been blind exactly then.
+
+Staleness is the age of the last display the loop committed to — refreshed by a rotation tick that
+reached `displayPicture`/`displayVideo`, by a download that has stopped making progress, and started
+at process launch so a frame that has never gotten anything on screen ages out too. (It judges loop
+liveness, not asset decodability: a single long video looping natively is healthy, not stale.)
+Nothing is judged during quiet hours, while another activity is in front
+(`/state: watchdog.paused`, `PAUSED` in the heartbeat), or before the first asset has ever shown.
+The limit is `max(20 min, 3 × rotation interval)`, and past it the ladder escalates — each rung at
+most once per wedge, and the counter resets as soon as the frame is healthy again:
+
+| rung | at stale ≥ | what it does |
+|---|---|---|
+| 1 force rotation | limit | re-drives `showNextImage` (a lost tick or a skipped rotation) |
+| 2 recover playback | limit + 5 min | forces the full player teardown an asset handoff would do (clears the same-asset skip, releases the player, uncovers the wallpaper) and then rotates — the documented TsPlayer recovery, never a per-duration recreate |
+| 3 network repair | limit + 10 min, and only after 10 min offline | `svc wifi disable` → 3 s → `svc wifi enable` through the ROM's adbd (fixed constants only), which restarts the vendor Wi-Fi stack via WifiService — the ROM's supplicant is registered as `init.svc.p2p_supplicant`, so poking `ctl.start wpa_supplicant` by the AOSP name would be a guess. Effect is judged by connectivity on the next tick. Up to 3 attempts, ≥10 min apart; bails out at once if adbd cannot be reached. Caveat measured on the EO2: while a host `adb` client is attached, adbd accepts the loopback connection but never answers — so this rung was verified to fail fast, not to restore Wi-Fi. Test it on a frame that is not plugged into a dev machine |
+| 4 self-restart | two un-acked main-thread probes | schedules a relaunch and kills our own process — the only rung that works when the UI thread is the wedged part |
+| 5 reboot | limit + 30 min | `reboot` via adbd. **Opt-in** (options dialog → *Reboot the frame if nothing else recovers it*); when off, the ladder logs that it stopped here. While there is no network it waits for rung 3's attempts to be spent first — an ISP outage is not fixed by rebooting the frame every day |
+
+The 2026-10-13 incident is the reason rungs 3 and 5 exist: a `SurfaceFlinger` hang put
+`system_server`'s WindowManager monitor under the system Watchdog, the Watchdog restarted the
+framework, and the ROM never started `wpa_supplicant` afterwards — so the frame sat "waiting for
+network" for 13 hours while every part of the app was correctly reporting the situation.
+
+Force any rung on a debug build with `POST /control?action=watchdog&level=<1..5>`.
+
 ## Logs / past state
 
 Raw system logcat is not readable by a normal (non-root) Android app, so the log feature
@@ -173,3 +208,11 @@ captures the app's own curated event stream instead: `MainActivity.debugInformat
 (and uncaught exceptions) feed `AppLogger`, which keeps a 500-event in-memory ring buffer
 **and** a 256 KB rolling on-disk file. Device telemetry (battery, memory, Wi-Fi, uptime) is
 collected on demand by `DeviceTelemetry` for `/state`.
+
+The file log is the only reliable post-mortem source: on the EO2 the vendor `ISystemWriteService`
+writes ~10 lines/second ("readSysfs could not contact remote"), so a `logcat -d` ring holds roughly
+13 minutes and any overnight incident is already gone by the time anyone can plug in adb. The
+watchdog therefore writes a `heartbeat` line every 10 minutes even when nothing is wrong
+(`tick`, `stale`, `limit`, `level`, `action`, `network`/`offlineFor`, `screen`, `PAUSED`,
+`UNACKED_PROBES`) — about two weeks of history inside the rolling cap, and enough to tell
+"loop dead", "offline" and "blocked main thread" apart after the fact.

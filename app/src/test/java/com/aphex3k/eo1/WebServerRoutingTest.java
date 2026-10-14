@@ -67,9 +67,12 @@ public class WebServerRoutingTest {
     }
 
     @Test
-    public void keyeventIsPostOnly() {
+    public void adminActionsArePostOnly() {
         assertTrue(WebServer.controlAllows("POST", "keyevent"));
         assertFalse(WebServer.controlAllows("GET", "keyevent"));
+        // Forcing a watchdog rung can reboot the device, so it may not be GET-reachable either.
+        assertTrue(WebServer.controlAllows("POST", "watchdog"));
+        assertFalse(WebServer.controlAllows("GET", "watchdog"));
         // Every other action keeps its existing GET/POST behavior.
         assertTrue(WebServer.controlAllows("GET", "next"));
         assertTrue(WebServer.controlAllows("POST", "next"));

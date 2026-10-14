@@ -155,6 +155,22 @@
             android:layout_marginTop="4dp"
             android:fontFamily="monospace"
             android:visibility="gone" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Unattended recovery"
+            android:layout_marginTop="20sp"
+            android:textAppearance="@style/TextAppearance.AppCompat.Large" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="The frame watches its own display loop and works down a ladder when nothing new appears while the screen should be on: re-drive the rotation, redraw the current asset, restart the app, nudge Wi-Fi through adbd. Rebooting the whole device is the last step and only happens if you allow it here." />
+        <CheckBox
+            android:id="@+id/autoRebootCheckBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Reboot the frame if nothing else recovers it" />
     </LinearLayout>
 </ScrollView>
 
