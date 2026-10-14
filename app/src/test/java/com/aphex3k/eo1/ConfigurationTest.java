@@ -21,6 +21,18 @@ public class ConfigurationTest {
     }
 
     @Test
+    public void autoRebootIsOffUnlessTheConfigSaysOtherwise() {
+        // A configuration.json written before the field existed must not grant the watchdog the
+        // permission to reboot the device.
+        assertFalse(new Gson().fromJson("{\"interval\":5}", Configuration.class).autoReboot);
+        assertFalse(new Configuration().autoReboot);
+
+        assertTrue(new Gson().fromJson("{\"autoReboot\":true}", Configuration.class).autoReboot);
+        assertTrue(new Gson().toJson(new Gson().fromJson(
+                "{\"autoReboot\":true}", Configuration.class)).contains("\"autoReboot\":true"));
+    }
+
+    @Test
     public void legacyFlatTripleMigratesToSingleImmichBackend() {
         Configuration c = new Gson().fromJson(
                 "{\"host\":\"https://immich.local/\",\"userid\":\"u@e.com\",\"password\":\"pw\"}",

@@ -93,6 +93,16 @@ public class ConfigStateJsonTest {
     }
 
     @Test
+    public void watchdogRebootPermissionIsReported() {
+        assertFalse(ConfigStateJson.configStateJson(config(immich("immich-1", "https://one.example/", "auto")))
+                .get("autoReboot").getAsBoolean());
+
+        Configuration c = config(immich("immich-1", "https://one.example/", "auto"));
+        c.autoReboot = true;
+        assertTrue(ConfigStateJson.configStateJson(c).get("autoReboot").getAsBoolean());
+    }
+
+    @Test
     public void localOnlyConfigHasEmptyLegacyHostAlias() {
         Configuration c = config(local());
         JsonObject json = ConfigStateJson.configStateJson(c);

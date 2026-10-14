@@ -593,7 +593,7 @@ public class WebServer {
                         sendJson(os, 403, errorJson("cross-origin request rejected"));
                         return;
                     }
-                    handleConfigPost(is, os);
+                    handleConfigPost(headers, is, os);
                 } else {
                     send(os, 405, "text/plain", "method not allowed");
                 }
@@ -631,7 +631,7 @@ public class WebServer {
                     sendJson(os, 403, errorJson("cross-origin request rejected"));
                     return;
                 }
-                handleConfigPost(is, os);
+                handleConfigPost(headers, is, os);
                 break;
             }
 
@@ -783,8 +783,19 @@ public class WebServer {
      * {@code POST /config/import}). The body is read off the socket with a hard cap before the
      * controller touches it.
      */
-    private void handleConfigPost(InputStream is, OutputStream os) throws IOException {
-        byte[] body = readBounded(is, MAX_CONFIG_BODY_BYTES);
+    private void handleConfigPost(Map<String, String> headers, InputStream is, OutputStream os)
+            throws IOException {
+        long declared = parseLongLenient(headers.get("content-length"));
+        if (declared > MAX_CONFIG_BODY_BYTES) {
+            sendJson(os, 413, errorJson("configuration exceeds " + (MAX_CONFIG_BODY_BYTES / 1024L)
+                    + " KB size limit"));
+            return;
+        }
+        // Read the declared length, not until EOF: a POSTing client (the config editor's Save
+        // button, curl, fetch) keeps the connection open waiting for the response, so waiting for
+        // end-of-stream deadlocks until the client times out — the write lands, but only after the
+        // caller has given up. Only an undeclared body falls back to reading to EOF.
+        byte[] body = declared >= 0 ? readAll(is, declared) : readBounded(is, MAX_CONFIG_BODY_BYTES);
         if (body.length > MAX_CONFIG_BODY_BYTES) {
             sendJson(os, 413, errorJson("configuration exceeds " + (MAX_CONFIG_BODY_BYTES / 1024L)
                     + " KB size limit"));
@@ -966,6 +977,10 @@ public class WebServer {
                 .append("<tr><th>Time zone (IANA id)</th><td><input id=\"cfgTimezone\" size=\"30\" placeholder=\"America/Los_Angeles\"></td></tr>")
                 .append("<tr><th>Self-update manifest URL (empty = off)</th><td><input id=\"cfgUpdateUrl\" size=\"50\" placeholder=\"http://host/eo1/update-manifest.json\"></td></tr>")
                 .append("<tr><th>Update check interval (minutes)</th><td><input id=\"cfgUpdateCheck\" type=\"number\" min=\"5\" max=\"1440\"></td></tr>")
+                .append("<tr><th>Reboot if nothing else recovers it</th><td><input id=\"cfgAutoReboot\" type=\"checkbox\"> ")
+                .append("<span style=\"color:#666\">last rung of the kiosk watchdog. Re-driving the rotation, ")
+                .append("tearing the player down, cycling Wi-Fi and restarting the app happen whether or not ")
+                .append("this is on — it only licenses the final reboot.</span></td></tr>")
                 .append("<tr><th>MQTT host</th><td><input id=\"cfgMqttHost\" size=\"30\"></td></tr>")
                 .append("<tr><th>MQTT port</th><td><input id=\"cfgMqttPort\" type=\"number\"></td></tr>")
                 .append("<tr><th>MQTT protocol</th><td><input id=\"cfgMqttProtocol\" size=\"10\"></td></tr>")
@@ -1042,6 +1057,7 @@ public class WebServer {
                 + "cfg.updateManifestUrl=(document.getElementById('cfgUpdateUrl').value||'').trim();"
                 + "var uc=parseInt(document.getElementById('cfgUpdateCheck').value,10);"
                 + "cfg.updateCheckIntervalMinutes=isNaN(uc)?120:Math.max(5,Math.min(1440,uc));"
+                + "cfg.autoReboot=!!document.getElementById('cfgAutoReboot').checked;"
                 + "cfg.selectedTimeZoneId=(document.getElementById('cfgTimezone').value||'').trim();"
                 + "cfg.mqttHost=(document.getElementById('cfgMqttHost').value||'').trim();"
                 + "var mp=parseInt(document.getElementById('cfgMqttPort').value,10);"
@@ -1064,6 +1080,7 @@ public class WebServer {
                 + "document.getElementById('cfgTimezone').value=CONFIG.selectedTimeZoneId||'';"
                 + "document.getElementById('cfgUpdateUrl').value=CONFIG.updateManifestUrl||'';"
                 + "document.getElementById('cfgUpdateCheck').value=CONFIG.updateCheckIntervalMinutes||120;"
+                + "document.getElementById('cfgAutoReboot').checked=CONFIG.autoReboot===true;"
                 + "document.getElementById('cfgMqttHost').value=CONFIG.mqttHost||'';"
                 + "document.getElementById('cfgMqttPort').value=CONFIG.mqttPort||1883;"
                 + "document.getElementById('cfgMqttProtocol').value=CONFIG.mqttProtocol||'';"
