@@ -334,7 +334,8 @@ public final class KioskWatchdog {
                     lastAction = "reboot-disabled";
                     rebootBlocked = true;
                     host.logWatchdogEvent("(" + reason + "): ladder exhausted; automatic reboot is "
-                            + "disabled (enable it in the options dialog to self-heal from this)", true);
+                            + "disabled — allow it (options dialog, or config.autoReboot over the LAN "
+                            + "config editor) for the frame to self-heal from this", true);
                 }
                 break;
             default:
