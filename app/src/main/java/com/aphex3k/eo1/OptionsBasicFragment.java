@@ -122,9 +122,7 @@ public class OptionsBasicFragment extends Fragment {
                 settingsManager.setTrustedNetwork(isChecked);
                 updateTrustedNetworkTokenView();
             });
-            autoRebootCheckBox.setChecked(settingsManager.isAutoRebootEnabled());
-            autoRebootCheckBox.setOnCheckedChangeListener((buttonView, isChecked) ->
-                    settingsManager.setAutoRebootEnabled(isChecked));
+            autoRebootCheckBox.setChecked(config.autoReboot);
         }
         renderBackendList();
         renderQuietWindows();
@@ -318,6 +316,7 @@ public class OptionsBasicFragment extends Fragment {
             // reschedule itself in a tight loop.
             config.interval = Math.max(1, Integer.parseInt(intervalField.getText().toString()));
         } catch (Exception ignored) {}
+        config.autoReboot = autoRebootCheckBox.isChecked();
         String updateUrl = updateUrlField.getText().toString().trim();
         if (!updateUrl.isEmpty()
                 && !updateUrl.toLowerCase().startsWith("http://")

@@ -1272,7 +1272,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public boolean autoRebootEnabled() {
-        return settingsManager.isAutoRebootEnabled();
+        return settingsManager.getConfiguration().autoReboot;
     }
 
     @Override

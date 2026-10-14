@@ -164,7 +164,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="The frame watches its own display loop and works down a ladder when nothing new appears while the screen should be on: re-drive the rotation, redraw the current asset, restart the app, nudge Wi-Fi through adbd. Rebooting the whole device is the last step and only happens if you allow it here." />
+            android:text="The frame watches its own display loop and works down a ladder when nothing new appears while the screen should be on: re-drive the rotation, redraw the current asset, restart the app, nudge Wi-Fi through adbd. Rebooting the whole device is the last step and only happens if it is allowed here. Saved with the configuration, so the LAN web editor can change it too (trusted network required)." />
         <CheckBox
             android:id="@+id/autoRebootCheckBox"
             android:layout_width="match_parent"
