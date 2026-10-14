@@ -7,5 +7,10 @@ package com.aphex3k.media;
  */
 public enum MediaType {
     IMAGE,
-    VIDEO
+    VIDEO,
+    /**
+     * A web page: rendered by a browser view rather than a decoder, so it is never downloaded,
+     * cached or codec-checked. Only {@code com.aphex3k.media.web.WebsiteBackend} produces it.
+     */
+    WEB
 }

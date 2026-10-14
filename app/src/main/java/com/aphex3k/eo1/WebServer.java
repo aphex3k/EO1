@@ -968,6 +968,7 @@ public class WebServer {
         sb.append("<table id=\"cfgBackends\"></table>");
         sb.append("<p><button onclick=\"addCfgBackend('immich')\">+ Add Immich backend</button> ")
                 .append("<button onclick=\"addCfgBackend('local')\">+ Add local uploads</button> ")
+                .append("<button onclick=\"addCfgBackend('web')\">+ Add website</button> ")
                 .append("<button onclick=\"exportConfig()\">Export configuration</button> ")
                 .append("<button onclick=\"document.getElementById('cfgImportFile').click()\">Import configuration</button></p>");
         sb.append("<input type=\"file\" id=\"cfgImportFile\" accept=\".json,application/json\" "
@@ -999,7 +1000,12 @@ public class WebServer {
         return sb.toString();
     }
 
-    private static String cfgSectionJs() {
+    /**
+     * The config editor's JavaScript. Package-private so the round-trip test can assert that every
+     * backend field the editor renders is also re-serialized by {@code collectCfg()} — a field that
+     * renders but is not collected is deleted from the user's configuration on the next save.
+     */
+    static String cfgSectionJs() {
         return "function escCfg(s){s=(s===undefined||s===null)?'':String(s);"
                 + "return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;').replace(/'/g,'&#39;');}"
                 + "function cfgBackends(){return Array.isArray(CONFIG.backends)?CONFIG.backends:[];}"
@@ -1009,23 +1015,27 @@ public class WebServer {
                 + "cfgBackends().forEach(function(b,i){"
                 + "var tr=document.createElement('tr');"
                 + "var h='<td>'+escCfg(b.id)+'</td><td>'+escCfg(b.type)+'</td>';"
-                + "if(b.type==='immich'){"
+                + "if(b.type==='immich'||b.type==='web'){"
+                + "var ph=(b.type==='web')?'http://host/page':'http://immich:2283';"
                 + "h+='<td><input type=\"checkbox\" class=\"cfgEnabled\" '+(b.enabled!==false?'checked':'')+'></td>'"
-                + "+'<td><input class=\"cfgHost\" size=\"30\" value=\"'+escCfg(b.host)+'\" placeholder=\"http://immich:2283\"></td>'"
-                + "+'<td><input class=\"cfgUser\" size=\"15\" value=\"'+escCfg(b.userid)+'\"></td>'"
+                + "+'<td><input class=\"cfgHost\" size=\"30\" value=\"'+escCfg(b.host)+'\" placeholder=\"'+ph+'\"></td>';"
+                + "if(b.type==='immich'){"
+                + "h+='<td><input class=\"cfgUser\" size=\"15\" value=\"'+escCfg(b.userid)+'\"></td>'"
                 + "+'<td><input class=\"cfgPass\" type=\"password\" size=\"15\" value=\"'+escCfg(b.password)+'\"></td>'"
                 + "+'<td><input class=\"cfgApi\" size=\"10\" value=\"'+escCfg(b.apiVersion||'auto')+'\"></td>';"
+                + "}else{h+='<td colspan=\"3\"></td>';}"
                 + "}else{h+='<td colspan=\"5\">local uploads (always on)</td>';}"
                 + "h+='<td><button onclick=\"removeCfgBackend('+i+')\">Remove</button></td>';"
                 + "tr.innerHTML=h;t.appendChild(tr);});}"
-                + "function nextImmichId(){"
-                + "var max=0;"
-                + "cfgBackends().forEach(function(b){var m=/^immich-(\\d+)$/.exec(String(b.id||''));if(m){var n=parseInt(m[1],10);if(n>max)max=n;}});"
-                + "return 'immich-'+(max+1);}"
+                + "function nextBackendId(prefix){"
+                + "var max=0;var re=new RegExp('^'+prefix+'-(\\\\d+)$');"
+                + "cfgBackends().forEach(function(b){var m=re.exec(String(b.id||''));if(m){var n=parseInt(m[1],10);if(n>max)max=n;}});"
+                + "return prefix+'-'+(max+1);}"
                 + "function addCfgBackend(type){"
                 + "if(type==='local'&&cfgBackends().some(function(b){return b.type==='local';})){alert('Local uploads backend already present');return;}"
                 + "if(!CONFIG.backends)CONFIG.backends=[];"
-                + "if(type==='immich'){CONFIG.backends.push({type:'immich',id:nextImmichId(),host:'',userid:'',password:'',apiVersion:'auto',enabled:true});}"
+                + "if(type==='immich'){CONFIG.backends.push({type:'immich',id:nextBackendId('immich'),host:'',userid:'',password:'',apiVersion:'auto',enabled:true});}"
+                + "else if(type==='web'){CONFIG.backends.push({type:'web',id:nextBackendId('web'),host:'',enabled:true});}"
                 + "else{CONFIG.backends.push({type:'local',id:'local'});}"
                 + "renderCfgBackends();}"
                 + "function removeCfgBackend(i){if(!CONFIG.backends)return;CONFIG.backends.splice(i,1);renderCfgBackends();}"
@@ -1043,9 +1053,13 @@ public class WebServer {
                 + "var cfg=JSON.parse(JSON.stringify(CONFIG));"
                 + "cfg.backends=rows.map(function(tr){"
                 + "var b={id:String(tr.cells[0].textContent),type:String(tr.cells[1].textContent)};"
-                + "if(b.type==='immich'){"
+                // Both host-bearing types must be re-serialized here: rows.map() replaces
+                // cfg.backends wholesale, so a field no row renders is dropped on save. For a web
+                // row that field is its only content — the page URL.
+                + "if(b.type==='immich'||b.type==='web'){"
                 + "b.enabled=!!tr.querySelector('.cfgEnabled').checked;"
-                + "b.host=(tr.querySelector('.cfgHost').value||'').trim();"
+                + "b.host=(tr.querySelector('.cfgHost').value||'').trim();}"
+                + "if(b.type==='immich'){"
                 + "b.userid=(tr.querySelector('.cfgUser').value||'').trim();"
                 + "b.password=tr.querySelector('.cfgPass').value||'';"
                 + "var api=(tr.querySelector('.cfgApi').value||'').trim();"

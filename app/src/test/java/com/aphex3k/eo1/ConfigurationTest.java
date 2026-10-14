@@ -114,6 +114,85 @@ public class ConfigurationTest {
     }
 
     @Test
+    public void webEntryNeedsOnlyAPageUrl() {
+        Configuration c = new Gson().fromJson(
+                "{\"backends\":[{\"type\":\"web\",\"id\":\"web-1\","
+                        + "\"host\":\"http://192.168.1.20/dash/\"}]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        assertTrue(c.backends.get(0).isWeb());
+        assertTrue(c.backends.get(0).isValid());
+        assertEquals(1, c.validBackendCount());
+    }
+
+    @Test
+    public void webEntryWithoutASchemeIsInvalidAndIsNeverGuessed() {
+        Configuration c = new Gson().fromJson(
+                "{\"backends\":[{\"type\":\"web\",\"id\":\"web-1\",\"host\":\"example.com/dash\"}]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        ConfigurationBackendEntry e = c.backends.get(0);
+        assertEquals("example.com/dash", e.host);
+        assertFalse(e.isValid());
+        assertEquals(0, c.validBackendCount());
+    }
+
+    @Test
+    public void webUrlsKeepTheirShapeAndTakeNoTrailingSlash() {
+        Configuration c = new Gson().fromJson(
+                "{\"backends\":[{\"type\":\"web\"},{\"type\":\"web\","
+                        + "\"host\":\"  http://host/page  \"}]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        assertEquals("web-1", c.backends.get(0).id);
+        assertEquals("web-2", c.backends.get(1).id);
+        assertEquals("", c.backends.get(0).host);
+        // A slash on a page path changes what loads; only immich base URLs get one appended.
+        assertEquals("http://host/page", c.backends.get(1).host);
+    }
+
+    @Test
+    public void duplicateWebUrlsAreDroppedButDistinctPagesAreKept() {
+        Configuration c = new Gson().fromJson(
+                "{\"backends\":["
+                        + "{\"type\":\"web\",\"id\":\"web-1\",\"host\":\"http://host/a\"},"
+                        + "{\"type\":\"web\",\"id\":\"web-2\",\"host\":\"http://host/a\"},"
+                        + "{\"type\":\"web\",\"id\":\"web-3\",\"host\":\"http://host/b\"}]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        assertEquals(2, c.backendsOrEmpty().size());
+        assertEquals("web-1", c.backends.get(0).id);
+        assertEquals("web-3", c.backends.get(1).id);
+    }
+
+    @Test
+    public void webUrlsDifferingOnlyInPathCaseAreBothKept() {
+        Configuration c = new Gson().fromJson(
+                "{\"backends\":[{\"type\":\"web\",\"id\":\"web-1\",\"host\":\"http://host/Page\"},"
+                        + "{\"type\":\"web\",\"id\":\"web-2\",\"host\":\"http://host/page\"}]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        assertEquals(2, c.backendsOrEmpty().size());
+    }
+
+    @Test
+    public void webEntryDropsItsApiVersion() {
+        Configuration c = new Gson().fromJson(
+                "{\"backends\":[{\"type\":\"web\",\"id\":\"web-1\",\"host\":\"http://host/a\","
+                        + "\"apiVersion\":\"3.1.0\"}]}",
+                Configuration.class);
+
+        Configuration.normalize(c);
+        assertEquals("", c.backends.get(0).apiVersion);
+        assertTrue(c.backends.get(0).isValid());
+    }
+
+    @Test
     public void unparseablePinnedVersionRelaxesToAuto() {
         Configuration c = new Gson().fromJson(
                 "{\"backends\":[{\"type\":\"immich\",\"id\":\"x\",\"host\":\"https://h.example/\",\"userid\":\"u\","

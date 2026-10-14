@@ -20,6 +20,13 @@
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
 
+# The WebKit bridge resolves the WebViewClient/WebChromeClient hooks it
+# calls by name on the subclass, so an override R8 renames simply never
+# fires: no crash, just a kiosk view that cannot tell a page that loaded
+# from a page that hung. Keeps the names of the kiosk clients' overrides.
+-keep class * extends android.webkit.WebViewClient { *; }
+-keep class * extends android.webkit.WebChromeClient { *; }
+
 # Amlogic TsPlayer JNI (RegisterNatives looks up this exact class/methods)
 -keep class com.example.tsplayer.TsPlayerNative { *; }
 

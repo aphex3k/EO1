@@ -9,6 +9,7 @@ import com.aphex3k.media.MediaBackend;
 import com.aphex3k.media.MediaSource;
 import com.aphex3k.media.MediaType;
 import com.aphex3k.media.local.LocalMediaBackend;
+import com.aphex3k.media.web.WebsiteBackend;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -56,6 +57,7 @@ public class MediaManagerCyclingTest {
         final List<Exception> exceptions = new ArrayList<>();
         final List<String> displayedKeys = new ArrayList<>();
         final List<File> displayedFiles = new ArrayList<>();
+        final List<String> displayedUrls = new ArrayList<>();
 
         @Override
         public void handleException(Exception e) {
@@ -75,6 +77,12 @@ public class MediaManagerCyclingTest {
         @Override
         public void displayVideo(File file, String assetKey) {
             displayedFiles.add(file);
+            displayedKeys.add(assetKey);
+        }
+
+        @Override
+        public void displayWebsite(String url, String assetKey) {
+            displayedUrls.add(url);
             displayedKeys.add(assetKey);
         }
     }
@@ -1058,6 +1066,71 @@ public class MediaManagerCyclingTest {
         assertTrue(mm.isUsableLocalVideo(file));
         MediaIntegrity.writeSidecar(file, "0000000000000000000000000000000000000000");
         assertFalse(mm.isUsableLocalVideo(file));
+    }
+
+    // ------------------------------------------------------------ web-page assets
+
+    private static WebsiteBackend webBackend(String id, String url) {
+        ConfigurationBackendEntry entry = new ConfigurationBackendEntry();
+        entry.type = ConfigurationBackendEntry.TYPE_WEB;
+        entry.id = id;
+        entry.host = url;
+        return new WebsiteBackend(entry);
+    }
+
+    @Test
+    public void webAssetRotatesInWithPhotosWithoutTouchingTheCache() throws Exception {
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.<MediaBackend>asList(backendA(1),
+                webBackend("web-1", "http://dash.local/")), listener, 11L);
+
+        for (int i = 0; i < 2; i++) {
+            mm.showNextImageLocked(tmp.newFolder("cache" + i), tmp.newFolder("uploads" + i),
+                    directPoster, false);
+        }
+
+        assertEquals(Arrays.asList("http://dash.local/"), listener.displayedUrls);
+        assertEquals(1, listener.displayedFiles.size());
+        assertEquals(2, listener.displayedKeys.size());
+    }
+
+    @Test
+    public void webAssetFromABackendThatGivesNoPageAddressIsSkipped() throws Exception {
+        MediaAsset page = new MediaAsset("p1", "fakeA", MediaType.WEB, -1, null,
+                null, null, null, null, 0, 0);
+        FakeBackend a = new FakeBackend("fakeA", "immich", page, remoteAsset("a1", "fakeA"));
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.<MediaBackend>asList(a), listener, 3L);
+
+        mm.showNextImageLocked(tmp.newFolder("cache"), tmp.newFolder("uploads"), directPoster, false);
+
+        assertEquals(0, listener.displayedUrls.size());
+        assertEquals(1, listener.displayedKeys.size());
+        assertTrue(listener.displayedKeys.get(0).endsWith(":a1"));
+    }
+
+    @Test
+    public void webFallbackAdvanceIsCappedPerCycle() throws Exception {
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.<MediaBackend>asList(
+                webBackend("web-1", "http://dash.local/")), listener, 5L);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        String key = listener.displayedKeys.get(0);
+
+        for (int i = 0; i < 3; i++) {
+            assertTrue(mm.consumeWebFallbackSlot(key));
+        }
+        assertFalse(mm.consumeWebFallbackSlot(key));
+
+        // A report about some other asset never advances anything.
+        assertFalse(mm.consumeWebFallbackSlot("web-9:does-not-exist"));
+
+        // The next tick is a fresh cycle and gets its budget back.
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertTrue(mm.consumeWebFallbackSlot(listener.displayedKeys.get(1)));
     }
 
     /** Minimal {@link SettingsManagerListener} stub: real files dir, everything else no-op. */

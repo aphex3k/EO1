@@ -149,6 +149,33 @@ public class WebServerRoutingTest {
         assertEquals("application/octet-stream", WebServer.contentTypeFor("data.bin"));
     }
 
+    /**
+     * The config editor's {@code collectCfg()} rebuilds {@code backends} from what the rows render,
+     * so a field that renders but is not collected is silently deleted on the next save — which for
+     * a web row means losing its page URL. This guards the web branch through both halves.
+     */
+    @Test
+    public void configEditorJsRoundTripsWebBackendRows() {
+        String js = WebServer.cfgSectionJs();
+        int renderAt = js.indexOf("function renderCfgBackends");
+        int collectAt = js.indexOf("function collectCfg");
+        assertTrue("render must branch on web rows",
+                js.indexOf("b.type==='immich'||b.type==='web'", renderAt) > renderAt);
+        assertTrue(renderAt >= 0 && collectAt > renderAt);
+
+        String collect = js.substring(collectAt);
+        assertTrue("collect must re-read the Enabled flag", collect.contains(".cfgEnabled"));
+        assertTrue("collect must re-read the page URL", collect.contains(".cfgHost"));
+        assertTrue("collect must keep web rows", collect.contains("b.type==='web'"));
+    }
+
+    @Test
+    public void configEditorJsAddsWebBackendsWithGeneratedIds() {
+        String js = WebServer.cfgSectionJs();
+        assertTrue("a new web entry must carry an id, the host field and an Enabled flag",
+                js.contains("{type:'web',id:nextBackendId('web'),host:'',enabled:true}"));
+    }
+
     private static Map<String, String> headers(String... kv) {
         Map<String, String> m = new HashMap<String, String>();
         for (int i = 0; i + 1 < kv.length; i += 2) {
