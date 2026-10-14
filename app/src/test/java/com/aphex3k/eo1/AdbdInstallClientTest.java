@@ -79,6 +79,30 @@ public class AdbdInstallClientTest {
         assertTrue(r.detail.length() <= 200 + 32);
     }
 
+    // -------------------------------------------------------------- classifyExec
+
+    @Test
+    public void classifyExec_zeroStatusSucceedsAndKeepsOutput() {
+        AdbdInstallClient.Result r = AdbdInstallClient.classifyExec("running\nEO1RC=0");
+        assertEquals(AdbdInstallClient.Outcome.SUCCESS, r.outcome);
+        assertEquals("The repair sequence reads this back, so output must survive.", "running", r.detail);
+    }
+
+    @Test
+    public void classifyExec_nonZeroStatusFails() {
+        AdbdInstallClient.Result r = AdbdInstallClient.classifyExec("svc: permission denied\nEO1RC=1");
+        assertEquals(AdbdInstallClient.Outcome.PM_FAILED, r.outcome);
+        assertTrue(r.detail.contains("permission denied"));
+        assertTrue(r.detail.contains("exit status 1"));
+    }
+
+    @Test
+    public void classifyExec_missingMarkerMeansTheChannelDiedWithTheCommand() {
+        // `reboot` tears down adbd before it can echo a status.
+        assertEquals(AdbdInstallClient.Outcome.SUCCESS,
+                AdbdInstallClient.classifyExec("").outcome);
+    }
+
     // ------------------------------------------------------------ install e2e
 
     @Test

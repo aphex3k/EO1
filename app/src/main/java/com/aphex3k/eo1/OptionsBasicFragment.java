@@ -50,6 +50,7 @@ public class OptionsBasicFragment extends Fragment {
     private CheckBox trustedNetworkCheckBox;
     private TextView trustedNetworkTokenView;
     private TextView trustedNetworkIpView;
+    private CheckBox autoRebootCheckBox;
     private String[] allTimeZoneIds;
 
     /** Working copy of the configured backends; persisted on save. */
@@ -88,6 +89,7 @@ public class OptionsBasicFragment extends Fragment {
         trustedNetworkCheckBox = view.findViewById(R.id.trustedNetworkCheckBox);
         trustedNetworkTokenView = view.findViewById(R.id.trustedNetworkTokenView);
         trustedNetworkIpView = view.findViewById(R.id.trustedNetworkIpView);
+        autoRebootCheckBox = view.findViewById(R.id.autoRebootCheckBox);
 
         allTimeZoneIds = TimeZone.getAvailableIDs();
         ArrayAdapter<String> tzAdapter = new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_item, allTimeZoneIds);
@@ -120,6 +122,9 @@ public class OptionsBasicFragment extends Fragment {
                 settingsManager.setTrustedNetwork(isChecked);
                 updateTrustedNetworkTokenView();
             });
+            autoRebootCheckBox.setChecked(settingsManager.isAutoRebootEnabled());
+            autoRebootCheckBox.setOnCheckedChangeListener((buttonView, isChecked) ->
+                    settingsManager.setAutoRebootEnabled(isChecked));
         }
         renderBackendList();
         renderQuietWindows();

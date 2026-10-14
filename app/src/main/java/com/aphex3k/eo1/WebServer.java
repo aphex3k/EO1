@@ -294,16 +294,20 @@ public class WebServer {
     }
 
     /**
-     * Whether a {@code /control} request may fire the given action. The {@code keyevent}
-     * admin action injects arbitrary key presses, so it is restricted to POST: a cross-origin
-     * GET from any web page would otherwise be able to drive the device UI. Other actions
-     * keep their existing GET/POST behavior.
+     * Actions that may only be fired by POST. They are admin/destructive — arbitrary key
+     * injection, and forcing a kiosk-watchdog rung (whose top rung reboots the device) — so a
+     * cross-origin GET from any web page must not be able to drive them. Other actions keep
+     * their existing GET/POST behavior.
      */
+    private static final java.util.Set<String> POST_ONLY_ACTIONS =
+            java.util.Collections.unmodifiableSet(new java.util.HashSet<String>(
+                    java.util.Arrays.asList("keyevent", "watchdog")));
+
     static boolean controlAllows(String method, String action) {
         if (action == null) {
             return false;
         }
-        return !"keyevent".equals(action) || "POST".equals(method);
+        return !POST_ONLY_ACTIONS.contains(action) || "POST".equals(method);
     }
 
     /**

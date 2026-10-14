@@ -81,7 +81,7 @@ import java.util.TimeZone;
 
 import okhttp3.HttpUrl;
 
-public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener, ApiServiceGenerator.ProgressListener, WebController {
+public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener, ApiServiceGenerator.ProgressListener, WebController, KioskWatchdog.Host {
 
     /**
     Amount of milliseconds in a minute
@@ -188,6 +188,40 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private long lastDownloadProgressLogAtMs = 0L;
     private final Object downloadProgressLogLock = new Object();
 
+    /** Liveness ladder; runs on its own timer thread, so it keeps working if we are wedged. */
+    private KioskWatchdog kioskWatchdog;
+    /**
+     * When the display loop last did something visible — a rotation that reached the screen, or a
+     * manual {@code next}. Deliberately also refreshed when the asset turns out to be the one
+     * already on screen: the watchdog judges loop liveness, not decodability, and a one-asset pool
+     * must not look like a wedge.
+     */
+    private volatile long lastRotationActivityMs = 0L;
+    /** Start of the in-flight asset download; 0 when nothing is downloading. */
+    private volatile long downloadStartedAtMs = 0L;
+    /** Last byte-level progress event; lets a dead download stop counting as "in flight". */
+    private volatile long downloadProgressAtMs = 0L;
+    /**
+     * OkHttp's read timeout is 25s, so past this much silence the response body is gone (finished,
+     * failed, or abandoned) even though no {@code done} event ever arrived. Without this the marker
+     * of one failed download would look like a permanent stall.
+     */
+    private static final long DOWNLOAD_PROGRESS_SILENCE_MS = 120_000L;
+    /** Last ack from the main thread to a watchdog probe. */
+    private volatile long mainLoopAckAtMs = 0L;
+    /** When we first noticed we had no network; 0 while connected. */
+    private volatile long offlineSinceMs = 0L;
+    /** True while the activity is not in the foreground (settings dialog, screen off by policy). */
+    private volatile boolean activityPaused = true;
+    private final Runnable mainLoopProbeAck = new Runnable() {
+        @Override
+        public void run() {
+            mainLoopAckAtMs = System.currentTimeMillis();
+        }
+    };
+    /** Guards against two repairs overlapping; the watchdog ticks faster than adbd round-trips. */
+    private volatile boolean repairRunning = false;
+
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -263,6 +297,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 getIntent().getFlags());
 
         configureMqttManager();
+
+        mainLoopAckAtMs = System.currentTimeMillis();
+        // Start the staleness clock at process start: a frame that has never gotten anything on
+        // screen — relaunched into a dead network, which is exactly the 2026-10-13 state — must age
+        // out and escalate too, not read as "healthy because nothing has happened yet".
+        lastRotationActivityMs = mainLoopAckAtMs;
+        this.kioskWatchdog = new KioskWatchdog(this);
+        this.kioskWatchdog.start();
 
         // The physical button on the EO2 is an OS-intercepted KEY_POWER: the display can
         // go dark or light without any key event reaching this activity. Watch for it.
@@ -382,6 +424,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         logScreenAndTimerState();
         if (brightnessManager.getShouldTheScreenBeOn()) {
             brightnessChanged(lastScreenBrightness);
+            lastRotationActivityMs = System.currentTimeMillis();
             mediaManager.showNextImage(this);
         } else {
             Log.i(TAG, "runOnTimer: skipping showNextImage (screen should be off / quiet hours)");
@@ -405,6 +448,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     protected void onResume() {
         super.onResume();
+        this.activityPaused = false;
 
         // If this process fired an install and is still alive, the install did not take
         // effect — roll the state back to STAGED so the next tick can retry.
@@ -524,6 +568,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     protected void onPause() {
+        this.activityPaused = true;
         cancelVideoWatchdog();
         // Keep coreLoopStarted so onResume only re-arms the timer instead of
         // kicking a second immediate showNextImage (cold-start pause/resume thrash).
@@ -546,6 +591,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     protected void onDestroy() {
+        if (this.kioskWatchdog != null) {
+            this.kioskWatchdog.stop();
+        }
         if (this.webServer != null) {
             this.webServer.shutdown();
         }
@@ -924,6 +972,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
+        lastRotationActivityMs = System.currentTimeMillis();
         debugInformationProvided(new DebugInformation("displayPictures", file.getAbsolutePath()));
 
         this.runOnUiThread(() -> {
@@ -1160,6 +1209,230 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         assetFallback(assetId, activityReference, true, file);
     }
 
+    // ------------------------------------------------------------------
+    // KioskWatchdog.Host — what "the frame is still displaying" means, and how to restore it.
+    // All of these run on the watchdog's timer thread unless noted.
+    // ------------------------------------------------------------------
+
+    @Override
+    public long nowMs() {
+        return System.currentTimeMillis();
+    }
+
+    @Override
+    public boolean isPaused() {
+        return activityPaused || settingsManager.isSetupDialogIfNeeded();
+    }
+
+    @Override
+    public boolean screenShouldBeOn() {
+        return brightnessManager.getShouldTheScreenBeOn();
+    }
+
+    @Override
+    public long intervalMs() {
+        return MILLIS * Math.max(1, settingsManager.getConfiguration().interval);
+    }
+
+    @Override
+    public long lastDisplayAtMs() {
+        return lastRotationActivityMs;
+    }
+
+    @Override
+    public long downloadInFlightMs() {
+        long last = downloadProgressAtMs;
+        long started = downloadStartedAtMs;
+        if (last == 0L || started == 0L || System.currentTimeMillis() - last > DOWNLOAD_PROGRESS_SILENCE_MS) {
+            return 0L;
+        }
+        return Math.max(0L, System.currentTimeMillis() - started);
+    }
+
+    @Override
+    public boolean networkAvailable() {
+        return connectionManager.isNetworkAvailable();
+    }
+
+    @Override
+    public long offlineMs() {
+        long since = offlineSinceMs;
+        return since == 0L ? 0L : Math.max(0L, System.currentTimeMillis() - since);
+    }
+
+    @Override
+    public boolean mainLoopAlive() {
+        return System.currentTimeMillis() - mainLoopAckAtMs < KioskWatchdog.MAIN_LOOP_DEAD_MS;
+    }
+
+    @Override
+    public void postProbe() {
+        handler.post(mainLoopProbeAck);
+    }
+
+    @Override
+    public boolean autoRebootEnabled() {
+        return settingsManager.isAutoRebootEnabled();
+    }
+
+    @Override
+    public void forceRotation() {
+        runOnUiThread(() -> {
+            Log.i(TAG, "watchdog: forcing a rotation");
+            showNextImage();
+        });
+    }
+
+    @Override
+    public void recoverPlayback() {
+        runOnUiThread(this::redrawCurrentAsset);
+    }
+
+    /**
+     * Forces the full player teardown that an asset handoff would have done — the documented
+     * recovery for a frozen Amlogic video plane — and then rotates. Clearing {@code lastVisibleAsset}
+     * first is what makes it work: without it, landing back on the same asset would skip straight
+     * past the recreate. Must run on the UI thread.
+     */
+    private void redrawCurrentAsset() {
+        try {
+            Log.i(TAG, "watchdog: forcing player teardown before the next display");
+            // Deliberately does not touch lastRotationActivityMs: a recovery attempt is not a
+            // display. If this rotation really lands, displayPicture/displayVideo refreshes the
+            // clock; if it does not, the ladder keeps climbing to the network and reboot rungs.
+            lastVisibleAsset = "";
+            cancelVideoWatchdog();
+            videoPlayer.release();
+            videoPlayer.setVisibility(View.INVISIBLE);
+            imageView.setVisibility(View.VISIBLE);
+            lastVisibleView = imageView;
+            mediaManager.showNextImage(this);
+        } catch (Exception e) {
+            handleException(e);
+        }
+    }
+
+    @Override
+    public void repairNetwork() {
+        runAdbdTask("network-repair", new AdbdTask() {
+            @Override
+            public List<DeviceRepair.Step> run(AdbdInstallClient client) throws InterruptedException {
+                return DeviceRepair.repairWifi(client::exec, new DeviceRepair.Sleeper() {
+                    @Override
+                    public void sleep(long ms) throws InterruptedException {
+                        Thread.sleep(ms);
+                    }
+                });
+            }
+        });
+    }
+
+    @Override
+    public void rebootDevice() {
+        runAdbdTask("reboot", new AdbdTask() {
+            @Override
+            public List<DeviceRepair.Step> run(AdbdInstallClient client) {
+                return DeviceRepair.reboot(client::exec);
+            }
+        });
+    }
+
+    /** A repair sequence, executed against a live adbd client on a worker thread. */
+    private interface AdbdTask {
+        List<DeviceRepair.Step> run(AdbdInstallClient client) throws InterruptedException;
+    }
+
+    /**
+     * Runs an adbd repair off the watchdog thread: adbd round-trips take seconds, and a timer task
+     * that blocks cannot escalate. Only ever reached with {@link DeviceRepair}'s fixed commands.
+     */
+    private void runAdbdTask(String label, AdbdTask task) {
+        if (repairRunning) {
+            Log.i(TAG, "watchdog: " + label + " skipped — another repair is in flight");
+            return;
+        }
+        repairRunning = true;
+        final String name = label;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    List<DeviceRepair.Step> steps = task.run(new AdbdInstallClient());
+                    logWatchdogEvent(name + ": " + DeviceRepair.describe(steps), false);
+                } catch (Throwable t) {
+                    // A repair thread must never reach the global handler (System.exit(2)).
+                    logWatchdogEvent(name + " failed: " + t, true);
+                } finally {
+                    repairRunning = false;
+                }
+            }
+        }, "eo1-" + name).start();
+    }
+
+    /**
+     * Restarts our own process. The relaunch alarm is scheduled on a worker thread rather than
+     * inline: {@code AlarmManager.set} is a binder call, and if the framework is the part that is
+     * hung, blocking the watchdog thread here would cost us every remaining rung (including
+     * reboot). The kill is what actually unsticks a wedged UI thread.
+     */
+    @Override
+    public void selfRestart() {
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    AlarmManager mgr = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+                    if (mgr != null && pendingIntent != null) {
+                        mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 15000L, pendingIntent);
+                    }
+                } catch (Throwable t) {
+                    Log.w(TAG, "watchdog: could not schedule relaunch: " + t);
+                }
+                try {
+                    android.os.Process.killProcess(android.os.Process.myPid());
+                } catch (Throwable ignored) {
+                    // Nothing left to do from inside a process that cannot kill itself.
+                }
+            }
+        }, "eo1-self-restart").start();
+    }
+
+    /**
+     * One watchdog event. {@code debugInformationProvided} is the single write path into
+     * {@code AppLogger} (it also drives the on-device debug overlay), so the file log gets exactly
+     * one line per event — writing here as well duplicates every line.
+     */
+    @Override
+    public void logWatchdogEvent(String message, boolean severe) {
+        if (severe) {
+            Log.w(TAG, "watchdog: " + message);
+        } else {
+            Log.i(TAG, "watchdog: " + message);
+        }
+        debugInformationProvided(new DebugInformation("watchdog", message));
+    }
+
+    /** The watchdog's view of itself, for {@code /state}. */
+    private JsonObject watchdogStateJson() {
+        JsonObject o = new JsonObject();
+        long stale = kioskWatchdog != null ? kioskWatchdog.staleMsNow() : 0L;
+        o.addProperty("staleMs", stale);
+        o.addProperty("staleLimitMs", KioskWatchdog.staleLimitMs(intervalMs()));
+        o.addProperty("level", kioskWatchdog != null ? kioskWatchdog.actedLevel() : KioskWatchdog.LEVEL_NONE);
+        o.addProperty("lastAction", kioskWatchdog != null ? kioskWatchdog.lastAction() : "none");
+        o.addProperty("lastActionAtMs", kioskWatchdog != null ? kioskWatchdog.lastActionAtMs() : 0L);
+        o.addProperty("repairAttempts", kioskWatchdog != null ? kioskWatchdog.repairAttempts() : 0);
+        o.addProperty("ticks", kioskWatchdog != null ? kioskWatchdog.ticks() : 0);
+        o.addProperty("paused", isPaused());
+        o.addProperty("mainLoopAlive", mainLoopAlive());
+        o.addProperty("mainLoopStallMs", Math.max(0L, System.currentTimeMillis() - mainLoopAckAtMs));
+        o.addProperty("probeMisses", kioskWatchdog != null ? kioskWatchdog.probeMisses() : 0);
+        o.addProperty("downloadInFlightMs", downloadInFlightMs());
+        o.addProperty("offlineMs", offlineMs());
+        o.addProperty("autoReboot", autoRebootEnabled());
+        return o;
+    }
+
     private String describeMediaInfo(int what, int extra) {
         switch (what) {
             case MediaPlayer.MEDIA_INFO_BUFFERING_START:
@@ -1186,6 +1459,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
+        lastRotationActivityMs = System.currentTimeMillis();
         debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
         WeakReference<MainActivity> activityReference = new WeakReference<>(this);
@@ -1425,6 +1699,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void connected() {
+        offlineSinceMs = 0L;
         Log.i(TAG, "ConnectionManager: connected");
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key), "connected"));
         startCoreLoopIfNetworkReady();
@@ -1432,6 +1707,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void disconnected() {
+        if (offlineSinceMs == 0L) {
+            offlineSinceMs = System.currentTimeMillis();
+        }
         Log.i(TAG, "ConnectionManager: disconnected");
         pauseCoreLoopForNetwork();
     }
@@ -1440,6 +1718,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public void clientProgressUpdates(long bytesRead, long contentLength, boolean done, @Nullable HttpUrl url) {
 
         long percent =  Math.round((100.0 * bytesRead) / contentLength);
+
+        long progressNowMs = System.currentTimeMillis();
+        if (done) {
+            downloadStartedAtMs = 0L;
+            downloadProgressAtMs = 0L;
+        } else {
+            if (downloadStartedAtMs == 0L) {
+                downloadStartedAtMs = progressNowMs;
+            }
+            downloadProgressAtMs = progressNowMs;
+        }
 
         // OkHttp invokes this on every read() of the response body, so logging every
         // event floods logcat with repeated "download: 9%" lines. Log the content-length
@@ -1557,6 +1846,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         JsonObject media = new JsonObject();
         media.addProperty("rotationAssets", mediaManager.rotationListSize());
         media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
+        media.addProperty("lastDisplayAtMs", lastRotationActivityMs);
         MediaAsset currentAsset = mediaManager.getCurrentAsset();
         if (currentAsset != null) {
             JsonObject current = new JsonObject();
@@ -1578,6 +1868,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.add("media", media);
 
         o.add("update", updateManager.stateJson());
+        o.add("watchdog", watchdogStateJson());
 
         o.add("telemetry", DeviceTelemetry.snapshot(this));
 
@@ -1706,6 +1997,28 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return false;
             }
             return sendKeyCode(keyCode);
+        }
+        if ("watchdog".equals(action)) {
+            // Debug builds only: rungs escalate over hours on real hardware, and the whole point of
+            // the ladder is that nobody has to be there when it fires. level 1..5 forces one.
+            if (!BuildConfig.DEBUG || kioskWatchdog == null) {
+                return false;
+            }
+            String rawLevel = params != null ? params.get("level") : null;
+            int level;
+            try {
+                level = Integer.parseInt(rawLevel);
+            } catch (NumberFormatException e) {
+                level = KioskWatchdog.LEVEL_FORCE_ROTATION;
+            }
+            if (level < KioskWatchdog.LEVEL_FORCE_ROTATION || level > KioskWatchdog.LEVEL_REBOOT) {
+                return false;
+            }
+            // Called from the web thread on purpose: every rung dispatches to whichever thread owns
+            // the work, so forcing the self-restart rung still works when the UI thread is the
+            // thing that is stuck.
+            kioskWatchdog.forceAction(level);
+            return true;
         }
         final Runnable task;
         switch (action) {
