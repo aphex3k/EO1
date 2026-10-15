@@ -30,6 +30,7 @@ public class KioskWatchdogTest {
         boolean networkAvailable = true;
         long offlineMs;
         boolean mainLoopAlive = true;
+        long progressToken = 0;
         boolean autoRebootEnabled;
 
         final List<String> actions = new ArrayList<>();
@@ -77,13 +78,18 @@ public class KioskWatchdogTest {
         }
 
         @Override
-        public boolean mainLoopAlive() {
-            return mainLoopAlive;
+        public long mainLoopProgressToken() {
+            return progressToken;
         }
 
         @Override
         public void postProbe() {
             actions.add("probe");
+            // A live looper runs the acknowledgement, which advances the token; a wedged one never
+            // gets to it, so the value stands still between two ticks.
+            if (mainLoopAlive) {
+                progressToken++;
+            }
         }
 
         @Override
@@ -340,6 +346,37 @@ public class KioskWatchdogTest {
         watchdog.tick();
         assertEquals("the looper answered, so nothing was wrong", 0, count("selfRestart"));
         assertEquals(0, watchdog.probeMisses());
+    }
+
+    /**
+     * The EO2 cold start seen on 2026-10-14: minutes of main-thread work (multidex extraction plus
+     * the retained-MQTT burst) between acknowledgements, so a wall-clock liveness window declared
+     * the loop dead while it was merely busy. Killing it started the same slow startup again, in a
+     * loop no process ever survived long enough to draw a frame. Liveness is progress now.
+     */
+    @Test
+    public void aSlowButProgressingMainLoopIsNeverRestarted() {
+        // Stale enough to earn the first age rung, and left to age for twelve ticks: the ladder may
+        // escalate, but a main thread that keeps answering must never be killed for it.
+        silentFor(KioskWatchdog.staleLimitMs(15 * MINUTE) + MINUTE);
+        tickTogether(MINUTE, 12);
+        assertEquals(0, count("selfRestart"));
+        assertEquals(0, watchdog.probeMisses());
+        assertTrue("staleness still has to be answered by the age ladder", acted("forceRotation"));
+    }
+
+    @Test
+    public void progressResetsTheMissCountSoAMidRunWedgeIsStillCaught() {
+        tickTogether(MINUTE, 5);
+        assertEquals(0, watchdog.probeMisses());
+
+        host.mainLoopAlive = false;
+        watchdog.tick();
+        assertEquals(1, watchdog.probeMisses());
+        assertEquals("one tick of silence is not proof", 0, count("selfRestart"));
+
+        watchdog.tick();
+        assertEquals(1, count("selfRestart"));
     }
 
     @Test
