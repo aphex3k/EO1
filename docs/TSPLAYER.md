@@ -11,7 +11,7 @@ Amlogic/Geniatech **TsPlayer** (`libTsPlayer-jni.so`) is the original Electric O
 | Automatic MediaPlayer fallback on load/play/surface failure | Non-Amlogic primary playback |
 | Native `.so` loop — create the player once per asset, no Java teardown loop | App-level video filters / ppmgr FX |
 
-There is no client-side transcoding or conversion — the downloaded Immich original is used as-is. Undecodable images (HEIC, corrupt) and incompatible videos fall back to the Immich preview / `/video/playback` via the display-error path.
+There is no client-side transcoding or conversion — the downloaded Immich original is used as-is, and it is always *tried*: the original on TsPlayer, the original on MediaPlayer, then the backend's degraded source (Immich `/video/playback` for video, the preview thumbnail for images). Nothing is filtered out by file name. A video with a coded side above 1920px skips straight to the last rung, because that decoder garbles such video without raising an error. What the original and the fallback both fail on is tagged `EO1_INCOMPATIBLE` for the operator to fix in Immich — regenerate thumbnails, re-encode, or remove it from the frame's albums.
 
 ## Source map
 

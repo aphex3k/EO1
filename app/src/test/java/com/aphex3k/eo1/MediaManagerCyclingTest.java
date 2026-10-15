@@ -579,29 +579,78 @@ public class MediaManagerCyclingTest {
         System.arraycopy(fourCc.getBytes(java.nio.charset.StandardCharsets.US_ASCII), 0, b, off, 4);
     }
 
+    /**
+     * A {@code .heic} name is not evidence. The asset is fetched and displayed like any other;
+     * whether the decoder can handle it is the display path's business, not the pool's.
+     */
     @Test
-    public void incompatibleExtensionIsSkippedBeforeDownload() throws Exception {
+    public void incompatibleExtensionDoesNotSkipTheAsset() throws Exception {
         String heicId = "01234567-89ab-cdef-0123-456789abcdef";
         MediaAsset heic = new MediaAsset(heicId, "fakeA", MediaType.IMAGE, -1, null,
                 heicId + ".heic", null, null, null, 0, 0);
-        FakeBackend a = new FakeBackend("fakeA", "immich", heic, remoteAsset("a0", "fakeA"));
+        FakeBackend a = new FakeBackend("fakeA", "immich", heic);
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
         File cacheDir = tmp.newFolder("cache");
         File uploads = tmp.newFolder("uploads");
 
-        int ticks = 0;
-        while (listener.displayedKeys.isEmpty() && ticks < 2) {
-            mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
-            ticks++;
-        }
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
 
         assertEquals(1, listener.displayedKeys.size());
-        assertEquals("fakeA:a0", listener.displayedKeys.get(0));
-        // The .heic asset was never opened (no wasted download); the skip is silent.
-        assertEquals(1, a.openerCalls.get());
+        assertEquals("fakeA:" + heicId, listener.displayedKeys.get(0));
+        assertEquals("the original is fetched, not assumed bad", 1, a.openerCalls.get());
+        assertTrue(new File(cacheDir, heicId + ".heic").isFile());
         assertTrue(listener.exceptions.isEmpty());
-        assertFalse(new File(cacheDir, heicId + ".heic").exists());
+    }
+
+    /**
+     * Bytes that are positively a HEIF container are the first real verdict: the original is
+     * discarded, remembered, and the asset is shown from the backend's fallback source instead.
+     * The next cycle must not touch the original again, and must reuse the cached fallback.
+     */
+    @Test
+    public void verifiedUndecodableOriginalFallsBackAndCachesTheFallback() throws Exception {
+        String lyingId = "01234567-89ab-cdef-0123-456789abcdef";
+        MediaAsset lying = new MediaAsset(lyingId, "fakeA", MediaType.IMAGE, -1, null,
+                lyingId + ".jpg", null, null, null, 0, 0);
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", lying) {
+            @Override
+            byte[] contentFor(String assetId) {
+                return heicFtypBytes();
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteThumbnail(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream("preview-bytes".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals(2, listener.displayedKeys.size());
+        assertEquals(1, fallbackOpens.get());
+        File original = new File(cacheDir, lyingId + ".jpg");
+        File fallback = new File(cacheDir, lyingId + "_fb.jpg");
+        assertFalse("the undecodable original is discarded", original.exists());
+        assertTrue(fallback.isFile());
+        assertEquals("preview-bytes",
+                new String(Files.readAllBytes(fallback.toPath()), StandardCharsets.UTF_8));
+        // One original fetch for the whole run: the verdict is remembered, the fallback is cached.
+        assertEquals(1, a.openerCalls.get());
     }
 
     @Test
@@ -643,13 +692,17 @@ public class MediaManagerCyclingTest {
         // The original is never resolved or downloaded; only the fallback stream is fetched.
         assertEquals(0, originalResolves.get());
         assertEquals(1, fallbackOpens.get());
-        File fallbackFile = new File(cacheDir, videoId + ".mp4");
+        File fallbackFile = new File(cacheDir, videoId + "_fb.mp4");
         assertTrue(fallbackFile.isFile());
         assertEquals("fallback-stream",
                 new String(Files.readAllBytes(fallbackFile.toPath()), StandardCharsets.UTF_8));
         assertFalse(new File(cacheDir, videoId + ".mov").exists());
-        // Fallback downloads get no integrity sidecar.
-        assertFalse(new File(cacheDir, videoId + ".mp4.sha1").exists());
+        // A fallback is cached like an original, so it carries an integrity sidecar and the next
+        // cycle reuses it instead of re-pulling the transcode.
+        assertTrue(new File(cacheDir, videoId + "_fb.mp4.sha1").isFile());
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, fallbackOpens.get());
+        assertEquals(2, listener.displayedKeys.size());
         assertTrue(listener.exceptions.isEmpty());
     }
 

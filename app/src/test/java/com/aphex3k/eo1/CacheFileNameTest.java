@@ -1,6 +1,7 @@
 package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNull;
 
 import com.aphex3k.immichApi.ImmichType;
@@ -28,10 +29,19 @@ public class CacheFileNameTest {
         assertEquals("abc123.mp4", MediaManager.cacheFileName(UUID, "clip", null, ImmichType.VIDEO, false));
     }
 
+    /**
+     * A fallback is cached like an original now, so its name must never collide with one: both
+     * files live in the same directory and are looked up by the same asset id.
+     */
     @Test
     public void cacheFileNameUsesFallbackEndpointExtension() {
-        assertEquals("abc123.mp4", MediaManager.cacheFileName(UUID, "video.mov", null, ImmichType.VIDEO, true));
-        assertEquals("abc123.jpg", MediaManager.cacheFileName(UUID, "photo.heic", null, ImmichType.IMAGE, true));
+        assertEquals("abc123_fb.mp4",
+                MediaManager.cacheFileName(UUID, "video.mov", null, ImmichType.VIDEO, true));
+        assertEquals("abc123_fb.jpg",
+                MediaManager.cacheFileName(UUID, "photo.heic", null, ImmichType.IMAGE, true));
+        assertNotEquals("a .jpg original must not share its cache name with its own thumbnail",
+                MediaManager.cacheFileName(UUID, "photo.jpg", null, ImmichType.IMAGE, false),
+                MediaManager.cacheFileName(UUID, "photo.jpg", null, ImmichType.IMAGE, true));
     }
 
     @Test

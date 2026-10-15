@@ -12,7 +12,20 @@ import java.io.File;
 public interface MediaManagerInterface {
     void removeFromCache(File file);
     void showNextImage(Activity activity);
+
+    /**
+     * Flags an asset in its backend as incompatible with this device (Immich: the
+     * {@code EO1_INCOMPATIBLE} tag). Call it once the asset's fallback display failed too: the
+     * tag exists to surface the asset for the operator, and the app never reads it back as a
+     * filter, so re-tagging an already-tagged asset is expected, not an error.
+     */
     void tagAssetAsIncompatible(String assetKey);
+
+    /**
+     * Second rung of the display ladder: shows the backend's degraded source (preview thumbnail,
+     * transcoded stream) for an asset whose original failed to display. Backends without a
+     * fallback source flag the asset from here, which is that asset's second failure.
+     */
     void displayThumbnailAsset(Activity activity, String assetKey, boolean isVideo);
 
     /**
