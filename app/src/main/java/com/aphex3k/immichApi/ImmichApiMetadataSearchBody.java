@@ -36,7 +36,9 @@ public class ImmichApiMetadataSearchBody {
 
     /**
      * Restricts the search to assets carrying one of these tag ids. Absent/null means "no
-     * tag filter" — servers across the supported 3.0.0–3.2.2 band accept this flat field.
+     * tag filter" — servers across the supported 3.x band accept this flat field. Immich
+     * marked it {@code deprecated} in 3.2.0 in favour of a structured filter, but keeps
+     * honoring it until the next major release.
      */
     @SerializedName("tagIds")
     @Nullable

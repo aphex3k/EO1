@@ -32,8 +32,8 @@ import retrofit2.Call;
 import retrofit2.Response;
 
 /**
- * Immich client for API band 3.0.0–3.2.2, implemented over the frozen
- * {@code com.aphex3k.immichApi} service surface.
+ * Immich client for the whole 3.x API line (endpoints verified identical through 3.3.3),
+ * implemented over the frozen {@code com.aphex3k.immichApi} service surface.
  *
  * <p>One instance owns one Retrofit service with its own in-memory session cookie
  * jar, so each configured Immich backend keeps an independent session. The session
