@@ -70,10 +70,14 @@ public interface MediaBackend {
 
     /**
      * Optional: marks an asset as incompatible in the backend's own system (e.g. Immich tag).
-     * Fired fire-and-forget from the display-error path; implementations must not block or
-     * throw — failures are logged inside the implementation. No-op when unsupported.
+     * No-op when unsupported.
+     *
+     * <p>Called on the manager's own background thread, never on the UI or rotation thread, so a
+     * blocking implementation is fine and must not spawn another thread of its own. Failures
+     * propagate: the caller reports them where the operator reads ({@code /logs}), which is the
+     * only way a tag that never got written stops looking like an asset that never needed one.
      */
-    default void markIncompatible(MediaAsset asset) {
+    default void markIncompatible(MediaAsset asset) throws Exception {
     }
 
     /**

@@ -688,7 +688,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return null;
         }
         if (!originalUsable(asset)) {
-            return acquireFallbackSource(asset, backend, cacheDir, reportProgress);
+            return acquireResolvedFallback(asset, backend, cacheDir, reportProgress);
         }
         MediaSource source = backend.resolveOriginal(asset);
         if (source == null) {
@@ -697,9 +697,27 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (source.isLocal()) {
             return source.localFile;
         }
-        File original = acquireRemoteFile(asset, source, cacheDir, reportProgress);
+        File original;
+        try {
+            original = acquireRemoteFile(asset, source, cacheDir, reportProgress);
+        } catch (MediaDownloadFailedException e) {
+            if (e.getCause() != null) {
+                // Something on the wire failed, not this asset: reporting it to the rotation is
+                // right, and falling back would spend 1000 thumbnail requests on a dead network.
+                throw e;
+            }
+            MediaSource fallback = backend.resolveThumbnailFallback(asset);
+            if (fallback == null || fallback.opener == null) {
+                // Nothing left to try: report the failure to the rotation rather than bury an
+                // asset that is both unobtainable and has no degraded source.
+                throw e;
+            }
+            Log.w(TAG, "acquireAsset: " + asset.key() + " original is unobtainable ("
+                    + e.getMessage() + "); falling back");
+            return acquireFallbackSource(asset, fallback, cacheDir, reportProgress);
+        }
         if (original == null) {
-            return acquireFallbackSource(asset, backend, cacheDir, reportProgress);
+            return acquireResolvedFallback(asset, backend, cacheDir, reportProgress);
         }
         return original;
     }
@@ -739,16 +757,38 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return true;
     }
 
-    /** The backend's degraded source for an asset, acquired like any other source. */
+    /** The backend's degraded source for an asset, or a quiet skip when it has none. */
     @Nullable
-    private File acquireFallbackSource(MediaAsset asset, MediaBackend backend, File cacheDir,
-                                       boolean reportProgress) throws Exception {
+    private File acquireResolvedFallback(MediaAsset asset, MediaBackend backend, File cacheDir,
+                                         boolean reportProgress) throws Exception {
         MediaSource fallback = backend.resolveThumbnailFallback(asset);
         if (fallback == null || fallback.opener == null) {
             Log.w(TAG, "acquireAsset: " + asset.key() + " - no fallback source, skipping");
             return null;
         }
-        return acquireRemoteFile(asset, fallback, cacheDir, reportProgress);
+        return acquireFallbackSource(asset, fallback, cacheDir, reportProgress);
+    }
+
+    /**
+     * Acquires an already-resolved degraded source. A failure that belongs to this asset rather
+     * than to the wire is the ladder's last rung falling over: the original was already given up
+     * on, so the asset is flagged. The display-error path flags the same case when the fallback
+     * arrives but will not decode.
+     */
+    @Nullable
+    private File acquireFallbackSource(MediaAsset asset, MediaSource fallback, File cacheDir,
+                                       boolean reportProgress) throws Exception {
+        try {
+            return acquireRemoteFile(asset, fallback, cacheDir, reportProgress);
+        } catch (MediaDownloadFailedException e) {
+            if (e.getCause() != null) {
+                throw e;
+            }
+            Log.w(TAG, "acquireAsset: " + asset.key() + " fallback is unobtainable ("
+                    + e.getMessage() + "); flagging it as incompatible with this device");
+            tagAssetAsIncompatible(asset.key());
+            return null;
+        }
     }
 
     /**
@@ -1104,7 +1144,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     postDebugInformation("Incompatible", "No backend for asset: " + assetKey);
                     return;
                 }
-                backend.markIncompatible(assetFromKey(assetKey, false));
+                try {
+                    backend.markIncompatible(assetFromKey(assetKey, false));
+                    Log.i(TAG, "tagAssetAsIncompatible: flagged " + assetKey + " in backend '"
+                            + backend.getId() + "'");
+                } catch (Exception e) {
+                    // Reported through the listener, so it reaches /logs and eo1-app.log and not
+                    // only the 13-minute logcat buffer: a tag the server refused is otherwise
+                    // indistinguishable from an asset that never needed one.
+                    Log.w(TAG, "tagAssetAsIncompatible: " + assetKey, e);
+                    postDebugInformation("Incompatible", "could not flag " + assetKey + " in '"
+                            + backend.getId() + "': " + e);
+                }
             }
         }, "tag-incompatible-" + assetKey).start();
     }

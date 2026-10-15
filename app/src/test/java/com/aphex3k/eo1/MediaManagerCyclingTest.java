@@ -653,6 +653,140 @@ public class MediaManagerCyclingTest {
         assertEquals(1, a.openerCalls.get());
     }
 
+    /**
+     * An original that cannot be fetched at all — a 404 on {@code /original}, a checksum the
+     * server's bytes never match — is a failure of the first rung, not of the asset's
+     * displayability. It must move down the ladder, not out of the rotation.
+     */
+    @Test
+    public void unobtainableOriginalFallsBackInsteadOfSkippingTheAsset() throws Exception {
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        final AtomicInteger marked = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", remoteAsset("a0", "fakeA"),
+                remoteAsset("a1", "fakeA")) {
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteThumbnail(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream("thumb".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+
+            @Override
+            public void markIncompatible(MediaAsset asset) {
+                marked.incrementAndGet();
+            }
+        };
+        a.mdfEOpeners.add("a0");
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertTrue("the asset is shown, from its degraded source",
+                listener.displayedKeys.contains("fakeA:a0"));
+        assertEquals("a working fallback is not an incompatible asset", 0, marked.get());
+        assertTrue(new File(cacheDir, "a0_fb.jpg").isFile());
+    }
+
+    /**
+     * Both rungs failing on the asset's own bytes is what the tag exists for — including when
+     * the second rung fails before anything reaches the screen.
+     */
+    @Test
+    public void unobtainableFallbackFlagsTheAsset() throws Exception {
+        final AtomicInteger marked = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", remoteAsset("a0", "fakeA"),
+                remoteAsset("a1", "fakeA")) {
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                if ("a0".equals(asset.id)) {
+                    return MediaSource.remoteThumbnail(new MediaSource.Opener() {
+                        @Override
+                        public InputStream open() throws Exception {
+                            throw new MediaDownloadFailedException("HTTP 404 on the thumbnail");
+                        }
+                    });
+                }
+                return super.resolveThumbnailFallback(asset);
+            }
+
+            @Override
+            public void markIncompatible(MediaAsset asset) {
+                if ("a0".equals(asset.id)) {
+                    marked.incrementAndGet();
+                }
+            }
+        };
+        a.mdfEOpeners.add("a0");
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("the healthy asset still rotates", "fakeA:a1", listener.displayedKeys.get(0));
+        long deadline = System.currentTimeMillis() + 5000;
+        while (marked.get() == 0 && System.currentTimeMillis() < deadline) {
+            Thread.sleep(10);
+        }
+        assertEquals("the double failure must reach the backend's flag", 1, marked.get());
+        assertTrue("an asset that fell through the ladder is skipped, not an error",
+                listener.exceptions.isEmpty());
+    }
+
+    /**
+     * A transport failure is nobody's asset: it must not spend the pool's fallback bandwidth,
+     * and it must not tag anything.
+     */
+    @Test
+    public void wireFailureDoesNotCascadeIntoFallbackFetches() throws Exception {
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        final AtomicInteger marked = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", remoteAsset("a0", "fakeA"),
+                remoteAsset("a1", "fakeA")) {
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteThumbnail(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream("thumb".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+
+            @Override
+            public void markIncompatible(MediaAsset asset) {
+                marked.incrementAndGet();
+            }
+        };
+        a.throwingOpeners.add("a0");
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.downloadRetryBackoffMs = 0;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("fakeA:a1", listener.displayedKeys.get(0));
+        assertEquals("a dead wire must not trigger thumbnail fetches", 0, fallbackOpens.get());
+        assertEquals(0, marked.get());
+        assertEquals("the failure is still reported", 1, listener.exceptions.size());
+    }
+
     @Test
     public void oversizedVideoIsRoutedToPlaybackFallback() throws Exception {
         String videoId = "01234567-89ab-cdef-0123-456789abcdef";

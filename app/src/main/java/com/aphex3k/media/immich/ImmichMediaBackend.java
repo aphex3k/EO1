@@ -160,17 +160,10 @@ public class ImmichMediaBackend implements MediaBackend {
      * albums this frame reads. Clearing the tag is the operator's call, never the app's.
      */
     @Override
-    public void markIncompatible(MediaAsset asset) {
-        final MediaAsset a = asset;
-        final ImmichClient c = client;
-        new Thread(() -> {
-            try {
-                c.tagAssetIncompatible(a.id, INCOMPATIBLE_TAG_NAME);
-            } catch (Exception e) {
-                Log.w(TAG, "Backend '" + entry.id + "': failed to tag asset " + a.id + " as "
-                        + INCOMPATIBLE_TAG_NAME + ": " + e);
-            }
-        }, "mark-incompatible-" + entry.id).start();
+    public void markIncompatible(MediaAsset asset) throws Exception {
+        // Runs on the calling thread (the manager's tagging thread) and lets every failure
+        // propagate to be reported there; it starts no thread of its own.
+        client.tagAssetIncompatible(asset.id, INCOMPATIBLE_TAG_NAME);
     }
 
     @Override
