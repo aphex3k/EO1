@@ -1718,13 +1718,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     /**
      * Best-effort, once per process, from {@code onCreate}: ask the device's own adbd to disable the
-     * ROM's vendor OTA receiver (see {@link DeviceRepair#CMD_DISABLE_VENDOR_UPDATER}). Deliberately
-     * not part of the core loop — adbd is loopback, so Wi-Fi has nothing to do with it, and a frame
-     * that boots into a dead network is precisely the one still hearing the hourly poller. Kept out
-     * of the watchdog ladder too: this is not a repair and must never block the caller. A frame
-     * whose ROM has no such package says so once in {@code /logs} and moves on. The attempt is
-     * claimed before the thread starts, so an unreachable adbd costs one log line, not a retry
-     * loop; the next launch tries again.
+     * receivers behind the ROM's two OTA pollers (see {@link DeviceRepair#VENDOR_UPDATER_COMMANDS}).
+     * Deliberately not part of the core loop — adbd is loopback, so Wi-Fi has nothing to do with it,
+     * and a frame that boots into a dead network is precisely the one whose poller still fires every
+     * 15 minutes. Kept out of the watchdog ladder too: this is not a repair and must never block the
+     * caller. A frame whose ROM has no such package says so once in {@code /logs} and moves on. The
+     * attempt is claimed before the thread starts, so an unreachable adbd costs one log line, not a
+     * retry loop; the next launch tries again.
      */
     private void silenceVendorUpdater() {
         if (vendorUpdaterAttempted) {

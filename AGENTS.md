@@ -67,7 +67,7 @@ Open these first:
 | Immich HTTP API | `app/src/main/java/com/aphex3k/immichApi/ImmichApiService.java` |
 | HTTP / TLS / cookies | `app/src/main/java/com/aphex3k/eo1/ApiServiceGenerator.java`, `Tls12SocketFactory.java` |
 | Self-update | `app/src/main/java/com/aphex3k/eo1/UpdateManager.java`, `AdbdInstallClient.java` (minimal adb wire-protocol client: `pm install` over the ROM's adbd on 127.0.0.1:5555, no confirmation UI), `com.aphex3k.update/` (`UpdateManifest` DTO, `UpdateState`/`UpdateStateStore` persistence, `ApkSignatureVerifier` pure-Java JAR-signature check) |
-| Kiosk self-recovery | `app/src/main/java/com/aphex3k/eo1/KioskWatchdog.java` (ladder + heartbeat, runs on a `Timer` thread because the main thread is one of the things it watches), `DeviceRepair.java` (fixed adbd command vocabulary: Wi-Fi repair, reboot) |
+| Kiosk self-recovery | `app/src/main/java/com/aphex3k/eo1/KioskWatchdog.java` (ladder + heartbeat, runs on a `Timer` thread because the main thread is one of the things it watches), `DeviceRepair.java` (fixed adbd command vocabulary: Wi-Fi repair, reboot, and the three `pm disable` lines that silence the ROM's two OTA pollers at launch) |
 | LAN web server | `WebServer` (HTTP on port 80→8080), `WebController` (implemented by `MainActivity`), `MultipartParser` (streaming multipart), `UploadedMedia` (persistent `filesDir/uploaded`), `AppLogger` (ring buffer + rolling file), `DeviceTelemetry` (on-demand `/state` data) — see [docs/WEBSERVER.md](docs/WEBSERVER.md) |
 | HOME launcher role | `app/src/main/AndroidManifest.xml` |
 | Unit tests | `app/src/test/java/` |
@@ -113,7 +113,7 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 - Gate platform-specific hardware behavior (soft-touch buttons, light sensor, screen brightness, power button) on `HardwareCapabilities` flags — never add model-specific `if`s on `Build.MODEL`/`Build.DEVICE` elsewhere; unsupported features no-op
 - Keep the LAN web server dependency-free and resource-cheap (hand-rolled `ServerSocket`, `Connection: close`); every web-server thread must be defensively wrapped — a stray exception must never reach the global `UncaughtExceptionHandler` (which calls `System.exit(2)`)
 - Let `libTsPlayer-jni.so` loop a media file **natively** — create the TsPlayer once per asset and run no per-duration Java teardown loop; full `deletePlayer` + `createPlayer` only on asset handoff / `stop()` / `surfaceDestroyed` (see [docs/TSPLAYER.md](docs/TSPLAYER.md) “Looping (native)”)
-- Keep every adbd command line built from fixed constants — the install path (`AdbdInstallClient`, staged public-copy path only) and the `DeviceRepair` ladder (`svc wifi disable`/`svc wifi enable`, `reboot`) alike; never interpolate user/config/network input
+- Keep every adbd command line built from fixed constants — the install path (`AdbdInstallClient`, staged public-copy path only) and the `DeviceRepair` ladder (`svc wifi disable`/`svc wifi enable`, `reboot`, and the `pm disable com.geniatech.upgrade/.UpdateReceiver` / `pm disable com.electricobjects.updater/.{CheckUpdateReceiver,BootCompletedReceiver}` lines it runs once from `MainActivity.onCreate`) alike; never interpolate user/config/network input
 - Let the kiosk watchdog escalate only *down* its ladder (rotation → redraw → network repair → self-restart → opt-in reboot), one rung per wedge, with the device reboot kept behind the options-dialog permission — an unattended frame should self-heal, but not silently hard-reboot in a loop
 
 **Don’t**

@@ -49,6 +49,24 @@ public final class DeviceRepair {
      */
     public static final String CMD_DISABLE_VENDOR_UPDATER =
             "pm disable com.geniatech.upgrade/.UpdateReceiver";
+    /**
+     * Silences the Electric Objects cloud updater ({@code /system/app/com.electricobjects.updater.apk},
+     * same {@code android.uid.system}), which wakes every <em>15</em> minutes on
+     * {@code repeatInterval=900000}. This is the poller this project exists to make irrelevant: the
+     * frame's display must not depend on Electric Objects' cloud, and a system-uid package holding
+     * {@code REBOOT} and {@code WRITE_SECURE_SETTINGS} should not be taking instructions from it.
+     */
+    public static final String CMD_DISABLE_EO_UPDATER_CHECK =
+            "pm disable com.electricobjects.updater/.CheckUpdateReceiver";
+    /**
+     * The other receiver in the same package. {@code .CheckUpdateReceiver} declares no intent
+     * filter, so it is only ever reached by the alarm's explicit broadcast; the boot receiver is
+     * what runs at {@code BOOT_COMPLETED} and starts {@code ElectricUpdateService} directly. Cut
+     * only the first and every boot still does one cloud round trip (and re-arms the alarm), so
+     * both components have to go.
+     */
+    public static final String CMD_DISABLE_EO_UPDATER_BOOT =
+            "pm disable com.electricobjects.updater/.BootCompletedReceiver";
 
     /** Pause between disable and enable so the framework can settle. */
     public static final long WIFI_TOGGLE_SETTLE_MS = 3000L;
@@ -58,7 +76,8 @@ public final class DeviceRepair {
     public static final List<String> REBOOT_COMMANDS = Collections.unmodifiableList(
             Arrays.asList(CMD_REBOOT));
     public static final List<String> VENDOR_UPDATER_COMMANDS = Collections.unmodifiableList(
-            Arrays.asList(CMD_DISABLE_VENDOR_UPDATER));
+            Arrays.asList(CMD_DISABLE_VENDOR_UPDATER, CMD_DISABLE_EO_UPDATER_CHECK,
+                    CMD_DISABLE_EO_UPDATER_BOOT));
 
     private static final Set<String> KNOWN_COMMANDS = Collections.unmodifiableSet(
             new HashSet<String>(WIFI_REPAIR_COMMANDS));
@@ -124,12 +143,20 @@ public final class DeviceRepair {
     }
 
     /**
-     * Disables the ROM's vendor OTA receiver. Best effort, one command, no fallback: whatever
-     * {@code pm} said is the answer. See {@link #CMD_DISABLE_VENDOR_UPDATER}.
+     * Disables the receivers behind every poller the ROM ships. Best effort, one command each, no
+     * fallback: whatever {@code pm} said is the answer, and a frame missing one of the packages
+     * carries on to the next. As in {@link #repairWifi}, an adbd that could not be reached at all
+     * stops the sequence — the remaining commands cannot land either.
      */
     public static List<Step> silenceVendorUpdater(Executor executor) {
-        List<Step> steps = new ArrayList<Step>(1);
-        steps.add(runStep(executor, CMD_DISABLE_VENDOR_UPDATER));
+        List<Step> steps = new ArrayList<Step>(VENDOR_UPDATER_COMMANDS.size());
+        for (String command : VENDOR_UPDATER_COMMANDS) {
+            Step step = runStep(executor, command);
+            steps.add(step);
+            if (step.outcome == AdbdInstallClient.Outcome.UNREACHABLE) {
+                break;
+            }
+        }
         return steps;
     }
 
