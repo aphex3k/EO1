@@ -55,8 +55,11 @@ public class DeviceRepairTest {
         assertEquals("svc wifi disable", DeviceRepair.CMD_WIFI_DISABLE);
         assertEquals("svc wifi enable", DeviceRepair.CMD_WIFI_ENABLE);
         assertEquals("reboot", DeviceRepair.CMD_REBOOT);
+        assertEquals("pm disable com.geniatech.upgrade/.UpdateReceiver",
+                DeviceRepair.CMD_DISABLE_VENDOR_UPDATER);
         assertEquals(Arrays.asList(DeviceRepair.CMD_WIFI_DISABLE, DeviceRepair.CMD_WIFI_ENABLE),
                 DeviceRepair.WIFI_REPAIR_COMMANDS);
+        assertTrue(DeviceRepair.isKnownCommand(DeviceRepair.CMD_DISABLE_VENDOR_UPDATER));
         assertFalse(DeviceRepair.isKnownCommand("svc wifi disable; rm -rf /data"));
         assertFalse(DeviceRepair.isKnownCommand("getprop ro.serialno"));
         assertFalse(DeviceRepair.isKnownCommand(""));
@@ -113,5 +116,33 @@ public class DeviceRepairTest {
         assertEquals(java.util.Collections.singletonList(DeviceRepair.CMD_REBOOT), executor.executed);
         assertEquals(1, steps.size());
         assertTrue(steps.get(0).ok());
+    }
+
+    @Test
+    public void silencesTheVendorUpdaterWithoutTouchingThePackage() {
+        FakeExecutor executor = new FakeExecutor();
+
+        List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(executor);
+
+        // The component, not the package: the receiver is what the alarm, BOOT_COMPLETED and every
+        // Wi-Fi state change reach, and disabling the package would take the vendor UI with it.
+        assertEquals(java.util.Collections.singletonList(DeviceRepair.CMD_DISABLE_VENDOR_UPDATER),
+                executor.executed);
+        assertEquals(1, steps.size());
+        assertTrue(steps.get(0).ok());
+    }
+
+    @Test
+    public void aFrameWithoutTheVendorUpdaterLogsOnceAndDoesNotRetry() {
+        FakeExecutor executor = new FakeExecutor()
+                .answering(DeviceRepair.CMD_DISABLE_VENDOR_UPDATER, AdbdInstallClient.Outcome.PM_FAILED,
+                        "Unable to find package");
+
+        List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(executor);
+
+        assertEquals(1, executor.executed.size());
+        assertFalse(steps.get(0).ok());
+        String described = DeviceRepair.describe(steps);
+        assertTrue(described, described.contains("=pm_failed (Unable to find package)"));
     }
 }

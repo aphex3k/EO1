@@ -36,6 +36,19 @@ public final class DeviceRepair {
     public static final String CMD_WIFI_ENABLE = "svc wifi enable";
     /** Cold-restarts the frame. Last resort, and opt-in. */
     public static final String CMD_REBOOT = "reboot";
+    /**
+     * Silences the ROM's vendor OTA poller. {@code com.geniatech.upgrade} ({@code
+     * /system/app/Update.apk}) keeps an hourly {@code AlarmManager} alarm
+     * ({@code act=com.upgrade.time.checkupdate}) whose broadcast starts {@code UpdateReceiver} →
+     * {@code IntervalCheckUpdateService} → a plain-HTTP GET to {@code www.geniatech.net}. That
+     * domain is a dead CNAME chain, so every hour — and on every BOOT_COMPLETED / Wi-Fi state
+     * change, which reach the same receiver — the frame wakes and prints an
+     * {@code UnknownHostException} to {@code System.err}. Disabling the receiver rather than the
+     * package cuts all of those trigger paths while leaving the rest of the vendor package intact.
+     * A ROM without the package is not a failure: {@code pm} reports an error and we log it.
+     */
+    public static final String CMD_DISABLE_VENDOR_UPDATER =
+            "pm disable com.geniatech.upgrade/.UpdateReceiver";
 
     /** Pause between disable and enable so the framework can settle. */
     public static final long WIFI_TOGGLE_SETTLE_MS = 3000L;
@@ -44,6 +57,8 @@ public final class DeviceRepair {
             Arrays.asList(CMD_WIFI_DISABLE, CMD_WIFI_ENABLE));
     public static final List<String> REBOOT_COMMANDS = Collections.unmodifiableList(
             Arrays.asList(CMD_REBOOT));
+    public static final List<String> VENDOR_UPDATER_COMMANDS = Collections.unmodifiableList(
+            Arrays.asList(CMD_DISABLE_VENDOR_UPDATER));
 
     private static final Set<String> KNOWN_COMMANDS = Collections.unmodifiableSet(
             new HashSet<String>(WIFI_REPAIR_COMMANDS));
@@ -108,6 +123,16 @@ public final class DeviceRepair {
         return steps;
     }
 
+    /**
+     * Disables the ROM's vendor OTA receiver. Best effort, one command, no fallback: whatever
+     * {@code pm} said is the answer. See {@link #CMD_DISABLE_VENDOR_UPDATER}.
+     */
+    public static List<Step> silenceVendorUpdater(Executor executor) {
+        List<Step> steps = new ArrayList<Step>(1);
+        steps.add(runStep(executor, CMD_DISABLE_VENDOR_UPDATER));
+        return steps;
+    }
+
     private static Step runStep(Executor executor, String command) {
         AdbdInstallClient.Result result = executor.run(command);
         return new Step(command, result.outcome, result.detail);
@@ -136,6 +161,7 @@ public final class DeviceRepair {
 
     /** True when a command is one of the fixed repair lines (guards against interpolated input). */
     public static boolean isKnownCommand(String command) {
-        return KNOWN_COMMANDS.contains(command) || REBOOT_COMMANDS.contains(command);
+        return KNOWN_COMMANDS.contains(command) || REBOOT_COMMANDS.contains(command)
+                || VENDOR_UPDATER_COMMANDS.contains(command);
     }
 }
