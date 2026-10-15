@@ -231,6 +231,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long DOWNLOAD_PROGRESS_SILENCE_MS = 120_000L;
     /** Last ack from the main thread to a watchdog probe. */
     private volatile long mainLoopAckAtMs = 0L;
+    /** Bumped on the main thread by every probe acknowledgement; see {@link #mainLoopProgressToken()}. */
+    private volatile long mainLoopAcks = 0L;
     /** When we first noticed we had no network; 0 while connected. */
     private volatile long offlineSinceMs = 0L;
     /** True while the activity is not in the foreground (settings dialog, screen off by policy). */
@@ -239,6 +241,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         @Override
         public void run() {
             mainLoopAckAtMs = System.currentTimeMillis();
+            mainLoopAcks++;
         }
     };
     /** Guards against two repairs overlapping; the watchdog ticks faster than adbd round-trips. */
@@ -1579,9 +1582,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         return since == 0L ? 0L : Math.max(0L, System.currentTimeMillis() - since);
     }
 
+    /**
+     * Number of acknowledgements so far. A value unchanged across a whole tick interval is the
+     * only evidence that counts as a dead main thread — a late acknowledgement is still proof the
+     * queue drained, and this hardware legitimately needs minutes of main-thread work to start.
+     */
     @Override
-    public boolean mainLoopAlive() {
-        return System.currentTimeMillis() - mainLoopAckAtMs < KioskWatchdog.MAIN_LOOP_DEAD_MS;
+    public long mainLoopProgressToken() {
+        return mainLoopAcks;
     }
 
     @Override
@@ -1747,7 +1755,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.addProperty("repairAttempts", kioskWatchdog != null ? kioskWatchdog.repairAttempts() : 0);
         o.addProperty("ticks", kioskWatchdog != null ? kioskWatchdog.ticks() : 0);
         o.addProperty("paused", isPaused());
-        o.addProperty("mainLoopAlive", mainLoopAlive());
+        // "Alive" is the watchdog's own verdict: the main thread advanced at the last check. A
+        // large mainLoopStallMs alongside it means slow startup, not a wedge.
+        o.addProperty("mainLoopAlive", kioskWatchdog != null && kioskWatchdog.probeMisses() == 0);
         o.addProperty("mainLoopStallMs", Math.max(0L, System.currentTimeMillis() - mainLoopAckAtMs));
         o.addProperty("probeMisses", kioskWatchdog != null ? kioskWatchdog.probeMisses() : 0);
         o.addProperty("downloadInFlightMs", downloadInFlightMs());

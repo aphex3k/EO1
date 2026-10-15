@@ -39,12 +39,13 @@ public final class KioskWatchdog {
     public static final int STALE_INTERVAL_MULTIPLE = 3;
     /** Lower bound on the staleness limit, so a short interval does not make the ladder twitchy. */
     public static final long STALE_FLOOR_MS = 20 * 60_000L;
-    /** Beyond this without an ack from the main thread, a probe counts as missed. */
-    public static final long MAIN_LOOP_DEAD_MS = 90_000L;
     /**
-     * Consecutive missed probes before the main thread is declared wedged. One is not enough: after
-     * a long suspend the timer tick and its probe both resume un-acked, and killing the app for that
-     * would trade a wedge for a nightly self-inflicted restart.
+     * Consecutive ticks in which the main thread advanced nothing before it is declared wedged.
+     * Deliberately not a wall-clock age window: the EO2 legitimately spends one to two minutes of
+     * main-thread work on a cold start (multidex extraction plus the retained-MQTT burst), and
+     * killing it mid-startup produced a loop in which no process ever lived long enough to draw a
+     * frame. One tick of silence is still not enough either — after a long suspend the tick and its
+     * probe both resume un-acked, which would trade a wedge for a nightly self-inflicted restart.
      */
     public static final int MAIN_LOOP_DEAD_TICKS = 2;
     /** A download in flight longer than this is treated as a stalled display. */
@@ -100,10 +101,14 @@ public final class KioskWatchdog {
         /** How long we have wanted a network and not had one; 0 while connected. */
         long offlineMs();
 
-        /** True when the main thread acked the most recent {@link #postProbe()}. */
-        boolean mainLoopAlive();
+        /**
+         * A counter that increases whenever the main thread runs anything the activity tracks —
+         * in practice each {@link #postProbe()} acknowledgement. Only a value that is unchanged
+         * between two ticks means the loop did nothing at all in that whole minute.
+         */
+        long mainLoopProgressToken();
 
-        /** Ask the main thread to ack; the result is evaluated on a later tick. */
+        /** Ask the main thread to ack; the acknowledgement advances the progress token. */
         void postProbe();
 
         /** Whether the user has allowed the last-resort device reboot. */
@@ -138,18 +143,28 @@ public final class KioskWatchdog {
     private int repairAttempts = 0;
     /** True when the ladder ended at a reboot rung the user has not permitted. */
     private boolean rebootBlocked = false;
-    /** Consecutive ticks whose probe the main thread never acked. */
+    /** Consecutive ticks in which the main thread advanced nothing. */
     private int probeMisses = 0;
+    /** Progress token seen at the last check; baselined by {@link #KioskWatchdog(Host)}. */
+    private long lastProgressToken = -1L;
     private int ticks = 0;
     private String lastAction = "none";
 
     public KioskWatchdog(Host host) {
         this.host = host;
+        // Baseline the progress counter at construction so the first evaluation compares two real
+        // samples instead of always seeing "change" against an impossible value.
+        this.lastProgressToken = host.mainLoopProgressToken();
     }
 
     /** Start (or restart after a {@link #stop()}) the minute-by-minute evaluation. */
     public synchronized void start() {
         stop();
+        probeMisses = 0;
+        // Baseline the progress counter and put a probe in flight now, so the first tick has a
+        // real interval of main-thread work to compare against instead of an empty queue.
+        lastProgressToken = host.mainLoopProgressToken();
+        host.postProbe();
         timer = new Timer(true);
         timer.schedule(new TimerTask() {
             @Override
@@ -224,11 +239,15 @@ public final class KioskWatchdog {
 
     private void evaluate(long now) {
         long stale = staleMs(host.screenShouldBeOn(), now, host.lastDisplayAtMs(), host.downloadInFlightMs());
-        if (host.mainLoopAlive()) {
+        // Progress, not promptness: a main thread that acks two minutes late has still emptied its
+        // queue and is working. Only an unchanged counter means it never got to anything.
+        long token = host.mainLoopProgressToken();
+        if (token != lastProgressToken) {
             probeMisses = 0;
         } else {
             probeMisses++;
         }
+        lastProgressToken = token;
         boolean mainLoopDead = probeMisses >= MAIN_LOOP_DEAD_TICKS;
         int wanted = requiredLevel(stale, host.intervalMs());
 
@@ -312,8 +331,9 @@ public final class KioskWatchdog {
                 break;
             case LEVEL_SELF_RESTART:
                 lastAction = "self-restart";
-                host.logWatchdogEvent("main thread missed " + probeMisses + " probes in a row"
-                        + " (stale " + (stale / 60_000L) + "m) — restarting app process", true);
+                host.logWatchdogEvent("main thread ran nothing for " + probeMisses
+                        + " ticks in a row (stale " + (stale / 60_000L) + "m)"
+                        + " — restarting app process", true);
                 host.selfRestart();
                 break;
             case LEVEL_REPAIR_NETWORK:
