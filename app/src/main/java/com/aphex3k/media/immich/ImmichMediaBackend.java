@@ -31,8 +31,10 @@ import java.util.Set;
  * <p>{@link #initialize()} resolves the API-version band and logs in. An explicit
  * pin skips probing and uses the band registered for that version; "auto" probes
  * {@code GET /api/server/version} and, when the probe fails, falls back to best
- * effort within the V3 band. Out-of-band versions raise
- * {@link BackendUnavailableException}, disabling only this backend.
+ * effort on the newest client. A server newer than every known band is served
+ * best effort by that newest client and reports a {@link #compatibilityWarning()};
+ * only a server too old for any band raises
+ * {@link BackendUnavailableException}, disabling this backend.
  */
 public class ImmichMediaBackend implements MediaBackend {
 
@@ -47,6 +49,7 @@ public class ImmichMediaBackend implements MediaBackend {
     @Nullable private final ApiServiceGenerator.ProgressListener progressListener;
     private ImmichClient client;
     @Nullable private Semver resolvedVersion;
+    @Nullable private String compatibilityWarning;
 
     public ImmichMediaBackend(ConfigurationBackendEntry entry,
                               @Nullable ApiServiceGenerator.ProgressListener progressListener) {
@@ -56,37 +59,61 @@ public class ImmichMediaBackend implements MediaBackend {
 
     @Override
     public void initialize() throws Exception {
+        compatibilityWarning = null;
         Semver pin = ImmichClientRegistry.parsePin(entry.apiVersion);
         if (pin != null) {
             // Explicit pin: no probe, use the band registered for this version.
-            Class<? extends ImmichClient> band = ImmichClientRegistry.clientForVersion(pin);
-            if (band == null) {
+            ImmichClientRegistry.Resolution resolution = ImmichClientRegistry.resolve(pin);
+            if (resolution == null) {
                 throw new BackendUnavailableException("no Immich client implementation for pinned version "
                         + pin + " (supported range " + ImmichClientRegistry.supportedRange() + ")");
             }
-            client = instantiate(band);
+            client = instantiate(resolution.client);
             resolvedVersion = pin;
+            if (!resolution.exact) {
+                compatibilityWarning = outsideBand(pin, resolution.client);
+            }
         } else {
-            client = new ImmichClientV3(entry.host, entry.userid, entry.password, progressListener);
+            client = instantiate(ImmichClientRegistry.newestClient());
             Semver probed = client.probeServerVersion();
             if (probed != null) {
-                Class<? extends ImmichClient> band = ImmichClientRegistry.clientForVersion(probed);
-                if (band == null) {
+                ImmichClientRegistry.Resolution resolution = ImmichClientRegistry.resolve(probed);
+                if (resolution == null) {
                     throw new BackendUnavailableException("Immich server " + probed + " (" + entry.host
-                            + ") is outside the supported range " + ImmichClientRegistry.supportedRange()
+                            + ") is older than the supported range " + ImmichClientRegistry.supportedRange()
                             + "; no client implementation available");
                 }
-                if (band != client.getClass()) {
-                    client = instantiate(band);
+                if (resolution.client != client.getClass()) {
+                    client = instantiate(resolution.client);
                 }
                 resolvedVersion = probed;
+                if (!resolution.exact) {
+                    compatibilityWarning = outsideBand(probed, resolution.client);
+                }
             } else {
-                // Probe failed: best effort, assume the V3 band.
-                Log.w(TAG, "Backend '" + entry.id + "': server version probe failed; assuming "
-                        + ImmichClientRegistry.supportedRange());
+                // Probe failed: best effort against the newest band we ship.
+                compatibilityWarning = "Could not determine the Immich server version on " + entry.host
+                        + "; assuming " + ImmichClientRegistry.supportedRange()
+                        + " — some assets may fail.";
             }
         }
+        if (compatibilityWarning != null) {
+            Log.w(TAG, "Backend '" + entry.id + "': " + compatibilityWarning);
+        }
         client.login();
+    }
+
+    /** Text for a server newer than any band we know, which we still try to serve. */
+    private static String outsideBand(Semver version, Class<? extends ImmichClient> band) {
+        return "Immich " + version + " is outside the supported range ("
+                + ImmichClientRegistry.supportedRange() + "); continuing best effort with "
+                + band.getSimpleName() + " — some assets may fail.";
+    }
+
+    @Override
+    @Nullable
+    public String compatibilityWarning() {
+        return compatibilityWarning;
     }
 
     @Override

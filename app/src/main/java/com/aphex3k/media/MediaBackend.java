@@ -87,6 +87,19 @@ public interface MediaBackend {
     }
 
     /**
+     * Optional: a one-shot caveat about a backend that initialized successfully but is not
+     * running in a fully supported configuration (e.g. against a server newer than any client
+     * version this build knows). Read once per pool generation after {@link #initialize()}
+     * and shown to the user; the backend stays in the rotation regardless.
+     *
+     * @return the warning text, or null when the backend has nothing to report
+     */
+    @Nullable
+    default String compatibilityWarning() {
+        return null;
+    }
+
+    /**
      * Optional: releases any resources the backend holds. No-op when there is nothing to
      * close.
      */

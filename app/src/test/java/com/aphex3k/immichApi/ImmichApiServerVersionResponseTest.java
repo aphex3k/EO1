@@ -1,6 +1,7 @@
 package com.aphex3k.immichApi;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
@@ -43,14 +44,32 @@ public class ImmichApiServerVersionResponseTest {
     }
 
     @Test
-    public void marksPostMaxAsUnsupported() {
+    public void parsesTheServerInTheField() {
         ImmichApiServerVersionResponse response = new Gson().fromJson(
-                "{\"major\":3,\"minor\":3,\"patch\":0}",
+                "{\"major\":3,\"minor\":3,\"patch\":1,\"prerelease\":null}",
+                ImmichApiServerVersionResponse.class
+        );
+
+        Semver version = response.getVersion();
+        assertNotNull(version);
+        assertEquals("3.3.1", version.getValue());
+        assertEquals(ImmichClientV3.class, ImmichClientRegistry.clientForVersion(version));
+    }
+
+    @Test
+    public void nextMajorResolvesToBestEffort() {
+        ImmichApiServerVersionResponse response = new Gson().fromJson(
+                "{\"major\":4,\"minor\":0,\"patch\":0}",
                 ImmichApiServerVersionResponse.class
         );
 
         Semver version = response.getVersion();
         assertNotNull(version);
         assertNull(ImmichClientRegistry.clientForVersion(version));
+
+        ImmichClientRegistry.Resolution resolution = ImmichClientRegistry.resolve(version);
+        assertNotNull(resolution);
+        assertEquals(ImmichClientV3.class, resolution.client);
+        assertFalse(resolution.exact);
     }
 }

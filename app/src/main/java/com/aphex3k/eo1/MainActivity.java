@@ -963,6 +963,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("Last Exception", e.toString()));
     }
 
+    /**
+     * A backend is running degraded rather than broken: toast it, and let
+     * {@link #debugInformationProvided} record it where it outlives logcat's ~13 minute
+     * ring (the /logs page and, in debug builds, the overlay).
+     */
+    @Override
+    public void warnUser(String message) {
+        this.runOnUiThread(() ->
+                Toast.makeText(MainActivity.this, message, Toast.LENGTH_LONG).show());
+        debugInformationProvided(new DebugInformation("compatibility", message));
+    }
+
     public void debugInformationProvided(@NonNull DebugInformation debugInformation) {
 
         this.runOnUiThread(() -> {

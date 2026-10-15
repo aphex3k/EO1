@@ -142,7 +142,10 @@ hosts: they are peers in the same merged pool and are **played/displayed directl
 only touches its UUID-named cache-file pattern). Files deleted through `/files/<name>/delete`
 or on disk drop out of the pool on the next tick. When an Immich backend is unreachable or
 its credentials are wrong, that backend is skipped with a toast and the remaining backends
-(including local uploads) keep rotating. A backend can also be turned off entirely with the
+(including local uploads) keep rotating. A backend running against a server newer than any
+client this build knows is a different case: it stays in the rotation and raises a one-shot
+compatibility warning (a toast, plus a `compatibility:` line in `/logs`) rather than being
+disabled. A backend can also be turned off entirely with the
 **Enabled** toggle in the configuration editor: the entry (and its credentials) stay in
 `configuration.json`, but `MediaManager` skips it when building the rotation pool — the pool
 is rebuilt on the next tick whenever an `enabled` flag changes.

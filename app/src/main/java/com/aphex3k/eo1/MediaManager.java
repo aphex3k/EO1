@@ -111,6 +111,15 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     private final Set<String> tagIncompatibleAttempted =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    /**
+     * Backend warnings already shown, keyed by backend id, config fingerprint and the warning
+     * text itself. A failing pool makes {@link #rebuildPool} run again on every tick, so
+     * without this a degraded backend would toast once per rotation interval. Keying on the
+     * text rather than clearing the set means the same backend speaks up again when its
+     * situation changes — the server upgraded, or the version probe starting to fail.
+     */
+    private final Set<String> warningsShown =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private volatile String currentPlaybackPath;
     /** Last successfully displayed asset; read on the UI thread by /state. */
     private volatile MediaAsset currentAsset;
@@ -430,6 +439,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         poolKeys.clear();
         poolCursor = 0;
         backendById.clear();
+        final String generationFingerprint = fingerprint(configuration);
 
         for (MediaBackend backend : buildGeneration(configuration, uploadsDir)) {
             String backendId = backend.getId();
@@ -443,6 +453,15 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 Log.e(TAG, "rebuildPool: backend '" + backendId + "' initialization failed", e);
                 postException(ui, new BackendUnavailableException(e));
                 continue;
+            }
+            // A backend that came up degraded still belongs in the rotation; tell the user
+            // once per thing that changed rather than once per tick.
+            String warning = backend.compatibilityWarning();
+            if (warning != null) {
+                if (warningsShown.add(backendId + '@' + generationFingerprint + '@' + warning)) {
+                    Log.w(TAG, "rebuildPool: backend '" + backendId + "' is degraded: " + warning);
+                    postWarning(ui, "Media backend '" + backendId + "': " + warning);
+                }
             }
             try {
                 List<MediaAsset> catalog = backend.fetchCatalog();
@@ -467,7 +486,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             }
         }
 
-        currentConfigurationFingerprint = fingerprint(configuration);
+        currentConfigurationFingerprint = generationFingerprint;
         poolStale = false;
         if (!pool.isEmpty()) {
             Collections.shuffle(pool, random);
@@ -623,6 +642,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             // Fingerprint only needs to change with the config; the raw text still does.
             return sb.toString();
         }
+    }
+
+    private void postWarning(UiPoster ui, String message) {
+        ui.post(new Runnable() {
+            @Override
+            public void run() {
+                MediaManagerListener mediaManagerListener = listener.get();
+                if (mediaManagerListener != null) {
+                    mediaManagerListener.warnUser(message);
+                }
+            }
+        });
     }
 
     private void postException(UiPoster ui, Exception e) {
