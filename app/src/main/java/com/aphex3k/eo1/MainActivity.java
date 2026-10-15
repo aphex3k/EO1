@@ -179,6 +179,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String videoWatchdogAssetId = "";
     private File videoWatchdogFile;
     private WeakReference<MainActivity> videoWatchdogActivityReference;
+    /** Which rung of the display ladder the armed watchdog is watching; see {@link DisplayStage}. */
+    private DisplayStage videoWatchdogStage = DisplayStage.ORIGINAL;
     private int videoWatchdogLastPosition = -1;
     private long videoWatchdogLastProgressMs = 0L;
     private boolean videoWatchdogRecoverAttempted = false;
@@ -1027,6 +1029,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void displayPicture(File file, String assetId) {
+        displayPicture(file, assetId, DisplayStage.ORIGINAL);
+    }
+
+    @Override
+    public void displayFallbackPicture(File file, String assetId) {
+        displayPicture(file, assetId, DisplayStage.FALLBACK);
+    }
+
+    private void displayPicture(File file, String assetId, DisplayStage stage) {
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
             Log.i(TAG, "displayPicture: skip same asset " + assetId);
@@ -1065,7 +1076,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                 .listener(new RequestListener<GifDrawable>() {
                                     @Override
                                     public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<GifDrawable> target, boolean isFirstResource) {
-                                        assetFallback(assetId, activityReference, false, file);
+                                        assetFallback(assetId, activityReference, false, file, stage);
                                         return false;
                                     }
 
@@ -1087,7 +1098,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                 .listener(new RequestListener<Drawable>() {
                                     @Override
                                     public boolean onLoadFailed(@Nullable GlideException e, @Nullable Object model, @NonNull Target<Drawable> target, boolean isFirstResource) {
-                                        assetFallback(assetId, activityReference, false, file);
+                                        assetFallback(assetId, activityReference, false, file, stage);
                                         return false;
                                     }
 
@@ -1107,7 +1118,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
             catch (Exception e) {
                 handleException(e);
-                assetFallback(assetId, activityReference, false, file);
+                assetFallback(assetId, activityReference, false, file, stage);
             }
         });
     }
@@ -1398,47 +1409,83 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastVisibleView = imageView;
     }
 
-    private void assetFallback(String assetId, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
-        // assetId may be null for the /video/playback fallback stream; Objects.equals keeps
+    /**
+     * Which rung of the display ladder a display call belongs to. A failure moves strictly
+     * down it — never up, never twice on the same rung — so one bad asset cannot spin the
+     * rotation loop: {@link #ORIGINAL} → {@link #ORIGINAL_REPLAY} → {@link #FALLBACK} → flagged.
+     */
+    private enum DisplayStage {
+        /** The asset's original bytes, first attempt. */
+        ORIGINAL,
+        /** The same original bytes again on the other player engine; after this, the fallback. */
+        ORIGINAL_REPLAY,
+        /** The backend's degraded source: a preview thumbnail or a transcoded stream. */
+        FALLBACK
+    }
+
+    private void assetFallback(String assetId, WeakReference<MainActivity> activityReference,
+                               boolean isVideo, File file, DisplayStage stage) {
+        // assetId may be null (a display that came from no pool asset); Objects.equals keeps
         // this guard null-safe (a bare assetId.equals() would NPE and kill the app).
         if (isVideo && !Objects.equals(assetId, activeVideoAssetId)) {
             return;
         }
-        playbackFallback(assetId, activityReference, isVideo, file);
+        playbackFallback(assetId, activityReference, isVideo, file, stage);
     }
 
-    private void playbackFallback(String assetId, WeakReference<MainActivity> activityReference, boolean isVideo, File file) {
-        if (isVideo) {
-            restoreImageViewAfterVideoFailure();
+    /**
+     * Moves one asset one rung down the display ladder. Nothing is flagged here: an asset is
+     * only incompatible with this device once its {@link DisplayStage#FALLBACK} display failed
+     * too, which is the rung below.
+     */
+    private void playbackFallback(String assetId, WeakReference<MainActivity> activityReference,
+                                  boolean isVideo, File file, DisplayStage stage) {
+        // restoreImageViewAfterVideoFailure is called at each transition that stops showing
+        // video, never before a rung that immediately starts another video.
+        if (assetId == null) {
+            Log.i(TAG, "playbackFallback: no asset for " + (file != null ? file.getName() : "?")
+                    + "; deferring rotation to next tick");
+            if (!isVideo) {
+                mediaManager.removeFromCache(file);
+            }
+            return;
         }
-        if (assetId != null) {
+        if (stage == DisplayStage.FALLBACK) {
+            // Both rungs failed. Flag it for the operator — who can regenerate the asset's
+            // thumbnails in Immich or drop it from the frame's albums — and let the next tick
+            // rotate on. Drop the fallback artifact so a fix on the server is picked up at
+            // once instead of being served from a poisoned cache.
+            Log.w(TAG, "playbackFallback: " + assetId + " failed with its fallback source too;"
+                    + " flagging it as incompatible with this device");
+            if (isVideo) {
+                restoreImageViewAfterVideoFailure();
+            }
             mediaManager.tagAssetAsIncompatible(assetId);
-            if (isVideo && file != null && mediaManager.isUsableLocalVideo(file)) {
-                // The original's bytes are already on disk (routing is content-deterministic,
-                // so a re-fetch through /video/playback would be the same bytes): replay the
-                // cached original on the fallback path instead of a full re-download.
-                Log.i(TAG, "playbackFallback: reusing local original for " + assetId);
-                lastVisibleAsset = "";
-                displayVideo(file, null);
-                return;
-            }
-            MainActivity activity = activityReference.get();
-            if (activity != null) {
-                mediaManager.displayThumbnailAsset(activity, assetId, isVideo);
-            }
-            // Local uploads may point at the persistent original in filesDir/uploaded;
-            // removeFromCache's file-based guards (cache-dir match + owned-name check) make
-            // this a no-op for those files.
             mediaManager.removeFromCache(file);
             return;
         }
-        // Fallback stream itself failed: don't rotate off-tick — the next scheduled tick
-        // takes over (also bounds the undecodable-thumbnail image loop). Keep a failed
-        // video's file so the next cycle is a cache hit; drop failed image thumbnails.
-        Log.i(TAG, "playbackFallback: fallback stream failed; deferring rotation to next tick");
-        if (!isVideo) {
-            mediaManager.removeFromCache(file);
+        if (isVideo && stage == DisplayStage.ORIGINAL && file != null
+                && mediaManager.isUsableLocalVideo(file)) {
+            // The original's bytes are already on disk (routing is content-deterministic, so a
+            // re-fetch through /video/playback would be the same bytes): replay them on the
+            // other engine rather than re-downloading. ORIGINAL_REPLAY is the rung after this,
+            // so a second failure here cannot loop back into another replay.
+            Log.i(TAG, "playbackFallback: reusing local original for " + assetId);
+            lastVisibleAsset = "";
+            displayVideo(file, assetId, DisplayStage.ORIGINAL_REPLAY);
+            return;
         }
+        if (isVideo) {
+            restoreImageViewAfterVideoFailure();
+        }
+        MainActivity activity = activityReference.get();
+        if (activity != null) {
+            mediaManager.displayThumbnailAsset(activity, assetId, isVideo);
+        }
+        // Local uploads may point at the persistent original in filesDir/uploaded;
+        // removeFromCache's file-based guards (cache-dir match + owned-name check) make
+        // this a no-op for those files.
+        mediaManager.removeFromCache(file);
     }
 
     private void cancelVideoWatchdog() {
@@ -1454,12 +1501,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogRecoverAttempted = false;
     }
 
-    private void startVideoWatchdog(String assetId, File file, WeakReference<MainActivity> activityReference) {
+    private void startVideoWatchdog(String assetId, File file,
+                                    WeakReference<MainActivity> activityReference,
+                                    DisplayStage stage) {
         cancelVideoWatchdog();
-        // The /video/playback fallback stream is displayed with a null asset id; the
-        // same-asset guard in runVideoWatchdogCheck cannot match it, so skip arming.
+        // A display with no asset behind it cannot be matched by the same-asset guard, so
+        // there is nothing for the watchdog to attribute a stall to.
         if (assetId == null) {
-            debugInformationProvided(new DebugInformation("video", "watchdog skipped (fallback stream, no asset id)"));
+            debugInformationProvided(new DebugInformation("video", "watchdog skipped (no asset id)"));
             return;
         }
         // TsPlayer getCurrentTime/duration are unreliable; position stalls false-trigger
@@ -1471,6 +1520,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogAssetId = assetId;
         videoWatchdogFile = file;
         videoWatchdogActivityReference = activityReference;
+        videoWatchdogStage = stage;
         videoWatchdogLastPosition = -1;
         videoWatchdogLastProgressMs = System.currentTimeMillis();
         videoWatchdogRecoverAttempted = false;
@@ -1493,6 +1543,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         final String assetId = videoWatchdogAssetId;
         final File file = videoWatchdogFile;
         final WeakReference<MainActivity> activityReference = videoWatchdogActivityReference;
+        // Read before anything below cancels the watchdog: the ladder rung belongs to the
+        // display that is being watched, not to whatever starts after it.
+        final DisplayStage stage = videoWatchdogStage;
 
         if (!assetId.equals(activeVideoAssetId)
                 || !brightnessManager.getShouldTheScreenBeOn()
@@ -1540,11 +1593,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         debugInformationProvided(new DebugInformation("video",
                 "stall fallback pos=" + position + " duration=" + videoPlayer.getDuration()));
         cancelVideoWatchdog();
-        if (fallbackTsPlayerToMediaPlayer(assetId, file, activityReference)) {
+        if (fallbackTsPlayerToMediaPlayer(assetId, file, activityReference, stage)) {
             return;
         }
         restoreImageViewAfterVideoFailure();
-        assetFallback(assetId, activityReference, true, file);
+        assetFallback(assetId, activityReference, true, file, stage);
     }
 
     // ------------------------------------------------------------------
@@ -1829,6 +1882,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void displayVideo(File file, String assetId) {
+        displayVideo(file, assetId, DisplayStage.ORIGINAL);
+    }
+
+    @Override
+    public void displayFallbackVideo(File file, String assetId) {
+        displayVideo(file, assetId, DisplayStage.FALLBACK);
+    }
+
+    private void displayVideo(File file, String assetId, DisplayStage stage) {
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
             Log.i(TAG, "displayVideo: skip same asset " + assetId);
@@ -1851,10 +1913,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 cancelVideoWatchdog();
                 selectVideoPlayer(routingAllowsTsPlayer(file));
                 int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
-                startVideoOnController(videoPlayer, file, assetId, videoDurationMs, activityReference, true);
+                startVideoOnController(videoPlayer, file, assetId, videoDurationMs,
+                        activityReference, true, stage);
             } catch (Exception e) {
                 restoreImageViewAfterVideoFailure();
-                assetFallback(assetId, activityReference, true, file);
+                assetFallback(assetId, activityReference, true, file, stage);
                 handleException(e);
             }
         });
@@ -1936,12 +1999,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
-     * After TsPlayer stalls or errors, hand the same file to MediaPlayer once.
+     * After TsPlayer stalls or errors, hand the same file to MediaPlayer once. Swapping engine
+     * is not swapping rung: the retry stays on {@code stage}, so its failure moves one rung
+     * down the ladder like any other failure of that display.
      *
      * @return true if MediaPlayer playback was started
      */
     private boolean fallbackTsPlayerToMediaPlayer(String assetId, File file,
-                                                  WeakReference<MainActivity> activityReference) {
+                                                  WeakReference<MainActivity> activityReference,
+                                                  DisplayStage stage) {
         if (!preferTsPlayer || videoPlayer != tsPlayerController) {
             return false;
         }
@@ -1954,7 +2020,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         try {
             selectVideoPlayer(false);
             int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
-            startVideoOnController(videoPlayer, file, assetId, videoDurationMs, activityReference, false);
+            startVideoOnController(videoPlayer, file, assetId, videoDurationMs,
+                    activityReference, false, stage);
             return true;
         } catch (Exception e) {
             handleException(e);
@@ -1965,7 +2032,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void startVideoOnController(VideoPlayerController controller, File file, String assetId,
                                         int durationHintMs,
                                         WeakReference<MainActivity> activityReference,
-                                        boolean allowTsFallback) {
+                                        boolean allowTsFallback, DisplayStage stage) {
         controller.stop();
         // TsPlayer SurfaceView must be VISIBLE to get a surface; MediaPlayer TextureView can stay
         // invisible until prepared (ImageView covers both until then).
@@ -1996,14 +2063,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                 "prepared duration=" + controller.getDuration()
                                     + " player=" + (controller == tsPlayerController
                                     ? "TsPlayer" : "MediaPlayer")));
-                        startVideoWatchdog(assetId, file, activityReference);
+                        startVideoWatchdog(assetId, file, activityReference, stage);
                     }
                 } catch (Exception e) {
-                    if (allowTsFallback && fallbackTsPlayerToMediaPlayer(assetId, file, activityReference)) {
+                    if (allowTsFallback && fallbackTsPlayerToMediaPlayer(assetId, file, activityReference, stage)) {
                         return;
                     }
                     restoreImageViewAfterVideoFailure();
-                    assetFallback(assetId, activityReference, true, file);
+                    assetFallback(assetId, activityReference, true, file, stage);
                     handleException(e);
                 }
             }
@@ -2040,11 +2107,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 cancelVideoWatchdog();
                 debugInformationProvided(new DebugInformation("video",
                         "error what=" + what + " extra=" + extra));
-                if (allowTsFallback && fallbackTsPlayerToMediaPlayer(assetId, file, activityReference)) {
+                if (allowTsFallback && fallbackTsPlayerToMediaPlayer(assetId, file, activityReference, stage)) {
                     return true;
                 }
                 restoreImageViewAfterVideoFailure();
-                assetFallback(assetId, activityReference, true, file);
+                assetFallback(assetId, activityReference, true, file, stage);
                 return false;
             }
 

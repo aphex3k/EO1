@@ -17,21 +17,24 @@ import java.util.Set;
  * Device-format compatibility gate for EO1/EO2.
  *
  * <p>The Geniatech SoC runs Android 4.4.2 (API 19) and cannot decode HEIF stills (including
- * HEVC-encoded ones) or AV1; HEVC (h265) video support is uncertain. This class lets the
- * rotation pipeline skip such assets instead of wasting a download or a decoder attempt on them.
+ * HEVC-encoded ones) or AV1; HEVC (h265) video support is uncertain. Nothing here takes an asset
+ * out of the rotation: at most it steers one to the backend's fallback source, or reports a
+ * verdict on bytes that are already on disk. Whether an original is actually undisplayable is
+ * settled by the decoder, not by a file name.
  *
  * <p>Three tiers:
  * <ul>
- *   <li>{@link #incompatibleReason(MediaType, String, String)} — an extension check that can
- *       run <em>before</em> a remote download, because the file name comes from backend
- *       metadata. Container extensions ({@code .mp4}, {@code .mov}, ...) that can also hold
- *       H.264 are deliberately not flagged.</li>
+ *   <li>{@link #incompatibleReason(MediaType, String, String)} — an extension check, used only
+ *       where there is no fallback to fall back to: the local upload backend, which files an
+ *       operator-facing report beside the file instead. Container extensions ({@code .mp4},
+ *       {@code .mov}, ...) that can also hold H.264 are deliberately not flagged.</li>
  *   <li>{@link #incompatibleVideoResolution(MediaType, int, int)} — a coded-dimension check
  *       that can run <em>before</em> a remote download, because the dimensions come from
  *       backend metadata. Videos with a side above {@link #MAX_VIDEO_SIDE_PX} (the panel is
- *       1080p) garble on the SoC's decoder; the pipeline routes them to the backend's
- *       playback fallback (e.g. Immich's transcoded {@code /video/playback} stream) instead
- *       of downloading the original.</li>
+ *       1080p) garble on the SoC's decoder <em>without raising an error</em>, so waiting for the
+ *       original to fail would show garbage and never reach a fallback: the pipeline routes them
+ *       to the backend's playback fallback (e.g. Immich's transcoded {@code /video/playback}
+ *       stream) instead of downloading the original.</li>
  *   <li>{@link #incompatibleReasonForFile(MediaType, File)} — a content check for a file that
  *       already exists locally (uploaded, or already downloaded). It detects HEIF/AVIF
  *       containers from the leading {@code ftyp} box even when the extension lies

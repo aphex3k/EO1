@@ -100,16 +100,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     /**
      * Asset keys whose original was byte-verified as undecodable on this device (e.g. HEIF
      * content served under a .jpg name). Remembers the verdict across pool rebuilds for the
-     * life of this process, so those assets are skipped without re-downloading.
+     * life of this process, so the original is downloaded once and every later rotation of
+     * that asset goes straight to the backend's fallback source. Forgotten on restart, which
+     * is the point: a re-encoded original gets tried again.
      */
     private final Set<String> knownIncompatibleKeys =
-            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
-    /**
-     * Keys for which the backend's incompatible tag was already posted in this process. A
-     * failing asset is re-flagged every rotation cycle until the pool rebuild excludes it, so
-     * the tag write (tag lookup + POST) stays at one attempt per process.
-     */
-    private final Set<String> tagIncompatibleAttempted =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     /**
      * Backend warnings already shown, keyed by backend id, config fingerprint and the warning
@@ -671,14 +666,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     // ---------------------------------------------------------------- acquisition
 
     /**
-     * Resolves one record to a playable file: local backends hand back their on-disk file,
-     * remote backends go through the download + integrity gate. Null (not an exception) when the
-     * asset should be skipped: the backend declines it (deleted file, no source), it is known
-     * to be undecodable on this device (incompatible format by name), it was byte-verified
-     * incompatible after a previous download, or it is an oversized video whose backend has
-     * no playback fallback. Videos above the device's decode limit are not skipped but
-     * re-routed to the backend's playback fallback (e.g. Immich's transcoded
-     * {@code /video/playback} stream), which is then acquired like any other fallback source.
+     * Resolves one record to a playable file. The original is always the first attempt; only
+     * when it cannot be used — byte-verified undecodable, or physically out of reach of this
+     * device (bigger than its cache, a video with a coded side beyond the panel) — does the
+     * asset fall back to the backend's degraded source. Null (not an exception) when the asset
+     * should be skipped this cycle: the backend declines it (deleted file, no source), or its
+     * original is unusable and the backend has no fallback.
      */
     private File acquireAsset(MediaAsset asset, File cacheDir) throws Exception {
         return acquireAsset(asset, cacheDir, true);
@@ -694,28 +687,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             Log.w(TAG, "acquireAsset: no backend for asset " + asset.key());
             return null;
         }
-        if (knownIncompatibleKeys.contains(asset.key())) {
-            Log.i(TAG, "acquireAsset: skipping " + asset.key() + " (verified incompatible with this device's decoders)");
-            return null;
-        }
-        String incompatibleReason = MediaCompatibility.incompatibleReason(
-                asset.type, asset.originalFileName, asset.originalPath);
-        if (incompatibleReason != null) {
-            Log.w(TAG, "acquireAsset: skipping " + asset.key() + " - " + incompatibleReason);
-            return null;
-        }
-        String oversizedReason = MediaCompatibility.incompatibleVideoResolution(
-                asset.type, asset.width, asset.height);
-        if (oversizedReason != null) {
-            Log.w(TAG, "acquireAsset: " + asset.key() + " - " + oversizedReason
-                    + "; routing to playback fallback");
-            MediaSource fallbackSource = backend.resolveThumbnailFallback(asset);
-            if (fallbackSource == null) {
-                Log.w(TAG, "acquireAsset: skipping " + asset.key()
-                        + " - oversized video and no playback fallback available");
-                return null;
-            }
-            return acquireRemoteFile(asset, fallbackSource, cacheDir, reportProgress);
+        if (!originalUsable(asset)) {
+            return acquireFallbackSource(asset, backend, cacheDir, reportProgress);
         }
         MediaSource source = backend.resolveOriginal(asset);
         if (source == null) {
@@ -724,7 +697,58 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (source.isLocal()) {
             return source.localFile;
         }
-        return acquireRemoteFile(asset, source, cacheDir, reportProgress);
+        File original = acquireRemoteFile(asset, source, cacheDir, reportProgress);
+        if (original == null) {
+            return acquireFallbackSource(asset, backend, cacheDir, reportProgress);
+        }
+        return original;
+    }
+
+    /**
+     * Whether an original is worth a download attempt at all. Codec guesses from the file name
+     * are not part of this: only what this device physically cannot handle — more bytes than
+     * its cache can hold, a video with a coded side beyond the panel, or bytes already verified
+     * undecodable since the last restart. Everything else gets displayed and judged by the
+     * decoder, which is the only thing that can be right.
+     */
+    private boolean originalUsable(MediaAsset asset) {
+        String key = asset.key();
+        if (knownIncompatibleKeys.contains(key)) {
+            Log.i(TAG, "acquireAsset: " + key + " original verified undecodable earlier this"
+                    + " run; going straight to the fallback source");
+            return false;
+        }
+        if (asset.localPath != null) {
+            // Already on disk: no download to avoid and no cache to overflow, so the decoder gets
+            // the bytes and decides. Its verdict is filed as a sidecar report, not a silent skip.
+            return true;
+        }
+        if (asset.sizeBytes != null && asset.sizeBytes > MAX_ASSET_BYTES) {
+            Log.w(TAG, "acquireAsset: " + key + " original is " + asset.sizeBytes
+                    + " bytes, beyond this device's " + MAX_ASSET_BYTES
+                    + " byte ceiling; routing to the fallback source");
+            return false;
+        }
+        String oversized = MediaCompatibility.incompatibleVideoResolution(
+                asset.type, asset.width, asset.height);
+        if (oversized != null) {
+            Log.w(TAG, "acquireAsset: " + key + " - " + oversized
+                    + "; routing to the fallback source");
+            return false;
+        }
+        return true;
+    }
+
+    /** The backend's degraded source for an asset, acquired like any other source. */
+    @Nullable
+    private File acquireFallbackSource(MediaAsset asset, MediaBackend backend, File cacheDir,
+                                       boolean reportProgress) throws Exception {
+        MediaSource fallback = backend.resolveThumbnailFallback(asset);
+        if (fallback == null || fallback.opener == null) {
+            Log.w(TAG, "acquireAsset: " + asset.key() + " - no fallback source, skipping");
+            return null;
+        }
+        return acquireRemoteFile(asset, fallback, cacheDir, reportProgress);
     }
 
     /**
@@ -749,15 +773,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
-     * Downloads (or verifies the cache for) a remote asset. A cached original is reused only
-     * after an integrity check (checksum/size against the backend's reference); fresh bytes are
-     * digested in flight and a hex sidecar ({@code <file>.sha1}) is written. Mismatched files are
-     * discarded and re-fetched once. Fallback streams are always re-fetched.
+     * Downloads (or verifies the cache for) a remote asset, original or fallback alike. A cached
+     * file is reused only after an integrity check — checksum and size against the backend's
+     * reference where the backend reports one (originals), otherwise against the hex sidecar
+     * ({@code <file>.sha1}) written when the bytes landed; fresh bytes are digested in flight.
+     * Mismatched files are discarded and re-fetched. A fallback lives under its own cache name,
+     * so a degraded stream never overwrites the original it stands in for.
      *
-     * <p>Returns {@code null} when the bytes turn out to be a format this device cannot decode
-     * (e.g. HEIF content served under a {@code .jpg} name): the file is discarded and the asset
-     * key is remembered in {@link #knownIncompatibleKeys} so it is skipped without
-     * re-downloading for the life of this process.
+     * <p>Returns {@code null} when an original's bytes turn out to be a format this device cannot
+     * decode (e.g. HEIF content served under a {@code .jpg} name): the file is discarded and the
+     * asset key is remembered in {@link #knownIncompatibleKeys} so the original is not
+     * re-downloaded for the life of this process. Only originals are byte-checked this way — a
+     * fallback that cannot be decoded is reported by the display path, which flags the asset.
      */
     private File acquireRemoteFile(MediaAsset asset, MediaSource source, File cacheDir)
             throws MediaDownloadFailedException, IOException {
@@ -776,14 +803,17 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         File cacheFile = new File(cacheDir,
                 cacheFileName(asset.id, asset.originalFileName, asset.originalPath, type, fallback));
 
-        if (!fallback && cacheFile.exists() && cacheFile.length() > 0) {
+        if (cacheFile.exists() && cacheFile.length() > 0) {
             if (MediaIntegrity.isCacheFileUsable(cacheFile, source.expectedChecksum, source.expectedBytes)) {
+                if (fallback) {
+                    return cacheFile;
+                }
                 String reason = MediaCompatibility.incompatibleReasonForFile(asset.type, cacheFile);
                 if (reason == null) {
                     return cacheFile;
                 }
                 Log.w(TAG, "acquireRemoteFile: cached " + cacheFile.getName() + " is " + reason
-                        + "; discarding and skipping " + asset.key());
+                        + "; discarding it and falling back for " + asset.key());
                 deleteCachedFile(cacheFile);
                 knownIncompatibleKeys.add(asset.key());
                 return null;
@@ -848,17 +878,17 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
                 if (MediaIntegrity.isDownloadValid(cacheFile, digest, fallback,
                         source.expectedChecksum, source.expectedBytes)) {
+                    try {
+                        MediaIntegrity.writeSidecar(cacheFile, MediaIntegrity.toHex(digest));
+                    } catch (IOException e) {
+                        Log.w(TAG, "acquireRemoteFile: failed to write integrity sidecar for "
+                                + cacheFile.getName(), e);
+                    }
                     if (!fallback) {
-                        try {
-                            MediaIntegrity.writeSidecar(cacheFile, MediaIntegrity.toHex(digest));
-                        } catch (IOException e) {
-                            Log.w(TAG, "acquireRemoteFile: failed to write integrity sidecar for "
-                                    + cacheFile.getName(), e);
-                        }
                         String reason = MediaCompatibility.incompatibleReasonForFile(asset.type, cacheFile);
                         if (reason != null) {
                             Log.w(TAG, "acquireRemoteFile: " + cacheFile.getName() + " is " + reason
-                                    + "; discarding and skipping " + asset.key());
+                                    + "; discarding it and falling back for " + asset.key());
                             deleteCachedFile(cacheFile);
                             knownIncompatibleKeys.add(asset.key());
                             return null;
@@ -893,7 +923,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     static String cacheFileName(String uuid, String originalFileName, String originalPath,
                                 ImmichType type, boolean fallback) {
         if (fallback) {
-            return uuid + "." + defaultExtension(type);
+            // Marked, because an original named ".jpg" would otherwise cache the thumbnail under
+            // its own file name and the two sources would evict each other every rotation.
+            return uuid + "_fb." + defaultExtension(type);
         }
 
         String extension = extensionFromFileName(originalFileName);
@@ -992,8 +1024,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     // ---------------------------------------------------------------- asset-key operations
 
     /**
-     * Shows a preview thumbnail (image) or a /video/playback stream (video) for a failed asset.
-     * No-op for local backends (they have no fallback source).
+     * Shows a preview thumbnail (image) or a /video/playback stream (video) for an asset whose
+     * original failed to display. This is the second and last attempt: a backend with no
+     * fallback source, or a fallback that cannot be fetched, flags the asset as incompatible.
      */
     @Override
     public void displayThumbnailAsset(Activity activity, String assetKey, boolean isVideo) {
@@ -1013,11 +1046,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 } catch (Exception e) {
                     Log.w(TAG, "displayThumbnailAsset: " + key, e);
                     postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
+                    tagAssetAsIncompatible(key);
                     return;
                 }
                 if (source == null || source.opener == null) {
                     Log.i(TAG, "displayThumbnailAsset: backend '" + backend.getId()
                             + "' has no fallback for " + key);
+                    tagAssetAsIncompatible(key);
                     return;
                 }
                 try {
@@ -1032,33 +1067,34 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                                 return;
                             }
                             if (isVideo) {
-                                mediaManagerListener.displayVideo(shown, null);
+                                mediaManagerListener.displayFallbackVideo(shown, key);
                             } else {
-                                mediaManagerListener.displayPicture(shown, null);
+                                mediaManagerListener.displayFallbackPicture(shown, key);
                             }
                         }
                     });
                 } catch (Exception e) {
                     Log.w(TAG, "displayThumbnailAsset: " + key, e);
                     postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
+                    tagAssetAsIncompatible(key);
                 }
             }
         }, "thumbnail-" + key).start();
     }
 
     /**
-     * Marks a failed asset with the backend's incompatible tag (Immich: find-or-create
+     * Marks an asset with the backend's incompatible tag (Immich: find-or-create
      * EO1_INCOMPATIBLE). Local backends no-op. No-op for unknown keys.
      *
-     * <p>At most one tag POST per key per process: assets that keep failing are re-flagged
-     * every rotation cycle until the pool rebuild excludes them, so a dedup set keeps the
-     * request traffic to a single tag lookup + write per key.
+     * <p>Called only after both the original and the fallback source failed to display, and
+     * repeated on every rotation that fails: the tag exists to surface the asset in the Immich
+     * UI for the operator to fix (regenerate its thumbnails) or take out of the frame's albums,
+     * so a stale tag must never retire an asset the app would happily show again. The app does
+     * not read this tag back as a filter, and re-tagging an already-tagged asset is a no-op
+     * server-side.
      */
     @Override
     public void tagAssetAsIncompatible(final String assetKey) {
-        if (!tagIncompatibleAttempted.add(assetKey)) {
-            return;
-        }
         new Thread(new Runnable() {
             @Override
             public void run() {

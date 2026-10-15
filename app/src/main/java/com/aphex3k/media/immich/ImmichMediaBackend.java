@@ -8,7 +8,6 @@ import androidx.annotation.Nullable;
 import com.aphex3k.eo1.ApiServiceGenerator;
 import com.aphex3k.eo1.BackendUnavailableException;
 import com.aphex3k.eo1.ConfigurationBackendEntry;
-import com.aphex3k.eo1.MediaCompatibility;
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
 import com.aphex3k.immichApi.ImmichExifInfo;
 import com.aphex3k.immichApi.ImmichType;
@@ -19,10 +18,7 @@ import com.aphex3k.media.MediaType;
 import com.vdurmont.semver4j.Semver;
 
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
  * Immich implementation of {@link MediaBackend}: one configured host with one
@@ -39,9 +35,6 @@ import java.util.Set;
 public class ImmichMediaBackend implements MediaBackend {
 
     private static final String TAG = "EO1";
-
-    /** Device memory ceiling: originals larger than this are not fetchable. */
-    public static final long MAX_ASSET_BYTES = 1073741824L;
 
     private static final String INCOMPATIBLE_TAG_NAME = "EO1_INCOMPATIBLE";
 
@@ -116,37 +109,28 @@ public class ImmichMediaBackend implements MediaBackend {
         return compatibilityWarning;
     }
 
+    /**
+     * Builds the rotation pool from every image and video the account can see. Nothing here
+     * judges whether this device can <em>decode</em> an asset: that is decided by displaying
+     * it (original first, then the backend's fallback), never by metadata that may be stale —
+     * a regenerated thumbnail or a re-encoded original must come back into the rotation on the
+     * next pool rebuild without an app change.
+     */
     @Override
     public List<MediaAsset> fetchCatalog() throws Exception {
         List<ImmichApiAssetResponse> raw = client.fetchCatalogAssets();
-        // Best-effort: assets this device already tagged as undecodable stay out of the
-        // pool. A failed tag lookup must never cost the whole catalog.
-        Set<String> excludedIds = Collections.emptySet();
-        try {
-            excludedIds = new HashSet<>(client.listTaggedAssetIds(INCOMPATIBLE_TAG_NAME));
-        } catch (Exception e) {
-            Log.w(TAG, "Backend '" + entry.id + "': could not load " + INCOMPATIBLE_TAG_NAME
-                    + " asset list, including all assets: " + e);
-        }
         List<MediaAsset> assets = new ArrayList<>(raw.size());
-        int skipped = 0;
-        int excluded = 0;
+        int ineligible = 0;
         for (ImmichApiAssetResponse r : raw) {
-            if (!isCompatibleAsset(r)) {
-                skipped++;
-            } else if (excludedIds.contains(r.getId())) {
-                excluded++;
-            } else {
+            if (isDisplayable(r)) {
                 assets.add(toMediaAsset(entry.id, r));
+            } else {
+                ineligible++;
             }
         }
-        if (skipped > 0) {
-            Log.d(TAG, "Catalog '" + entry.id + "': " + skipped
-                    + " asset(s) skipped as incompatible with this device");
-        }
-        if (excluded > 0) {
-            Log.d(TAG, "Catalog '" + entry.id + "': " + excluded
-                    + " asset(s) excluded as tagged " + INCOMPATIBLE_TAG_NAME);
+        if (ineligible > 0) {
+            Log.d(TAG, "Catalog '" + entry.id + "': " + ineligible
+                    + " entry(s) are not images or videos, or are in the trash");
         }
         return assets;
     }
@@ -168,6 +152,13 @@ public class ImmichMediaBackend implements MediaBackend {
         return MediaSource.remoteThumbnail(() -> c.thumbnailStream(rawId));
     }
 
+    /**
+     * Flags the asset with {@value #INCOMPATIBLE_TAG_NAME} so the operator can find it in the
+     * Immich UI. The tag is <em>not</em> a filter: the app keeps showing the asset and re-tags it
+     * every time both the original and the fallback stream fail, so the tag means "this one needs
+     * attention in the library" — regenerate its thumbnails, re-encode it, or drop it from the
+     * albums this frame reads. Clearing the tag is the operator's call, never the app's.
+     */
     @Override
     public void markIncompatible(MediaAsset asset) {
         final MediaAsset a = asset;
@@ -202,28 +193,15 @@ public class ImmichMediaBackend implements MediaBackend {
     }
 
     /**
-     * Device compatibility gate for an Immich asset: exif present, file size within
-     * {@link #MAX_ASSET_BYTES}, not trashed, a media type the pipeline can display, and no
-     * known-unsupported codec by file name (checked before the original is downloaded).
+     * Pool-membership gate, deliberately silent on codecs: the asset must be an image or a
+     * video the account still has (a trashed asset's original URL stops resolving), and that
+     * is all. Whether this device can decode it is answered by displaying it.
      */
-    public static boolean isCompatibleAsset(@NonNull ImmichApiAssetResponse asset) {
-        ImmichExifInfo exif = asset.getExifInfo();
-        if (exif == null) {
-            return false;
-        }
-        Long fileSize = exif.getFileSizeInByte();
-        if (fileSize == null || fileSize > MAX_ASSET_BYTES) {
-            return false;
-        }
+    public static boolean isDisplayable(@NonNull ImmichApiAssetResponse asset) {
         if (Boolean.TRUE.equals(asset.getIsTrashed())) {
             return false;
         }
-        if (asset.getType() != ImmichType.IMAGE && asset.getType() != ImmichType.VIDEO) {
-            return false;
-        }
-        MediaType type = asset.getType() == ImmichType.VIDEO ? MediaType.VIDEO : MediaType.IMAGE;
-        return MediaCompatibility.incompatibleReason(
-                type, asset.getOriginalFileName(), asset.getOriginalPath()) == null;
+        return asset.getType() == ImmichType.IMAGE || asset.getType() == ImmichType.VIDEO;
     }
 
     /** Pure mapping from an Immich DTO to a compact pipeline record. */

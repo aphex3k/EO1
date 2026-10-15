@@ -60,91 +60,43 @@ public class ImmichMediaBackendMappingTest {
     }
 
     @Test
-    public void compatibleRequiresExifInfo() {
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"IMAGE\"}")));
-    }
-
-    @Test
-    public void compatibleRejectsOversized() {
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+    public void poolMembershipIgnoresEverythingButTypeAndTrash() {
+        // No exif yet (the job has not run), oversized, HEIF by name: all of them belong in the
+        // pool, because the decoder is the only thing allowed to decide.
+        assertTrue(ImmichMediaBackend.isDisplayable(asset("{\"id\":\"a\",\"type\":\"IMAGE\"}")));
+        assertTrue(ImmichMediaBackend.isDisplayable(
                 asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"exifInfo\":{\"fileSizeInByte\":1073741825}}")));
-    }
-
-    @Test
-    public void compatibleAcceptsExactlyAtLimit() {
-        assertTrue(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"exifInfo\":{\"fileSizeInByte\":1073741824}}")));
-    }
-
-    @Test
-    public void compatibleRejectsTrashed() {
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"isTrashed\":true,\"exifInfo\":{\"fileSizeInByte\":10}}")));
-    }
-
-    @Test
-    public void compatibleRejectsNonMediaTypes() {
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"AUDIO\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"OTHER\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(asset("{\"id\":\"a\"}")));
-    }
-
-    @Test
-    public void compatibleAcceptsMediaTypes() {
-        assertTrue(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        assertTrue(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
-    }
-
-    @Test
-    public void nullFileSizeIsIncompatible() {
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+        assertTrue(ImmichMediaBackend.isDisplayable(
                 asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"exifInfo\":{}}")));
-    }
-
-    @Test
-    public void compatibleRejectsHeifAndAvifImages() {
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+        assertTrue(ImmichMediaBackend.isDisplayable(
                 asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo.heic\","
                         + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo.heif\","
-                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo.avif\","
-                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
-    }
-
-    @Test
-    public void compatibleRejectsHevcAndAv1Videos() {
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"originalFileName\":\"clip.h265\","
-                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
+        assertTrue(ImmichMediaBackend.isDisplayable(
                 asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"originalFileName\":\"clip.hevc\","
                         + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"originalFileName\":\"clip.av1\","
+    }
+
+    @Test
+    public void poolMembershipRejectsTrashed() {
+        assertFalse(ImmichMediaBackend.isDisplayable(
+                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"isTrashed\":true,"
                         + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
     }
 
     @Test
-    public void compatibleAcceptsContainerVideoAndExtensionFallbacks() {
-        // .mp4 can hold H.264: never flagged by the name check.
-        assertTrue(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"originalFileName\":\"clip.mp4\","
-                        + "\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        // HEIF extension only in the path, when the name has none.
-        assertFalse(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo\","
-                        + "\"originalPath\":\"/photos/photo.heic\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
-        // Decodable extension in the path passes.
-        assertTrue(ImmichMediaBackend.isCompatibleAsset(
-                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"originalFileName\":\"photo\","
-                        + "\"originalPath\":\"/photos/photo.jpg\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
+    public void poolMembershipRejectsNonMediaTypes() {
+        assertFalse(ImmichMediaBackend.isDisplayable(
+                asset("{\"id\":\"a\",\"type\":\"AUDIO\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        assertFalse(ImmichMediaBackend.isDisplayable(
+                asset("{\"id\":\"a\",\"type\":\"OTHER\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        assertFalse(ImmichMediaBackend.isDisplayable(asset("{\"id\":\"a\"}")));
+    }
+
+    @Test
+    public void poolMembershipAcceptsBothMediaTypes() {
+        assertTrue(ImmichMediaBackend.isDisplayable(
+                asset("{\"id\":\"a\",\"type\":\"IMAGE\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
+        assertTrue(ImmichMediaBackend.isDisplayable(
+                asset("{\"id\":\"a\",\"type\":\"VIDEO\",\"exifInfo\":{\"fileSizeInByte\":10}}")));
     }
 }
