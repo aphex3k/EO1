@@ -246,6 +246,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     };
     /** Guards against two repairs overlapping; the watchdog ticks faster than adbd round-trips. */
     private volatile boolean repairRunning = false;
+    /** One vendor-OTA silencing attempt per process — see {@link #silenceVendorUpdater()}. */
+    private volatile boolean vendorUpdaterAttempted = false;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -339,6 +341,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             displayStateFilter.addAction(Intent.ACTION_SCREEN_OFF);
             registerReceiver(displayStateReceiver, displayStateFilter);
         }
+
+        silenceVendorUpdater();
     }
 
     private void configureMqttManager() {
@@ -1710,6 +1714,38 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 }
             }
         }, "eo1-" + name).start();
+    }
+
+    /**
+     * Best-effort, once per process, from {@code onCreate}: ask the device's own adbd to disable the
+     * receivers behind the ROM's two OTA pollers (see {@link DeviceRepair#VENDOR_UPDATER_COMMANDS}).
+     * Deliberately not part of the core loop — adbd is loopback, so Wi-Fi has nothing to do with it,
+     * and a frame that boots into a dead network is precisely the one whose poller still fires every
+     * 15 minutes. Kept out of the watchdog ladder too: this is not a repair and must never block the
+     * caller. A frame whose ROM has no such package says so once in {@code /logs} and moves on. The
+     * attempt is claimed before the thread starts, so an unreachable adbd costs one log line, not a
+     * retry loop; the next launch tries again.
+     */
+    private void silenceVendorUpdater() {
+        if (vendorUpdaterAttempted) {
+            return;
+        }
+        vendorUpdaterAttempted = true;
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    AdbdInstallClient client = new AdbdInstallClient();
+                    List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(client::exec);
+                    String outcome = DeviceRepair.describe(steps);
+                    Log.i(TAG, "vendor updater: " + outcome);
+                    debugInformationProvided(new DebugInformation("vendorUpdater", outcome));
+                } catch (Throwable t) {
+                    // A background attempt must never reach the global handler (System.exit(2)).
+                    Log.w(TAG, "vendor updater: " + t);
+                }
+            }
+        }, "eo1-vendor-updater").start();
     }
 
     /**

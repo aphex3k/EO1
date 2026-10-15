@@ -55,8 +55,18 @@ public class DeviceRepairTest {
         assertEquals("svc wifi disable", DeviceRepair.CMD_WIFI_DISABLE);
         assertEquals("svc wifi enable", DeviceRepair.CMD_WIFI_ENABLE);
         assertEquals("reboot", DeviceRepair.CMD_REBOOT);
+        assertEquals("pm disable com.geniatech.upgrade/.UpdateReceiver",
+                DeviceRepair.CMD_DISABLE_VENDOR_UPDATER);
+        assertEquals("pm disable com.electricobjects.updater/.CheckUpdateReceiver",
+                DeviceRepair.CMD_DISABLE_EO_UPDATER_CHECK);
+        assertEquals("pm disable com.electricobjects.updater/.BootCompletedReceiver",
+                DeviceRepair.CMD_DISABLE_EO_UPDATER_BOOT);
         assertEquals(Arrays.asList(DeviceRepair.CMD_WIFI_DISABLE, DeviceRepair.CMD_WIFI_ENABLE),
                 DeviceRepair.WIFI_REPAIR_COMMANDS);
+        assertEquals(3, DeviceRepair.VENDOR_UPDATER_COMMANDS.size());
+        assertTrue(DeviceRepair.isKnownCommand(DeviceRepair.CMD_DISABLE_VENDOR_UPDATER));
+        assertTrue(DeviceRepair.isKnownCommand(DeviceRepair.CMD_DISABLE_EO_UPDATER_CHECK));
+        assertTrue(DeviceRepair.isKnownCommand(DeviceRepair.CMD_DISABLE_EO_UPDATER_BOOT));
         assertFalse(DeviceRepair.isKnownCommand("svc wifi disable; rm -rf /data"));
         assertFalse(DeviceRepair.isKnownCommand("getprop ro.serialno"));
         assertFalse(DeviceRepair.isKnownCommand(""));
@@ -113,5 +123,50 @@ public class DeviceRepairTest {
         assertEquals(java.util.Collections.singletonList(DeviceRepair.CMD_REBOOT), executor.executed);
         assertEquals(1, steps.size());
         assertTrue(steps.get(0).ok());
+    }
+
+    @Test
+    public void silencesEveryUpdaterReceiverWithoutTouchingThePackages() {
+        FakeExecutor executor = new FakeExecutor();
+
+        List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(executor);
+
+        // Components, not packages: a receiver is what each alarm and each BOOT_COMPLETED reaches,
+        // so disabling it cuts the wake while leaving whatever else the vendor package offers alone.
+        assertEquals(DeviceRepair.VENDOR_UPDATER_COMMANDS, executor.executed);
+        assertEquals(3, steps.size());
+        for (DeviceRepair.Step step : steps) {
+            assertTrue(step.command, step.ok());
+        }
+    }
+
+    @Test
+    public void aMissingUpdaterDoesNotStopTheOthers() {
+        FakeExecutor executor = new FakeExecutor()
+                .answering(DeviceRepair.CMD_DISABLE_EO_UPDATER_BOOT, AdbdInstallClient.Outcome.PM_FAILED,
+                        "Unable to find package");
+
+        List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(executor);
+
+        assertEquals("a frame whose ROM lacks one updater still silences the rest",
+                DeviceRepair.VENDOR_UPDATER_COMMANDS, executor.executed);
+        assertTrue(steps.get(0).ok());
+        assertFalse(steps.get(2).ok());
+        String described = DeviceRepair.describe(steps);
+        assertTrue(described, described.contains("=pm_failed (Unable to find package)"));
+    }
+
+    @Test
+    public void unreachableAdbdEndsTheSilencingSequenceEarly() {
+        FakeExecutor executor = new FakeExecutor()
+                .answering(DeviceRepair.CMD_DISABLE_VENDOR_UPDATER, AdbdInstallClient.Outcome.UNREACHABLE,
+                        "SocketTimeoutException");
+
+        List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(executor);
+
+        assertEquals("no reason to spend another timeout if the first never landed",
+                java.util.Collections.singletonList(DeviceRepair.CMD_DISABLE_VENDOR_UPDATER),
+                executor.executed);
+        assertEquals(1, steps.size());
     }
 }
