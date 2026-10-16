@@ -66,10 +66,11 @@ public interface ImmichClient {
 
     /**
      * Finds or creates a tag named {@code tagName} on this server and adds {@code assetId}
-     * to it. No-ops silently when the tag cannot be found or created (matches legacy
-     * behaviour).
+     * to it.
      *
-     * @throws com.aphex3k.eo1.ImmichApiTagException when tagging the asset fails.
+     * @throws com.aphex3k.eo1.ImmichApiTagException when the tag could not be listed, found,
+     *         created, or applied — always with the server's status line. Nothing about this
+     *         call is silent: an unwritten tag must be distinguishable from an unnecessary one.
      */
     void tagAssetIncompatible(String assetId, String tagName) throws Exception;
 

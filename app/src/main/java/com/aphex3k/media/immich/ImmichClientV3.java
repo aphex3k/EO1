@@ -7,6 +7,7 @@ import androidx.annotation.Nullable;
 import com.aphex3k.eo1.ApiServiceGenerator;
 import com.aphex3k.eo1.AuthenticationFailedException;
 import com.aphex3k.eo1.AuthenticationUnavailableException;
+import com.aphex3k.eo1.ImmichApiTagException;
 import com.aphex3k.eo1.InvalidCredentialsException;
 import com.aphex3k.eo1.MediaDownloadFailedException;
 import com.aphex3k.immichApi.ImmichApiAssetResponse;
@@ -226,25 +227,42 @@ public class ImmichClientV3 implements ImmichClient {
         return response.body().byteStream();
     }
 
+    /**
+     * Finds or creates {@code tagName} and adds {@code assetId} to it. Every step reports its
+     * failure: a tag that was never written used to return quietly, which made "nothing in the
+     * Immich tag list" indistinguishable from "nothing needed tagging".
+     */
     @Override
     public void tagAssetIncompatible(String assetId, String tagName)
-            throws IOException, com.aphex3k.eo1.ImmichApiTagException {
-        String tagId = findTagId(tagName);
+            throws IOException, ImmichApiTagException {
+        Response<List<ImmichApiTagResponse>> allTagsResponse =
+                withSession(() -> service.getAllTags());
+        if (!allTagsResponse.isSuccessful()) {
+            throw new ImmichApiTagException(
+                    "could not list tags to find " + tagName + ": " + describe(allTagsResponse));
+        }
+        String tagId = matchTagIdByName(allTagsResponse.body(), tagName);
         if (tagId == null) {
             Response<ImmichApiTagResponse> createTag =
                     withSession(() -> service.createTag(new ImmichApiTag(tagName)));
-            if (createTag.isSuccessful() && createTag.body() != null) {
-                tagId = createTag.body().getId();
+            if (!createTag.isSuccessful()) {
+                throw new ImmichApiTagException("could not create tag "
+                        + tagName + ": " + describe(createTag));
+            }
+            ImmichApiTagResponse created = createTag.body();
+            tagId = created != null ? created.getId() : null;
+            if (tagId == null) {
+                throw new ImmichApiTagException(
+                        "created tag " + tagName + " but the server returned no id");
             }
         }
-        if (tagId != null) {
-            final String finalTagId = tagId;
-            Response<List<com.aphex3k.immichApi.ImmichApiTagAssetResponse>> addTag =
-                    withSession(() -> service.tagAssets(
-                            finalTagId, new ImmichApiTagAssetBody(Collections.singletonList(assetId))));
-            if (!addTag.isSuccessful()) {
-                throw new com.aphex3k.eo1.ImmichApiTagException();
-            }
+        final String finalTagId = tagId;
+        Response<List<com.aphex3k.immichApi.ImmichApiTagAssetResponse>> addTag =
+                withSession(() -> service.tagAssets(
+                        finalTagId, new ImmichApiTagAssetBody(Collections.singletonList(assetId))));
+        if (!addTag.isSuccessful()) {
+            throw new ImmichApiTagException("could not tag asset " + assetId
+                    + " with " + tagName + " (tag " + finalTagId + "): " + describe(addTag));
         }
     }
 
@@ -257,14 +275,39 @@ public class ImmichClientV3 implements ImmichClient {
     private String findTagId(String tagName) throws IOException {
         Response<List<ImmichApiTagResponse>> allTagsResponse =
                 withSession(() -> service.getAllTags());
-        if (allTagsResponse.isSuccessful() && allTagsResponse.body() != null) {
-            for (ImmichApiTagResponse tag : allTagsResponse.body()) {
-                if (tagName.equals(tag.getName())) {
-                    return tag.getId();
-                }
+        return allTagsResponse.isSuccessful()
+                ? matchTagIdByName(allTagsResponse.body(), tagName)
+                : null;
+    }
+
+    @Nullable
+    private static String matchTagIdByName(List<ImmichApiTagResponse> tags, String tagName) {
+        if (tags == null) {
+            return null;
+        }
+        for (ImmichApiTagResponse tag : tags) {
+            if (tag != null && tagName.equals(tag.getName())) {
+                return tag.getId();
             }
         }
         return null;
+    }
+
+    /** Status line of a failed response, with whatever reason the server body carries. */
+    private static String describe(Response<?> response) {
+        String detail = "";
+        try {
+            okhttp3.ResponseBody error = response.errorBody();
+            if (error != null) {
+                String text = error.string().trim();
+                if (!text.isEmpty()) {
+                    detail = " " + (text.length() > 200 ? text.substring(0, 200) : text);
+                }
+            }
+        } catch (Exception e) {
+            // The status code already says the most useful part.
+        }
+        return "HTTP " + response.code() + detail;
     }
 
     /**
