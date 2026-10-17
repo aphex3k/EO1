@@ -134,6 +134,7 @@ public class UpdateStateStoreTest {
         assertEquals(UpdateState.State.INSTALL_PENDING, s.state);
         assertEquals(0L, s.installFiredAtMs);
         assertFalse(s.needsHumanConfirmation);
+        assertFalse("an old state file never claims an open adb window", s.armedTcpAdb);
     }
 
     @Test
@@ -143,11 +144,14 @@ public class UpdateStateStoreTest {
         UpdateState s = stateIn(UpdateState.State.STAGED, "needs-human-confirmation");
         s.installFiredAtMs = 1700000009000L;
         s.needsHumanConfirmation = true;
+        s.armedTcpAdb = true;
         assertTrue(store.write(s));
 
         UpdateState read = store.read();
         assertEquals(1700000009000L, read.installFiredAtMs);
         assertTrue(read.needsHumanConfirmation);
+        assertTrue("the process that dies mid-install must leave the next one a note to close adb",
+                read.armedTcpAdb);
         assertEquals("needs-human-confirmation", read.lastError);
     }
 

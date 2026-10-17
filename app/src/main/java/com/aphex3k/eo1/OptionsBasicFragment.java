@@ -51,6 +51,8 @@ public class OptionsBasicFragment extends Fragment {
     private CheckBox trustedNetworkCheckBox;
     private TextView trustedNetworkTokenView;
     private TextView trustedNetworkIpView;
+    private CheckBox loopbackAdbCheckBox;
+    private TextView loopbackAdbLabel;
     private CheckBox autoRebootCheckBox;
     private String[] allTimeZoneIds;
 
@@ -91,6 +93,8 @@ public class OptionsBasicFragment extends Fragment {
         trustedNetworkCheckBox = view.findViewById(R.id.trustedNetworkCheckBox);
         trustedNetworkTokenView = view.findViewById(R.id.trustedNetworkTokenView);
         trustedNetworkIpView = view.findViewById(R.id.trustedNetworkIpView);
+        loopbackAdbCheckBox = view.findViewById(R.id.loopbackAdbCheckBox);
+        loopbackAdbLabel = view.findViewById(R.id.loopbackAdbLabel);
         autoRebootCheckBox = view.findViewById(R.id.autoRebootCheckBox);
 
         allTimeZoneIds = TimeZone.getAvailableIDs();
@@ -125,6 +129,9 @@ public class OptionsBasicFragment extends Fragment {
                 settingsManager.setTrustedNetwork(isChecked);
                 updateTrustedNetworkTokenView();
             });
+            loopbackAdbCheckBox.setChecked(settingsManager.isLoopbackAdbAllowed());
+            loopbackAdbCheckBox.setOnCheckedChangeListener((buttonView, isChecked) ->
+                    settingsManager.setLoopbackAdbAllowed(isChecked));
             autoRebootCheckBox.setChecked(config.autoReboot);
         }
         renderBackendList();
@@ -170,19 +177,28 @@ public class OptionsBasicFragment extends Fragment {
      * checkbox while the flag is on. The token is the only way to use the web UI's
      * configuration endpoints and the IP is where the web UI lives, so both must be
      * readable by someone standing in front of the device.
+     *
+     * <p>Also shows the <i>Allow loopback ADB for update installs</i> row. It is hidden while
+     * Trusted Network is off because that is the real rule: silent installs need both, so a
+     * checkbox that could never take effect is not offered.
      */
     private void updateTrustedNetworkTokenView() {
         if (settingsManager == null || trustedNetworkTokenView == null) {
             return;
         }
-        if (settingsManager.isTrustedNetwork()) {
+        boolean trusted = settingsManager.isTrustedNetwork();
+        int trustedViews = trusted ? View.VISIBLE : View.GONE;
+        trustedNetworkTokenView.setVisibility(trustedViews);
+        trustedNetworkIpView.setVisibility(trustedViews);
+        if (trusted) {
             trustedNetworkTokenView.setText("Configuration token: " + settingsManager.trustedNetworkToken());
-            trustedNetworkTokenView.setVisibility(View.VISIBLE);
             trustedNetworkIpView.setText("Wi-Fi IP: " + wifiIp());
-            trustedNetworkIpView.setVisibility(View.VISIBLE);
-        } else {
-            trustedNetworkTokenView.setVisibility(View.GONE);
-            trustedNetworkIpView.setVisibility(View.GONE);
+        }
+        if (loopbackAdbCheckBox != null) {
+            loopbackAdbCheckBox.setVisibility(trustedViews);
+        }
+        if (loopbackAdbLabel != null) {
+            loopbackAdbLabel.setVisibility(trustedViews);
         }
     }
 

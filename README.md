@@ -202,14 +202,25 @@ Install is a ladder, and a frame walks down it only as far as it can do the work
   sideloaded frames never hold it — for them the app instead runs `pm install -r` as the
   shell user through the device's own adbd on `127.0.0.1:5555` (`AdbdInstallClient` speaks
   the minimal adb wire protocol; no confirmation UI).
-- **The EO1 ROM never configures that adbd** (`service.adb.tcp.port` is unset, so a connect
-  gives `ECONNREFUSED`), so the app sets the property and restarts the service itself
-  (`AdbdInstallClient.ensureTcpAdbd()`, at most one restart per 10 minutes). The same rung is
-  what makes the watchdog's Wi-Fi repair and the vendor-OTA `pm disable` lines work on EO1.
-  ⚠️ There is no loopback-only mode: adbd binds `0.0.0.0`, so an armed frame answers `adb`
-  from anywhere on your LAN **as root**. Treat that like the frame's unsecured web server —
-  trusted LAN only, or firewall/off-VLAN port 5555. Restarting adbd also drops any host `adb`
-  session currently attached over USB.
+- **The EO1 ROM never configures that adbd** (`service.adb.tcp.port` is unset, so a connect gives
+  `ECONNREFUSED`), so on that board a silent install needs the frame to start adbd itself — and it
+  does that **one action at a time, and only if you say so twice**: *Trusted Network* **and** *Allow
+  loopback ADB for update installs* in the options dialog, both default off
+  (`SettingsManager.isLoopbackAdbEnabled()`). With the pair on, `AdbdInstallClient.ensureTcpAdbd()`
+  writes the property and restarts the service (at most once per 10 minutes); with either off the app
+  touches nothing and falls to the next rung.
+  ⚠️ Because there is no loopback-only mode, an armed frame answers `adb` from anywhere it can route
+  to, **as root** — a wider door than the frame's unsecured web server, which is why it is opt-in and
+  why the window is one action rather than one boot: `teardownTcpAdbd()` writes
+  `service.adb.tcp.port=-1` and restarts adbd in a `finally` the moment that action ends (and if an
+  install's own success kills the process first, the note left in the state file makes the next
+  launch close it). An adbd the ROM started on its own, as on EO2, is never touched — closing a
+  daemon you did not open would only interrupt it. Restarting adbd drops any host `adb` session
+  attached over USB.
+- **It is never started to be ready.** Two places may ask for it: an install while an update is
+  staged, and a watchdog rung the ladder has actually reached (Wi-Fi repair, `reboot`). Nothing is
+  opened at boot — the launch-time vendor-OTA `pm disable` only *probes*, and logs a skip when
+  nothing is listening, so flipping the flag does not silently widen what runs unattended.
 - If neither silent transport works, **an automatic cycle puts nothing on screen.** A frame is
   mounted on a wall and dark through quiet hours; a confirmation dialog shown to nobody is not
   an install, it just looks like one for days. The update stays `STAGED` and retryable with
@@ -230,7 +241,7 @@ Install is a ladder, and a frame walks down it only as far as it can do the work
 
 | Symptom | Action |
 |---|---|
-| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode` (`headless`/`adbd`/`defer-to-human`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable`, `needsHumanConfirmation`, `installFiredAtMs` |
+| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode` (`headless`/`adbd`/`defer-to-human`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable`, `loopbackAdbAllowed`, `tcpAdbArmedByApp`, `needsHumanConfirmation`, `installFiredAtMs` |
 | Staged but not installed | `/logs` says which transport failed. If `needsHumanConfirmation` is set, no silent install is possible on that frame: `/control?action=install-staged` (turns the screen on and shows the confirmation dialog there) |
 | Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
 | Force a re-check now | `/control?action=check-updates` |

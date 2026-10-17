@@ -1801,12 +1801,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         new Thread(new Runnable() {
             @Override
             public void run() {
+                AdbdInstallClient.Result armed = null;
                 try {
-                    // EO1's ROM ships no service.adb.tcp.port, so without this every rung would
-                    // stop at its first ECONNREFUSED. Rate-limited inside; cheap when reachable.
-                    AdbdInstallClient.Result transport = AdbdInstallClient.ensureTcpAdbd();
-                    if (transport.outcome != AdbdInstallClient.Outcome.SUCCESS) {
-                        logWatchdogEvent(name + " skipped: adbd unreachable (" + transport.detail + ")", true);
+                    // The ladder has reached this rung, so it may use adbd — but only for as long as
+                    // this one action runs: start it now (if the operator allowed that at all), and
+                    // the finally below closes it again. Between rungs nothing is listening.
+                    armed = AdbdInstallClient.ensureTcpAdbd(
+                            settingsManager != null && settingsManager.isLoopbackAdbEnabled());
+                    if (armed.outcome != AdbdInstallClient.Outcome.SUCCESS
+                            && armed.outcome != AdbdInstallClient.Outcome.ARMED) {
+                        logWatchdogEvent(name + " skipped: adbd unavailable (" + armed.detail + ")", true);
                         return;
                     }
                     List<DeviceRepair.Step> steps = task.run(new AdbdInstallClient());
@@ -1815,6 +1819,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     // A repair thread must never reach the global handler (System.exit(2)).
                     logWatchdogEvent(name + " failed: " + t, true);
                 } finally {
+                    if (armed != null && armed.outcome == AdbdInstallClient.Outcome.ARMED) {
+                        AdbdInstallClient.teardownTcpAdbd();
+                    }
                     repairRunning = false;
                 }
             }
@@ -1840,11 +1847,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public void run() {
                 try {
-                    AdbdInstallClient.Result transport = AdbdInstallClient.ensureTcpAdbd();
-                    if (transport.outcome != AdbdInstallClient.Outcome.SUCCESS) {
-                        Log.i(TAG, "vendor updater: skipped, adbd unreachable (" + transport.detail + ")");
+                    if (!AdbdInstallClient.probe()) {
+                        // Silencing the vendor pollers is not an action anyone asked for, so unlike a
+                        // reached watchdog rung it never opens a root port on the LAN — it uses one
+                        // that is already there. On an EO1 that makes this a logged no-op.
+                        Log.i(TAG, "vendor updater: skipped, adbd is not listening");
                         debugInformationProvided(new DebugInformation("vendorUpdater",
-                                "skipped: adbd unreachable (" + transport.detail + ")"));
+                                "skipped: adbd is not listening"));
                         return;
                     }
                     AdbdInstallClient client = new AdbdInstallClient();

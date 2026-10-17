@@ -32,7 +32,13 @@ public final class AdbdInstallClient {
         /** adbd was reached but {@code pm install} reported a failure. */
         PM_FAILED,
         /** adbd was unreachable or the protocol exchange did not complete. */
-        UNREACHABLE
+        UNREACHABLE,
+        /**
+         * adbd is listening <em>because this call started it</em> — the caller owes a
+         * {@link #teardownTcpAdbd()} when its action ends. Distinct from {@code SUCCESS} precisely
+         * so a daemon the ROM owns is never mistaken for one the app opened.
+         */
+        ARMED
     }
 
     /** Outcome plus a short human-readable detail (log / {@code /state} friendly). */
@@ -59,6 +65,8 @@ public final class AdbdInstallClient {
     /** init's service-control property; writing a service name to it restarts that service. */
     static final String PROP_RESTART_SERVICE = "ctl.restart";
     static final String SERVICE_ADBD = "adbd";
+    /** {@code service.adb.tcp.port} value that means "do not listen" — what teardown writes back. */
+    static final String PROP_TCP_PORT_OFF = "-1";
 
     /** Floor between adbd restarts, so a refusing ROM is asked once per window, not per tick. */
     static final long REARM_MIN_INTERVAL_MS = 10 * 60 * 1000L;
@@ -169,30 +177,43 @@ public final class AdbdInstallClient {
     }
 
     /**
-     * Makes sure adbd is listening, starting it if the ROM never did.
+     * Makes sure adbd is listening, starting it if the ROM never did — <b>only if the operator
+     * allowed that</b> ({@code allowed}, which is {@code SettingsManager.isLoopbackAdbEnabled()}:
+     * <i>Trusted Network</i> and <i>Allow loopback ADB for update installs</i> both on).
      *
-     * <p>The EO1 ROM does not set {@code service.adb.tcp.port}, so on that board loopback adbd is
-     * simply absent (a hard {@code ECONNREFUSED}, not a timeout — verified with no host attached);
-     * the EO2 ROM sets it. Both the silent install path and {@link DeviceRepair} need this daemon,
-     * and a frame that holds no {@code INSTALL_PACKAGES} has no other way to install by itself, so
-     * the app starts adbd itself. There is no loopback-only mode: adbd binds {@code 0.0.0.0}, so an
-     * armed frame answers {@code adb} from anywhere on the LAN as root — the same trusted-LAN
-     * assumption the web server makes, only stronger.
+     * <p>Why it needs asking: there is no loopback-only mode. adbd binds {@code 0.0.0.0} and its
+     * shell user is root on these ROMs, so arming it hands any host that can route to the frame an
+     * unauthenticated root shell and free APK install — a wider door than the frame's plain-HTTP web
+     * server, so the app never opens it as a side effect of an update. The EO1 ROM leaves
+     * {@code service.adb.tcp.port} unset (loopback adbd is simply absent — a hard
+     * {@code ECONNREFUSED}, verified with no host attached), the EO2 ROM sets it; the silent install
+     * path and {@link DeviceRepair} need the daemon either way.
      *
-     * <p>Restarting adbd also drops a host {@code adb} session attached over USB.
+     * <p>Who may ask: the install path, while an update is staged and being installed, and a
+     * watchdog rung that is actually running. Nothing else — not launch, not a tick that found
+     * nothing to do. Every caller that gets {@link Outcome#ARMED} closes it again with
+     * {@link #teardownTcpAdbd()} when its action ends, so the window is the action rather than the
+     * boot. Restarting adbd drops a host {@code adb} session attached over USB.
      *
-     * @return SUCCESS when the endpoint is reachable (it already was, or this call armed it);
-     *         UNREACHABLE with the reason otherwise — detail is log/{@code /state}-ready.
+     * @return ARMED when this call started the daemon (the caller owes a teardown), SUCCESS when it
+     *         was already listening, UNREACHABLE with the reason otherwise — detail is
+     *         log/{@code /state}-ready.
      */
-    public static Result ensureTcpAdbd() {
-        return ensureTcpAdbd(TCP_TRANSPORT, REFLECTIVE_PROPERTY_WRITER, THREAD_SLEEPER,
+    public static Result ensureTcpAdbd(boolean allowed) {
+        return ensureTcpAdbd(allowed, TCP_TRANSPORT, REFLECTIVE_PROPERTY_WRITER, THREAD_SLEEPER,
                 System.currentTimeMillis());
     }
 
-    /** Testable core of {@link #ensureTcpAdbd()} — no sockets, no hidden API, no sleeping. */
-    static Result ensureTcpAdbd(Transport transport, PropertyWriter writer, Sleeper sleeper, long nowMs) {
+    /** Testable core of {@link #ensureTcpAdbd(boolean)} — no sockets, no hidden API, no sleeping. */
+    static Result ensureTcpAdbd(boolean allowed, Transport transport, PropertyWriter writer,
+                                Sleeper sleeper, long nowMs) {
         if (transport.reachable()) {
+            // The ROM's own daemon. Not ours to close, and restarting it would only interrupt it.
             return new Result(Outcome.SUCCESS, "already listening");
+        }
+        if (!allowed) {
+            return new Result(Outcome.UNREACHABLE, "loopback adb not allowed (needs Trusted Network"
+                    + " + Allow loopback ADB for update installs in the options dialog)");
         }
         if (!shouldRearm(false, lastRearmAttemptMs, nowMs)) {
             return new Result(Outcome.UNREACHABLE, "not listening; re-arm attempted recently");
@@ -207,10 +228,33 @@ public final class AdbdInstallClient {
         for (int attempt = 0; attempt < REARM_PROBE_TRIES; attempt++) {
             sleeper.sleep(REARM_SETTLE_MS);
             if (transport.reachable()) {
-                return new Result(Outcome.SUCCESS, "re-armed");
+                return new Result(Outcome.ARMED, "started adbd for this action");
             }
         }
-        return new Result(Outcome.UNREACHABLE, "restarted adbd, still not listening");
+        // The write landed but nothing came up. The caller still owes a close: the property is set,
+        // so a late-starting adbd would come up open.
+        return new Result(Outcome.ARMED, "started adbd, but it is not answering yet");
+    }
+
+    /**
+     * Closes a window {@link #ensureTcpAdbd(boolean)} opened on this call's authority: writes
+     * {@code -1} (adbd's "no TCP") and restarts the service. Call it only on an
+     * {@link Outcome#ARMED} result — an EO2 whose ROM listens on its own must be left exactly as the
+     * ROM configured it.
+     */
+    public static Result teardownTcpAdbd() {
+        return teardownTcpAdbd(REFLECTIVE_PROPERTY_WRITER);
+    }
+
+    /** Testable core of {@link #teardownTcpAdbd()}. No settle wait: the restart reads what we wrote. */
+    static Result teardownTcpAdbd(PropertyWriter writer) {
+        try {
+            writer.set(PROP_TCP_PORT, PROP_TCP_PORT_OFF);
+            writer.set(PROP_RESTART_SERVICE, SERVICE_ADBD);
+        } catch (Throwable t) {
+            return new Result(Outcome.UNREACHABLE, "could not close loopback adb: " + t);
+        }
+        return new Result(Outcome.SUCCESS, "loopback adb closed");
     }
 
     /**

@@ -2,6 +2,7 @@ package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.io.File;
@@ -177,25 +178,48 @@ public class AdbdInstallClientTest {
                 1_000_000L + AdbdInstallClient.REARM_MIN_INTERVAL_MS));
     }
 
+    /**
+     * A daemon the ROM started is not ours: no property may be written (a restart would drop a host
+     * {@code adb} session for nothing) and the answer is not {@code ARMED}, so the caller has no
+     * teardown duty either — that is how "leave EO2 as it is" is expressed.
+     */
     @Test
     public void ensureTcpAdbd_leavesAWorkingAdbdAlone() {
         AdbdInstallClient.lastRearmAttemptMs = 0L;
         Recorder r = new Recorder(true, true);
 
-        assertEquals(AdbdInstallClient.Outcome.SUCCESS,
-                AdbdInstallClient.ensureTcpAdbd(r.transport, r.writer, r.sleeper, NOW).outcome);
+        AdbdInstallClient.Result already =
+                AdbdInstallClient.ensureTcpAdbd(true, r.transport, r.writer, r.sleeper, NOW);
+        assertEquals(AdbdInstallClient.Outcome.SUCCESS, already.outcome);
         assertTrue("no property may be written: restarting a live adbd would drop the session"
                 + " — " + r.writes, r.writes.isEmpty());
+        assertNotEquals("not ours to close", AdbdInstallClient.Outcome.ARMED, already.outcome);
     }
 
-    /** The EO1 case: nothing listening, ROM allows the write, adbd comes up. */
+    /**
+     * The whole point of the flag: without both options-dialog checkboxes the app never opens a
+     * root shell on the network, however much an install or a repair rung would like to.
+     */
     @Test
-    public void ensureTcpAdbd_writesBothPropertiesAndRetriesTheProbe() {
+    public void ensureTcpAdbd_neverArmsWithoutOperatorPermission() {
         AdbdInstallClient.lastRearmAttemptMs = 0L;
         Recorder r = new Recorder(false, true);
 
-        assertEquals(AdbdInstallClient.Outcome.SUCCESS,
-                AdbdInstallClient.ensureTcpAdbd(r.transport, r.writer, r.sleeper, NOW).outcome);
+        AdbdInstallClient.Result denied =
+                AdbdInstallClient.ensureTcpAdbd(false, r.transport, r.writer, r.sleeper, NOW);
+        assertEquals(AdbdInstallClient.Outcome.UNREACHABLE, denied.outcome);
+        assertTrue(denied.detail, denied.detail.contains("not allowed"));
+        assertTrue("no property may be written", r.writes.isEmpty());
+    }
+
+    /** The EO1 case: nothing listening, the operator allowed it, ROM allows the write. */
+    @Test
+    public void ensureTcpAdbd_writesBothPropertiesAndOwesAClose() {
+        AdbdInstallClient.lastRearmAttemptMs = 0L;
+        Recorder r = new Recorder(false, true);
+
+        assertEquals(AdbdInstallClient.Outcome.ARMED,
+                AdbdInstallClient.ensureTcpAdbd(true, r.transport, r.writer, r.sleeper, NOW).outcome);
         assertEquals(2, r.writes.size());
         assertEquals("service.adb.tcp.port=5555", r.writes.get(0));
         assertEquals("ctl.restart=adbd", r.writes.get(1));
@@ -207,17 +231,30 @@ public class AdbdInstallClientTest {
         AdbdInstallClient.lastRearmAttemptMs = 0L;
         Recorder r = new Recorder(false, false);
 
-        AdbdInstallClient.Result refused = AdbdInstallClient.ensureTcpAdbd(r.transport, r.writer,
-                r.sleeper, NOW);
+        AdbdInstallClient.Result refused = AdbdInstallClient.ensureTcpAdbd(true, r.transport,
+                r.writer, r.sleeper, NOW);
         assertEquals(AdbdInstallClient.Outcome.UNREACHABLE, refused.outcome);
         assertTrue(refused.detail, refused.detail.contains("ROM refused"));
         assertEquals(1, r.writes.size());
 
-        AdbdInstallClient.Result throttled = AdbdInstallClient.ensureTcpAdbd(r.transport, r.writer,
-                r.sleeper, NOW + 1000L);
+        AdbdInstallClient.Result throttled = AdbdInstallClient.ensureTcpAdbd(true, r.transport,
+                r.writer, r.sleeper, NOW + 1000L);
         assertEquals(AdbdInstallClient.Outcome.UNREACHABLE, throttled.outcome);
         assertEquals("the window must gate it, not the failure", 1, r.writes.size());
         assertTrue(throttled.detail, throttled.detail.contains("recently"));
+    }
+
+    /** The exposure window is one action: teardown writes "do not listen" and restarts the service. */
+    @Test
+    public void teardownTcpAdbd_closesThePortItOpened() {
+        Recorder r = new Recorder(false, true);
+        r.writes.clear();
+
+        assertEquals(AdbdInstallClient.Outcome.SUCCESS,
+                AdbdInstallClient.teardownTcpAdbd(r.writer).outcome);
+        assertEquals(2, r.writes.size());
+        assertEquals("service.adb.tcp.port=-1", r.writes.get(0));
+        assertEquals("ctl.restart=adbd", r.writes.get(1));
     }
 
     /** Fakes for the three effects {@code ensureTcpAdbd} has in the world. */

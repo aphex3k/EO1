@@ -45,6 +45,12 @@ public class UpdateState {
      * other transition, so a stale flag can never claim a human is still needed.
      */
     public boolean needsHumanConfirmation;
+    /**
+     * True while an install has the frame's adbd open on TCP 5555 because this app started it — an
+     * exposure an operator agreed to for the length of one action, not one boot. Survives precisely
+     * so the process that replaces a successful install can close the door the previous one opened.
+     */
+    public boolean armedTcpAdb;
 
     public static UpdateState idle() {
         return new UpdateState();

@@ -36,6 +36,12 @@ public class SettingsManager {
      * dialog only while the trusted-network flag is on.
      */
     private static final String PREF_TRUSTED_NETWORK_TOKEN = "trusted_network_token";
+    /**
+     * SharedPreferences key for the <em>Allow loopback ADB for update installs</em> flag. Like {@code trusted_network}
+     * it is never part of {@code configuration.json} and never exported — it is a statement about
+     * what this device may do to itself, not a preference to carry between devices. Off by default.
+     */
+    private static final String PREF_LOOPBACK_ADB = "loopback_adb";
     private Configuration configuration = new Configuration();
     public Configuration getConfiguration() {
         return this.configuration;
@@ -71,6 +77,51 @@ public class SettingsManager {
             }
         } catch (Exception ignored) {
         }
+    }
+
+    /**
+     * Whether this frame may start its own adbd (TCP 5555, root, bound to every interface) at all.
+     * Off by default: it is a wider door than the frame's plain-HTTP web server, so it is never
+     * opened as a side effect of anything. What it permits is one action at a time — an install while
+     * an update is staged, or a watchdog rung the ladder has actually reached — and the caller closes
+     * the port again when that action ends. Persisted in the app's default SharedPreferences, never
+     * in {@code configuration.json}.
+     */
+    public boolean isLoopbackAdbAllowed() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return false;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            return prefs != null && prefs.getBoolean(PREF_LOOPBACK_ADB, false);
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    public void setLoopbackAdbAllowed(boolean allowed) {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs != null) {
+                prefs.edit().putBoolean(PREF_LOOPBACK_ADB, allowed).apply();
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    /**
+     * The one question every caller actually has: may the frame arm loopback adbd right now? Both
+     * flags must be on — <i>Trusted Network</i> says the wire is trusted, <i>Allow loopback ADB for update installs</i>
+     * says opening a root shell on it was the operator's decision. Kept here so the install path and
+     * the watchdog cannot drift apart on a security question.
+     */
+    public boolean isLoopbackAdbEnabled() {
+        return isTrustedNetwork() && isLoopbackAdbAllowed();
     }
 
     /**

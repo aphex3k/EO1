@@ -184,9 +184,16 @@ public class UpdateManager {
      * and demotes a stale {@code INSTALL_PENDING} back to the retryable {@code STAGED}.
      */
     public void reconcileOnStartup() {
+        boolean inheritedAdbWindow = false;
         synchronized (this) {
             UpdateState current = state;
             UpdateState reconciled = reconcileState(current, BuildConfig.VERSION_CODE);
+            if (current.armedTcpAdb) {
+                // A silent install opened TCP adb and was killed by its own success before it could
+                // close it. The window was agreed to for one action, so close it here.
+                inheritedAdbWindow = true;
+                reconciled.armedTcpAdb = false;
+            }
 
             if (current.state == UpdateState.State.CHECKING
                     || current.state == UpdateState.State.DOWNLOADING
@@ -221,6 +228,11 @@ public class UpdateManager {
             stateStore.write(state);
         }
         notifyDebug("update state: " + state.state + (state.lastError.isEmpty() ? "" : " (" + state.lastError + ")"));
+        if (inheritedAdbWindow) {
+            // Outside the lock and after the state write: this restarts adbd, which takes a moment.
+            notifyDebug("startup: an earlier install left adbd open — "
+                    + AdbdInstallClient.teardownTcpAdbd().detail);
+        }
     }
 
     /**
@@ -416,11 +428,15 @@ public class UpdateManager {
 
         boolean holdsPermission = holdsInstallPermission();
         // No INSTALL_PACKAGES (true of every sideloaded frame): the device's own adbd is the only
-        // silent transport, and on EO1 it is not even listening until the app starts it. Probing
-        // and re-arming changes no state, so the ladder below can decide on its answer.
+        // silent transport, and on EO1 it is not even listening. This is the one and only place the
+        // app starts it — for this install, of this staged APK, closed again in the finally below.
+        // Probing and re-arming change no state, so the ladder can decide on the answer.
         AdbdInstallClient.Result armed = holdsPermission
-                ? null : AdbdInstallClient.ensureTcpAdbd();
-        boolean adbdReachable = armed != null && armed.outcome == AdbdInstallClient.Outcome.SUCCESS;
+                ? null : AdbdInstallClient.ensureTcpAdbd(loopbackAdbAllowed());
+        boolean adbdReachable = armed != null && (armed.outcome == AdbdInstallClient.Outcome.SUCCESS
+                || armed.outcome == AdbdInstallClient.Outcome.ARMED);
+        // Only an adbd this call started is this call's to close.
+        final boolean armedByUs = armed != null && armed.outcome == AdbdInstallClient.Outcome.ARMED;
 
         switch (chooseInstallPath(holdsPermission, adbdReachable, humanRequested)) {
             case HEADLESS:
@@ -434,9 +450,18 @@ public class UpdateManager {
                 }
                 break;
 
-            case ADBD:
+            case ADBD: {
                 armAndPersist("adbd pm install", snapshot.expectedVersionCode);
-                if (!installViaAdbd(snapshot)) {
+                // Record it before the attempt: a successful pm install kills this process, and the
+                // next one has to know it inherited a door the last one opened.
+                persistAdbArmed(armedByUs);
+                boolean settled;
+                try {
+                    settled = installViaAdbd(snapshot);
+                } finally {
+                    closeAdbIfWeOpenedIt(armedByUs);
+                }
+                if (!settled) {
                     // Looked reachable and then did not answer.
                     if (humanRequested) {
                         fireInstallIntent(snapshot);
@@ -445,6 +470,7 @@ public class UpdateManager {
                     }
                 }
                 break;
+            }
 
             case INTENT:
                 fireInstallIntent(snapshot);
@@ -457,6 +483,42 @@ public class UpdateManager {
                 setNeedsHuman();
                 break;
         }
+    }
+
+    /**
+     * Whether this frame may open loopback adb <em>to install an update</em>: <i>Trusted Network</i>
+     * and <i>Allow loopback ADB for update installs</i>, both on, decided on the options dialog. Read
+     * per attempt so flipping either one takes effect without a restart. The permission covers one
+     * action at a time: this install, or a {@link DeviceRepair} rung the watchdog has actually
+     * reached — never launch, and never left open between actions.
+     */
+    private boolean loopbackAdbAllowed() {
+        try {
+            return settingsManager != null && settingsManager.isLoopbackAdbEnabled();
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /** Notes in the state file that this install opened the port, so a successor can close it. */
+    private void persistAdbArmed(boolean armed) {
+        synchronized (this) {
+            state.armedTcpAdb = armed;
+            stateStore.write(state);
+        }
+        if (armed) {
+            notifyDebug("install: started adbd for this install; it will be closed again after");
+        }
+    }
+
+    /** End of the exposure window: closes adbd if — and only if — this install started it. */
+    private void closeAdbIfWeOpenedIt(boolean armedByUs) {
+        if (!armedByUs) {
+            return; // the ROM's own daemon, or there was none to close
+        }
+        AdbdInstallClient.Result closed = AdbdInstallClient.teardownTcpAdbd();
+        persistAdbArmed(false);
+        notifyDebug("install: " + closed.detail);
     }
 
     /** Records that a silent install is being fired, and keeps the frame launchable if we die. */
@@ -1175,6 +1237,7 @@ public class UpdateManager {
         c.lastCheckedMs = s.lastCheckedMs;
         c.attempts = s.attempts;
         c.installFiredAtMs = s.installFiredAtMs;
+        c.armedTcpAdb = s.armedTcpAdb;
         c.state = newState;
         c.lastError = lastError == null ? "" : lastError;
         // needsHumanConfirmation is deliberately not carried: only the deferral below sets it,
@@ -1232,6 +1295,10 @@ public class UpdateManager {
         o.addProperty("installMode", next == InstallPath.DEFER ? "defer-to-human" : next.name().toLowerCase(Locale.US));
         o.addProperty("lastInstallAttempt", lastInstallAttempt);
         o.addProperty("adbdReachable", adbdReachable);
+        // Whether the frame is permitted to start adbd itself (both options-dialog flags), and
+        // whether one is open right now because it did.
+        o.addProperty("loopbackAdbAllowed", loopbackAdbAllowed());
+        o.addProperty("tcpAdbArmedByApp", s.armedTcpAdb);
         o.addProperty("needsHumanConfirmation", s.needsHumanConfirmation);
         o.addProperty("installFiredAtMs", s.installFiredAtMs);
         return o;
