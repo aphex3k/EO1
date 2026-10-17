@@ -133,6 +133,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int lastVideoRotation = -1;
     private int lastVideoWidth;
     private int lastVideoHeight;
+    private String lastVideoCodec;
     private String lastFrameOrientation;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
@@ -2004,6 +2005,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         int rotation = probe.rotationDeg;
         int width = probe.codedWidth;
         int height = probe.codedHeight;
+        String codec = probe.codec;
         MediaAsset asset = mediaManager != null ? mediaManager.getCurrentAsset() : null;
         if (asset != null) {
             if (width <= 0) {
@@ -2028,12 +2030,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastVideoRotation = rotation;
         lastVideoWidth = width;
         lastVideoHeight = height;
+        lastVideoCodec = codec;
         lastFrameOrientation = framePortrait ? "portrait" : "landscape";
-        Log.i(TAG, "displayVideo routing: rotation=" + rotation + " coded=" + width + "x" + height
+        Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
+                + " coded=" + width + "x" + height
                 + " frame=" + lastFrameOrientation + " player="
                 + (forceFallback ? "MediaPlayer" : "TsPlayer"));
         debugInformationProvided(new DebugInformation("videoRouting",
-                "rotation=" + rotation + " dims=" + width + "x" + height
+                "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
                         + " frame=" + lastFrameOrientation + " -> "
                         + (forceFallback ? "MediaPlayer" : "TsPlayer")));
         return !forceFallback;
@@ -2432,6 +2436,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             video.addProperty("rotation", lastVideoRotation);
             video.addProperty("width", lastVideoWidth);
             video.addProperty("height", lastVideoHeight);
+            if (lastVideoCodec != null) {
+                video.addProperty("codec", lastVideoCodec);
+            }
             if (lastFrameOrientation != null) {
                 video.addProperty("frameOrientation", lastFrameOrientation);
             }
