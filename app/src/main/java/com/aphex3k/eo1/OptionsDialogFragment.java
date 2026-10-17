@@ -20,7 +20,7 @@ import com.google.android.material.tabs.TabLayout;
 import com.google.android.material.tabs.TabLayoutMediator;
 
 public class OptionsDialogFragment extends DialogFragment {
-    private static final String[] TAB_TITLES = {"Media", "MQTT"};
+    private static final String[] TAB_TITLES = {"Media", "MQTT", "About"};
     private SettingsManager settingsManager;
     private OptionsBasicFragment basicFragment;
     private OptionsMqttFragment mqttFragment;
@@ -38,7 +38,9 @@ public class OptionsDialogFragment extends DialogFragment {
         ViewPager2 viewPager = view.findViewById(R.id.optionsViewPager);
         basicFragment = new OptionsBasicFragment(settingsManager);
         mqttFragment = new OptionsMqttFragment(settingsManager);
-        viewPager.setAdapter(new OptionsPagerAdapter(this, basicFragment, mqttFragment));
+        // The About tab is read-only, so it has no saveToConfiguration() step below.
+        viewPager.setAdapter(new OptionsPagerAdapter(this, basicFragment, mqttFragment,
+                new OptionsAboutFragment()));
         new TabLayoutMediator(tabLayout, viewPager, (tab, position) -> tab.setText(TAB_TITLES[position])).attach();
 
         // Add Save button programmatically at the bottom

@@ -7,9 +7,9 @@ import androidx.viewpager2.adapter.FragmentStateAdapter;
 
 public class OptionsPagerAdapter extends FragmentStateAdapter {
     private final Fragment[] fragments;
-    public OptionsPagerAdapter(@NonNull Fragment parent, OptionsBasicFragment basic, OptionsMqttFragment mqtt) {
+    public OptionsPagerAdapter(@NonNull Fragment parent, Fragment... fragments) {
         super(parent);
-        this.fragments = new Fragment[]{basic, mqtt};
+        this.fragments = fragments;
     }
     @NonNull
     @Override
@@ -18,6 +18,6 @@ public class OptionsPagerAdapter extends FragmentStateAdapter {
     }
     @Override
     public int getItemCount() {
-        return 2;
+        return fragments.length;
     }
 }
