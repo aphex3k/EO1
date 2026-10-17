@@ -33,6 +33,24 @@ public class UpdateState {
     public String lastError = "";
     /** Check cycles started since the last success/reset (display-only). */
     public int attempts;
+    /**
+     * Wall-clock ms an install was last fired (0 = never). The process that fires an install can be
+     * killed by it, by a relaunch, or by a watchdog restart, and {@code INSTALL_PENDING} must not
+     * become a dead end in the next process — so the settle deadline is persisted, not remembered.
+     */
+    public long installFiredAtMs;
+    /**
+     * True when the staged update is retryable but every silent transport failed, so it needs a
+     * person to confirm it on the frame's screen. Set only by that deferral and cleared by every
+     * other transition, so a stale flag can never claim a human is still needed.
+     */
+    public boolean needsHumanConfirmation;
+    /**
+     * True while an install has the frame's adbd open on TCP 5555 because this app started it — an
+     * exposure an operator agreed to for the length of one action, not one boot. Survives precisely
+     * so the process that replaces a successful install can close the door the previous one opened.
+     */
+    public boolean armedTcpAdb;
 
     public static UpdateState idle() {
         return new UpdateState();

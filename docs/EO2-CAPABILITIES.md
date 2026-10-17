@@ -52,7 +52,7 @@ Implication: a **USB keyboard** plugged into the EO2 reaches every keyboard-base
 
 Port 80 bind fails with `EACCES` (no root) → the designed fallback to **8080** is in effect. Verified via `adb forward tcp:8080 tcp:8080`:
 
-- `GET /state` → full JSON: device/app identity, config (backends, interval, quiet hours, timezone), network, `media.rotationAssets`/`media.screenOn`, update state (`IDLE`, `installMode: intent-fallback`), telemetry (battery all zeros — wall-powered, no battery), TsPlayer diagnostics, debug overlay entries.
+- `GET /state` → full JSON: device/app identity, config (backends, interval, quiet hours, timezone), network, `media.rotationAssets`/`media.screenOn`, update state (`IDLE`, `installMode: intent-fallback` — read while a host `adb` was attached; that value is `defer-to-human` now, see [WEBSERVER.md](WEBSERVER.md)), telemetry (battery all zeros — wall-powered, no battery), TsPlayer diagnostics, debug overlay entries.
 - `GET /control?action=screen` → `{"ok":true,"fired":true}`, `/state` `screenOn` flips. ✅
 - `GET /control?action=next` → `{"ok":true,"fired":true}`, asset advanced. ✅
 - Other available actions: `brightness`, `config`, `settings`, `update-site`, `check-updates`, `install-staged`, `update-reset`.

@@ -195,29 +195,59 @@ different uid) and then installed.
 
 ### How the install runs
 
+Install is a ladder, and a frame walks down it only as far as it can do the work *alone*:
+
 - When the frame holds `INSTALL_PACKAGES`, the APK is installed headlessly via
   `PackageManager.installPackage`. On this ROM the permission is `signature|system`, so
   sideloaded frames never hold it — for them the app instead runs `pm install -r` as the
   shell user through the device's own adbd on `127.0.0.1:5555` (`AdbdInstallClient` speaks
-  the minimal adb wire protocol; no confirmation UI). Only when adbd is unreachable does
-  the app fall back to the proven install intent, waking the screen for a human to confirm.
-- Before firing, a +120 s `AlarmManager` relaunch alarm (the same one the crash handler uses)
-  is armed, so a fatal crash mid-install still gets the frame back to a launchable state.
+  the minimal adb wire protocol; no confirmation UI).
+- **The EO1 ROM never configures that adbd** (`service.adb.tcp.port` is unset, so a connect gives
+  `ECONNREFUSED`), so on that board a silent install needs the frame to start adbd itself — and it
+  does that **one action at a time, and only if you say so twice**: *Trusted Network* **and** *Allow
+  loopback ADB for update installs* in the options dialog, both default off
+  (`SettingsManager.isLoopbackAdbEnabled()`). With the pair on, `AdbdInstallClient.ensureTcpAdbd()`
+  writes the property and restarts the service (at most once per 10 minutes); with either off the app
+  touches nothing and falls to the next rung.
+  ⚠️ Because there is no loopback-only mode, an armed frame answers `adb` from anywhere it can route
+  to, **as root** — a wider door than the frame's unsecured web server, which is why it is opt-in and
+  why the window is one action rather than one boot: `teardownTcpAdbd()` writes
+  `service.adb.tcp.port=-1` and restarts adbd in a `finally` the moment that action ends (and if an
+  install's own success kills the process first, the note left in the state file makes the next
+  launch close it). An adbd the ROM started on its own, as on EO2, is never touched — closing a
+  daemon you did not open would only interrupt it. Restarting adbd drops any host `adb` session
+  attached over USB.
+- **It is never started to be ready.** Two places may ask for it: an install while an update is
+  staged, and a watchdog rung the ladder has actually reached (Wi-Fi repair, `reboot`). Nothing is
+  opened at boot — the launch-time vendor-OTA `pm disable` only *probes*, and logs a skip when
+  nothing is listening, so flipping the flag does not silently widen what runs unattended.
+- If neither silent transport works, **an automatic cycle puts nothing on screen.** A frame is
+  mounted on a wall and dark through quiet hours; a confirmation dialog shown to nobody is not
+  an install, it just looks like one for days. The update stays `STAGED` and retryable with
+  `needsHumanConfirmation: true`, and the web page says so. Pressing **Install on the frame**
+  is the explicit opt-in that shows the dialog (waking the panel, and no longer interrupted by
+  a relaunch alarm), for a frame you can reach with an OTG keyboard or mouse.
+- Before firing a *silent* install, a +120 s `AlarmManager` relaunch alarm (the same one the
+  crash handler uses) is armed, so a fatal crash mid-install still gets the frame back to a
+  launchable state.
 - The installer kills this process on success, so success is detected by the *new* process on
   startup: the persisted expected `versionCode` is compared against
   `BuildConfig.VERSION_CODE` (`reconcileOnStartup`). A stuck or refused install rolls back to
-  the retryable `STAGED` state and is retried on the next timer tick.
+  the retryable `STAGED` state and is retried on the next timer tick — so the retry cadence is
+  your `interval` setting, and it pauses with the activity. `INSTALL_PENDING` carries the
+  persisted time it was fired, so a pending install can settle in a process that never started it.
 
 ### Recovery (headless, via the LAN web server)
 
 | Symptom | Action |
 |---|---|
-| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode`, `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable` |
-| Staged but not installed | `/control?action=install-staged` (turns the screen on and fires the install) |
+| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode` (`headless`/`adbd`/`defer-to-human`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable`, `loopbackAdbAllowed`, `tcpAdbArmedByApp`, `needsHumanConfirmation`, `installFiredAtMs` |
+| Staged but not installed | `/logs` says which transport failed. If `needsHumanConfirmation` is set, no silent install is possible on that frame: `/control?action=install-staged` (turns the screen on and shows the confirmation dialog there) |
 | Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
 | Force a re-check now | `/control?action=check-updates` |
 
-The index page exposes **Check updates** / **Install staged** / **Update reset** buttons.
+The index page exposes **Check updates** / **Install on the frame** / **Update reset** buttons, and
+prints a standing notice there when an update is staged but waiting on a person.
 Recovery is forward-fix only: a failed update leaves the last good version running; the app
 never downgrades or uninstalls itself.
 

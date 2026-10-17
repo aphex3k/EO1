@@ -16,12 +16,12 @@ import java.util.Locale;
  *
  * <p>Sideloaded frames never hold {@code android.permission.INSTALL_PACKAGES}
  * (signature|system on this ROM), so installing from this app would show the
- * confirmation dialog — which a headless frame cannot confirm. The ROM's adbd
- * listens on {@code 127.0.0.1:5555} (build.prop {@code service.adb.tcp.port}),
- * however, and shell commands may {@code pm install}. This class speaks just
- * enough of the classic adb wire protocol (protocol 0, what Android 4.4.2 adbd
- * speaks) to run one {@code pm install} and read its output; nothing beyond
- * {@code java.net}.
+ * confirmation dialog — which a headless frame cannot confirm. The device's own
+ * adbd on {@code 127.0.0.1:5555} runs {@code pm install} as the shell user
+ * instead, and {@link #ensureTcpAdbd()} starts that daemon on a ROM (EO1) that
+ * never configured it. This class speaks just enough of the classic adb wire
+ * protocol (protocol 0, what Android 4.4.2 adbd speaks) to run one {@code pm
+ * install} and read its output; nothing beyond {@code java.net} and reflection.
  */
 public final class AdbdInstallClient {
 
@@ -32,7 +32,13 @@ public final class AdbdInstallClient {
         /** adbd was reached but {@code pm install} reported a failure. */
         PM_FAILED,
         /** adbd was unreachable or the protocol exchange did not complete. */
-        UNREACHABLE
+        UNREACHABLE,
+        /**
+         * adbd is listening <em>because this call started it</em> — the caller owes a
+         * {@link #teardownTcpAdbd()} when its action ends. Distinct from {@code SUCCESS} precisely
+         * so a daemon the ROM owns is never mistaken for one the app opened.
+         */
+        ARMED
     }
 
     /** Outcome plus a short human-readable detail (log / {@code /state} friendly). */
@@ -53,6 +59,22 @@ public final class AdbdInstallClient {
 
     static final String DEFAULT_HOST = "127.0.0.1";
     static final int DEFAULT_PORT = 5555;
+
+    /** Tells adbd which TCP port to bind; absent on the EO1 ROM, hence {@link #ensureTcpAdbd()}. */
+    static final String PROP_TCP_PORT = "service.adb.tcp.port";
+    /** init's service-control property; writing a service name to it restarts that service. */
+    static final String PROP_RESTART_SERVICE = "ctl.restart";
+    static final String SERVICE_ADBD = "adbd";
+    /** {@code service.adb.tcp.port} value that means "do not listen" — what teardown writes back. */
+    static final String PROP_TCP_PORT_OFF = "-1";
+
+    /** Floor between adbd restarts, so a refusing ROM is asked once per window, not per tick. */
+    static final long REARM_MIN_INTERVAL_MS = 10 * 60 * 1000L;
+    private static final long REARM_SETTLE_MS = 1500L;
+    private static final int REARM_PROBE_TRIES = 3;
+
+    /** Wall-clock ms of the last re-arm attempt; package-visible so tests can reset it. */
+    static volatile long lastRearmAttemptMs;
 
     private static final int CONNECT_TIMEOUT_MS = 5000;
     private static final int PROBE_TIMEOUT_MS = 1000;
@@ -153,6 +175,143 @@ public final class AdbdInstallClient {
     public static boolean probe() {
         return probe(DEFAULT_HOST, DEFAULT_PORT);
     }
+
+    /**
+     * Makes sure adbd is listening, starting it if the ROM never did — <b>only if the operator
+     * allowed that</b> ({@code allowed}, which is {@code SettingsManager.isLoopbackAdbEnabled()}:
+     * <i>Trusted Network</i> and <i>Allow loopback ADB for update installs</i> both on).
+     *
+     * <p>Why it needs asking: there is no loopback-only mode. adbd binds {@code 0.0.0.0} and its
+     * shell user is root on these ROMs, so arming it hands any host that can route to the frame an
+     * unauthenticated root shell and free APK install — a wider door than the frame's plain-HTTP web
+     * server, so the app never opens it as a side effect of an update. The EO1 ROM leaves
+     * {@code service.adb.tcp.port} unset (loopback adbd is simply absent — a hard
+     * {@code ECONNREFUSED}, verified with no host attached), the EO2 ROM sets it; the silent install
+     * path and {@link DeviceRepair} need the daemon either way.
+     *
+     * <p>Who may ask: the install path, while an update is staged and being installed, and a
+     * watchdog rung that is actually running. Nothing else — not launch, not a tick that found
+     * nothing to do. Every caller that gets {@link Outcome#ARMED} closes it again with
+     * {@link #teardownTcpAdbd()} when its action ends, so the window is the action rather than the
+     * boot. Restarting adbd drops a host {@code adb} session attached over USB.
+     *
+     * @return ARMED when this call started the daemon (the caller owes a teardown), SUCCESS when it
+     *         was already listening, UNREACHABLE with the reason otherwise — detail is
+     *         log/{@code /state}-ready.
+     */
+    public static Result ensureTcpAdbd(boolean allowed) {
+        return ensureTcpAdbd(allowed, TCP_TRANSPORT, REFLECTIVE_PROPERTY_WRITER, THREAD_SLEEPER,
+                System.currentTimeMillis());
+    }
+
+    /** Testable core of {@link #ensureTcpAdbd(boolean)} — no sockets, no hidden API, no sleeping. */
+    static Result ensureTcpAdbd(boolean allowed, Transport transport, PropertyWriter writer,
+                                Sleeper sleeper, long nowMs) {
+        if (transport.reachable()) {
+            // The ROM's own daemon. Not ours to close, and restarting it would only interrupt it.
+            return new Result(Outcome.SUCCESS, "already listening");
+        }
+        if (!allowed) {
+            return new Result(Outcome.UNREACHABLE, "loopback adb not allowed (needs Trusted Network"
+                    + " + Allow loopback ADB for update installs in the options dialog)");
+        }
+        if (!shouldRearm(false, lastRearmAttemptMs, nowMs)) {
+            return new Result(Outcome.UNREACHABLE, "not listening; re-arm attempted recently");
+        }
+        lastRearmAttemptMs = nowMs;
+        try {
+            writer.set(PROP_TCP_PORT, String.valueOf(DEFAULT_PORT));
+            writer.set(PROP_RESTART_SERVICE, SERVICE_ADBD);
+        } catch (Throwable t) {
+            return new Result(Outcome.UNREACHABLE, "ROM refused the property write: " + t);
+        }
+        for (int attempt = 0; attempt < REARM_PROBE_TRIES; attempt++) {
+            sleeper.sleep(REARM_SETTLE_MS);
+            if (transport.reachable()) {
+                return new Result(Outcome.ARMED, "started adbd for this action");
+            }
+        }
+        // The write landed but nothing came up. The caller still owes a close: the property is set,
+        // so a late-starting adbd would come up open.
+        return new Result(Outcome.ARMED, "started adbd, but it is not answering yet");
+    }
+
+    /**
+     * Closes a window {@link #ensureTcpAdbd(boolean)} opened on this call's authority: writes
+     * {@code -1} (adbd's "no TCP") and restarts the service. Call it only on an
+     * {@link Outcome#ARMED} result — an EO2 whose ROM listens on its own must be left exactly as the
+     * ROM configured it.
+     */
+    public static Result teardownTcpAdbd() {
+        return teardownTcpAdbd(REFLECTIVE_PROPERTY_WRITER);
+    }
+
+    /** Testable core of {@link #teardownTcpAdbd()}. No settle wait: the restart reads what we wrote. */
+    static Result teardownTcpAdbd(PropertyWriter writer) {
+        try {
+            writer.set(PROP_TCP_PORT, PROP_TCP_PORT_OFF);
+            writer.set(PROP_RESTART_SERVICE, SERVICE_ADBD);
+        } catch (Throwable t) {
+            return new Result(Outcome.UNREACHABLE, "could not close loopback adb: " + t);
+        }
+        return new Result(Outcome.SUCCESS, "loopback adb closed");
+    }
+
+    /**
+     * Pure gate: never touch a working adbd, and never restart it more than once per
+     * {@link #REARM_MIN_INTERVAL_MS} — a ROM that refuses the write would otherwise pay an adbd
+     * restart on every install attempt and every watchdog rung.
+     */
+    static boolean shouldRearm(boolean reachable, long lastAttemptMs, long nowMs) {
+        return !reachable
+                && (lastAttemptMs == 0L || nowMs - lastAttemptMs >= REARM_MIN_INTERVAL_MS);
+    }
+
+    /** Loopback reachability, injected so the gate is testable without sockets. */
+    public interface Transport {
+        boolean reachable();
+    }
+
+    /** One system-property write, injected so the re-arm sequence is testable off-device. */
+    public interface PropertyWriter {
+        void set(String key, String value) throws Exception;
+    }
+
+    /** Sleep hook, so tests do not wait out adbd's restart. */
+    public interface Sleeper {
+        void sleep(long ms);
+    }
+
+    private static final Transport TCP_TRANSPORT = new Transport() {
+        @Override
+        public boolean reachable() {
+            return probe();
+        }
+    };
+
+    private static final Sleeper THREAD_SLEEPER = new Sleeper() {
+        @Override
+        public void sleep(long ms) {
+            try {
+                Thread.sleep(ms);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+    };
+
+    /**
+     * {@code android.os.SystemProperties} is hidden, so it is absent from the compile-time
+     * android.jar; reflection is the only way in. Both keys below are write-once constants —
+     * nothing user-, network- or config-derived ever reaches a property.
+     */
+    private static final PropertyWriter REFLECTIVE_PROPERTY_WRITER = new PropertyWriter() {
+        @Override
+        public void set(String key, String value) throws Exception {
+            Class<?> props = Class.forName("android.os.SystemProperties");
+            props.getMethod("set", String.class, String.class).invoke(null, key, value);
+        }
+    };
 
     static boolean probe(String host, int port) {
         Socket socket = null;

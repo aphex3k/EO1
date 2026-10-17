@@ -53,6 +53,24 @@ public class SettingsManagerTest {
         assertFalse(sm.isTrustedNetwork());
     }
 
+    /** Arming loopback adb is a root shell on the LAN, so it needs both flags — never one. */
+    @Test
+    public void loopbackAdbNeedsBothFlagsAndDefaultsOff() throws Exception {
+        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        assertFalse(sm.isLoopbackAdbAllowed());
+        assertFalse(sm.isLoopbackAdbEnabled());
+
+        sm.setLoopbackAdbAllowed(true);
+        assertFalse("the extra flag alone must not open the door", sm.isLoopbackAdbEnabled());
+
+        sm.setTrustedNetwork(true);
+        assertTrue(sm.isLoopbackAdbEnabled());
+
+        sm.setLoopbackAdbAllowed(false);
+        assertFalse(sm.isLoopbackAdbEnabled());
+        assertTrue("disabling adbd leaves the web-server flag alone", sm.isTrustedNetwork());
+    }
+
     @Test
     public void importValidWritesFileAndUpdatesLiveConfiguration() throws Exception {
         File files = tmp.newFolder("files");

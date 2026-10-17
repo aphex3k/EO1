@@ -117,6 +117,44 @@ public class UpdateStateStoreTest {
         assertFalse(store.write(null));
     }
 
+    /**
+     * A state file written before these fields existed must read back with them unset — an absent
+     * {@code installFiredAtMs} means "nothing is owed a settle window", not "long ago".
+     */
+    @Test
+    public void preExistingStateFileReadsWithNewFieldsUnset() throws Exception {
+        File f = new File(folder.getRoot(), "update-state.json");
+        try (FileWriter w = new FileWriter(f)) {
+            w.write("{\"state\":\"INSTALL_PENDING\",\"expectedVersionCode\":7,"
+                    + "\"expectedVersionName\":\"1.7.0\",\"manifestSha256\":\"aa\","
+                    + "\"expectedSizeBytes\":12345,\"lastCheckedMs\":1700000000000,"
+                    + "\"lastError\":\"\",\"attempts\":3}");
+        }
+        UpdateState s = new UpdateStateStore(f).read();
+        assertEquals(UpdateState.State.INSTALL_PENDING, s.state);
+        assertEquals(0L, s.installFiredAtMs);
+        assertFalse(s.needsHumanConfirmation);
+        assertFalse("an old state file never claims an open adb window", s.armedTcpAdb);
+    }
+
+    @Test
+    public void installTimingAndHumanFlagRoundTrip() throws Exception {
+        File f = new File(folder.getRoot(), "update-state.json");
+        UpdateStateStore store = new UpdateStateStore(f);
+        UpdateState s = stateIn(UpdateState.State.STAGED, "needs-human-confirmation");
+        s.installFiredAtMs = 1700000009000L;
+        s.needsHumanConfirmation = true;
+        s.armedTcpAdb = true;
+        assertTrue(store.write(s));
+
+        UpdateState read = store.read();
+        assertEquals(1700000009000L, read.installFiredAtMs);
+        assertTrue(read.needsHumanConfirmation);
+        assertTrue("the process that dies mid-install must leave the next one a note to close adb",
+                read.armedTcpAdb);
+        assertEquals("needs-human-confirmation", read.lastError);
+    }
+
     @Test
     public void deleteRemovesState() throws Exception {
         File f = new File(folder.getRoot(), "update-state.json");

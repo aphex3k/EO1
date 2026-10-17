@@ -163,6 +163,18 @@
             android:fontFamily="monospace"
             android:visibility="gone" />
         <TextView
+            android:id="@+id/loopbackAdbLabel"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Without this, an update that passes every check stays staged until someone confirms it at the frame: a frame cannot install a package it does not have permission to install. With it, the frame starts the device's own adbd (a root shell on port 5555, reachable from anything that can route to it) only while it is installing a staged update, or while a recovery step it has actually reached needs the device's shell — and shuts it down again the moment that action ends. Idle time and boot need it open for nothing. Needs Trusted Network as well." />
+        <CheckBox
+            android:id="@+id/loopbackAdbCheckBox"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Allow loopback ADB for update installs" />
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:text="Unattended recovery"
