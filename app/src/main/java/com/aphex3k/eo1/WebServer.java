@@ -886,6 +886,7 @@ public class WebServer {
                 + "button{margin:2px}a{color:#8cf}</style>");
         sb.append("<h1>").append(platform).append(" frame @ ").append(escapeHtml(safeIp()))
                 .append(" (port ").append(boundPort).append(")</h1>");
+        sb.append("<p>").append(escapeHtml(controller.appBuildSummary())).append("</p>");
         sb.append("<p><a href=\"/state\">state</a> · <a href=\"/logs\">logs</a> · <a href=\"/files\">files (json)</a></p>");
 
         sb.append("<h2>Upload</h2>");

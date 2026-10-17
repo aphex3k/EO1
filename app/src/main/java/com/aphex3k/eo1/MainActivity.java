@@ -550,7 +550,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.connectionManager.registerListener(this);
 
-        debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
+        debugInformationProvided(new DebugInformation("version", BuildFacts.version()));
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key),
                 this.connectionManager.isNetworkAvailable() ? "connected" : "waiting for network"));
     }
@@ -2331,6 +2331,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
+    public String appBuildSummary() {
+        return BuildFacts.summary(this);
+    }
+
+    @Override
     public String buildStateJson() {
         JsonObject o = new JsonObject();
 
@@ -2350,11 +2355,29 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.add("capabilities", caps);
 
         JsonObject app = new JsonObject();
-        app.addProperty("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE);
+        app.addProperty("version", BuildFacts.version());
+        app.addProperty("versionName", BuildFacts.versionName());
+        app.addProperty("buildNumber", BuildFacts.buildNumber());
+        app.addProperty("variant", BuildFacts.variant());
+        app.addProperty("buildDate", BuildFacts.buildStamp());
+        app.addProperty("gitSha", BuildFacts.gitSha());
+        app.addProperty("gitDirty", "true".equals(BuildFacts.gitDirty()));
         app.addProperty("debug", BuildConfig.DEBUG);
         app.addProperty("tsPlayer", preferTsPlayer);
         app.addProperty("webPort", webServer != null ? webServer.getBoundPort() : -1);
         app.addProperty("trustedNetwork", settingsManager != null && settingsManager.isTrustedNetwork());
+        BuildFacts.Signer signer = BuildFacts.signing(this);
+        JsonObject signerJson = new JsonObject();
+        signerJson.addProperty("signed", signer.signed);
+        signerJson.addProperty("fingerprint", signer.fingerprintHex);
+        signerJson.addProperty("subject", signer.subject);
+        signerJson.addProperty("serial", signer.serial);
+        signerJson.addProperty("validFrom", signer.validFrom);
+        signerJson.addProperty("validTo", signer.validTo);
+        signerJson.addProperty("validity", signer.validityStatus);
+        signerJson.addProperty("algorithm", signer.algorithm);
+        signerJson.addProperty("keyVerdict", signer.keyVerdict);
+        app.add("signer", signerJson);
         o.add("app", app);
 
         o.add("config", ConfigStateJson.configStateJson(settingsManager.getConfiguration()));
