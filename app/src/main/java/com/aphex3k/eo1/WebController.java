@@ -23,6 +23,13 @@ public interface WebController {
     /** Builds the full {@code /state} JSON document. */
     String buildStateJson();
 
+    /**
+     * One-line identity of the running build (version, variant, source commit, signing-key verdict)
+     * for the page header. The certificate's own facts are only in {@code /state}: the server holds
+     * no {@code Context}, and this has to stay renderable without one.
+     */
+    String appBuildSummary();
+
     /** Returns the recent in-memory log events as a JSON array (up to {@code lines}). */
     String getLogTail(int lines);
 
