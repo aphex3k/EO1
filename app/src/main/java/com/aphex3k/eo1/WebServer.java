@@ -913,8 +913,9 @@ public class WebServer {
                 .append("<button onclick=\"ctrl('screen')\">Screen</button>")
                 .append("<button onclick=\"ctrl('brightness')\">Brightness+</button>")
                 .append("<button onclick=\"ctrl('check-updates')\">Check updates</button>")
-                .append("<button onclick=\"ctrl('install-staged')\">Install staged</button>")
-                .append("<button onclick=\"ctrl('update-reset')\">Update reset</button>");
+                .append("<button onclick=\"ctrl('install-staged')\">Install on the frame</button>")
+                .append("<button onclick=\"ctrl('update-reset')\">Update reset</button>")
+                .append("<div id=\"updateNotice\"></div>");
         if (BuildConfig.DEBUG) {
             sb.append("<br><br><b>Send key (admin)</b> <input type=\"number\" id=\"keycode\" min=\"0\" max=\"65535\" value=\"26\" style=\"width:5em\">")
                     .append("<button onclick=\"sendKey()\">Send</button>")
@@ -930,6 +931,19 @@ public class WebServer {
 
         sb.append("<script>");
         sb.append("function ctrl(a){fetch('/control?action='+a).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}");
+        // An update no silent transport can install stays staged and says so here, instead of
+        // putting a confirmation dialog on an unattended screen. textContent, never innerHTML:
+        // expectedVersionName arrives in a manifest fetched off the network.
+        sb.append("function updateNotice(){fetch('/state').then(r=>r.json()).then(function(j){")
+                .append("var n=document.getElementById('updateNotice');var u=j&&j.update;if(!n)return;")
+                .append("if(u&&u.needsHumanConfirmation){n.textContent=\"Update \"+(u.expectedVersionName||u.expectedVersionCode)")
+                .append("+\" is staged, but this frame cannot install it by itself (install mode: \")+u.installMode+")
+                .append("\"). Use the Install button above, then confirm the dialog on the frame - an OTG keyboard or mouse")
+                .append(" works. It stays staged and retryable until then.\";}")
+                .append("else if(u&&u.state=='INSTALL_PENDING'&&u.installFiredAtMs){")
+                .append("n.textContent=\"An install is in flight; the frame retries on its own if it does not land.\";}")
+                .append("else{n.textContent='';}}).catch(function(){});}")
+                .append("updateNotice();");
         sb.append("function fillKey(n){document.getElementById('keycode').value=n;}");
         sb.append("function sendKey(){var c=document.getElementById('keycode').value;fetch('/control?action=keyevent&code='+encodeURIComponent(c),{method:'POST'}).then(r=>r.json()).then(j=>alert('keyevent '+(document.getElementById('keycode').value)+':'+(j.fired?'fired':'failed')));}");
         sb.append("function del(n){if(!confirm('Delete '+n+'?'))return;");
@@ -1165,7 +1179,7 @@ public class WebServer {
         return "function stagedBlock(sha,bytes){"
                 + "var h='<p><b>SHA-256: </b><code style=\"display:block;word-break:break-all\">'+sha+'</code><br>'"
                 + "+bytes+' bytes. Verify this checksum against the published release before installing.</p>'"
-                + "+'<p><button id=\"apkInstall\">Install staged</button> ';"
+                + "+'<p><button id=\"apkInstall\">Install on the frame</button> ';"
                 + "+'<button id=\"apkReset\">Discard staged</button></p>';"
                 + "document.getElementById('apkStatus').innerHTML=h;"
                 + "document.getElementById('apkInstall').onclick=function(){ctrl('install-staged');};"

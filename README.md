@@ -195,29 +195,48 @@ different uid) and then installed.
 
 ### How the install runs
 
+Install is a ladder, and a frame walks down it only as far as it can do the work *alone*:
+
 - When the frame holds `INSTALL_PACKAGES`, the APK is installed headlessly via
   `PackageManager.installPackage`. On this ROM the permission is `signature|system`, so
   sideloaded frames never hold it — for them the app instead runs `pm install -r` as the
   shell user through the device's own adbd on `127.0.0.1:5555` (`AdbdInstallClient` speaks
-  the minimal adb wire protocol; no confirmation UI). Only when adbd is unreachable does
-  the app fall back to the proven install intent, waking the screen for a human to confirm.
-- Before firing, a +120 s `AlarmManager` relaunch alarm (the same one the crash handler uses)
-  is armed, so a fatal crash mid-install still gets the frame back to a launchable state.
+  the minimal adb wire protocol; no confirmation UI).
+- **The EO1 ROM never configures that adbd** (`service.adb.tcp.port` is unset, so a connect
+  gives `ECONNREFUSED`), so the app sets the property and restarts the service itself
+  (`AdbdInstallClient.ensureTcpAdbd()`, at most one restart per 10 minutes). The same rung is
+  what makes the watchdog's Wi-Fi repair and the vendor-OTA `pm disable` lines work on EO1.
+  ⚠️ There is no loopback-only mode: adbd binds `0.0.0.0`, so an armed frame answers `adb`
+  from anywhere on your LAN **as root**. Treat that like the frame's unsecured web server —
+  trusted LAN only, or firewall/off-VLAN port 5555. Restarting adbd also drops any host `adb`
+  session currently attached over USB.
+- If neither silent transport works, **an automatic cycle puts nothing on screen.** A frame is
+  mounted on a wall and dark through quiet hours; a confirmation dialog shown to nobody is not
+  an install, it just looks like one for days. The update stays `STAGED` and retryable with
+  `needsHumanConfirmation: true`, and the web page says so. Pressing **Install on the frame**
+  is the explicit opt-in that shows the dialog (waking the panel, and no longer interrupted by
+  a relaunch alarm), for a frame you can reach with an OTG keyboard or mouse.
+- Before firing a *silent* install, a +120 s `AlarmManager` relaunch alarm (the same one the
+  crash handler uses) is armed, so a fatal crash mid-install still gets the frame back to a
+  launchable state.
 - The installer kills this process on success, so success is detected by the *new* process on
   startup: the persisted expected `versionCode` is compared against
   `BuildConfig.VERSION_CODE` (`reconcileOnStartup`). A stuck or refused install rolls back to
-  the retryable `STAGED` state and is retried on the next timer tick.
+  the retryable `STAGED` state and is retried on the next timer tick — so the retry cadence is
+  your `interval` setting, and it pauses with the activity. `INSTALL_PENDING` carries the
+  persisted time it was fired, so a pending install can settle in a process that never started it.
 
 ### Recovery (headless, via the LAN web server)
 
 | Symptom | Action |
 |---|---|
-| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode`, `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable` |
-| Staged but not installed | `/control?action=install-staged` (turns the screen on and fires the install) |
+| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode` (`headless`/`adbd`/`defer-to-human`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable`, `needsHumanConfirmation`, `installFiredAtMs` |
+| Staged but not installed | `/logs` says which transport failed. If `needsHumanConfirmation` is set, no silent install is possible on that frame: `/control?action=install-staged` (turns the screen on and shows the confirmation dialog there) |
 | Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
 | Force a re-check now | `/control?action=check-updates` |
 
-The index page exposes **Check updates** / **Install staged** / **Update reset** buttons.
+The index page exposes **Check updates** / **Install on the frame** / **Update reset** buttons, and
+prints a standing notice there when an update is staged but waiting on a person.
 Recovery is forward-fix only: a failed update leaves the last good version running; the app
 never downgrades or uninstalls itself.
 

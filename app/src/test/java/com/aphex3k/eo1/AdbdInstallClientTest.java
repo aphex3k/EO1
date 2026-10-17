@@ -165,6 +165,101 @@ public class AdbdInstallClientTest {
         assertFalse(AdbdInstallClient.probe("127.0.0.1", port));
     }
 
+    // ------------------------------------------------------------ adbd re-arm
+
+    @Test
+    public void shouldRearm_neverWhenListening_oncePerWindowOtherwise() {
+        assertFalse(AdbdInstallClient.shouldRearm(true, 0L, 1_000_000L));
+        assertTrue(AdbdInstallClient.shouldRearm(false, 0L, 1_000_000L));
+        assertFalse(AdbdInstallClient.shouldRearm(false, 1_000_000L,
+                1_000_000L + AdbdInstallClient.REARM_MIN_INTERVAL_MS - 1L));
+        assertTrue(AdbdInstallClient.shouldRearm(false, 1_000_000L,
+                1_000_000L + AdbdInstallClient.REARM_MIN_INTERVAL_MS));
+    }
+
+    @Test
+    public void ensureTcpAdbd_leavesAWorkingAdbdAlone() {
+        AdbdInstallClient.lastRearmAttemptMs = 0L;
+        Recorder r = new Recorder(true, true);
+
+        assertEquals(AdbdInstallClient.Outcome.SUCCESS,
+                AdbdInstallClient.ensureTcpAdbd(r.transport, r.writer, r.sleeper, NOW).outcome);
+        assertTrue("no property may be written: restarting a live adbd would drop the session"
+                + " — " + r.writes, r.writes.isEmpty());
+    }
+
+    /** The EO1 case: nothing listening, ROM allows the write, adbd comes up. */
+    @Test
+    public void ensureTcpAdbd_writesBothPropertiesAndRetriesTheProbe() {
+        AdbdInstallClient.lastRearmAttemptMs = 0L;
+        Recorder r = new Recorder(false, true);
+
+        assertEquals(AdbdInstallClient.Outcome.SUCCESS,
+                AdbdInstallClient.ensureTcpAdbd(r.transport, r.writer, r.sleeper, NOW).outcome);
+        assertEquals(2, r.writes.size());
+        assertEquals("service.adb.tcp.port=5555", r.writes.get(0));
+        assertEquals("ctl.restart=adbd", r.writes.get(1));
+    }
+
+    /** A ROM that refuses an app writing properties must cost one attempt, not a restart storm. */
+    @Test
+    public void ensureTcpAdbd_reportsRefusalAndDoesNotRetryInsideTheWindow() {
+        AdbdInstallClient.lastRearmAttemptMs = 0L;
+        Recorder r = new Recorder(false, false);
+
+        AdbdInstallClient.Result refused = AdbdInstallClient.ensureTcpAdbd(r.transport, r.writer,
+                r.sleeper, NOW);
+        assertEquals(AdbdInstallClient.Outcome.UNREACHABLE, refused.outcome);
+        assertTrue(refused.detail, refused.detail.contains("ROM refused"));
+        assertEquals(1, r.writes.size());
+
+        AdbdInstallClient.Result throttled = AdbdInstallClient.ensureTcpAdbd(r.transport, r.writer,
+                r.sleeper, NOW + 1000L);
+        assertEquals(AdbdInstallClient.Outcome.UNREACHABLE, throttled.outcome);
+        assertEquals("the window must gate it, not the failure", 1, r.writes.size());
+        assertTrue(throttled.detail, throttled.detail.contains("recently"));
+    }
+
+    /** Fakes for the three effects {@code ensureTcpAdbd} has in the world. */
+    private static final class Recorder {
+        final List<String> writes = new CopyOnWriteArrayList<String>();
+        private boolean reachable;
+        private final boolean writeAllowed;
+
+        final AdbdInstallClient.Transport transport = new AdbdInstallClient.Transport() {
+            @Override
+            public boolean reachable() {
+                return reachable;
+            }
+        };
+
+        final AdbdInstallClient.PropertyWriter writer = new AdbdInstallClient.PropertyWriter() {
+            @Override
+            public void set(String key, String value) throws Exception {
+                writes.add(key + "=" + value); // attempted writes, refused or not
+                if (!writeAllowed) {
+                    throw new SecurityException("permission denied");
+                }
+                if (AdbdInstallClient.PROP_RESTART_SERVICE.equals(key)) {
+                    reachable = true;
+                }
+            }
+        };
+
+        final AdbdInstallClient.Sleeper sleeper = new AdbdInstallClient.Sleeper() {
+            @Override
+            public void sleep(long ms) {
+            }
+        };
+
+        Recorder(boolean reachable, boolean writeAllowed) {
+            this.reachable = reachable;
+            this.writeAllowed = writeAllowed;
+        }
+    }
+
+    private static final long NOW = 1_700_000_000_000L;
+
     // ------------------------------------------------------------------ fake
 
     /**

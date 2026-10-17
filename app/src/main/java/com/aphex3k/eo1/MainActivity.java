@@ -1802,6 +1802,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public void run() {
                 try {
+                    // EO1's ROM ships no service.adb.tcp.port, so without this every rung would
+                    // stop at its first ECONNREFUSED. Rate-limited inside; cheap when reachable.
+                    AdbdInstallClient.Result transport = AdbdInstallClient.ensureTcpAdbd();
+                    if (transport.outcome != AdbdInstallClient.Outcome.SUCCESS) {
+                        logWatchdogEvent(name + " skipped: adbd unreachable (" + transport.detail + ")", true);
+                        return;
+                    }
                     List<DeviceRepair.Step> steps = task.run(new AdbdInstallClient());
                     logWatchdogEvent(name + ": " + DeviceRepair.describe(steps), false);
                 } catch (Throwable t) {
@@ -1833,6 +1840,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public void run() {
                 try {
+                    AdbdInstallClient.Result transport = AdbdInstallClient.ensureTcpAdbd();
+                    if (transport.outcome != AdbdInstallClient.Outcome.SUCCESS) {
+                        Log.i(TAG, "vendor updater: skipped, adbd unreachable (" + transport.detail + ")");
+                        debugInformationProvided(new DebugInformation("vendorUpdater",
+                                "skipped: adbd unreachable (" + transport.detail + ")"));
+                        return;
+                    }
                     AdbdInstallClient client = new AdbdInstallClient();
                     List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(client::exec);
                     String outcome = DeviceRepair.describe(steps);

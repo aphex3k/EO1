@@ -53,18 +53,26 @@ import okhttp3.Response;
  * plus a world-readable public copy under {@code /sdcard/Download/}, because the installer
  * runs under a different uid) and installed.
  *
- * <p>Install dispatch: when the frame holds {@code INSTALL_PACKAGES}, the APK is installed
- * headlessly via a reflective call to {@code PackageManager.installPackage} with a proxied
- * {@code PackageManager$PackageInstallObserver}. On this ROM that permission is
- * signature|system, so sideloaded frames never hold it — they install headlessly through the
- * device's own adbd on {@code 127.0.0.1:5555} instead ({@link AdbdInstallClient} runs
- * {@code pm install} as the shell user — no confirmation UI). Only when adbd is
- * unreachable does it fall back to the proven install-intent path.
+ * <p>Install dispatch is a ladder — see {@link #chooseInstallPath}: {@code INSTALL_PACKAGES}
+ * (signature|system, so no sideloaded frame holds it) → the device's own adbd, which
+ * {@link AdbdInstallClient#ensureTcpAdbd()} starts when the ROM never configured it → and if
+ * neither answers, the update simply stays {@code STAGED} with {@code needsHumanConfirmation} set.
+ * <b>An automatic cycle never puts the confirmation dialog on screen.</b> A frame is mounted on a
+ * wall, usually dark during quiet hours: an unattended dialog is not an install, and it used to be
+ * retried every tick against nobody, which is what made self-update look silently broken. The
+ * dialog is what an explicit {@code Install on the frame} in the web UI gets, for a frame that has
+ * no other way (an OTG keyboard or mouse plugged into the frame).
+ *
+ * <p>Retries ride the rotation tick — {@code interval} minutes, and the tick stops with the
+ * activity — so the settle window below is a floor, not a schedule.
  *
  * <p>Recovery across process death: the installer kills this process on success, so success
  * is detected only by the new process's {@link #reconcileOnStartup()}. A +120 s relaunch alarm
- * (the same one {@code uncaughtException} uses) is armed just before firing, so a fatal
- * crash mid-install still gets the frame back to a launchable state.
+ * (the same one {@code uncaughtException} uses) is armed just before a <em>silent</em> dispatch,
+ * so a fatal crash mid-install still gets the frame back to a launchable state. It is never armed
+ * for the dialog: it used to fire MainActivity back over a confirmation a person was still reading.
+ * {@code INSTALL_PENDING} carries {@link UpdateState#installFiredAtMs} for the same reason — the
+ * pending state must not outlive the process that set it.
  */
 public class UpdateManager {
 
@@ -74,7 +82,10 @@ public class UpdateManager {
     /** Free space required besides the APK itself, for the installer's headroom. */
     private static final long STAGING_HEADROOM_BYTES = 32L * 1024 * 1024;
     private static final long RELAUNCH_ALARM_MS = 120_000L;
+    /** How long a fired install may hold INSTALL_PENDING before the next tick treats it as failed. */
     private static final long INSTALL_SETTLE_MS = 90_000L;
+    /** {@code lastError} of a staged update no silent transport on this frame can install. */
+    static final String REASON_NEEDS_HUMAN = "needs-human-confirmation";
 
     private final WeakReference<UpdateManagerListener> listener;
     private final Context context;
@@ -88,7 +99,6 @@ public class UpdateManager {
     private UpdateState state;
     private boolean installInFlight;
     private boolean installFiredInThisProcess;
-    private long installFiredAtMs;
     private volatile String lastInstallAttempt = "none";
     private OkHttpClient httpClient;
 
@@ -245,11 +255,13 @@ public class UpdateManager {
     }
 
     /**
-     * Called from {@code onResume}: if this process fired an install and is still alive on
-     * the old version, the install did not take effect (intent cancelled, headless install
-     * refused) — roll back to the retryable {@code STAGED}.
+     * Called from {@code onResume}: if this process fired an install and is still alive on the old
+     * version, it did not take effect — roll back to the retryable {@code STAGED}. Naming the reason
+     * matters here: {@code canceled-or-refused} means a person dismissed the dialog we were shown,
+     * and anything else means a silent transport that promised more than it delivered.
      */
     public void reconcileInstallOutcome() {
+        boolean rolledBack = false;
         synchronized (this) {
             if (!installFiredInThisProcess) {
                 return;
@@ -260,47 +272,79 @@ public class UpdateManager {
                 return;
             }
             installFiredInThisProcess = false;
-            state = withState(state, UpdateState.State.STAGED, "install-canceled-or-refused");
+            boolean dialog = "intent".equals(lastInstallAttempt);
+            state = withState(state, UpdateState.State.STAGED,
+                    dialog ? "install-canceled-or-refused" : "install-did-not-complete");
+            state.installFiredAtMs = 0L;
             stateStore.write(state);
-            Log.w(TAG, "install did not complete in-process; back to STAGED (retried on the next tick)");
+            rolledBack = true;
+        }
+        if (rolledBack) {
+            notifyDebug("install did not complete in-process; back to STAGED (retried on the next tick)");
         }
     }
 
     // ------------------------------------------------------------------- installing
 
     /**
-     * Installs a staged update. With {@code force} it also reports via the listener when
-     * there is nothing staged (used by the web button). Called on every timer tick, so a
-     * failed/stuck install is retried automatically until it lands or {@link #resetUpdate()}.
+     * Installs a staged update, called from the web UI's install button and from every rotation
+     * tick — so a stuck install is retried until it lands or {@link #resetUpdate()}.
+     *
+     * @param humanRequested {@code true} only for the button. It authorises the one thing an
+     *                       unattended frame cannot use — the confirmation dialog — and makes the
+     *                       call report why it did nothing. A tick passes {@code false}, and a tick
+     *                       with no silent transport then leaves the update staged and silent
+     *                       instead of showing a dialog to nobody.
      */
-    public void installStaged(boolean force) {
+    public void installStaged(final boolean humanRequested) {
+        String event = null; // a state change worth logging on an unattended tick too
+        String note = null;  // a reply to a press; on a tick it would be noise every interval
+        boolean dispatch = false;
         synchronized (this) {
             if (installInFlight) {
                 return;
             }
-            if (state.state == UpdateState.State.INSTALL_PENDING
-                    && installFiredInThisProcess
-                    && System.currentTimeMillis() - installFiredAtMs > INSTALL_SETTLE_MS) {
-                // A fired install that never settled (no observer callback, process still
-                // alive): roll back so the next attempt can retry.
-                installFiredInThisProcess = false;
-                state = withState(state, UpdateState.State.STAGED, "install-canceled-or-refused");
-                stateStore.write(state);
-                Log.w(TAG, "install fired earlier did not settle; back to STAGED");
-            }
-            if (state.state != UpdateState.State.STAGED) {
-                if (force) {
-                    notifyDebug("install-staged: no staged update (state=" + state.state + ")");
+            if (state.state == UpdateState.State.INSTALL_PENDING) {
+                long firedAt = state.installFiredAtMs;
+                long elapsedMs = System.currentTimeMillis() - firedAt;
+                if (firedAt > 0L && elapsedMs <= INSTALL_SETTLE_MS) {
+                    // An install really is in flight — pm install can run for minutes. The old
+                    // "no staged update" read as a broken state machine when it only meant
+                    // "you pressed this a few seconds after it already fired".
+                    note = "install already dispatched " + (elapsedMs / 1000L)
+                            + "s ago; waiting for it to settle";
+                } else {
+                    // INSTALL_PENDING with its settle window spent (or with no timestamp at all,
+                    // i.e. a state file older than this field): the install did not land. Roll back
+                    // so this attempt can retry — including in a process that never fired it.
+                    installFiredInThisProcess = false;
+                    state = withState(state, UpdateState.State.STAGED, "install-did-not-complete");
+                    state.installFiredAtMs = 0L;
+                    stateStore.write(state);
+                    event = "install fired earlier did not settle; back to STAGED";
                 }
-                return;
             }
-            installInFlight = true;
+            if (state.state == UpdateState.State.STAGED) {
+                installInFlight = true;
+                dispatch = true;
+            } else if (note == null) {
+                note = "nothing staged (state=" + state.state + ")";
+            }
+        }
+        if (event != null) {
+            notifyDebug("install-staged: " + event);
+        }
+        if (note != null && humanRequested) {
+            notifyDebug("install-staged: " + note);
+        }
+        if (!dispatch) {
+            return;
         }
         Thread thread = new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
-                    runInstall();
+                    runInstall(humanRequested);
                 } catch (Throwable t) {
                     Log.e(TAG, "install crashed", t);
                     failState("install-crashed: " + t);
@@ -314,7 +358,38 @@ public class UpdateManager {
         thread.start();
     }
 
-    private void runInstall() {
+    /** Which transport an install dispatch takes; see {@link #chooseInstallPath}. */
+    enum InstallPath {
+        /** This frame holds INSTALL_PACKAGES: silent installPackage. */
+        HEADLESS,
+        /** Silent install through the device's own adbd (possibly after re-arming it). */
+        ADBD,
+        /** The confirmation dialog — only ever launched because a person asked for it. */
+        INTENT,
+        /** Nothing on this frame can install by itself: stay STAGED and say so. */
+        DEFER
+    }
+
+    /**
+     * The install ladder as a pure decision, so "will this frame install by itself?" is answerable
+     * in a unit test instead of only on a shelf. A frame with no silent transport must never put a
+     * dialog on an unattended screen: it would sit on a dark panel until a relaunch yanked it away,
+     * which is what made self-update look broken.
+     *
+     * @param adbdReachable true when the device's own adbd answers on loopback — possibly only
+     *                      because {@link AdbdInstallClient#ensureTcpAdbd()} just started it
+     */
+    static InstallPath chooseInstallPath(boolean holdsPermission, boolean adbdReachable, boolean humanRequested) {
+        if (holdsPermission) {
+            return InstallPath.HEADLESS;
+        }
+        if (adbdReachable) {
+            return InstallPath.ADBD;
+        }
+        return humanRequested ? InstallPath.INTENT : InstallPath.DEFER;
+    }
+
+    private void runInstall(boolean humanRequested) {
         UpdateState snapshot;
         synchronized (this) {
             if (state.state != UpdateState.State.STAGED) {
@@ -339,38 +414,77 @@ public class UpdateManager {
             }
         }
 
+        boolean holdsPermission = holdsInstallPermission();
+        // No INSTALL_PACKAGES (true of every sideloaded frame): the device's own adbd is the only
+        // silent transport, and on EO1 it is not even listening until the app starts it. Probing
+        // and re-arming changes no state, so the ladder below can decide on its answer.
+        AdbdInstallClient.Result armed = holdsPermission
+                ? null : AdbdInstallClient.ensureTcpAdbd();
+        boolean adbdReachable = armed != null && armed.outcome == AdbdInstallClient.Outcome.SUCCESS;
+
+        switch (chooseInstallPath(holdsPermission, adbdReachable, humanRequested)) {
+            case HEADLESS:
+                armAndPersist("headless installPackage", snapshot.expectedVersionCode);
+                lastInstallAttempt = "headless";
+                try {
+                    fireHeadlessInstall(Uri.fromFile(stagedPublic));
+                } catch (Throwable t) {
+                    Log.e(TAG, "installPackage threw", t);
+                    setStaged("installPackage-threw: " + t);
+                }
+                break;
+
+            case ADBD:
+                armAndPersist("adbd pm install", snapshot.expectedVersionCode);
+                if (!installViaAdbd(snapshot)) {
+                    // Looked reachable and then did not answer.
+                    if (humanRequested) {
+                        fireInstallIntent(snapshot);
+                    } else {
+                        setNeedsHuman();
+                    }
+                }
+                break;
+
+            case INTENT:
+                fireInstallIntent(snapshot);
+                break;
+
+            case DEFER:
+                // Nothing on this frame can install it, and an unattended confirmation dialog is
+                // not a plan — it would sit on a dark panel until something else took the screen
+                // back. Stay staged and retryable; the web UI says who is owed a click.
+                setNeedsHuman();
+                break;
+        }
+    }
+
+    /** Records that a silent install is being fired, and keeps the frame launchable if we die. */
+    private void armAndPersist(String how, int expectedVersionCode) {
         armRelaunchAlarm();
         persistInstallPending();
         installFiredInThisProcess = true;
-        installFiredAtMs = System.currentTimeMillis();
+        notifyDebug("install: " + how + " (version " + expectedVersionCode + ")");
+    }
 
-        if (holdsInstallPermission()) {
-            lastInstallAttempt = "headless";
-            Log.i(TAG, "installing staged update headlessly (version " + snapshot.expectedVersionCode + ")");
-            try {
-                fireHeadlessInstall(Uri.fromFile(stagedPublic));
-            } catch (Throwable t) {
-                Log.e(TAG, "installPackage threw", t);
-                setStaged("installPackage-threw: " + t);
-            }
-        } else if (installViaAdbd(snapshot)) {
-            // The adbd path settled the attempt: success (process replacement pending) or a
-            // pm failure already recorded as STAGED for the next tick.
-        } else {
-            // No adbd on this frame: one-time bootstrap frames use the proven intent
-            // fallback (confirmation UI, operable via OTG keyboard/mouse).
-            lastInstallAttempt = "intent";
-            wakeScreenForInstaller();
-            Log.i(TAG, "installing staged update via install intent (version " + snapshot.expectedVersionCode + ")");
-            try {
-                Intent intent = new Intent(Intent.ACTION_VIEW);
-                intent.setDataAndType(Uri.fromFile(stagedPublic), "application/vnd.android.package-archive");
-                intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
-                context.startActivity(intent);
-            } catch (Throwable t) {
-                Log.e(TAG, "install intent threw", t);
-                setStaged("install-intent-threw: " + t);
-            }
+    private void fireInstallIntent(UpdateState snapshot) {
+        // A person asked for this install, so the dialog is wanted: it is how a bootstrap frame
+        // finishes an update, via an OTG keyboard/mouse at the frame. No relaunch alarm here — it
+        // used to fire MainActivity back over the pending confirmation 120 s into it.
+        persistInstallPending();
+        installFiredInThisProcess = true;
+        lastInstallAttempt = "intent";
+        wakeScreenForInstaller();
+        notifyDebug("install: confirmation dialog on the frame's screen (version "
+                + snapshot.expectedVersionCode + ")");
+        try {
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(Uri.fromFile(stagedPublic), "application/vnd.android.package-archive");
+            intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(intent);
+        } catch (Throwable t) {
+            Log.e(TAG, "install intent threw", t);
+            setStaged("install-intent-threw: " + t);
         }
     }
 
@@ -385,21 +499,21 @@ public class UpdateManager {
      */
     private boolean installViaAdbd(UpdateState snapshot) {
         lastInstallAttempt = "adbd";
-        Log.i(TAG, "installing staged update via adbd (version " + snapshot.expectedVersionCode + ")");
         AdbdInstallClient.Result result = new AdbdInstallClient().install(stagedPublic);
         if (result.outcome == AdbdInstallClient.Outcome.PM_FAILED) {
-            Log.w(TAG, "adbd install failed: " + result.detail);
+            notifyDebug("adbd pm install failed: " + result.detail);
             installFiredInThisProcess = false;
             setStaged("install-failed: " + result.detail);
             return true;
         }
         if (result.outcome != AdbdInstallClient.Outcome.SUCCESS) {
-            Log.w(TAG, "adbd unreachable (" + result.detail + "); falling back to install intent");
+            notifyDebug("adbd did not answer: " + result.detail);
             return false;
         }
         // pm replaces the package and kills this process; the new process's
         // reconcileOnStartup() confirms (INSTALL_PENDING -> IDLE, staged files deleted).
-        Log.i(TAG, "adbd install succeeded (version " + snapshot.expectedVersionCode + "); awaiting process replacement");
+        notifyDebug("adbd pm install succeeded (version " + snapshot.expectedVersionCode
+                + "); awaiting process replacement");
         return true;
     }
 
@@ -1040,6 +1154,7 @@ public class UpdateManager {
     private void persistInstallPending() {
         synchronized (this) {
             state = withState(state, UpdateState.State.INSTALL_PENDING, "");
+            state.installFiredAtMs = System.currentTimeMillis();
             stateStore.write(state);
         }
     }
@@ -1059,9 +1174,25 @@ public class UpdateManager {
         c.expectedSizeBytes = s.expectedSizeBytes;
         c.lastCheckedMs = s.lastCheckedMs;
         c.attempts = s.attempts;
+        c.installFiredAtMs = s.installFiredAtMs;
         c.state = newState;
         c.lastError = lastError == null ? "" : lastError;
+        // needsHumanConfirmation is deliberately not carried: only the deferral below sets it,
+        // so any other transition retires the claim that a person still owes the frame a click.
         return c;
+    }
+
+    /** STAGED, retryable, but nothing on this frame can install it without a click. */
+    private void setNeedsHuman() {
+        synchronized (this) {
+            state = withState(state, UpdateState.State.STAGED, REASON_NEEDS_HUMAN);
+            state.needsHumanConfirmation = true;
+            // Nothing was fired, so nothing is owed a settle window.
+            state.installFiredAtMs = 0L;
+            stateStore.write(state);
+        }
+        notifyDebug("install: deferred — no silent transport on this frame;"
+                + " use \"Install on the frame\" in the web UI");
     }
 
     /**
@@ -1095,9 +1226,14 @@ public class UpdateManager {
         staged.addProperty("bytes", stagedPublic.length());
         o.add("stagedApk", staged);
         o.addProperty("installPermissionHeld", headless);
-        o.addProperty("installMode", headless ? "headless" : (adbdReachable ? "adbd" : "intent-fallback"));
+        // "defer-to-human": the next automatic dispatch puts nothing on screen and waits. Pressing
+        // Install in the web UI is what turns that deferral into the confirmation dialog.
+        InstallPath next = chooseInstallPath(headless, adbdReachable, false);
+        o.addProperty("installMode", next == InstallPath.DEFER ? "defer-to-human" : next.name().toLowerCase(Locale.US));
         o.addProperty("lastInstallAttempt", lastInstallAttempt);
         o.addProperty("adbdReachable", adbdReachable);
+        o.addProperty("needsHumanConfirmation", s.needsHumanConfirmation);
+        o.addProperty("installFiredAtMs", s.installFiredAtMs);
         return o;
     }
 

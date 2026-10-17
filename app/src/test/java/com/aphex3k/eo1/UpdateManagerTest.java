@@ -11,8 +11,8 @@ import com.aphex3k.update.UpdateState;
 import org.junit.Test;
 
 /**
- * JVM tests for {@link UpdateManager}'s pure statics ({@code checkDue} and
- * {@code reconcileState}). No Android framework classes are exercised.
+ * JVM tests for {@link UpdateManager}'s pure statics ({@code checkDue}, {@code reconcileState}
+ * and {@code chooseInstallPath}). No Android framework classes are exercised.
  */
 public class UpdateManagerTest {
 
@@ -164,5 +164,32 @@ public class UpdateManagerTest {
         stStaged.expectedVersionCode = 0;
         UpdateState rStaged = UpdateManager.reconcileState(stStaged, 0);
         assertSame(stStaged, rStaged);
+    }
+
+    // ---------------------------------------------------------- chooseInstallPath
+
+    @Test
+    public void installPath_permissionBeatsEverything() {
+        assertEquals(UpdateManager.InstallPath.HEADLESS,
+                UpdateManager.chooseInstallPath(true, false, false));
+        assertEquals(UpdateManager.InstallPath.HEADLESS,
+                UpdateManager.chooseInstallPath(true, true, true));
+    }
+
+    @Test
+    public void installPath_adbdIsSilent() {
+        assertEquals(UpdateManager.InstallPath.ADBD,
+                UpdateManager.chooseInstallPath(false, true, false));
+        assertEquals(UpdateManager.InstallPath.ADBD,
+                UpdateManager.chooseInstallPath(false, true, true));
+    }
+
+    /** The dialog is what a person pressing the button gets — never what a tick does. */
+    @Test
+    public void installPath_dialogOnlyOnHumanRequest() {
+        assertEquals(UpdateManager.InstallPath.INTENT,
+                UpdateManager.chooseInstallPath(false, false, true));
+        assertEquals(UpdateManager.InstallPath.DEFER,
+                UpdateManager.chooseInstallPath(false, false, false));
     }
 }
