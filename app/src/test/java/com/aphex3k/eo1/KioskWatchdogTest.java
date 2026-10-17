@@ -232,6 +232,40 @@ public class KioskWatchdogTest {
         assertEquals(10, host.actions.size());
     }
 
+    /**
+     * The 2026-10-16 false-positive reboot: quiet hours end, {@code screenShouldBeOn} flips true,
+     * but nothing has been displayed for the whole dark window since {@code lastRotationActivityMs}
+     * only advances on an actual display or the rotation tick's screen-on branch. A watchdog tick
+     * landing in the gap before that next rotation tick would otherwise age the frame by the full
+     * length of the dark period — here, long enough to skip every lower rung straight to reboot.
+     */
+    @Test
+    public void wakingUpAfterALongQuietPeriodDoesNotCountTheDarkTimeAsStale() {
+        host.screenShouldBeOn = false;
+        host.autoRebootEnabled = true;
+        // Last real display was right before quiet hours began, eight hours ago.
+        host.lastDisplayAtMs = host.now - 8 * HOUR;
+        tickTogether(MINUTE, 10);
+        assertEquals(0, count("forceRotation"));
+        assertEquals(0, count("rebootDevice"));
+
+        // Quiet hours end. The rotation timer's next tick is up to a full interval away, but the
+        // watchdog's own tick does not wait for it.
+        host.screenShouldBeOn = true;
+        watchdog.tick();
+        assertEquals("the dark period must not count toward the wedge", KioskWatchdog.LEVEL_NONE,
+                watchdog.actedLevel());
+        assertEquals(0, count("forceRotation"));
+        assertEquals(0, count("rebootDevice"));
+
+        // Only after a full limit's worth of silence since waking does the ladder start, and it
+        // starts from the bottom rung.
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+        tickTogether(MINUTE, (int) (limit / MINUTE) + 1);
+        assertEquals(1, count("forceRotation"));
+        assertEquals(0, count("rebootDevice"));
+    }
+
     @Test
     public void aSilentLoopDrivesTheRotationOnce() {
         silentFor(KioskWatchdog.staleLimitMs(15 * MINUTE));

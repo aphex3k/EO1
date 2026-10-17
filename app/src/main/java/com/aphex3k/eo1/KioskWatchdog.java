@@ -22,7 +22,9 @@ import java.util.TimerTask;
  *
  * <p>Recovery is a ladder. Each rung is taken at most once per wedge, only after the previous rung
  * has had time to work; it escalates from cheap and local (re-drive the rotation) to global
- * (reboot the frame), and the reboot rung is opt-in.
+ * (reboot the frame), and the reboot rung is opt-in. The clock that drives the ladder restarts
+ * whenever the screen goes from legitimately off (quiet hours, power button, manual toggle) to on:
+ * time spent dark is not a wedge, and must never count toward one once the frame wakes back up.
  *
  * <p>Every tick is guarded against {@code Throwable}: an exception escaping a {@code TimerTask}
  * reaches the process's {@code UncaughtExceptionHandler}, which calls {@code System.exit(2)} — the
@@ -147,6 +149,15 @@ public final class KioskWatchdog {
     private int probeMisses = 0;
     /** Progress token seen at the last check; baselined by {@link #KioskWatchdog(Host)}. */
     private long lastProgressToken = -1L;
+    /**
+     * {@link Host#screenShouldBeOn()} as of the previous {@link #evaluate(long)}, used to catch the
+     * false-to-true edge. Starts {@code true} so a process that boots into dark quiet hours does
+     * not mistake "first tick, screen is off" for "the screen just woke up" — boot-time staleness
+     * is anchored by {@code MainActivity} at {@code onCreate} instead.
+     */
+    private boolean lastTickScreenShouldBeOn = true;
+    /** When the screen last went from should-be-off to should-be-on; clamps how old a wedge can look. */
+    private long screenWokeAtMs = 0L;
     private int ticks = 0;
     private String lastAction = "none";
 
@@ -188,8 +199,11 @@ public final class KioskWatchdog {
     }
 
     /**
-     * Age of the last thing shown on screen. Zero (healthy) during quiet hours or before the
-     * first display, so a frame that is meant to be dark never escalates.
+     * Age of the last thing shown on screen. Zero (healthy) while the screen should be off, or
+     * before the first display. This is the pure arithmetic only — callers must not feed a
+     * {@code lastDisplayAtMs} older than the last time the screen legitimately turned back on
+     * (see {@link #evaluate}'s {@code screenWokeAtMs} clamp), or a frame that was simply meant to
+     * be dark for a while would count its whole quiet period as a wedge the moment it wakes.
      */
     public static long staleMs(boolean screenShouldBeOn, long nowMs, long lastDisplayAtMs,
                                long downloadInFlightMs) {
@@ -238,7 +252,20 @@ public final class KioskWatchdog {
     }
 
     private void evaluate(long now) {
-        long stale = staleMs(host.screenShouldBeOn(), now, host.lastDisplayAtMs(), host.downloadInFlightMs());
+        // The age clock must restart the moment the screen legitimately wakes up (end of quiet
+        // hours, the physical power button, a manual toggle, a brightness adjust) — otherwise the
+        // first tick to see "screen should be on" measures staleness from the last thing shown
+        // before the dark period, hours old, and requiredLevel() jumps straight past every lower
+        // rung to the reboot rung in a single evaluation. Clamping here rather than in the wake
+        // call sites is what makes it catch all of them, including ones that never touch
+        // MainActivity's quiet-hours path at all.
+        boolean screenOn = host.screenShouldBeOn();
+        if (screenOn && !lastTickScreenShouldBeOn) {
+            screenWokeAtMs = now;
+        }
+        lastTickScreenShouldBeOn = screenOn;
+        long stale = staleMs(screenOn, now, Math.max(host.lastDisplayAtMs(), screenWokeAtMs),
+                host.downloadInFlightMs());
         // Progress, not promptness: a main thread that acks two minutes late has still emptied its
         // queue and is working. Only an unchanged counter means it never got to anything.
         long token = host.mainLoopProgressToken();
@@ -259,7 +286,7 @@ public final class KioskWatchdog {
 
         if (now - lastHeartbeatAtMs >= HEARTBEAT_MS) {
             lastHeartbeatAtMs = now;
-            host.logWatchdogEvent(heartbeatLine(stale, now), false);
+            host.logWatchdogEvent(heartbeatLine(stale, now, screenOn), false);
         }
 
         // Another activity is in front (settings dialog): the loop is legitimately idle, so no
@@ -363,7 +390,7 @@ public final class KioskWatchdog {
         }
     }
 
-    private String heartbeatLine(long stale, long now) {
+    private String heartbeatLine(long stale, long now, boolean screenOn) {
         StringBuilder sb = new StringBuilder();
         sb.append("heartbeat tick=").append(ticks)
                 .append(" stale=").append(stale / 1000L).append("s")
@@ -378,7 +405,7 @@ public final class KioskWatchdog {
         if (probeMisses > 0) {
             sb.append(" UNACKED_PROBES=").append(probeMisses);
         }
-        sb.append(" screen=").append(host.screenShouldBeOn() ? "on" : "off");
+        sb.append(" screen=").append(screenOn ? "on" : "off");
         if (host.isPaused()) {
             // Rungs are suppressed while another activity is in front; say so, so a long pause
             // cannot be mistaken for a healthy frame.
@@ -392,7 +419,8 @@ public final class KioskWatchdog {
 
     /** How long the display loop has been silent right now (0 during quiet hours). */
     public long staleMsNow() {
-        return staleMs(host.screenShouldBeOn(), host.nowMs(), host.lastDisplayAtMs(), host.downloadInFlightMs());
+        return staleMs(host.screenShouldBeOn(), host.nowMs(),
+                Math.max(host.lastDisplayAtMs(), screenWokeAtMs), host.downloadInFlightMs());
     }
 
     /**
