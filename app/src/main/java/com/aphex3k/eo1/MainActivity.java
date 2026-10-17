@@ -50,6 +50,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.view.ViewCompat;
+import androidx.fragment.app.Fragment;
 
 import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaType;
@@ -105,6 +106,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long DOWNLOAD_PROGRESS_LOG_INTERVAL_MS = 5000L;
     /** Logcat tag matched by debug.sh follow_logcat filter. */
     private static final String TAG = "EO1";
+    /** Tag the options dialog is shown under, and the idempotency key for {@link #showConfigurationUI()}. */
+    private static final String OPTIONS_DIALOG_TAG = "OptionsDialog";
     private View lastVisibleView;
     private String lastVisibleAsset = "";
     private String activeVideoAssetId = "";
@@ -250,6 +253,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private volatile boolean repairRunning = false;
     /** One vendor-OTA silencing attempt per process — see {@link #silenceVendorUpdater()}. */
     private volatile boolean vendorUpdaterAttempted = false;
+    /** Whether this window holds input focus — the precondition for every key binding. */
+    private volatile boolean windowFocused = false;
+    /** Simple class name of the view holding focus, or "none". Kept on the UI thread only. */
+    private volatile String focusedView = "none";
+    /** The last key this window was actually offered, so a dead keyboard reads as one in /state. */
+    private volatile int lastKeyEventCode = 0;
+    private volatile long lastKeyEventAtMs = 0L;
 
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
@@ -262,6 +272,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         tsVideoView = findViewById(R.id.tsVideoView);
         debugOverlay = findViewById(R.id.debugOverlay);
         progressIndicator = findViewById(R.id.progressIndicator);
+        // This window needs a focusable view of its own, or focus stays wherever an editor left it:
+        // hardware keys are then routed to that editor's input connection and never reach
+        // dispatchKeyEvent, which silently kills C, Space and the soft buttons.
+        findViewById(R.id.rootView).requestFocus();
 
         mediaPlayerController = new MediaPlayerController(mediaPlayerVideoView);
         tsPlayerController = new TsPlayerController(tsVideoView);
@@ -466,13 +480,32 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
-    public boolean onKeyUp(int keyCode, android.view.KeyEvent event) {
-
-        if (this.eventManager.onKeyDown(keyCode)) {
-            return true;
+    public boolean dispatchKeyEvent(android.view.KeyEvent event) {
+        // Recorded before anything acts on the key, so a report of "the keyboard stopped working" is
+        // answerable from /state alone: if lastKeyAtMs never moves, this window was never offered the
+        // key — which is a focus problem, not a mapping one.
+        if (event.getAction() == android.view.KeyEvent.ACTION_UP) {
+            View focus = getCurrentFocus();
+            focusedView = focus == null ? "none" : focus.getClass().getSimpleName();
+            lastKeyEventCode = event.getKeyCode();
+            lastKeyEventAtMs = System.currentTimeMillis();
+            debugInformationProvided(new DebugInformation("key",
+                    android.view.KeyEvent.keyCodeToString(event.getKeyCode())
+                            + " with focus " + focusedView));
+            if (this.eventManager != null && this.eventManager.onKeyDown(event.getKeyCode())) {
+                return true;
+            }
         }
-        else {
-            return super.onKeyDown(keyCode, event);
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        this.windowFocused = hasFocus;
+        if (hasFocus) {
+            View focus = getCurrentFocus();
+            this.focusedView = focus == null ? "none" : focus.getClass().getSimpleName();
         }
     }
 
@@ -765,8 +798,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void showConfigurationUI() {
         this.runOnUiThread(() -> {
+            Fragment existing = getSupportFragmentManager().findFragmentByTag(OPTIONS_DIALOG_TAG);
+            if (existing != null) {
+                if (existing.isAdded()) {
+                    return;
+                }
+                // Restored from a recreation and never given its SettingsManager back —
+                // OptionsDialogFragment has no no-arg constructor, so it is half-built. Drop it
+                // rather than show a second window under the same tag.
+                getSupportFragmentManager().beginTransaction()
+                        .remove(existing)
+                        .commitAllowingStateLoss();
+            }
             OptionsDialogFragment dialog = new OptionsDialogFragment(this.settingsManager);
-            dialog.show(getSupportFragmentManager(), "OptionsDialog");
+            dialog.show(getSupportFragmentManager(), OPTIONS_DIALOG_TAG);
         });
     }
 
@@ -2318,6 +2363,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             media.add("current", current);
         }
         o.add("media", media);
+
+        JsonObject input = new JsonObject();
+        input.addProperty("windowFocused", windowFocused);
+        input.addProperty("activityPaused", activityPaused);
+        input.addProperty("focusedView", focusedView);
+        input.addProperty("lastKeyCode", lastKeyEventCode);
+        input.addProperty("lastKeyAtMs", lastKeyEventAtMs);
+        o.add("input", input);
 
         o.add("update", updateManager.stateJson());
         o.add("watchdog", watchdogStateJson());
