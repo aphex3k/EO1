@@ -36,6 +36,7 @@ public class EventManager {
         if (capabilities.supportsBrightnessButton()
                 && ((keyCode == KeyEvent.EO1_TOP_BUTTON && lastKeyCode == KeyEvent.EO1_BACK_BUTTON) ||
                         (keyCode == KeyEvent.EO1_BACK_BUTTON && lastKeyCode == KeyEvent.EO1_TOP_BUTTON))
+                        && lastKeyCodeDate != null
                         && ((new Date()).getTime() - lastKeyCodeDate.getTime() < 250))
         {
             eventManagerListener.checkForUpdates();
