@@ -189,14 +189,18 @@ liveness, not asset decodability: a single long video looping natively is health
 Nothing is judged during quiet hours, while another activity is in front
 (`/state: watchdog.paused`, `PAUSED` in the heartbeat), or before the first asset has ever shown.
 The limit is `max(20 min, 3 × rotation interval)`, and past it the ladder escalates — each rung at
-most once per wedge, and the counter resets as soon as the frame is healthy again:
+most once per wedge, one rung per tick at most, and the counter resets as soon as the frame is
+healthy again. The "at stale ≥" column is therefore what a rung *requires*, not when it fires: a
+wedge that already looks hours old on the watchdog's first look still walks rungs 1→2→3→4 before it
+reaches 5, because rung 5 is the one an unprivileged frame is not allowed to pull and must not be
+arrived at by skipping the rung that would have worked:
 
 | rung | at stale ≥ | what it does |
 |---|---|---|
 | 1 force rotation | limit | re-drives `showNextImage` (a lost tick or a skipped rotation) |
 | 2 recover playback | limit + 5 min | forces the full player teardown an asset handoff would do (clears the same-asset skip, releases the player, uncovers the wallpaper) and then rotates — the documented TsPlayer recovery, never a per-duration recreate |
 | 3 network repair | limit + 10 min, and only after 10 min offline | `svc wifi disable` → 3 s → `svc wifi enable` through the ROM's adbd (fixed constants only), which restarts the vendor Wi-Fi stack via WifiService — the ROM's supplicant is registered as `init.svc.p2p_supplicant`, so poking `ctl.start wpa_supplicant` by the AOSP name would be a guess. Effect is judged by connectivity on the next tick. Up to 3 attempts, ≥10 min apart; bails out at once if adbd cannot be reached. Caveat measured on the EO2: while a host `adb` client is attached, adbd accepts the loopback connection but never answers — so this rung was verified to fail fast, not to restore Wi-Fi. Test it on a frame that is not plugged into a dev machine |
-| 4 self-restart | two un-acked main-thread probes | schedules a relaunch and kills our own process — the only rung that works when the UI thread is the wedged part |
+| 4 self-restart | two un-acked main-thread probes, or the climb arriving at it | schedules a relaunch and kills our own process — the only rung that works when the UI thread is the wedged part |
 | 5 reboot | limit + 30 min | `reboot` via adbd. **Opt-in** via `config.autoReboot` — the *Reboot the frame if nothing else recovers it* checkbox in the options dialog, or the same field in the config editor below (trusted network + token); when off, the ladder logs that it stopped here. While there is no network it waits for rung 3's attempts to be spent first — an ISP outage is not fixed by rebooting the frame every day |
 
 The 2026-10-13 incident is the reason rungs 3 and 5 exist: a `SurfaceFlinger` hang put

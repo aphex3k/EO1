@@ -162,6 +162,20 @@ public class KioskWatchdogTest {
         return host.actions.contains(action);
     }
 
+    /**
+     * Walk the ladder up to {@code level} one rung per tick, taking the rungs below honestly rather
+     * than poking a field, so a case about one rung is not written in terms of nothing else having
+     * happened. What the climb did stays in {@code host.actions}.
+     */
+    private void climbTo(int level) {
+        int guard = 0;
+        while (watchdog.actedLevel() < level && guard++ < 12) {
+            host.advance(MINUTE);
+            watchdog.tick();
+        }
+        assertTrue("the ladder stalled below rung " + level, watchdog.actedLevel() >= level);
+    }
+
     // ------------------------------------------------------------------ thresholds
 
     @Test
@@ -307,10 +321,12 @@ public class KioskWatchdogTest {
         silentFor(limit + 10 * MINUTE);
         host.networkAvailable = false;
         host.offlineMs = MINUTE;
-        watchdog.tick();
+        climbTo(KioskWatchdog.LEVEL_REPAIR_NETWORK);
         assertEquals(0, count("repairNetwork"));
 
+        // The outage is old enough now, and the ladder already sits on the repair rung.
         host.offlineMs = KioskWatchdog.OFFLINE_REPAIR_MS;
+        host.advance(KioskWatchdog.REPAIR_SPACING_MS);
         watchdog.tick();
         assertEquals(1, count("repairNetwork"));
     }
@@ -322,7 +338,8 @@ public class KioskWatchdogTest {
         host.networkAvailable = false;
         host.offlineMs = KioskWatchdog.OFFLINE_REPAIR_MS;
 
-        watchdog.tick();
+        // The climb's last step is the first repair attempt.
+        climbTo(KioskWatchdog.LEVEL_REPAIR_NETWORK);
         assertEquals(1, count("repairNetwork"));
 
         tickTogether(MINUTE, 4);
@@ -346,13 +363,39 @@ public class KioskWatchdogTest {
     public void rebootIsTheLastResortAndRefusedUnlessEnabled() {
         long limit = KioskWatchdog.staleLimitMs(15 * MINUTE);
         silentFor(limit + 31 * MINUTE);
-        watchdog.tick();
+        climbTo(KioskWatchdog.LEVEL_REBOOT);
         assertEquals(0, count("rebootDevice"));
         assertTrue("the refusal must be logged", loggedContains("automatic reboot is disabled"));
 
         host.autoRebootEnabled = true;
         watchdog.tick();
         assertEquals(1, count("rebootDevice"));
+    }
+
+    /**
+     * The frame this rung exists for: a wedge that already looks hours old the first time the
+     * watchdog sees it must not be answered by jumping to the one rung it is not allowed to pull.
+     * On a healthy-network frame the ladder now walks past the cheap rungs and reaches
+     * self-restart, which is the rung that recovers an unattended frame with {@code autoReboot}
+     * off — instead of logging the refusal once and then idling on it for days.
+     */
+    @Test
+    public void aWedgeThatLooksOldOnSightStillClimbsFromTheBottom() {
+        silentFor(KioskWatchdog.staleLimitMs(15 * MINUTE) + 12 * HOUR);
+
+        watchdog.tick();
+        assertEquals("the first evaluation takes the cheapest rung", 1, count("forceRotation"));
+        assertEquals(0, count("rebootDevice"));
+
+        tickTogether(MINUTE, 2);
+        assertEquals(0, count("repairNetwork"));
+        assertEquals("the repair rung is passed over, not waited on",
+                KioskWatchdog.LEVEL_REPAIR_NETWORK, watchdog.actedLevel());
+
+        watchdog.tick();
+        assertTrue("self-restart must be reached without the reboot permission",
+                acted("selfRestart"));
+        assertEquals(0, count("rebootDevice"));
     }
 
     @Test
@@ -447,7 +490,9 @@ public class KioskWatchdogTest {
         host.autoRebootEnabled = true;
         silentFor(KioskWatchdog.staleLimitMs(15 * MINUTE) + 40 * MINUTE);
 
-        watchdog.tick();
+        // One rung per tick, so the ladder arrives at the repair rung through the rungs below it.
+        // What must not change is the order: repairs are spent before the reboot rung is reached.
+        climbTo(KioskWatchdog.LEVEL_REPAIR_NETWORK);
         assertEquals("the reboot rung must not skip the repairs", 1, count("repairNetwork"));
         assertEquals(0, count("rebootDevice"));
 

@@ -22,8 +22,13 @@ import java.util.TimerTask;
  *
  * <p>Recovery is a ladder. Each rung is taken at most once per wedge, only after the previous rung
  * has had time to work; it escalates from cheap and local (re-drive the rotation) to global
- * (reboot the frame), and the reboot rung is opt-in. The clock that drives the ladder restarts
- * whenever the screen goes from legitimately off (quiet hours, power button, manual toggle) to on:
+ * (reboot the frame), and the reboot rung is opt-in. The ladder climbs <b>one rung per
+ * evaluation</b> and never skips to the highest rung the current age has earned: a wedge that looks
+ * old the moment it is first seen must still get the cheap rungs, because on a frame without the
+ * reboot permission the top rung is a dead end that would otherwise be reached without self-restart
+ * — the rung that actually works unattended — ever having been tried. The clock that drives the
+ * ladder restarts whenever the screen goes from legitimately off (quiet hours, power button, manual
+ * toggle) to on:
  * time spent dark is not a wedge, and must never count toward one once the frame wakes back up.
  *
  * <p>Every tick is guarded against {@code Throwable}: an exception escaping a {@code TimerTask}
@@ -323,12 +328,27 @@ public final class KioskWatchdog {
             return;
         }
 
-        if (wanted == LEVEL_REPAIR_NETWORK && host.offlineMs() < OFFLINE_REPAIR_MS) {
-            // Not enough time without a network to justify poking the Wi-Fi stack yet.
+        // Climb one rung per evaluation rather than jumping to the highest rung this age has
+        // earned. The offsets pace the rungs anyway, so normally wanted == actedLevel + 1 and this
+        // changes nothing. The difference shows when a wedge is first seen already past several
+        // thresholds — a long quiet period, a wall-clock jump, or a frame whose displays keep
+        // failing fast enough to stay stale — and the jump lands on REBOOT, the one rung a frame
+        // without the permission cannot pull. It then sits on that rung for days, returning at the
+        // "already acted" guard above, without ever trying the rungs below that would have worked,
+        // self-restart included.
+        int next = Math.min(wanted, actedLevel + 1);
+        if (next == LEVEL_REPAIR_NETWORK && host.offlineMs() < OFFLINE_REPAIR_MS) {
+            // Not enough time without a network to justify poking the Wi-Fi stack. Pass the rung
+            // over instead of stalling the climb on it: holding here would strand the ladder one
+            // rung short of self-restart on a frame whose network is fine.
+            actedLevel = LEVEL_REPAIR_NETWORK;
+            lastAction = "repair-skipped";
+            host.logWatchdogEvent("(" + (stale / 60_000L) + "m stale): skipping network repair —"
+                    + " offline only " + (host.offlineMs() / 60_000L) + "m", false);
             return;
         }
 
-        act(wanted, stale, now);
+        act(next, stale, now);
     }
 
     private void retryRepairIfDue(long now, long stale) {
@@ -358,9 +378,13 @@ public final class KioskWatchdog {
                 break;
             case LEVEL_SELF_RESTART:
                 lastAction = "self-restart";
-                host.logWatchdogEvent("main thread ran nothing for " + probeMisses
-                        + " ticks in a row (stale " + (stale / 60_000L) + "m)"
-                        + " — restarting app process", true);
+                // Two different roads lead here and an operator reading the log needs to know
+                // which: a confirmed dead loop, or the age ladder climbing past a slow loop that
+                // is still making progress.
+                host.logWatchdogEvent((probeMisses >= MAIN_LOOP_DEAD_TICKS
+                        ? "main thread ran nothing for " + probeMisses + " ticks in a row"
+                        : "ladder reached self-restart (main thread alive)")
+                        + " (stale " + (stale / 60_000L) + "m) — restarting app process", true);
                 host.selfRestart();
                 break;
             case LEVEL_REPAIR_NETWORK:
