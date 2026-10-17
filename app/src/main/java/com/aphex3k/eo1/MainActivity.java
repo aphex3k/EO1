@@ -133,6 +133,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int lastVideoRotation = -1;
     private int lastVideoWidth;
     private int lastVideoHeight;
+    private String lastVideoCodec;
     private String lastFrameOrientation;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
@@ -571,7 +572,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.connectionManager.registerListener(this);
 
-        debugInformationProvided(new DebugInformation("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE));
+        debugInformationProvided(new DebugInformation("version", BuildFacts.version()));
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key),
                 this.connectionManager.isNetworkAvailable() ? "connected" : "waiting for network"));
     }
@@ -2036,6 +2037,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         int rotation = probe.rotationDeg;
         int width = probe.codedWidth;
         int height = probe.codedHeight;
+        String codec = probe.codec;
         MediaAsset asset = mediaManager != null ? mediaManager.getCurrentAsset() : null;
         if (asset != null) {
             if (width <= 0) {
@@ -2060,12 +2062,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastVideoRotation = rotation;
         lastVideoWidth = width;
         lastVideoHeight = height;
+        lastVideoCodec = codec;
         lastFrameOrientation = framePortrait ? "portrait" : "landscape";
-        Log.i(TAG, "displayVideo routing: rotation=" + rotation + " coded=" + width + "x" + height
+        Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
+                + " coded=" + width + "x" + height
                 + " frame=" + lastFrameOrientation + " player="
                 + (forceFallback ? "MediaPlayer" : "TsPlayer"));
         debugInformationProvided(new DebugInformation("videoRouting",
-                "rotation=" + rotation + " dims=" + width + "x" + height
+                "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
                         + " frame=" + lastFrameOrientation + " -> "
                         + (forceFallback ? "MediaPlayer" : "TsPlayer")));
         return !forceFallback;
@@ -2359,6 +2363,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
+    public String appBuildSummary() {
+        return BuildFacts.summary(this);
+    }
+
+    @Override
     public String buildStateJson() {
         JsonObject o = new JsonObject();
 
@@ -2378,13 +2387,31 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.add("capabilities", caps);
 
         JsonObject app = new JsonObject();
-        app.addProperty("version", BuildConfig.VERSION_NAME + "." + BuildConfig.VERSION_CODE);
+        app.addProperty("version", BuildFacts.version());
+        app.addProperty("versionName", BuildFacts.versionName());
+        app.addProperty("buildNumber", BuildFacts.buildNumber());
+        app.addProperty("variant", BuildFacts.variant());
+        app.addProperty("buildDate", BuildFacts.buildStamp());
+        app.addProperty("gitSha", BuildFacts.gitSha());
+        app.addProperty("gitDirty", "true".equals(BuildFacts.gitDirty()));
         app.addProperty("debug", BuildConfig.DEBUG);
         app.addProperty("tsPlayer", preferTsPlayer);
         app.addProperty("webPort", webServer != null ? webServer.getBoundPort() : -1);
         app.addProperty("trustedNetwork", settingsManager != null && settingsManager.isTrustedNetwork());
         app.addProperty("createCount", sActivityCreateCount);
         app.addProperty("processStartMs", PROCESS_START_MS);
+        BuildFacts.Signer signer = BuildFacts.signing(this);
+        JsonObject signerJson = new JsonObject();
+        signerJson.addProperty("signed", signer.signed);
+        signerJson.addProperty("fingerprint", signer.fingerprintHex);
+        signerJson.addProperty("subject", signer.subject);
+        signerJson.addProperty("serial", signer.serial);
+        signerJson.addProperty("validFrom", signer.validFrom);
+        signerJson.addProperty("validTo", signer.validTo);
+        signerJson.addProperty("validity", signer.validityStatus);
+        signerJson.addProperty("algorithm", signer.algorithm);
+        signerJson.addProperty("keyVerdict", signer.keyVerdict);
+        app.add("signer", signerJson);
         o.add("app", app);
 
         // The whole backlight story in one place: what the user set, what the sensor last saw, and
@@ -2455,6 +2482,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             video.addProperty("rotation", lastVideoRotation);
             video.addProperty("width", lastVideoWidth);
             video.addProperty("height", lastVideoHeight);
+            if (lastVideoCodec != null) {
+                video.addProperty("codec", lastVideoCodec);
+            }
             if (lastFrameOrientation != null) {
                 video.addProperty("frameOrientation", lastFrameOrientation);
             }

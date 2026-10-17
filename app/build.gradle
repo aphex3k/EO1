@@ -1,3 +1,5 @@
+import com.android.build.api.variant.BuildConfigField
+
 plugins {
     id 'com.android.application'
 }
@@ -96,6 +98,46 @@ android {
         buildConfig true
     }
 
+}
+
+// Build provenance for the on-device About tab, /state and the web page: which source produced
+// this binary. A wall-clock timestamp would be re-evaluated at configuration time (AGP 8.x has no
+// lazy buildConfigField overload), so it would rewrite BuildConfig.java and recompile the module
+// on every Gradle invocation — including `test`. These are git facts instead: stable for a given
+// checkout, so generate*BuildConfig stays UP-TO-DATE, and a rebuild of the same commit is the same
+// binary anyway. Each is -P overridable the way VERSION_CODE/VERSION_NAME already are.
+def gitOut = { List<String> args ->
+    try {
+        def pb = new ProcessBuilder(['git'] + args)
+        pb.directory(project.rootDir)
+        pb.redirectError(ProcessBuilder.Redirect.DISCARD)
+        def proc = pb.start()
+        def out = proc.inputStream.getText('UTF-8').trim()
+        return proc.waitFor() == 0 ? out : null
+    } catch (Throwable ignored) {
+        return null          // no git binary, or a source tree unpacked from a tarball
+    }
+}
+// A Java string literal, from a value that may come from -P on someone's command line.
+def javaLiteral = { String raw -> '"' + raw.replaceAll(/["\\\r\n]/, '') + '"' }
+def provenanceField = { String name, Closure<String> compute ->
+    providers.provider {
+        def value = project.hasProperty(name) ? project.getProperty(name).toString() : compute.call()
+        new BuildConfigField('String', javaLiteral(value), 'Build provenance; see app/build.gradle')
+    }
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.buildConfigFields.put('GIT_SHA',
+                provenanceField('GIT_SHA') { gitOut(['rev-parse', '--short', 'HEAD']) ?: 'unknown' })
+        variant.buildConfigFields.put('BUILD_DATE',
+                provenanceField('BUILD_DATE') { gitOut(['show', '-s', '--format=%cI', 'HEAD']) ?: 'unknown' })
+        variant.buildConfigFields.put('GIT_DIRTY', provenanceField('GIT_DIRTY') {
+            def status = gitOut(['status', '--porcelain'])
+            return status == null ? 'unknown' : (status ? 'true' : 'false')
+        })
+    }
 }
 
 dependencies {

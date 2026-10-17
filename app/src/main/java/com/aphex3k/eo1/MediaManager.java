@@ -723,11 +723,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
-     * Whether an original is worth a download attempt at all. Codec guesses from the file name
-     * are not part of this: only what this device physically cannot handle — more bytes than
-     * its cache can hold, a video with a coded side beyond the panel, or bytes already verified
-     * undecodable since the last restart. Everything else gets displayed and judged by the
-     * decoder, which is the only thing that can be right.
+     * Whether an original is worth a download attempt at all. What this can settle without the
+     * bytes: more of them than the cache can hold, a video with a coded side beyond the panel, or
+     * a verdict already reached on this asset's bytes since the last restart — which for a video
+     * is the only pre-download codec knowledge the pipeline ever gets, since no backend reports a
+     * codec and a container extension is a claim rather than a fact. Everything else gets
+     * displayed and judged by the decoder, which is the only thing that can be right.
      */
     private boolean originalUsable(MediaAsset asset) {
         String key = asset.key();
@@ -779,7 +780,24 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private File acquireFallbackSource(MediaAsset asset, MediaSource fallback, File cacheDir,
                                        boolean reportProgress) throws Exception {
         try {
-            return acquireRemoteFile(asset, fallback, cacheDir, reportProgress);
+            File artifact = acquireRemoteFile(asset, fallback, cacheDir, reportProgress);
+            if (artifact == null) {
+                return null;
+            }
+            // A server with nothing transcoded answers the degraded request with the original
+            // bytes, so this rung can be exactly as undecodable as the first one. Handing it to a
+            // player would paint a black frame and call that success: it is the ladder running
+            // out, which is decided here rather than left to a decoder that may never complain.
+            String unusable = MediaCompatibility.incompatibleReasonForFile(asset.type, artifact);
+            if (unusable != null) {
+                Log.w(TAG, "acquireAsset: " + asset.key() + " fallback source is " + unusable
+                        + "; flagging it as incompatible with this device");
+                deleteCachedFile(artifact);
+                knownIncompatibleKeys.add(asset.key());
+                tagAssetAsIncompatible(asset.key());
+                return null;
+            }
+            return artifact;
         } catch (MediaDownloadFailedException e) {
             if (e.getCause() != null) {
                 throw e;

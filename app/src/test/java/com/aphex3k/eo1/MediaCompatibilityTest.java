@@ -14,8 +14,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 
 /**
- * JVM tests of the device codec gate: the name-based pre-download check and the
- * {@code ftyp} byte check for files that already exist locally.
+ * JVM tests of the device codec gate: the name-based pre-download check, and the byte checks for
+ * files that already exist locally — the {@code ftyp} box for stills, the video sample
+ * description for clips.
  */
 public class MediaCompatibilityTest {
 
@@ -150,12 +151,59 @@ public class MediaCompatibilityTest {
     }
 
     @Test
-    public void skipsByteCheckForVideoAndNull() throws Exception {
-        File heic = writeBytes("x.jpg", ftyp("heic"));
-        assertNull(MediaCompatibility.incompatibleReasonForFile(MediaType.VIDEO, heic));
+    public void videoIsJudgedBySampleDescriptionNotByFtypBrands() throws Exception {
+        // HEIF brands are a still-image verdict: a video whose bytes carry them is not thereby
+        // undecodable, and a name that is not an ISOBMFF extension yields no codec at all.
+        File heicBytesNamedJpg = writeBytes("x.jpg", ftyp("heic"));
+        assertNull(MediaCompatibility.incompatibleReasonForFile(MediaType.VIDEO, heicBytesNamedJpg));
         assertNull(MediaCompatibility.incompatibleReasonForFile(MediaType.IMAGE, null));
         assertNull(MediaCompatibility.incompatibleReasonForFile(
                 MediaType.IMAGE, new File(tmp.getRoot(), "missing.jpg")));
+    }
+
+    @Test
+    public void rejectsCodecsThisDeviceHasNoDecoderFor() {
+        assertIncompatibleCodec("hvc1");
+        assertIncompatibleCodec("hev1");
+        assertIncompatibleCodec("av01");
+        assertIncompatibleCodec("vvc1");
+        assertIncompatibleCodec("dvh1");
+    }
+
+    @Test
+    public void acceptsCodecsThisDeviceCanDecodeAndUnknownOnes() {
+        assertCompatibleCodec("avc1");
+        assertCompatibleCodec("mp4v");
+        assertCompatibleCodec("s263");
+        assertCompatibleCodec(null);
+        // A video codec fourcc in an image asset is nobody's verdict.
+        assertNull(MediaCompatibility.incompatibleVideoCodec(MediaType.IMAGE, "hvc1"));
+    }
+
+    @Test
+    public void rejectsHevcBytesInsideAContainerNamedMov() throws Exception {
+        // The whole point of the sample-description check: iPhone .MOV files are HEVC, and the
+        // extension says nothing either way.
+        File mov = writeBytes("IMG_8740.mov", moovWithSampleEntry("hvc1"));
+        String reason = MediaCompatibility.incompatibleReasonForFile(MediaType.VIDEO, mov);
+        assertTrue("HEVC in a .mov must not reach a player", reason != null);
+        assertTrue(reason, reason.contains("hvc1"));
+    }
+
+    @Test
+    public void acceptsAvcBytesInsideAContainerNamedMov() throws Exception {
+        assertNull(MediaCompatibility.incompatibleReasonForFile(
+                MediaType.VIDEO, writeBytes("clip.mov", moovWithSampleEntry("avc1"))));
+    }
+
+    @Test
+    public void unknownSampleDescriptionIsNoReason() throws Exception {
+        // An audio entry is not a video codec verdict, and neither is an entry the probe does not
+        // recognise: an unidentified file is always given to the decoder.
+        assertNull(MediaCompatibility.incompatibleReasonForFile(
+                MediaType.VIDEO, writeBytes("clip.mov", moovWithSampleEntry("mp4a"))));
+        assertNull(MediaCompatibility.incompatibleReasonForFile(
+                MediaType.VIDEO, writeBytes("clip.mov", new byte[64])));
     }
 
     private static void assertIncompatible(MediaType type, String name) {
@@ -190,6 +238,51 @@ public class MediaCompatibilityTest {
     private void assertBytesCompatible(byte[] content) throws Exception {
         assertNull(MediaCompatibility.incompatibleReasonForFile(
                 MediaType.IMAGE, writeBytes("sample.jpg", content)));
+    }
+
+    private static void assertIncompatibleCodec(String fourCc) {
+        String reason = MediaCompatibility.incompatibleVideoCodec(MediaType.VIDEO, fourCc);
+        assertTrue("expected " + fourCc + " to be undecodable here", reason != null);
+    }
+
+    private static void assertCompatibleCodec(String fourCc) {
+        assertNull(fourCc + " should be decodable here",
+                MediaCompatibility.incompatibleVideoCodec(MediaType.VIDEO, fourCc));
+    }
+
+    private static byte[] u32(int v) {
+        return new byte[]{(byte) (v >>> 24), (byte) (v >>> 16), (byte) (v >>> 8), (byte) v};
+    }
+
+    private static byte[] u16(int v) {
+        return new byte[]{(byte) (v >>> 8), (byte) v};
+    }
+
+    private static byte[] cat(byte[]... parts) {
+        int len = 0;
+        for (byte[] p : parts) {
+            len += p.length;
+        }
+        byte[] out = new byte[len];
+        int off = 0;
+        for (byte[] p : parts) {
+            System.arraycopy(p, 0, out, off, p.length);
+            off += p.length;
+        }
+        return out;
+    }
+
+    private static byte[] box(String type, byte[]... payload) {
+        byte[] body = cat(payload);
+        return cat(u32(8 + body.length), type.getBytes(StandardCharsets.US_ASCII), body);
+    }
+
+    /** moov/trak/mdia/minf/stbl/stsd wrapping one sample entry named {@code fourCc}. */
+    private static byte[] moovWithSampleEntry(String fourCc) {
+        byte[] entry = cat(new byte[6], u16(1), new byte[16], u16(1920), u16(1080));
+        byte[] entryBox = cat(u32(8 + entry.length), fourCc.getBytes(StandardCharsets.US_ASCII), entry);
+        return box("moov", box("trak", box("mdia", box("minf",
+                box("stbl", box("stsd", new byte[]{0, 0, 0, 0}, u32(1), entryBox))))));
     }
 
     /** ISO 14496-12 {@code ftyp} box: size + type + major brand + minor + compatible brands. */
