@@ -1062,26 +1062,36 @@ public class WebServer {
         sb.append(renderUpdateSection());
 
         sb.append("<script>");
-        sb.append("function ctrl(a){fetch('/control?action='+a).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}");
-        // An update no silent transport can install stays staged and says so here, instead of
-        // putting a confirmation dialog on an unattended screen. textContent, never innerHTML:
-        // expectedVersionName arrives in a manifest fetched off the network.
-        sb.append("function updateNotice(){fetch('/state').then(r=>r.json()).then(function(j){")
-                .append("var n=document.getElementById('updateNotice');var u=j&&j.update;if(!n)return;")
-                .append("if(u&&u.needsHumanConfirmation){n.textContent=\"Update \"+(u.expectedVersionName||u.expectedVersionCode)")
-                .append("+\" is staged, but this frame cannot install it by itself (install mode: \")+u.installMode+")
-                .append("\"). Use the Install button above, then confirm the dialog on the frame - an OTG keyboard or mouse")
-                .append(" works. It stays staged and retryable until then.\";}")
-                .append("else if(u&&u.state=='INSTALL_PENDING'&&u.installFiredAtMs){")
-                .append("n.textContent=\"An install is in flight; the frame retries on its own if it does not land.\";}")
-                .append("else{n.textContent='';}}).catch(function(){});}")
-                .append("updateNotice();");
-        sb.append("function fillKey(n){document.getElementById('keycode').value=n;}");
-        sb.append("function sendKey(){var c=document.getElementById('keycode').value;fetch('/control?action=keyevent&code='+encodeURIComponent(c),{method:'POST'}).then(r=>r.json()).then(j=>alert('keyevent '+(document.getElementById('keycode').value)+':'+(j.fired?'fired':'failed')));}");
-        sb.append("function del(n){if(!confirm('Delete '+n+'?'))return;");
-        sb.append("fetch('/files/'+n+'/delete',{method:'POST'}).then(r=>r.json()).then(j=>location.reload());}");
+        sb.append(controlSectionJs());
         sb.append("</script>");
         return sb.toString();
+    }
+
+    /**
+     * The index page's own JavaScript, package-private so the routing test can assert on the text it emits.
+     * A {@code <script>} element is parsed whole before it runs, so one misplaced token in here silently
+     * undefines every function in it while the page still renders — hence: no fragment below may leave a
+     * string literal open for the next one to close.
+     */
+    static String controlSectionJs() {
+        return "function ctrl(a){fetch('/control?action='+a).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}"
+                // An update no silent transport can install stays staged and says so here, instead of
+                // putting a confirmation dialog on an unattended screen. textContent, never innerHTML:
+                // expectedVersionName arrives in a manifest fetched off the network.
+                + "function updateNotice(){fetch('/state').then(r=>r.json()).then(function(j){"
+                + "var n=document.getElementById('updateNotice');var u=j&&j.update;if(!n)return;"
+                + "if(u&&u.needsHumanConfirmation){n.textContent=\"Update \""
+                + "+(u.expectedVersionName||u.expectedVersionCode)"
+                + "+\" is staged, but this frame cannot install it by itself (install mode: \""
+                + "+u.installMode+\"). Use the Install button above, then confirm the dialog on the frame - an OTG keyboard or mouse works. It stays staged and retryable until then\";}"
+                + "else if(u&&u.state=='INSTALL_PENDING'&&u.installFiredAtMs){"
+                + "n.textContent=\"An install is in flight; the frame retries on its own if it does not land.\";}"
+                + "else{n.textContent='';}}).catch(function(){});}"
+                + "updateNotice();"
+                + "function fillKey(n){document.getElementById('keycode').value=n;}"
+                + "function sendKey(){var c=document.getElementById('keycode').value;fetch('/control?action=keyevent&code='+encodeURIComponent(c),{method:'POST'}).then(r=>r.json()).then(j=>alert('keyevent '+(document.getElementById('keycode').value)+':'+(j.fired?'fired':'failed')));}"
+                + "function del(n){if(!confirm('Delete '+n+'?'))return;"
+                + "fetch('/files/'+n+'/delete',{method:'POST'}).then(r=>r.json()).then(j=>location.reload());}";
     }
 
     /**
@@ -1397,11 +1407,11 @@ public class WebServer {
         return sb.toString();
     }
 
-    private static String updateSectionJs() {
+    static String updateSectionJs() {
         return "function stagedBlock(sha,bytes){"
                 + "var h='<p><b>SHA-256: </b><code style=\"display:block;word-break:break-all\">'+sha+'</code><br>'"
                 + "+bytes+' bytes. Verify this checksum against the published release before installing.</p>'"
-                + "+'<p><button id=\"apkInstall\">Install on the frame</button> ';"
+                + "+'<p><button id=\"apkInstall\">Install on the frame</button> '"
                 + "+'<button id=\"apkReset\">Discard staged</button></p>';"
                 + "document.getElementById('apkStatus').innerHTML=h;"
                 + "document.getElementById('apkInstall').onclick=function(){ctrl('install-staged');};"
