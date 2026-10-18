@@ -109,7 +109,8 @@ public interface WebController {
     /**
      * Fires a device control action (mirrors a hardware key press).
      *
-     * @param action one of {@code next}, {@code screen}, {@code brightness}, {@code config},
+     * @param action one of {@code next}, {@code show} (displays one asset by ID; debug builds only,
+     *               reads {@code asset}), {@code screen}, {@code brightness}, {@code config},
      *               {@code settings}, {@code update-site}, {@code check-updates},
      *               {@code install-staged} (installs a staged self-update, screen on),
      *               {@code update-reset} (drops staged update files and state),
@@ -117,8 +118,9 @@ public interface WebController {
      *               POST-only — rung 5 reboots the device),
      *               {@code keyevent} (injects an arbitrary keycode; debug builds only,
      *               and the web server accepts it only via POST).
-     * @param params the request's query/form parameters; {@code keyevent} reads {@code code} and
-     *               {@code watchdog} reads {@code level} from it.
+     * @param params the request's query/form parameters; {@code keyevent} reads {@code code},
+     *               {@code watchdog} reads {@code level} and {@code show} reads {@code asset}
+     *               (an {@code "backendId:assetId"} key) from it.
      * @return {@code true} if a known action was dispatched.
      */
     boolean control(String action, Map<String, String> params);

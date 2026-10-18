@@ -12,7 +12,7 @@
 | `/files/<name>/delete` | DELETE / POST | Deletes an uploaded file |
 | `/upload` | POST | `multipart/form-data` upload, 512 MB cap per file, 2 GB cap per request, max 32 parts; stored in `filesDir/uploaded/` |
 | `/update?token=<t>` | POST | **Trusted network + configuration token + same origin.** `multipart/form-data` upload of a single APK file (100 MB cap — `UpdateManifest.MAX_APK_BYTES`), staged as a self-update instead of added to the rotation pool. The APK is verified with the same gates as the self-update download path: SHA-256, JAR signature against the installed app's signing certificate (pure-Java `ApkSignatureVerifier`), and a strictly newer `versionCode` read from the APK's binary manifest. On success it lands in `filesDir/updates/` as the staged update (state `STAGED`) — **never auto-installed**. The JSON response carries the computed `sha256` so the user can check it against the published release before firing `install-staged`; the index page shows it and offers **Install staged** / **Discard staged** (a page reload re-shows it from `/state`) |
-| `/control?action=<a>[&code=<n>]` | GET / POST | Fires a hardware-key action (below); `keyevent` (debug builds only) additionally requires POST and reads the `code` param |
+| `/control?action=<a>[&code=<n>][&asset=<key>]` | GET / POST | Fires a hardware-key action (below); `keyevent` (debug builds only) additionally requires POST and reads the `code` param, and `show` (debug builds only) reads `asset` |
 | `/config?token=<t>` | GET | **Trusted network + configuration token.** Full device configuration JSON, credentials included |
 | `/config?token=<t>` | POST | **Trusted network + configuration token + same origin.** Applies the request body (≤ 512 KB JSON) as the new device configuration: parsed, normalized, written to `filesDir/configuration.json`, live config replaced, time zone re-applied, rotation restarted. `{"ok":false,"msg":...}` on validation failure (config unchanged) |
 | `/config/download?token=<t>` | GET | **Trusted network + configuration token.** Streams the configuration as a `configuration.json` attachment (same document as `POST /config` writes, legacy mirror fields included) |
@@ -25,6 +25,7 @@
 | action | hardware equivalent | effect |
 |---|---|---|
 | `next` | space / PS4 circle | show next asset in the rotation |
+| `show?asset=<backendId>:<assetId>` | — (**debug builds only**) | Display **one chosen rotation asset now** instead of hoping the shuffle lands on it: the named record is swapped to the head of the pool and the next tick displays it, so it goes down the ordinary rotation path with the whole ladder applied — original bytes, the other player engine, backend fallback, incompatible tagging — exactly as an unprompted rotation of that asset would. `<backendId>` is one of `config.backends[].id` (`immich-1`, `local`, `web-1`); `<assetId>` is the id that backend reports for the asset (Immich's own asset UUID; for `local` and `web`, a deterministic UUID derived from the file name or page URL), so the dependable way to get a key is to read `/state`'s `media.current.key` off a frame that is already showing the asset in question. An empty key, or one this generation's pool does not hold, answers `fired:false`; before the first rotation there is no pool to check against, so such a request is accepted and the miss is reported in `/logs` instead. Like `next`, nothing is displayed while quiet hours have the panel off — turn it on with `?action=screen` first, and a request made while the panel is dark is dropped rather than left pending until it wakes |
 | `screen` | top button | toggle screen on/off |
 | `brightness` | back button | raise the backlight level one step (EO1). Eight steps from 0.3 to 1.0; past the top it wraps to 0.3. The level is the *floor* the ambient-light curve lifts from, and it is persisted, so it survives a restart, an update install and a reboot |
 | `config` | C | open the app configuration dialog |
@@ -40,6 +41,8 @@ All actions are posted to the UI thread — except `keyevent`, which is injected
 web worker thread (`sendKeyDownUpSync` posts to the UI looper and would deadlock if posted
 to it), and `watchdog`, which runs on the web worker thread precisely so it can still act when
 the UI thread is the thing that is stuck (each rung dispatches to whatever thread owns the work).
+`show` is posted like the rest: it only parks an asset key on the media layer and then drives the
+same rotation tick `next` does, which is why it adds no display path of its own.
 `keyevent` and `watchdog` are debug-build-only admin actions that additionally require POST: a
 release build refuses them entirely, and the method gate blocks the cross-origin `GET`
 drive-by. POST-only is **not** CSRF protection by itself — `/control` reads its parameters
@@ -48,8 +51,11 @@ form and reach the action on a debug build; real CSRF resistance would need addi
 checks (an `Origin`/`Referer` validation, a non-simple content type, or a per-session
 token). The server deliberately has none of those — it remains credential-free plain HTTP
 by design (trusted LAN only) — so the security boundary is the trusted-LAN assumption plus
-the debug-build gate, not hardening against hostile pages. `keyevent`/`watchdog` on a release
-build or via GET, an unknown action, or a malformed `code`/`level` returns
+the debug-build gate, not hardening against hostile pages. `show` is debug-build-only as well, but
+stays `GET`-able, because naming which of its own rotation assets a frame displays adds no power a
+drive-by `?action=next` does not already have. `keyevent`/`watchdog` on a release
+build or via GET, `show` on a release build or with a key the current pool does not hold, an
+unknown action, or a malformed `code`/`level` returns
 `{"ok":false,"fired":false}`.
 
 ## Trusted network
