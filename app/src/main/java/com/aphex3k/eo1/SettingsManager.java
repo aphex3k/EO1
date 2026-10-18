@@ -43,8 +43,17 @@ public class SettingsManager {
      */
     private static final String PREF_LOOPBACK_ADB = "loopback_adb";
     /**
+     * SharedPreferences key for the backlight level the EO1's BACK button cycles. Stored as the
+     * opaque step index {@link BrightnessManager} interprets, not as a brightness value. Per-device
+     * hardware state like {@code trusted_network}: never in {@code configuration.json} and never
+     * exported, because importing someone else's config must not silently change how bright this
+     * frame is. It is also the only reason the level survives a restart at all — without it the
+     * floor resets to its default every time the Activity is rebuilt.
+     */
+    private static final String PREF_MIN_BRIGHTNESS_STEP = "min_brightness_step";
+    /**
      * SharedPreferences key for the operator's free-form label for <em>this</em> frame ("Kitchen").
-     * Like the two flags above it is never part of {@code configuration.json} and never exported: it
+     * Like the flags above it is never part of {@code configuration.json} and never exported: it
      * names one box, so carrying it to another on import would mislabel that one. Empty means unset —
      * every surface then identifies the frame by platform and IP address alone, exactly as before the
      * field existed.
@@ -143,6 +152,38 @@ public class SettingsManager {
      */
     public boolean isLoopbackAdbEnabled() {
         return isTrustedNetwork() && isLoopbackAdbAllowed();
+    }
+
+    /**
+     * The persisted backlight step, or 0 (the floor) if nothing was ever stored. Range clamping is
+     * {@link BrightnessManager}'s job — this is deliberately a dumb int, since what the number
+     * means belongs to the brightness code and not to where it is kept.
+     */
+    public int getMinimumBrightnessStep() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return 0;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            return prefs != null ? prefs.getInt(PREF_MIN_BRIGHTNESS_STEP, 0) : 0;
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    public void setMinimumBrightnessStep(int step) {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs != null) {
+                prefs.edit().putInt(PREF_MIN_BRIGHTNESS_STEP, step).apply();
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     /**

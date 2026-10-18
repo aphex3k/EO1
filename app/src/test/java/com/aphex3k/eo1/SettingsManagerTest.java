@@ -71,6 +71,37 @@ public class SettingsManagerTest {
         assertTrue("disabling adbd leaves the web-server flag alone", sm.isTrustedNetwork());
     }
 
+    /**
+     * The backlight level is per-device hardware state, so it lives here rather than in
+     * configuration.json — and it has to outlive a restart, because MainActivity rebuilds its
+     * BrightnessManager in onCreate and a level that does not survive that is a level that resets
+     * itself every time the frame does.
+     */
+    @Test
+    public void minimumBrightnessStepDefaultsToTheFloorAndOutlivesTheManager() throws Exception {
+        FakeListener listener = new FakeListener(tmp.newFolder("files"));
+
+        SettingsManager sm = new SettingsManager(listener);
+        assertEquals(0, sm.getMinimumBrightnessStep());
+
+        sm.setMinimumBrightnessStep(4);
+        assertEquals(4, sm.getMinimumBrightnessStep());
+        // A fresh SettingsManager over the same prefs is what an Activity re-creation hands back.
+        assertEquals(4, new SettingsManager(listener).getMinimumBrightnessStep());
+    }
+
+    @Test
+    public void minimumBrightnessStepIsNotPartOfConfigurationDocument() throws Exception {
+        File files = tmp.newFolder("files");
+        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        sm.setMinimumBrightnessStep(6);
+        assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
+
+        String json = sm.exportConfigurationJson();
+        assertFalse(json.contains("brightness"));
+        assertFalse(readAll(new File(files, "configuration.json")).contains("brightness"));
+    }
+
     @Test
     public void importValidWritesFileAndUpdatesLiveConfiguration() throws Exception {
         File files = tmp.newFolder("files");

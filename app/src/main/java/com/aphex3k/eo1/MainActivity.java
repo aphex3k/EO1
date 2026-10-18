@@ -133,6 +133,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int lastVideoRotation = -1;
     private int lastVideoWidth;
     private int lastVideoHeight;
+    private String lastVideoCodec;
     private String lastFrameOrientation;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
@@ -151,12 +152,26 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private volatile List<CronExpression> quietCronExpressions = new ArrayList<CronExpression>();
     /** Last quiet-state applied by the scheduler; edge-triggering avoids fighting manual toggles. */
     private volatile boolean lastScheduledQuietState = false;
-    private float lastScreenBrightness = 0.3f;
+    /**
+     * What {@link #writeScreenBrightness(float)} last put on the panel, for /state only. The
+     * authority on what the brightness should be is {@link BrightnessManager#currentBrightness()};
+     * keeping a second value like this one as an <em>input</em> anywhere is what made the frame
+     * dim itself below the user's level. -1 means nothing has been applied yet.
+     */
+    private volatile float lastAppliedBrightness = -1.0f;
     private ConnectionManager connectionManager;
     private AppLogger appLogger;
     private WebServer webServer;
     /** True once the stale incoming_* cleanup has run for this process (first onCreate only). */
     private static volatile boolean sStaleIncomingCleaned = false;
+    /**
+     * onCreate count for this process. A frame that "resets itself" is either having its Activity
+     * re-created (this climbs, {@link #PROCESS_START_MS} does not) or restarting (both climb), and
+     * /state is the only place left to tell them apart once the device is back on the wall.
+     */
+    private static volatile int sActivityCreateCount = 0;
+    /** Process start, for the same reason: uptime with a low create count means neither happened. */
+    private static final long PROCESS_START_MS = System.currentTimeMillis();
     private PowerManager.WakeLock screenOffWakeLock;
     /**
      * Reconciles shouldTheScreenBeOn with the real panel. On the EO2 the physical button is a
@@ -303,13 +318,21 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             progressIndicator.setDrawingCacheBackgroundColor(Color.green(255));
         }
 
+        sActivityCreateCount++;
         this.capabilities = HardwareCapabilitiesFactory.detect(Build.DEVICE, Build.MODEL);
         Log.i(TAG, "hardware: " + capabilities.platform() + " (device=" + Build.DEVICE
                 + ", model=" + Build.MODEL + ")");
-        this.brightnessManager = new BrightnessManager(this,
-                (SensorManager) getSystemService(SENSOR_SERVICE), capabilities);
-        this.eventManager = new EventManager(this, capabilities);
+        // Settings first: the brightness manager restores the user's level from its store, and a
+        // frame that never restores it is a frame that dims itself after the next restart.
         this.settingsManager = new SettingsManager(this);
+        Log.i(TAG, "created: activity #" + sActivityCreateCount + " (uptime "
+                + ((System.currentTimeMillis() - PROCESS_START_MS) / 1000L) + "s)");
+        this.brightnessManager = new BrightnessManager(this,
+                (SensorManager) getSystemService(SENSOR_SERVICE), capabilities, this.settingsManager);
+        // Put the restored level on the panel now rather than at the first rotation tick, which can
+        // be the whole interval away: a frame that comes back dim is a frame that looks broken.
+        applyCurrentBrightness();
+        this.eventManager = new EventManager(this, capabilities);
         this.updateManager = new UpdateManager(this, this, this.settingsManager);
         this.mediaManager = new MediaManager(this, this.settingsManager, this);
         this.connectionManager = new ConnectionManager(this);
@@ -468,7 +491,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         nextRotationAtMs = System.currentTimeMillis() + delayMs;
         logScreenAndTimerState();
         if (brightnessManager.getShouldTheScreenBeOn()) {
-            brightnessChanged(lastScreenBrightness);
+            applyCurrentBrightness();
             lastRotationActivityMs = System.currentTimeMillis();
             mediaManager.showNextImage(this);
         } else {
@@ -678,6 +701,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (this.kioskWatchdog != null) {
             this.kioskWatchdog.stop();
         }
+        if (this.brightnessManager != null) {
+            // Recreation would otherwise leave the old light-sensor listener firing for an Activity
+            // that no longer exists.
+            this.brightnessManager.shutdown();
+        }
         if (webView != null) {
             WebView view = webView;
             webView = null;
@@ -695,20 +723,26 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void brightnessChanged(float targetScreenBrightness) {
+        writeScreenBrightness(targetScreenBrightness);
+    }
 
+    /**
+     * The only thing in the app that touches {@code screenBrightness}. It writes exactly what it is
+     * handed, because the upward-only {@code Math.max} this replaced was the sole reason a BACK
+     * tap survived the next rotation tick — and it stopped working the moment a recreated Activity
+     * handed back fresh attributes reading {@code BRIGHTNESS_OVERRIDE_NONE}, which is when the
+     * panel dropped to whatever a stale cache held.
+     */
+    private void writeScreenBrightness(float brightness) {
         WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
-
-        if (this.brightnessManager.getShouldTheScreenBeOn()) {
-
-            layoutParams.screenBrightness = Math.max(targetScreenBrightness, layoutParams.screenBrightness);
-        }
-        else {
-            layoutParams.screenBrightness = 0;
-        }
-
-        lastScreenBrightness = layoutParams.screenBrightness;
-
+        layoutParams.screenBrightness = brightness;
         getWindow().setAttributes(layoutParams);
+        lastAppliedBrightness = brightness;
+    }
+
+    /** Asks the brightness manager what the panel should be showing and puts that on the hardware. */
+    private void applyCurrentBrightness() {
+        writeScreenBrightness(brightnessManager.currentBrightness());
     }
 
     @Override
@@ -799,7 +833,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // hideWebView() paused the page; making it visible again would not unfreeze it.
             webView.onResume();
         }
-        brightnessChanged(lastScreenBrightness);
+        applyCurrentBrightness();
     }
 
     @Override
@@ -828,11 +862,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             Log.i(TAG, "adjustMinimumBrightness: ignored (" + capabilities.platform() + " has no screen brightness control)");
             return;
         }
+        // A tap is also "wake up" — quiet hours may have the panel dark on a level the user
+        // already chose. Everything after that is the manager's: it steps, persists, and applies.
         this.brightnessManager.setShouldTheScreenBeOn(true);
-        this.brightnessManager.adjustMinimumBrightness();
-        WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
-        layoutParams.screenBrightness = this.brightnessManager.minBrightness;
-        getWindow().setAttributes(layoutParams);
+        this.brightnessManager.raiseMinimumBrightnessStep();
     }
 
     @Override
@@ -2011,6 +2044,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         int rotation = probe.rotationDeg;
         int width = probe.codedWidth;
         int height = probe.codedHeight;
+        String codec = probe.codec;
         MediaAsset asset = mediaManager != null ? mediaManager.getCurrentAsset() : null;
         if (asset != null) {
             if (width <= 0) {
@@ -2035,12 +2069,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastVideoRotation = rotation;
         lastVideoWidth = width;
         lastVideoHeight = height;
+        lastVideoCodec = codec;
         lastFrameOrientation = framePortrait ? "portrait" : "landscape";
-        Log.i(TAG, "displayVideo routing: rotation=" + rotation + " coded=" + width + "x" + height
+        Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
+                + " coded=" + width + "x" + height
                 + " frame=" + lastFrameOrientation + " player="
                 + (forceFallback ? "MediaPlayer" : "TsPlayer"));
         debugInformationProvided(new DebugInformation("videoRouting",
-                "rotation=" + rotation + " dims=" + width + "x" + height
+                "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
                         + " frame=" + lastFrameOrientation + " -> "
                         + (forceFallback ? "MediaPlayer" : "TsPlayer")));
         return !forceFallback;
@@ -2386,6 +2422,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         app.addProperty("tsPlayer", preferTsPlayer);
         app.addProperty("webPort", webServer != null ? webServer.getBoundPort() : -1);
         app.addProperty("trustedNetwork", settingsManager != null && settingsManager.isTrustedNetwork());
+        app.addProperty("createCount", sActivityCreateCount);
+        app.addProperty("processStartMs", PROCESS_START_MS);
         BuildFacts.Signer signer = BuildFacts.signing(this);
         JsonObject signerJson = new JsonObject();
         signerJson.addProperty("signed", signer.signed);
@@ -2399,6 +2437,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         signerJson.addProperty("keyVerdict", signer.keyVerdict);
         app.add("signer", signerJson);
         o.add("app", app);
+
+        // The whole backlight story in one place: what the user set, what the sensor last saw, and
+        // what is actually on the panel. A "it dimmed by itself" report is answerable from this.
+        JsonObject brightness = new JsonObject();
+        brightness.addProperty("supported", capabilities.supportsScreenBrightness());
+        brightness.addProperty("step", brightnessManager.getMinimumBrightnessStep());
+        brightness.addProperty("persistedStep", settingsManager.getMinimumBrightnessStep());
+        brightness.addProperty("floor", brightnessManager.minimumBrightness());
+        brightness.addProperty("applied", lastAppliedBrightness);
+        brightness.addProperty("lastLightValue", brightnessManager.lastLightValue());
+        brightness.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
+        o.add("brightness", brightness);
 
         o.add("config", ConfigStateJson.configStateJson(settingsManager.getConfiguration()));
 
@@ -2456,6 +2506,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             video.addProperty("rotation", lastVideoRotation);
             video.addProperty("width", lastVideoWidth);
             video.addProperty("height", lastVideoHeight);
+            if (lastVideoCodec != null) {
+                video.addProperty("codec", lastVideoCodec);
+            }
             if (lastFrameOrientation != null) {
                 video.addProperty("frameOrientation", lastFrameOrientation);
             }

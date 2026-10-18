@@ -1,6 +1,7 @@
 package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNull;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -97,7 +98,7 @@ public class VideoHeaderProbeTest {
         return box("tkhd", cat(new byte[]{1, 0, 0, 0}, payload));
     }
 
-    private static byte[] stsdAv1(int width, int height) {
+    private static byte[] stsdEntry(String fourCc, int width, int height) {
         byte[] entry = cat(
                 new byte[6],                 // SampleEntry pre_defined
                 u16(1),                      // data_reference_index
@@ -107,12 +108,16 @@ public class VideoHeaderProbeTest {
                 new byte[4],                 // reserved
                 u16(1),                      // num_sequences
                 new byte[4]);                // codec payload padding
-        byte[] entryBox = cat(u32(8 + entry.length), "avc1".getBytes(StandardCharsets.US_ASCII), entry);
+        byte[] entryBox = cat(u32(8 + entry.length), fourCc.getBytes(StandardCharsets.US_ASCII), entry);
         return box("stsd", cat(new byte[]{0, 0, 0, 0}, u32(1), entryBox));
     }
 
     private static byte[] trak(byte[] tkhd, int width, int height) {
-        byte[] stbl = box("stbl", stsdAv1(width, height));
+        return trak(tkhd, "avc1", width, height);
+    }
+
+    private static byte[] trak(byte[] tkhd, String fourCc, int width, int height) {
+        byte[] stbl = box("stbl", stsdEntry(fourCc, width, height));
         byte[] minf = box("minf", stbl);
         byte[] mdia = box("mdia", minf);
         return box("trak", tkhd, mdia);
@@ -150,6 +155,34 @@ public class VideoHeaderProbeTest {
         assertEquals(0, p.rotationDeg);
         assertEquals(1920, p.codedWidth);
         assertEquals(1080, p.codedHeight);
+        assertEquals("avc1", p.codec);
+    }
+
+    @Test
+    public void reportsTheSampleEntryFourccOfTheVideoTrack() throws Exception {
+        File mov = writeFile("IMG_8740.MOV", box("moov", trak(tkhdV0(0, 1, -1, 0), "hvc1", 1920, 1080)));
+        assertEquals("hvc1", VideoHeaderProbe.probe(mov).codec);
+        assertEquals(270, VideoHeaderProbe.probe(mov).rotationDeg);
+    }
+
+    @Test
+    public void audioTrackFirstStillReportsTheVideoCodec() throws Exception {
+        // QuickTime files routinely carry the audio trak first; the entry the probe reports must
+        // be a video one, or the codec gate has nothing to judge.
+        byte[] moov = box("moov",
+                trak(tkhdV0(1, 0, 0, 1), "mp4a", 0, 0),
+                trak(tkhdV0(1, 0, 0, 1), "av01", 1920, 1080));
+        VideoHeaderProbe.Probe p = VideoHeaderProbe.probe(writeFile("av1.mov", moov));
+        assertEquals("av01", p.codec);
+        assertEquals(1920, p.codedWidth);
+    }
+
+    @Test
+    public void unrecognisedSampleEntryReportsNoCodec() throws Exception {
+        byte[] moov = box("moov", trak(tkhdV0(1, 0, 0, 1), "tmcd", 0, 0));
+        VideoHeaderProbe.Probe p = VideoHeaderProbe.probe(writeFile("timecode.mov", moov));
+        assertNull(p.codec);
+        assertEquals(0, p.codedHeight);
     }
 
     @Test

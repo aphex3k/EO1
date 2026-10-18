@@ -3,13 +3,21 @@ package com.aphex3k.eo1;
 import java.io.File;
 import java.io.IOException;
 import java.io.RandomAccessFile;
+import java.nio.charset.Charset;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Bounded, pure-Java ISOBMFF (.mov/.mp4/.m4v) header probe.
  *
- * <p>Reports two facts about a video file without touching the media stack:
+ * <p>Reports three facts about a video file without touching the media stack:
  * <ul>
+ *   <li>the codec, as the fourcc of the first recognised video sample description — the only
+ *       place in the app where a file's actual codec is readable, since the container extension
+ *       is a claim rather than a fact ({@code .mov} carries H.264 or HEVC equally well);</li>
  *   <li>the display-matrix rotation in degrees clockwise (0/90/180/270, or -1 when unknown)
  *       — read from the {@code tkhd} 16.16 matrix, overridden by an ISO 23001-8 {@code rot }
  *       box when one is present (that rare path returns the box's counter-clockwise value
@@ -23,9 +31,10 @@ import java.util.Locale;
  * <p>Deliberately no {@code MediaMetadataRetriever}: opening a file through mediaserver grabs
  * {@code /dev/amstream_vbuf} and EBUSY-starves a live in-process TsPlayer. I/O is bounded to a
  * 2 MB head scan plus an 8 MB tail scan (a found {@code moov} box is read at most 32 MB).
- * Anything beyond those caps, or unparseable, yields "unknown" ({@code -1 / 0,0}), which callers
- * treat as "no change from today's behaviour". Non-ISOBMFF extensions yield
- * {@code (0, 0, 0)}: rotation identity, dimensions unknown.
+ * Anything beyond those caps, or unparseable, yields "unknown" ({@code -1 / 0,0 / null}), which
+ * callers treat as "no change from today's behaviour" — an unknown codec is never a reason to
+ * skip a file. Non-ISOBMFF extensions yield {@code (0, 0, 0, null)}: rotation identity,
+ * dimensions and codec unknown.
  */
 public final class VideoHeaderProbe {
 
@@ -45,35 +54,48 @@ public final class VideoHeaderProbe {
     private VideoHeaderProbe() {
     }
 
-    /** Probe result. {@code rotationDeg}: 0/90/180/270 or -1 (unknown). Dims: 0 = unknown. */
+    /**
+     * Probe result. {@code rotationDeg}: 0/90/180/270 or -1 (unknown). Dims: 0 = unknown.
+     * {@code codec}: lower-case fourcc of the first recognised video sample description, or
+     * null when the file gave no readable one.
+     */
     public static final class Probe {
         public final int rotationDeg;
         public final int codedWidth;
         public final int codedHeight;
+        public final String codec;
 
-        public Probe(int rotationDeg, int codedWidth, int codedHeight) {
+        public Probe(int rotationDeg, int codedWidth, int codedHeight, String codec) {
             this.rotationDeg = rotationDeg;
             this.codedWidth = codedWidth;
             this.codedHeight = codedHeight;
+            this.codec = codec;
         }
     }
 
+    /** Sample-description facts read out of one {@code trak} box. */
+    private static final class SampleEntry {
+        String codec;
+        int width;
+        int height;
+    }
+
     /**
-     * Probes {@code f}. Never throws; returns {@code (-1, 0, 0)} when nothing could be
-     * determined and {@code (0, 0, 0)} for non-ISOBMFF file names.
+     * Probes {@code f}. Never throws; returns everything-unknown when nothing could be
+     * determined and an all-zero result with a null codec for non-ISOBMFF file names.
      */
     public static Probe probe(File f) {
         if (f == null || !f.isFile()) {
-            return new Probe(-1, 0, 0);
+            return new Probe(-1, 0, 0, null);
         }
         String name = f.getName().toLowerCase(Locale.ROOT);
         if (!name.endsWith(".mov") && !name.endsWith(".mp4") && !name.endsWith(".m4v")) {
-            return new Probe(0, 0, 0);
+            return new Probe(0, 0, 0, null);
         }
         try {
             long len = f.length();
             if (len < 32) {
-                return new Probe(-1, 0, 0);
+                return new Probe(-1, 0, 0, null);
             }
 
             int headLen = (int) Math.min(len, HEAD_SCAN_BYTES);
@@ -107,9 +129,9 @@ public final class VideoHeaderProbe {
                     return parseMoov(moov);
                 }
             }
-            return new Probe(-1, 0, 0);
+            return new Probe(-1, 0, 0, null);
         } catch (Exception e) {
-            return new Probe(-1, 0, 0);
+            return new Probe(-1, 0, 0, null);
         }
     }
 
@@ -184,8 +206,7 @@ public final class VideoHeaderProbe {
     private static Probe parseMoov(byte[] moov) {
         int rotBox = -1;
         int rotTkhd = -1;
-        int width = 0;
-        int height = 0;
+        SampleEntry video = new SampleEntry();
         int n = moov.length;
         int off = 8; // past the moov box's own size/type header
         while (off + 8 <= n) {
@@ -201,28 +222,20 @@ public final class VideoHeaderProbe {
                     rotBox = r;
                 }
             } else if (type == FOURCC_TRAK) {
-                int[] t = parseTrak(moov, off, end);
-                if (t != null) {
-                    if (rotTkhd < 0 && t[0] >= 0) {
-                        rotTkhd = t[0];
-                    }
-                    if (width == 0 && t[1] > 0 && t[2] > 0) {
-                        width = t[1];
-                        height = t[2];
-                    }
+                int r = parseTrak(moov, off, end, video);
+                if (rotTkhd < 0 && r >= 0) {
+                    rotTkhd = r;
                 }
             }
             off = end;
         }
         int rotation = rotBox >= 0 ? rotBox : rotTkhd;
-        return new Probe(rotation, width, height);
+        return new Probe(rotation, video.width, video.height, video.codec);
     }
 
-    /** Returns {rotation, width, height} from a trak box; rotation -1 when no tkhd matrix. */
-    private static int[] parseTrak(byte[] data, int start, int end) {
+    /** Rotation from a trak box's tkhd (-1 when it has none), plus that track's video entry. */
+    private static int parseTrak(byte[] data, int start, int end, SampleEntry out) {
         int rotation = -1;
-        int width = 0;
-        int height = 0;
         int off = start + 8;
         while (off + 8 <= end) {
             long size = u32(data, off);
@@ -236,18 +249,12 @@ public final class VideoHeaderProbe {
                 if (rotation < 0 && r >= 0) {
                     rotation = r;
                 }
-            } else if (type == FOURCC_MDIA) {
-                if (width == 0) {
-                    int[] dims = parseMdiaDims(data, off, childEnd);
-                    if (dims != null) {
-                        width = dims[0];
-                        height = dims[1];
-                    }
-                }
+            } else if (type == FOURCC_MDIA && out.codec == null) {
+                parseMdia(data, off, childEnd, out);
             }
             off = childEnd;
         }
-        return new int[]{rotation, width, height};
+        return rotation;
     }
 
     /**
@@ -305,101 +312,98 @@ public final class VideoHeaderProbe {
         return (r == 0 || r == 90 || r == 180 || r == 270) ? r : -1;
     }
 
-    /** Walks mdia → minf → stbl → stsd for the first video sample entry's coded dimensions. */
-    private static int[] parseMdiaDims(byte[] data, int start, int end) {
+    /**
+     * Sample-description fourccs that name a video track. Anything else in a {@code stsd} is left
+     * unidentified — an audio entry is not a codec verdict, and an unknown codec is never a reason
+     * to skip a file.
+     */
+    private static final Set<String> VIDEO_SAMPLE_ENTRIES = Collections.unmodifiableSet(
+            new HashSet<String>(Arrays.asList("avc1", "avc3", "av01", "dvh1", "hev1", "hvc1",
+                    "kavi", "mp4v", "s263", "s264", "s265", "vc1 ", "vvc1", "wvc1",
+                    "3iv1", "3iv2", "3ivx")));
+
+    /** Walks mdia → minf → stbl → stsd, filling {@code out} from this track's video entry. */
+    private static void parseMdia(byte[] data, int start, int end, SampleEntry out) {
         int off = start + 8;
         while (off + 8 <= end) {
             int type = (int) u32(data, off + 4);
             int childEnd = childEnd(data, off, u32(data, off), end);
             if (childEnd <= off || childEnd > end) {
-                break;
+                return;
             }
             if (type == FOURCC_MINF) {
-                int[] dims = parseMinf(data, off, childEnd);
-                if (dims != null) {
-                    return dims;
+                parseMinf(data, off, childEnd, out);
+                if (out.codec != null) {
+                    return;
                 }
             }
             off = childEnd;
         }
-        return null;
     }
 
-    private static int[] parseMinf(byte[] data, int start, int end) {
+    private static void parseMinf(byte[] data, int start, int end, SampleEntry out) {
         int off = start + 8;
         while (off + 8 <= end) {
             int type = (int) u32(data, off + 4);
             int childEnd = childEnd(data, off, u32(data, off), end);
             if (childEnd <= off || childEnd > end) {
-                break;
+                return;
             }
             if (type == FOURCC_STBL) {
-                int[] dims = parseStbl(data, off, childEnd);
-                if (dims != null) {
-                    return dims;
+                parseStbl(data, off, childEnd, out);
+                if (out.codec != null) {
+                    return;
                 }
             }
             off = childEnd;
         }
-        return null;
     }
 
-    private static int[] parseStbl(byte[] data, int start, int end) {
+    private static void parseStbl(byte[] data, int start, int end, SampleEntry out) {
         int off = start + 8;
         while (off + 8 <= end) {
             int type = (int) u32(data, off + 4);
             int childEnd = childEnd(data, off, u32(data, off), end);
             if (childEnd <= off || childEnd > end) {
-                break;
+                return;
             }
             if (type == FOURCC_STSD) {
-                int[] dims = parseStsd(data, off, childEnd);
-                if (dims != null) {
-                    return dims;
-                }
+                parseStsd(data, off, childEnd, out);
+                return;
             }
             off = childEnd;
         }
-        return null;
     }
 
-    /** Width/height are fixed at 32/34 bytes into every VideoSampleEntry. */
-    private static int[] parseStsd(byte[] data, int start, int end) {
+    /** Coded width/height sit at 32/34 bytes into every VideoSampleEntry, after its fourcc. */
+    private static void parseStsd(byte[] data, int start, int end, SampleEntry out) {
         int off = start + 8 + 4; // version/flags
         if (off + 4 > end) {
-            return null;
+            return;
         }
         int count = (int) u32(data, off) & 0x7FFFFFFF;
         off += 4;
         for (int i = 0; i < count; i++) {
             if (off + 36 > end) {
-                return null;
+                return;
             }
             long size = u32(data, off);
-            int type = (int) u32(data, off + 4);
             if (size < 36) {
-                return null;
+                return;
             }
-            if (isVideoCodec(type)) {
+            String fourCc = fourccString(data, off + 4);
+            if (VIDEO_SAMPLE_ENTRIES.contains(fourCc)) {
+                out.codec = fourCc;
                 int w = u16(data, off + 32);
                 int h = u16(data, off + 34);
-                return (w > 0 && h > 0) ? new int[]{w, h} : null;
+                if (w > 0 && h > 0) {
+                    out.width = w;
+                    out.height = h;
+                }
+                return;
             }
             off += size == 1 ? (int) u64(data, off + 8) : (int) size;
         }
-        return null;
-    }
-
-    private static boolean isVideoCodec(int fourCc) {
-        return fourCc == fourcc("avc1") || fourCc == fourcc("avc3")
-                || fourCc == fourcc("av01") || fourCc == fourcc("hvc1")
-                || fourCc == fourcc("hev1") || fourCc == fourcc("mp4v")
-                || fourCc == fourcc("x264") || fourCc == fourcc("s263")
-                || fourCc == fourcc("s264") || fourCc == fourcc("s265")
-                || fourCc == fourcc("vvc1") || fourCc == fourcc("vc1 ")
-                || fourCc == fourcc("wvc1") || fourCc == fourcc("dvh1")
-                || fourCc == fourcc("3iv1") || fourCc == fourcc("3iv2")
-                || fourCc == fourcc("3ivx") || fourCc == fourcc("kavi");
     }
 
     // --- byte helpers -----------------------------------------------------------------
@@ -444,6 +448,10 @@ public final class VideoHeaderProbe {
 
     private static int fourcc(String s) {
         return (s.charAt(0) << 24) | (s.charAt(1) << 16) | (s.charAt(2) << 8) | s.charAt(3);
+    }
+
+    private static String fourccString(byte[] b, int off) {
+        return new String(b, off, 4, Charset.forName("US-ASCII")).toLowerCase(Locale.ROOT);
     }
 
     private static byte[] readAll(File f, long start, int len) throws IOException {
