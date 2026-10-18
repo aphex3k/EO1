@@ -18,8 +18,9 @@ import java.util.List;
  * ({@code com.aphex3k.immichApi.vN}) plus a new client ({@code ImmichClientVN}) and a band
  * entry in {@link ImmichClientRegistry} — the frozen clients are never edited.
  *
- * <p>One instance = one backend (host + credentials), holding one authenticated Retrofit
- * service and in-memory session cookie jar that live across rotation ticks.
+ * <p>One instance = one backend (host + credentials). It holds one Retrofit service, and its
+ * session — the bearer token and when that token dies — lives in {@link ImmichSessionStore} for
+ * the life of the process, so it outlives both rotation ticks and the instances themselves.
  */
 public interface ImmichClient {
 
@@ -32,8 +33,10 @@ public interface ImmichClient {
     Semver probeServerVersion();
 
     /**
-     * Authenticates against the server; the session is held in this client's cookie jar for
-     * all subsequent calls.
+     * Makes this backend hold a usable token, acquiring one with the configured credentials if it
+     * does not already have one. Implementations reuse a live token rather than re-authenticating,
+     * so a pool rebuild costs no login; credentials are sent to the auth endpoint only when a token
+     * actually has to be minted.
      *
      * @throws com.aphex3k.eo1.AuthenticationFailedException 401, or a login response without
      *         a user id

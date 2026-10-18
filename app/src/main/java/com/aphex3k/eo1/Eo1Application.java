@@ -4,6 +4,8 @@ import android.content.Context;
 
 import androidx.multidex.MultiDexApplication;
 
+import com.aphex3k.media.immich.ImmichSessionStore;
+
 /**
  * Process bootstrap. Exists so that the crash handler and the log outlive any Activity: the app is
  * the device's {@code HOME}, so a throw during {@code MainActivity.onCreate} used to mean the
@@ -42,6 +44,13 @@ public final class Eo1Application extends MultiDexApplication {
             CrashSources.start(this, log);
         } catch (Throwable ignored) {
             // Startup diagnostics are optional; MainActivity will build what it needs.
+        }
+        try {
+            // Gives the Immich sessions somewhere to keep a token before the first backend
+            // attaches; until this runs the store is in-memory only, which still works.
+            ImmichSessionStore.install(this);
+        } catch (Throwable ignored) {
+            // Authentication does not depend on the mirror being there.
         }
     }
 

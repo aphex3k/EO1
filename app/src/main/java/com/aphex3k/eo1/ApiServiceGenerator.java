@@ -37,17 +37,30 @@ import retrofit2.converter.gson.GsonConverterFactory;
 public class ApiServiceGenerator {
 
     public static <S> S createService(Class<S> serviceClass, String host, @Nullable Context context, @Nullable ProgressListener progressListener) {
+        return createService(serviceClass, host, context, progressListener, null);
+    }
+
+    /**
+     * @param authInterceptor supplies credentials per request, or {@code null} for a client that
+     *        authenticates some other way. There is no cookie jar on this path: an Immich session
+     *        is a bearer token the app holds and can expire, not a string it happens to be sent.
+     */
+    public static <S> S createService(Class<S> serviceClass, String host, @Nullable Context context,
+                                      @Nullable ProgressListener progressListener,
+                                      @Nullable Interceptor authInterceptor) {
         return new Retrofit.Builder()
                 .baseUrl(host)
                 .addConverterFactory(GsonConverterFactory.create())
-                .client(getNewHttpClient(context, progressListener))
+                .client(getNewHttpClient(context, progressListener, authInterceptor))
                 .build()
                 .create(serviceClass);
     }
 
-    protected static OkHttpClient getNewHttpClient(@Nullable Context context, ProgressListener progressListener) {
+    protected static OkHttpClient getNewHttpClient(@Nullable Context context,
+                                                   ProgressListener progressListener,
+                                                   @Nullable Interceptor authInterceptor) {
 
-        HttpLoggingInterceptor logging = new HttpLoggingInterceptor();
+        HttpLoggingInterceptor logging = new HttpLoggingInterceptor(new RedactingLogger());
 
         if (BuildConfig.DEBUG) {
             logging.setLevel(HttpLoggingInterceptor.Level.HEADERS);
@@ -63,7 +76,6 @@ public class ApiServiceGenerator {
                 .connectTimeout(25, TimeUnit.SECONDS)
                 .writeTimeout(25, TimeUnit.SECONDS)
                 .readTimeout(25, TimeUnit.SECONDS)
-                .cookieJar(new SessionCookieJar())
                 .addInterceptor(new Interceptor() {
                     @NonNull
                     @Override public Response intercept(@NonNull Chain chain) throws IOException {
@@ -77,6 +89,12 @@ public class ApiServiceGenerator {
                         return chain.proceed(request);
                     }
                 });
+
+        if (authInterceptor != null) {
+            // Added before the logging interceptor, so logging is innermost and sees what actually
+            // goes out — which is why it has to redact.
+            client.addInterceptor(authInterceptor);
+        }
 
         if (progressListener != null) {
             client.addNetworkInterceptor(chain -> {
@@ -116,6 +134,36 @@ public class ApiServiceGenerator {
         }
 
         return client;
+    }
+
+    /**
+     * Debug header logging that keeps the session out of logcat.
+     *
+     * <p>{@code HttpLoggingInterceptor.redactHeader} postdates this project's pinned
+     * logging-interceptor, so redaction happens at the sink instead. A live bearer token in logcat
+     * is replayable by anything that can read the log, and unlike the password it needs nothing
+     * else to work.
+     */
+    private static class RedactingLogger implements HttpLoggingInterceptor.Logger {
+
+        private static final String TAG = "EO1-http";
+
+        @Override
+        public void log(String message) {
+            if (message == null) {
+                return;
+            }
+            int colon = message.indexOf(':');
+            if (colon > 0) {
+                String name = message.substring(0, colon).trim().toLowerCase(java.util.Locale.US);
+                if (name.equals("authorization") || name.equals("cookie")
+                        || name.equals("set-cookie")) {
+                    Log.d(TAG, name + ": [redacted]");
+                    return;
+                }
+            }
+            Log.d(TAG, message);
+        }
     }
 
     private static class ProgressResponseBody extends ResponseBody {
