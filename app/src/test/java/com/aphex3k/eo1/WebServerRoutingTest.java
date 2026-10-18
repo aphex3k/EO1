@@ -176,6 +176,64 @@ public class WebServerRoutingTest {
                 js.contains("{type:'web',id:nextBackendId('web'),host:'',enabled:true}"));
     }
 
+    @Test
+    public void deviceNameRoute() {
+        // As everywhere else, route() classifies by path; the POST-only + token + same-origin
+        // enforcement happens in dispatch().
+        assertEquals("deviceName", WebServer.route("POST", "/devicename"));
+        assertEquals("deviceName", WebServer.route("GET", "/devicename"));
+    }
+
+    /** Unnamed must be byte-identical to the header this server produced before the field existed. */
+    @Test
+    public void unsetDeviceNameLeavesTheHeaderAlone() {
+        assertEquals("<!doctype html><meta charset=\"utf-8\"><title>EO2</title>",
+                WebServer.indexTitleHtml("EO2", ""));
+        assertEquals("<h1>EO2 frame @ 192.168.1.87 (port 8080)</h1>",
+                WebServer.indexHeadingHtml("EO2", "", "192.168.1.87", 8080));
+        // A controller that cannot reach its prefs reads as unnamed, never as the literal "null".
+        assertEquals(WebServer.indexTitleHtml("EO2", ""), WebServer.indexTitleHtml("EO2", null));
+        assertEquals(WebServer.indexHeadingHtml("EO2", "", "ip", 80),
+                WebServer.indexHeadingHtml("EO2", "   ", "ip", 80));
+    }
+
+    @Test
+    public void setDeviceNameLeadsBothHeaderForms() {
+        assertEquals("<!doctype html><meta charset=\"utf-8\"><title>Kitchen · EO2</title>",
+                WebServer.indexTitleHtml("EO2", "Kitchen"));
+        assertEquals("<h1>Kitchen · EO2 frame @ 192.168.1.87 (port 8080)</h1>",
+                WebServer.indexHeadingHtml("EO2", "Kitchen", "192.168.1.87", 8080));
+    }
+
+    /** The name is operator text rendered into a page: it may not open a tag or end an attribute. */
+    @Test
+    public void deviceNameCannotBreakOutOfTheHeader() {
+        String hostile = "</h1><script>alert(1)</script>";
+        String quoted = "a\"onload=\"alert(1)";
+        for (String name : new String[]{hostile, quoted}) {
+            String title = WebServer.indexTitleHtml("EO2", name);
+            String heading = WebServer.indexHeadingHtml("EO2", name, "ip", 80);
+            assertFalse("no script tag may survive", title.contains("<script")
+                    || heading.contains("<script"));
+            assertFalse("no tag may be closed early", heading.contains("</h1><"));
+            assertFalse("quotes must not terminate the attribute",
+                    title.substring(title.indexOf("<title>") + 7, title.indexOf("</title>")).contains("\""));
+        }
+        assertTrue(WebServer.indexHeadingHtml("EO2", hostile, "ip", 80).contains("&lt;script&gt;"));
+    }
+
+    /** The write must be a POST to the gated endpoint with the same remembered token as /config. */
+    @Test
+    public void deviceNameJsUsesTheGatedEndpointAndSharedToken() {
+        String js = WebServer.deviceNameSectionJs();
+        assertTrue(js.contains("'/devicename?token='"));
+        assertTrue(js.contains("method:'POST'"));
+        assertTrue("must fall back to the remembered token, not demand re-typing",
+                js.contains("eo1.cfg.token"));
+        assertTrue("the name travels in the body, not the query string",
+                js.contains("body:v"));
+    }
+
     private static Map<String, String> headers(String... kv) {
         Map<String, String> m = new HashMap<String, String>();
         for (int i = 0; i + 1 < kv.length; i += 2) {

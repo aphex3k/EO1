@@ -549,6 +549,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.connectionManager.registerListener(this);
 
+        // Re-seeded every resume so a frame that was named before this process started still says
+        // which one it is. Unset stays unmentioned: no line, same overlay as before the field.
+        String deviceName = deviceName();
+        if (!deviceName.isEmpty()) {
+            debugInformationProvided(new DebugInformation(
+                    SettingsManager.DEBUG_KEY_DEVICE_NAME, deviceName));
+        }
         debugInformationProvided(new DebugInformation("version", BuildFacts.version()));
         debugInformationProvided(new DebugInformation(getString(R.string.connection_status_key),
                 this.connectionManager.isNetworkAvailable() ? "connected" : "waiting for network"));
@@ -2332,6 +2339,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
+    public String deviceName() {
+        return settingsManager != null ? settingsManager.deviceName() : "";
+    }
+
+    /** Called from the web server's worker threads; {@code SettingsManager} does the refresh. */
+    @Override
+    public String setDeviceName(String requested) {
+        return settingsManager != null ? settingsManager.setDeviceName(requested) : "";
+    }
+
+    @Override
     public String buildStateJson() {
         JsonObject o = new JsonObject();
 
@@ -2340,6 +2358,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         device.addProperty("model", Build.MODEL);
         device.addProperty("android", Build.VERSION.RELEASE);
         device.addProperty("platform", capabilities.platform());
+        // Omitted, not empty, when the frame was never named — a reader then falls back to
+        // platform and address, which is all there ever was.
+        String deviceName = deviceName();
+        if (!deviceName.isEmpty()) {
+            device.addProperty("name", deviceName);
+        }
         o.add("device", device);
 
         JsonObject caps = new JsonObject();

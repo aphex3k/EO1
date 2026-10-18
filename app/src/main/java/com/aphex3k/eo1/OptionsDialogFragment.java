@@ -38,9 +38,11 @@ public class OptionsDialogFragment extends DialogFragment {
         ViewPager2 viewPager = view.findViewById(R.id.optionsViewPager);
         basicFragment = new OptionsBasicFragment(settingsManager);
         mqttFragment = new OptionsMqttFragment(settingsManager);
-        // The About tab is read-only, so it has no saveToConfiguration() step below.
+        // The About tab has no saveToConfiguration() step below: it writes nothing to the
+        // configuration, and its one editable field (the device name, in the key/value store) commits
+        // on its own button — a page swiped off-screen has no views left here for Save to read.
         viewPager.setAdapter(new OptionsPagerAdapter(this, basicFragment, mqttFragment,
-                new OptionsAboutFragment()));
+                new OptionsAboutFragment(settingsManager)));
         new TabLayoutMediator(tabLayout, viewPager, (tab, position) -> tab.setText(TAB_TITLES[position])).attach();
 
         // Add Save button programmatically at the bottom

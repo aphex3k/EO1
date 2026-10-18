@@ -184,6 +184,111 @@ public class SettingsManagerTest {
         assertFalse(readAll(new File(files, "configuration.json")).contains(token));
     }
 
+    // --- device name: the per-frame label, device-local like the flags above ---
+
+    @Test
+    public void deviceNameDefaultsEmpty() throws Exception {
+        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        assertEquals("", sm.deviceName());
+    }
+
+    @Test
+    public void setDeviceNameReturnsWhatWasStored() throws Exception {
+        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        assertEquals("Kitchen", sm.setDeviceName("Kitchen"));
+        assertEquals("Kitchen", sm.deviceName());
+        assertEquals("", sm.setDeviceName(""));
+        assertEquals("", sm.deviceName());
+    }
+
+    /**
+     * The overlay and eo1-app.log are both formatted {@code key: value\n}, so a name that carries a
+     * newline is a name writing lines into a frame's post-mortem log. Control characters are dropped
+     * rather than blanked: the case that matters is a pasted trailing newline, and after the trim
+     * that reads exactly as the clean one does.
+     */
+    @Test
+    public void setDeviceNameStripsControlCharsAndTrims() throws Exception {
+        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        assertEquals("Kitchen", sm.setDeviceName("Kitchen\n"));
+        assertEquals("Kitchen", sm.setDeviceName("  Kitchen \t"));
+        // An interior control character merges the words around it rather than leaving a hole.
+        assertEquals("KitchenDiner", sm.setDeviceName("Kitchen\u0000Diner"));
+        assertFalse(sm.deviceName().contains("\n"));
+    }
+
+    /** A pref edited out of band (adb shell) is sanitised on read too, for the same reason. */
+    @Test
+    public void deviceNameIsSanitisedOnRead() throws Exception {
+        FakeListener listener = new FakeListener(tmp.newFolder("files"));
+        SettingsManager sm = new SettingsManager(listener);
+        listener.getDefaultSharedPreferences()
+                .edit().putString("device_name", "Bed\u0001room\n").apply();
+        assertEquals("Bedroom", sm.deviceName());
+    }
+
+    @Test
+    public void setDeviceNameCapsLengthOnBothBounds() throws Exception {
+        StringBuilder longName = new StringBuilder();
+        for (int i = 0; i < 70; i++) {
+            longName.append('a');
+        }
+        assertEquals(SettingsManager.DEVICE_NAME_MAX_CHARS,
+                SettingsManager.sanitizeDeviceName(longName.toString()).length());
+
+        // 3-byte code points hit the byte bound (128) well before the char bound (64): 42 x 3 = 126.
+        StringBuilder cjk = new StringBuilder();
+        for (int i = 0; i < 50; i++) {
+            cjk.append('一');
+        }
+        assertEquals(42, SettingsManager.sanitizeDeviceName(cjk.toString()).length());
+
+        // A pair straddling the char bound must go whole, not leave half of it behind.
+        StringBuilder split = new StringBuilder();
+        for (int i = 0; i < 63; i++) {
+            split.append('a');
+        }
+        split.append(new String(Character.toChars(0x1F600)));
+        String cut = SettingsManager.sanitizeDeviceName(split.toString());
+        assertEquals(63, cut.length());
+        assertFalse(Character.isSurrogate(cut.charAt(cut.length() - 1)));
+    }
+
+    @Test
+    public void sanitizeDeviceNameIsIdempotent() throws Exception {
+        String once = SettingsManager.sanitizeDeviceName(" \u0000Kitchen  " + repeat('x', 200));
+        assertEquals(once, SettingsManager.sanitizeDeviceName(once));
+    }
+
+    /** The point of the whole field: naming one frame must not travel with its configuration. */
+    @Test
+    public void deviceNameIsNotPartOfConfigurationDocument() throws Exception {
+        File files = tmp.newFolder("files");
+        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        sm.setDeviceName("Kitchen");
+        assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
+
+        assertFalse(sm.exportConfigurationJson().contains("Kitchen"));
+        assertFalse(readAll(new File(files, "configuration.json")).contains("Kitchen"));
+    }
+
+    @Test
+    public void importConfigurationDoesNotClearDeviceName() throws Exception {
+        File files = tmp.newFolder("files");
+        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        sm.setDeviceName("Kitchen");
+        assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
+        assertEquals("Kitchen", sm.deviceName());
+    }
+
+    private static String repeat(char c, int times) {
+        StringBuilder sb = new StringBuilder(times);
+        for (int i = 0; i < times; i++) {
+            sb.append(c);
+        }
+        return sb.toString();
+    }
+
     private static String readAll(File f) throws Exception {
         FileInputStream in = new FileInputStream(f);
         try {

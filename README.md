@@ -100,6 +100,8 @@ Create separate albums for your pictures - either organized as previously on the
 Choose the album you want to show on each device, click the Share icon in the up-right of the immich app, and choose the account associated with the device.
 The app will only be able to see content from your immich database that is shared with it.
 
+Then give each frame a name, so you can tell them apart without a DHCP lease: the options dialog's **About** tab has a *Device name* field, and so does the frame's own web page (`POST /devicename`, once *Trusted Network* is on). The label is stored on the device and never in `configuration.json`, so it cannot be copied to another frame by an import — it appears in the frame's debug overlay and in the web page header, which is what makes `http://192.168.1.87:8080` announce itself as the kitchen. An unnamed frame reads exactly as before: platform and IP address, nothing else.
+
 ### Multiple media backends
 
 The frame's configuration holds a list of **media backends**; the rotation pool merges the catalogs of all of them and picks randomly across the combined set. Any number of Immich hosts is allowed, plus one optional **local** backend for files uploaded through the frame's [LAN web server](docs/WEBSERVER.md) — it joins the rotation as an equal peer and needs no account — plus any number of **web** backends, each showing one web page.
