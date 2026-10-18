@@ -57,6 +57,12 @@ public class WebServer {
     public static final long MAX_IN_MEMORY_UPLOAD_BYTES = 16L * 1024L * 1024L;
     /** Body cap for POST /config and /config/import: a device configuration is a few KB at most. */
     public static final long MAX_CONFIG_BODY_BYTES = 512L * 1024L;
+    /**
+     * Body cap for POST /devicename. Generous against the name's own bound
+     * ({@link SettingsManager#DEVICE_NAME_MAX_UTF8_BYTES} bytes, applied after this by the
+     * sanitiser), so a rejected request can never be a silently truncated name.
+     */
+    public static final long MAX_DEVICE_NAME_BODY_BYTES = 512L;
 
     private static final int PORTS[] = {80, 8080};
     private static final int READ_TIMEOUT_MS = 60000;
@@ -299,6 +305,9 @@ public class WebServer {
         }
         if (path.equals("/config")) {
             return "config";
+        }
+        if (path.equals("/devicename")) {
+            return "deviceName";
         }
         if (path.equals("/health")) {
             return "health";
@@ -697,6 +706,24 @@ public class WebServer {
                 break;
             }
 
+            case "deviceName": {
+                if (!method.equals("POST")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                String nameGateError = configGateError(params);
+                if (nameGateError != null) {
+                    sendJson(os, 403, errorJson(nameGateError));
+                    return;
+                }
+                if (!configWriteAllowed(headers, boundPort)) {
+                    sendJson(os, 403, errorJson("cross-origin request rejected"));
+                    return;
+                }
+                handleDeviceNamePost(headers, is, os);
+                break;
+            }
+
             case "health":
                 send(os, 200, "text/plain", "ok");
                 break;
@@ -878,6 +905,42 @@ public class WebServer {
     }
 
     /**
+     * Applies a {@code POST /devicename} body as this frame's label. The name travels in the body
+     * rather than the query string so it cannot end up in a logged request line or a pasted URL; an
+     * empty body clears it. Only the declared length is read, for the reason given in
+     * {@link #handleConfigPost}. Sanitising and the overlay refresh are the implementor's, not ours.
+     */
+    private void handleDeviceNamePost(Map<String, String> headers, InputStream is, OutputStream os)
+            throws IOException {
+        long declared = parseLongLenient(headers.get("content-length"));
+        if (declared > MAX_DEVICE_NAME_BODY_BYTES) {
+            sendJson(os, 413, errorJson("device name exceeds " + MAX_DEVICE_NAME_BODY_BYTES
+                    + " bytes"));
+            return;
+        }
+        byte[] body = declared >= 0 ? readAll(is, declared) : readBounded(is, MAX_DEVICE_NAME_BODY_BYTES);
+        if (body.length > MAX_DEVICE_NAME_BODY_BYTES) {
+            sendJson(os, 413, errorJson("device name exceeds " + MAX_DEVICE_NAME_BODY_BYTES
+                    + " bytes"));
+            return;
+        }
+        String name;
+        try {
+            name = controller.setDeviceName(new String(body, UTF_8));
+        } catch (Exception e) {
+            Log.e(TAG, "device name write failed", e);
+            sendJson(os, 500, errorJson("internal error: " + e.getClass().getSimpleName()));
+            return;
+        }
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", true);
+        // Echo the stored form, so a name the sanitiser shortened is visible instead of silent.
+        o.addProperty("name", name);
+        o.addProperty("cleared", name.isEmpty());
+        sendJson(os, 200, o);
+    }
+
+    /**
      * Reads the whole request body into memory, stopping just past {@code limit} bytes so an
      * oversized body is detected (and rejected by the caller) instead of pinning the socket or
      * exhausting the heap.
@@ -940,14 +1003,14 @@ public class WebServer {
         File dir = controller.uploadedDir();
         UploadedMedia.FileInfo[] files = controller.listUploadedFiles();
         StringBuilder sb = new StringBuilder();
-        String platform = escapeHtml(controller.platform());
-        sb.append("<!doctype html><meta charset=\"utf-8\"><title>")
-                .append(platform).append("</title>");
+        String platform = controller.platform();
+        String deviceName = deviceName();
+        sb.append(indexTitleHtml(platform, deviceName));
         sb.append("<style>body{font:14px monospace;background:#111;color:#eee;padding:16px}"
                 + "table{border-collapse:collapse}td,th{padding:4px 8px;text-align:left}"
                 + "button{margin:2px}a{color:#8cf}</style>");
-        sb.append("<h1>").append(platform).append(" frame @ ").append(escapeHtml(safeIp()))
-                .append(" (port ").append(boundPort).append(")</h1>");
+        sb.append(indexHeadingHtml(platform, deviceName, safeIp(), boundPort));
+        sb.append("<p>").append(escapeHtml(controller.appBuildSummary())).append("</p>");
         sb.append("<p><a href=\"/state\">state</a> · <a href=\"/logs\">logs</a> · ")
                 .append("<a href=\"/crashes\">crashes</a> · ")
                 .append("<a href=\"/files\">files (json)</a></p>");
@@ -995,6 +1058,7 @@ public class WebServer {
         }
 
         sb.append(renderConfigurationSection());
+        sb.append(renderDeviceNameSection());
         sb.append(renderUpdateSection());
 
         sb.append("<script>");
@@ -1018,6 +1082,96 @@ public class WebServer {
         sb.append("fetch('/files/'+n+'/delete',{method:'POST'}).then(r=>r.json()).then(j=>location.reload());}");
         sb.append("</script>");
         return sb.toString();
+    }
+
+    /**
+     * This frame's device name, read defensively: the header is on every page, and a controller that
+     * cannot reach its preferences must yield "no name" rather than a failed request.
+     */
+    private String deviceName() {
+        try {
+            String n = controller.deviceName();
+            return n == null ? "" : n;
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /**
+     * A device name's contribution to a page title or heading: {@code "Kitchen · "}, or nothing at all
+     * when the frame was never named — which is what keeps every header byte-identical to the one this
+     * server produced before the field existed. Escaped here, so no caller can forget to.
+     */
+    static String deviceNamePrefixHtml(String deviceName) {
+        String label = deviceName == null ? "" : deviceName.trim();
+        return label.isEmpty() ? "" : escapeHtml(label) + " · ";
+    }
+
+    /** The doctype and {@code <title>} of the index page. See {@link #deviceNamePrefixHtml}. */
+    static String indexTitleHtml(String platform, String deviceName) {
+        return "<!doctype html><meta charset=\"utf-8\"><title>"
+                + deviceNamePrefixHtml(deviceName) + escapeHtml(platform) + "</title>";
+    }
+
+    /** The index page's {@code <h1>}. */
+    static String indexHeadingHtml(String platform, String deviceName, String ip, int port) {
+        return "<h1>" + deviceNamePrefixHtml(deviceName) + escapeHtml(platform)
+                + " frame @ " + escapeHtml(ip) + " (port " + port + ")</h1>";
+    }
+
+    /**
+     * The Device name section of the index page. The name is always visible in the header above; this
+     * is the editor, and like the other write paths it is offered only with trusted network on, since
+     * the label is per-device and the gate that keeps one frame's settings off another's is the right
+     * gate for it.
+     */
+    private String renderDeviceNameSection() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<h2>Device name</h2>");
+        if (!trustedNetwork()) {
+            sb.append("<p>Set in the <i>About</i> tab of the on-device options dialog. Renaming from "
+                    + "the browser is disabled while <i>Trusted Network</i> is off there.</p>");
+            return sb.toString();
+        }
+        sb.append("<p>A label for <b>this</b> frame only. It is not part of the configuration document, "
+                + "so exporting or importing a configuration cannot relabel another frame. It appears in "
+                + "the header above and in the frame's own debug overlay. Empty clears it.</p>");
+        sb.append("<p><input id=\"devName\" type=\"text\" size=\"32\" maxlength=\"")
+                .append(SettingsManager.DEVICE_NAME_MAX_CHARS)
+                .append("\" value=\"").append(escapeHtml(deviceName()))
+                .append("\" placeholder=\"Kitchen\"> ")
+                .append("<button onclick=\"nameFrame()\">Set</button></p>");
+        sb.append("<div id=\"devNameStatus\"></div>");
+        sb.append("<script>");
+        sb.append(deviceNameSectionJs());
+        sb.append("</script>");
+        return sb.toString();
+    }
+
+    /**
+     * The device-name editor's JavaScript. Package-private so the routing test can assert the write
+     * really is a POST to the gated endpoint, and that it reaches for the same remembered token the
+     * configuration editor stores it under.
+     */
+    static String deviceNameSectionJs() {
+        return "function nameFrame(){"
+                + "var v=document.getElementById('devName').value;"
+                + "var t=(document.getElementById('cfgToken').value||'').trim();"
+                + "if(!t){try{t=localStorage.getItem('eo1.cfg.token')||'';}catch(e){}}"
+                + "if(!t){alert('Enter the configuration token first (options dialog on the frame).');return;}"
+                + "document.getElementById('devNameStatus').textContent='saving...';"
+                + "fetch('/devicename?token='+encodeURIComponent(t),{method:'POST',body:v})"
+                + ".then(function(r){return r.json().then(function(j){return {s:r.status,j:j};});})"
+                + ".then(function(x){"
+                + "var st=document.getElementById('devNameStatus');"
+                + "if(!x.j||!x.j.ok){st.textContent='rejected: '+((x.j&&x.j.msg)||('HTTP '+x.s));return;}"
+                + "rememberToken(t);"
+                + "document.getElementById('devName').value=x.j.name;"
+                // The header is server-rendered, so the only honest way to show the new name in it is
+                // to re-read the page. Brief pause first, so the verdict is visible.
+                + "st.textContent=(x.j.cleared?'name cleared':'name saved')+', reloading...';"
+                + "setTimeout(function(){location.reload();},600);})"
+                + ".catch(function(e){document.getElementById('devNameStatus').textContent='failed: '+e;});}";
     }
 
     /**
@@ -1280,6 +1434,7 @@ public class WebServer {
 
     private String renderLogsPage() {
         return "<!doctype html><meta charset=\"utf-8\"><title>"
+                + deviceNamePrefixHtml(deviceName())
                 + escapeHtml(controller.platform())
                 + " logs</title>"
                 + "<style>body{font:12px monospace;background:#111;color:#eee;padding:8px}"
@@ -1316,6 +1471,7 @@ public class WebServer {
     private String renderCrashesPage() {
         StringBuilder sb = new StringBuilder();
         sb.append("<!doctype html><meta charset=\"utf-8\"><title>")
+                .append(deviceNamePrefixHtml(deviceName()))
                 .append(escapeHtml(controller.platform())).append(" crashes</title>")
                 .append("<style>body{font:12px monospace;background:#111;color:#eee;padding:8px}")
                 .append("table{border-collapse:collapse}td,th{padding:3px 8px;text-align:left}")

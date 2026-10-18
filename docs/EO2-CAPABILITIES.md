@@ -32,15 +32,15 @@ No touchscreen: no `ABS_X`/`ABS_Y`/`ABS_MT_*` on any device.
 
 - `dumpsys sensorservice`: empty sensor list, 0 active listener registrations.
 - No sensor HAL in `/system/lib/hw/`.
-- `BrightnessManager`'s `TYPE_LIGHT` listener never fires. Note: `"Reported Light Value: 0.175"` lines in logcat are **not** sensor readings — 0.175 is the `Lux.FULL_MOON` (`minLux`) constant fed through `setShouldTheScreenBeOn(true)`; `0.0` is the off-state constant.
-- Effective brightness is therefore the static `minBrightness` (default 0.3), raisable only via the back-button action / web `brightness` action.
+- `BrightnessManager` registers no `TYPE_LIGHT` listener at all on EO2 (`supportsLightSensor()` is false). Note: `"Reported Light Value: 0.175"` lines in logcat are **not** sensor readings — 0.175 is `Lux.FULL_MOON` (`minLux`), the value the curve is initialised to and never moves from without a sensor; `0.0` is the off-state constant.
+- Effective brightness is therefore the static floor (`minBrightness`, 0.3 at step 0). The back-button / web `brightness` action does **not** raise it here: `MainActivity.adjustMinimumBrightness()` is gated on `supportsScreenBrightness()`, which EO2 reports false, so the tap logs that it was ignored and changes nothing. (The row in §4 predates that gate.)
 
 ## 4. Key handling reachable on EO2 (verified via `input keyevent`)
 
 | Keycode | Key | App handler | Result |
 |---|---|---|---|
 | 132 | F2 | `toggleScreenOn()` | ✅ Works both directions: `screenOffWakeLock` released/acquired, TsPlayer `surfaceDestroyed`/`surfaceCreated`, `/state` `screenOn` flips True↔False |
-| 134 | F4 | `adjustMinimumBrightness()` | ✅ Works (silent by design); `Min Brightness`/`Calculated Brightness Value` logs show 0.3→0.5 after two presses. In-memory only — resets to 0.3 on app restart |
+| 134 | F4 | `adjustMinimumBrightness()` | ✅ Reached (silent by design) and — as recorded here, before the capability gate existed — raised `Min Brightness` 0.3→0.5 after two presses. Now a logged no-op on EO2, since `supportsScreenBrightness()` is false; on EO1 the same tap steps the level and **persists it**, so it no longer resets to the floor when the app restarts |
 | 62 | SPACE | `showNextImage()` | ✅ Works — advanced through the pool (`displayVideo`/`displayPictures` logs, new assets downloaded) |
 | 31 | C | `showConfigurationUI()` | ✅ Works — in-app config dialog opens (MEDIA/MQTT tabs: backends, time zone, quiet-hours cron, slideshow interval, self-update URL/interval, Save) |
 | 47 | S | `openSystemSettings()` | ✅ Works — the EO2 **does ship an AOSP Settings app** (full UI: Wi-Fi, Display, Apps, Developer options, …) |

@@ -36,10 +36,17 @@ import java.util.Set;
  *       to the backend's playback fallback (e.g. Immich's transcoded {@code /video/playback}
  *       stream) instead of downloading the original.</li>
  *   <li>{@link #incompatibleReasonForFile(MediaType, File)} — a content check for a file that
- *       already exists locally (uploaded, or already downloaded). It detects HEIF/AVIF
- *       containers from the leading {@code ftyp} box even when the extension lies
- *       (e.g. HEIF content named {@code .jpg}).</li>
+ *       already exists locally (uploaded, or already downloaded). For stills it detects HEIF/AVIF
+ *       containers from the leading {@code ftyp} box even when the extension lies (e.g. HEIF
+ *       content named {@code .jpg}); for video it reads the sample description through
+ *       {@link VideoHeaderProbe} and so catches a codec the container extension could not declare
+ *       (HEVC inside a perfectly-named {@code .MOV}).</li>
  * </ul>
+ *
+ * <p>Only the first two tiers can run before a download. No Immich asset response reports a
+ * codec — {@code videoCodec} exists in the 3.3.3 OpenAPI spec only inside the admin transcoding
+ * configuration — so a {@code .mov}'s codec is unknowable until its bytes are on disk, which is
+ * what the third tier is for.
  *
  * <p>The content check is conservative: only files positively identified as a HEIF/AVIF
  * container are rejected; everything else (including unknown formats) passes and is left to
@@ -61,11 +68,25 @@ public final class MediaCompatibility {
     /**
      * Video extensions that denote the codec itself, not just the container, so the asset is
      * known to be undecodable. {@code .mp4}/{@code .mov}/{@code .m4v} can hold H.264 and are
-     * deliberately not flagged.
+     * deliberately not flagged: those are judged by their sample description instead, once the
+     * file is on disk — see {@link #incompatibleReasonForFile(MediaType, File)}.
      */
     private static final Set<String> INCOMPATIBLE_VIDEO_EXTENSIONS =
             Collections.unmodifiableSet(new HashSet<String>(
                     Arrays.asList(".h265", ".hevc", ".av1")));
+
+    /**
+     * Sample-description fourccs ({@code stsd} entries, lower-cased by {@link VideoHeaderProbe})
+     * naming a codec this device has no decoder for. HEVC and AV1 are absent from Android 4.4
+     * entirely (both arrived in later platform releases), and VVC is absent from any Android
+     * build; the Dolby Vision fourcc is listed because a profile-5 {@code dvh1} track is HEVC
+     * with no H.264 fallback. An 8-bit H.264/AVC, MPEG-4 Part 2 or H.263 track is decodable
+     * here and is not in this set, so a container that mixes the two is never penalised for the
+     * codec it does not use.
+     */
+    private static final Set<String> INCOMPATIBLE_VIDEO_CODECS =
+            Collections.unmodifiableSet(new HashSet<String>(
+                    Arrays.asList("hvc1", "hev1", "av01", "vvc1", "dvh1")));
 
     /**
      * ISO 14496-12 / ISO 19378-12 {@code ftyp} brands that mark HEIF (still) containers,
@@ -154,13 +175,36 @@ public final class MediaCompatibility {
     }
 
     /**
+     * Codec check for a video whose sample description is known — read from the file by
+     * {@link VideoHeaderProbe}, or reported by a backend that carries one.
+     *
+     * <p>Routing is the whole point: an asset whose codec no decoder on this device can service
+     * should never reach a player, because a player that is handed bytes it cannot render may
+     * report success and simply show nothing.
+     *
+     * @param type media type of the asset
+     * @param codecFourCc lower-case {@code stsd} fourcc, or null when unknown
+     * @return a human-readable reason when this device has no decoder for that codec, or
+     *         {@code null} when it can decode it or the codec could not be identified
+     */
+    @Nullable
+    public static String incompatibleVideoCodec(@Nullable MediaType type,
+                                                @Nullable String codecFourCc) {
+        if (type != MediaType.VIDEO || codecFourCc == null) {
+            return null;
+        }
+        if (INCOMPATIBLE_VIDEO_CODECS.contains(codecFourCc)) {
+            return "video codec " + codecFourCc + " has no decoder on this device";
+        }
+        return null;
+    }
+
+    /**
      * Content-based check for a file that already exists locally. Detects HEIF/AVIF
      * containers from their {@code ftyp} box even when the extension says something
-     * else (e.g. HEIF content named {@code .jpg}).
-     *
-     * <p>Video files are not byte-checked: the codec of an MP4/MOV is stored deep in the
-     * {@code stsd} box, and the display-error path (player error → fallback) already covers
-     * undecodable video.
+     * else (e.g. HEIF content named {@code .jpg}), and detects an undecodable video codec
+     * from its sample description even when the extension says something else (e.g. HEVC
+     * content named {@code .mov}).
      *
      * @param type media type of the asset
      * @param file the on-disk file to inspect, or null
@@ -169,7 +213,13 @@ public final class MediaCompatibility {
      */
     @Nullable
     public static String incompatibleReasonForFile(MediaType type, @Nullable File file) {
-        if (type != MediaType.IMAGE || file == null || !file.isFile() || file.length() == 0) {
+        if (type == null || file == null || !file.isFile() || file.length() == 0) {
+            return null;
+        }
+        if (type == MediaType.VIDEO) {
+            return incompatibleVideoCodec(type, VideoHeaderProbe.probe(file).codec);
+        }
+        if (type != MediaType.IMAGE) {
             return null;
         }
         byte[] head = new byte[HEAD_BYTES];

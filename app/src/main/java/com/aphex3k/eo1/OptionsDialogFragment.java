@@ -20,7 +20,7 @@ import com.google.android.material.tabs.TabLayout;
 import com.google.android.material.tabs.TabLayoutMediator;
 
 public class OptionsDialogFragment extends DialogFragment {
-    private static final String[] TAB_TITLES = {"Media", "MQTT"};
+    private static final String[] TAB_TITLES = {"Media", "MQTT", "About"};
     private SettingsManager settingsManager;
     private OptionsBasicFragment basicFragment;
     private OptionsMqttFragment mqttFragment;
@@ -38,7 +38,11 @@ public class OptionsDialogFragment extends DialogFragment {
         ViewPager2 viewPager = view.findViewById(R.id.optionsViewPager);
         basicFragment = new OptionsBasicFragment(settingsManager);
         mqttFragment = new OptionsMqttFragment(settingsManager);
-        viewPager.setAdapter(new OptionsPagerAdapter(this, basicFragment, mqttFragment));
+        // The About tab has no saveToConfiguration() step below: it writes nothing to the
+        // configuration, and its one editable field (the device name, in the key/value store) commits
+        // on its own button — a page swiped off-screen has no views left here for Save to read.
+        viewPager.setAdapter(new OptionsPagerAdapter(this, basicFragment, mqttFragment,
+                new OptionsAboutFragment(settingsManager)));
         new TabLayoutMediator(tabLayout, viewPager, (tab, position) -> tab.setText(TAB_TITLES[position])).attach();
 
         // Add Save button programmatically at the bottom
