@@ -248,6 +248,37 @@ public class WebServerRoutingTest {
                 js.contains("body:v"));
     }
 
+    /**
+     * The Control buttons reach {@code ctrl()} through inline {@code onclick}s, and a browser parses the whole
+     * {@code <script>} before running any of it — so one stray token leaves {@code ctrl} and {@code del}
+     * undefined on a page that still looks fine. A ")" in code position did exactly that to this notice, so
+     * the concatenation is pinned (the wording is not).
+     */
+    @Test
+    public void indexControlJsKeepsTheStagedUpdateNoticeInOnePiece() {
+        String js = WebServer.controlSectionJs();
+        assertTrue("every control button's onclick resolves ctrl in this block",
+                js.contains("function ctrl("));
+        assertTrue("the install-mode close paren must sit inside the string, not in code position",
+                js.contains("(install mode: \"+u.installMode+\"). Use the Install button"));
+    }
+
+    /**
+     * {@code stagedBlock()} assembles both staged-APK buttons into one {@code var h}. A statement terminator
+     * between them leaves "Discard staged" out of the DOM, and the handler line right after it then throws
+     * on a null element — so the whole block reads as a page that simply does nothing.
+     */
+    @Test
+    public void stagedBlockJsRendersBothApkButtonsInOneStatement() {
+        String js = WebServer.updateSectionJs();
+        int install = js.indexOf("id=\"apkInstall\"");
+        int reset = js.indexOf("id=\"apkReset\"");
+        int wire = js.indexOf("innerHTML=h");
+        assertTrue("both buttons must be in the markup", install >= 0 && reset > install && wire > reset);
+        assertFalse("no statement may end between the two buttons",
+                js.substring(install, reset).contains(";"));
+    }
+
     private static Map<String, String> headers(String... kv) {
         Map<String, String> m = new HashMap<String, String>();
         for (int i = 0; i + 1 < kv.length; i += 2) {
