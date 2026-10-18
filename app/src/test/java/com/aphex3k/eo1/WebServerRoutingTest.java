@@ -35,6 +35,20 @@ public class WebServerRoutingTest {
     }
 
     @Test
+    public void crashRoutes() {
+        assertEquals("crashesPage", WebServer.route("GET", "/crashes"));
+        assertEquals("crashJson", WebServer.route("GET", "/crash.json"));
+        assertEquals("crashGet", WebServer.route("GET", "/crash/crash-1-a-java-9.txt"));
+        assertEquals("crashGet", WebServer.route("GET", "/crash/crash-1-a-java-9.txt%20"));
+        assertEquals("crashDelete", WebServer.route("DELETE", "/crash/crash-1-a-java-9.txt/delete"));
+        assertEquals("crashDelete", WebServer.route("POST", "/crash/crash-1-a-java-9.txt/delete"));
+        // The exact matches must win over the /crash/ prefix.
+        assertEquals("crashJson", WebServer.route("GET", "/crash.json"));
+        assertEquals("unknown", WebServer.route("GET", "/crash"));
+        assertEquals("unknown", WebServer.route("GET", "/crashes/extra"));
+    }
+
+    @Test
     public void uploadControlHealthRoutes() {
         assertEquals("upload", WebServer.route("POST", "/upload"));
         assertEquals("control", WebServer.route("GET", "/control"));

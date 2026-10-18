@@ -271,10 +271,16 @@ EO1_UPDATE_HOST=http://your-host/eo1 ./publish-update.sh 2 1.3.1
 ```
 
 The script enforces a monotonic `versionCode` (strictly greater than the last published one),
-builds with `assembleRelease`, hashes with `shasum -a 256`, writes `update-manifest.json` and
-stages both files in `./update-out` (optionally rsync'd to `EO1_UPDATE_REMOTE`). Serve that
-directory from any plain-HTTP server the frames can reach and point `updateManifestUrl` at
+builds with `assembleRelease`, hashes with `shasum -a 256`, writes `update-manifest.json` and stages
+all three files in `./update-out` (optionally rsync'd to `EO1_UPDATE_REMOTE`): the APK, the manifest,
+and `mapping-<versionCode>.txt.gz` — the build's R8 mapping, archived so a crash report from that
+version can still be decoded years later ([docs/WEBSERVER.md](docs/WEBSERVER.md#crash-dumps)). Serve
+that directory from any plain-HTTP server the frames can reach and point `updateManifestUrl` at
 `…/update-manifest.json`.
+
+> The mapping is **not** listed in the manifest and no frame ever downloads it; it is only ever read
+> by a person holding a crash dump. Publishing fails if the build produced no mapping — if you
+> deliberately turned minification off, say so with `EO1_UPDATE_MAPPING_OPTIONAL=1`.
 
 > The frames cannot validate TLS (device certificates are expired), so keep the update host on
 > a trusted LAN. A LAN attacker who can rewrite the manifest or APK is still stopped by the

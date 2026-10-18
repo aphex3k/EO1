@@ -18,11 +18,17 @@
          DELETE_PACKAGES is declared for completeness. -->
     <uses-permission android:name="android.permission.INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.DELETE_PACKAGES" />
-    
+    <!-- READ_LOGS is signature|system, so a sideloaded frame is silently denied it and CrashSources
+         reports that source as unavailable rather than storing a junk report. It is declared because
+         the frames that matter are platform-signed in /system/app, where it lets the startup scrape
+         read the `system` log buffer — where debuggerd writes a native death on API 19 (there is no
+         `crash` buffer until Android 7.0). Without it a TsPlayer segfault leaves no trace at all. -->
+    <uses-permission android:name="android.permission.READ_LOGS" tools:ignore="ProtectedPermissions" />
+
     <application
         android:requestLegacyExternalStorage="true"
         android:hardwareAccelerated="true"
-        android:name="androidx.multidex.MultiDexApplication"
+        android:name=".Eo1Application"
         android:allowBackup="true"
         android:largeHeap="true"
         android:icon="@mipmap/ic_launcher"

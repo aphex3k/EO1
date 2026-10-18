@@ -89,7 +89,7 @@ import java.util.TimeZone;
 
 import okhttp3.HttpUrl;
 
-public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, Thread.UncaughtExceptionHandler, ConnectionManagerListener, ApiServiceGenerator.ProgressListener, WebController, KioskWatchdog.Host {
+public class MainActivity extends AppCompatActivity implements BrightnessManagerListener, EventManagerListener, SettingsManagerListener, UpdateManagerListener, MediaManagerListener, ConnectionManagerListener, ApiServiceGenerator.ProgressListener, WebController, KioskWatchdog.Host {
 
     /**
     Amount of milliseconds in a minute
@@ -315,7 +315,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.connectionManager = new ConnectionManager(this);
 
         // Always-on LAN web server (debug / control / media upload).
-        this.appLogger = new AppLogger(this);
+        // The process's single AppLogger is built in Eo1Application, so the ring already holds the
+        // pre-onCreate history by the time a crash report asks for its lead-up.
+        this.appLogger = Eo1Application.loggerFor(this);
+        if (this.appLogger == null) {
+            // Only reachable if Eo1Application#onCreate itself failed.
+            this.appLogger = new AppLogger(this);
+        }
+        if (CrashReporter.get() == null) {
+            // ...and if its install failed too, the frame would otherwise be back on the framework
+            // handler: a crash dialog on an unattended panel, and no relaunch alarm.
+            CrashReporter.install(getApplicationContext());
+        }
+        CrashReporter reporter = CrashReporter.get();
+        if (reporter != null) {
+            // Either way the reporter points at the one live logger, not a discarded one.
+            reporter.setLogger(this.appLogger);
+        }
         // Remove stale upload temp dirs from a previously killed process. Only the first
         // onCreate of a given process may do this: after an Activity recreation the process
         // is still alive and an in-flight upload worker may own a live incoming_* dir.
@@ -330,8 +346,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // reconciliation; configureMqttManager() no longer owns the load.
         settingsManager.loadConfiguration();
         updateManager.reconcileOnStartup();
-
-        Thread.setDefaultUncaughtExceptionHandler(this);
 
         pendingIntent = PendingIntent.getActivity(
                 getBaseContext(),
@@ -2203,18 +2217,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
-    public void uncaughtException(@NonNull Thread thread, @NonNull Throwable throwable) {
-        if (this.appLogger != null) {
-            // Include the stack trace: a bare toString() only says the exception type, and
-            // the device is often unreachable via adb — /logs is the only post-mortem source.
-            this.appLogger.error(TAG, "FATAL uncaught on " + thread.getName() + ":", throwable);
-        }
-        AlarmManager mgr = (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-        mgr.set(AlarmManager.RTC, System.currentTimeMillis() + 120000, pendingIntent);
-        System.exit(2);
-    }
-
-    @Override
     public void connected() {
         offlineSinceMs = 0L;
         Log.i(TAG, "ConnectionManager: connected");
@@ -2397,6 +2399,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         o.add("update", updateManager.stateJson());
         o.add("watchdog", watchdogStateJson());
+        o.add("crash", crashBlockJson());
 
         o.add("telemetry", DeviceTelemetry.snapshot(this));
 
@@ -2477,6 +2480,60 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public boolean deleteUploadedFile(String name) {
         return UploadedMedia.delete(UploadedMedia.dirFor(this), name);
+    }
+
+    @Override
+    public File crashDir() {
+        return CrashStore.dirFor(this);
+    }
+
+    @Override
+    public CrashStore.Info[] listCrashDumps() {
+        return CrashStore.list(CrashStore.dirFor(this));
+    }
+
+    @Override
+    public File crashDumpFile(String name) {
+        return CrashStore.resolve(CrashStore.dirFor(this), name);
+    }
+
+    @Override
+    public boolean deleteCrashDump(String name) {
+        return CrashStore.delete(CrashStore.dirFor(this), name);
+    }
+
+    /**
+     * The {@code /state} {@code crash} block. Wrapped because a throw anywhere inside
+     * {@link #buildStateJson} would otherwise 500 the whole document — the same reason
+     * {@code WebServer} wraps every out-of-route controller call in a degraded default.
+     */
+    private JsonObject crashBlockJson() {
+        JsonObject o = new JsonObject();
+        try {
+            o.add("store", CrashStore.statsJson(CrashStore.dirFor(this)));
+            JsonObject sources = new JsonObject();
+            CrashSources.Availability a = CrashSources.last();
+            sources.addProperty("logcat", a.logcat);
+            sources.addProperty("dropbox", a.dropbox);
+            sources.addProperty("anr", a.anr);
+            sources.addProperty("copies", a.copies);
+            sources.addProperty("readLogs", hasReadLogsPermission() ? "granted" : "denied");
+            o.add("sources", sources);
+        } catch (Throwable t) {
+            // Report whatever was assembled before the failure; never fail /state over this.
+        }
+        return o;
+    }
+
+    /** Whether this install was granted the signature-level READ_LOGS (false on a sideload). */
+    private boolean hasReadLogsPermission() {
+        try {
+            return checkPermission("android.permission.READ_LOGS",
+                    android.os.Process.myPid(), android.os.Process.myUid())
+                    == android.content.pm.PackageManager.PERMISSION_GRANTED;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     @Override
