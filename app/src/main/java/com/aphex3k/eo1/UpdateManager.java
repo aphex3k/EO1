@@ -1,9 +1,6 @@
 package com.aphex3k.eo1;
 
 import android.app.Activity;
-import android.app.AlarmManager;
-import android.app.PendingIntent;
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
@@ -81,7 +78,7 @@ public class UpdateManager {
     private static final long MANIFEST_BODY_CAP = 64 * 1024;
     /** Free space required besides the APK itself, for the installer's headroom. */
     private static final long STAGING_HEADROOM_BYTES = 32L * 1024 * 1024;
-    private static final long RELAUNCH_ALARM_MS = 120_000L;
+    private static final long RELAUNCH_ALARM_MS = CrashReporter.RELAUNCH_DELAY_MS;
     /** How long a fired install may hold INSTALL_PENDING before the next tick treats it as failed. */
     private static final long INSTALL_SETTLE_MS = 90_000L;
     /** {@code lastError} of a staged update no silent transport on this frame can install. */
@@ -1039,18 +1036,12 @@ public class UpdateManager {
         }
     }
 
-    /** Same +120 s relaunch alarm MainActivity's uncaughtExceptionHandler uses. */
+    /**
+     * The same +120 s relaunch alarm {@link CrashReporter} arms when a process dies. Shared so the
+     * two restart paths cannot drift apart.
+     */
     private void armRelaunchAlarm() {
-        try {
-            Intent home = new Intent(Intent.ACTION_MAIN)
-                    .addCategory(Intent.CATEGORY_HOME)
-                    .setComponent(new ComponentName(context.getPackageName(), MainActivity.class.getName()));
-            PendingIntent pi = PendingIntent.getActivity(context, 0, home, PendingIntent.FLAG_UPDATE_CURRENT);
-            AlarmManager am = (AlarmManager) context.getSystemService(Context.ALARM_SERVICE);
-            am.set(AlarmManager.RTC, System.currentTimeMillis() + RELAUNCH_ALARM_MS, pi);
-        } catch (Exception e) {
-            Log.w(TAG, "armRelaunchAlarm: " + e);
-        }
+        CrashReporter.relaunchAfter(context, RELAUNCH_ALARM_MS);
     }
 
     /**

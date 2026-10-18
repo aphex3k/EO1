@@ -1,38 +1,12 @@
-# Web server (LAN debug / control / media upload)
-
-Every EO1 has a very slow (2.4 GHz) Wi-Fi interface used to acquire Immich media. To keep the
-device debuggable and controllable without adb, the app runs an **always-on, unsecured,
-plain-HTTP** web server on its LAN address:
-
-- Tries **port 80** first (privileged; only works for a system/root install).
-- Falls back to **port 8080**.
-
-The bound port is logged to logcat (tag `EO1-web`) and exposed in the `app.webPort` field of
-`/state`. There is no TLS by design: the device's TLS stack is outdated and the server is only
-meant to be reached from a trusted LAN. One app behaviour is a wider door than this server, and it is
-off until you open it twice: a frame that holds no `INSTALL_PACKAGES` can start its own adbd
-(`service.adb.tcp.port=5555`) to install an update silently, which — there being no loopback-only
-mode — answers `adb` **as root** from anywhere routable. That happens only while **both** *Trusted
-Network* (this server's own gate) and *Allow loopback ADB for update installs* are on in the options
-dialog, only for the length of one action — an install, or a watchdog rung that has actually been
-reached — and the frame closes it again in a `finally` when that action ends. Nothing opens it to be
-ready: not boot, not the vendor-poller silencing, and nothing about this web server. With either flag
-off, self-update degrades to staging plus a notice on this page.
-
-Implementation: `WebServer` is a hand-rolled `ServerSocket` server (one accept thread + 3
-worker threads, always `Connection: close`, no keep-alive, per-request timeouts). It talks to
-the app exclusively through the `WebController` interface (implemented by `MainActivity`), so
-the server itself is unit-testable with a fake controller and never references the Activity.
-
-## Endpoints
-
-| Route | Method | Purpose |
-|---|---|---|
 | `/` | GET | One-page UI: upload form, file table (download/delete), control buttons. The header leads with this frame's device name when one is set, and names the running build (version, variant, source commit, date, signing-key verdict) so a frame can be identified without touching it |
-| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; `app.version`/`versionName`/`buildNumber`/`variant`/`buildDate`/`gitSha`/`gitDirty` and an `app.signer` block (`signed`, `fingerprint` — SHA-256 of the installed certificate's DER, `subject`, `serial`, `validFrom`/`validTo`, `validity`, `algorithm`, `keyVerdict`) report which build is running and who signed it, the same facts the options dialog's **About** tab shows, and `app.createCount`/`app.processStartMs` — how many times the Activity has been built in this process and when the process started, which is how a report of "it reset itself" tells an Activity re-creation apart from a restart; device adds detected `platform`, plus `name` — the per-device label, present only when the frame has been named, so an unnamed frame's `device` block reads exactly as it did before the field existed; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`enabled`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `autoReboot` (the watchdog's reboot permission — a configuration field, so the config editor below can change it), `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, a `media` block (`rotationAssets`, `screenOn`, and — once an asset is on screen — `current` with `key`, `type` (`image`/`video`/`web`, plus `url` for a page), `backendId`, `width`, `height` (0 when unknown), `durationMs`, `local` (bool), plus `originalFileName`/`sizeBytes` when the backend reports them), a `brightness` block (`supported` — false on EO2, where nothing here changes; `step` and `floor` — the backlight level the user's BACK taps put, as an index and as the brightness it means, `persistedStep` — the same number read back out of SharedPreferences, so a `step` that disagrees with `persistedStep` means the level was raised by something that never wrote it down; `lastLightValue` — the last reading the light-sensor curve used, `applied` — what is on the panel right now (-1 before the first apply), and `screenOn`), an `input` block (`windowFocused` — whether this window holds input focus, the precondition for every keyboard binding; `activityPaused`; `focusedView` — simple class name of the view holding focus, or `none`, and it reads as a text editor if an editor ever keeps focus after the options dialog closes, which is what silences keys while everything else looks healthy; `lastKeyCode`/`lastKeyAtMs` — the last key the window was actually offered, so a keyboard delivering nothing shows as a timestamp that never moves), an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld` (bool — whether the frame holds `INSTALL_PACKAGES`), `installMode` (path the next install dispatch will take: `headless` when that permission is held, else `adbd` when the ROM's adbd is reachable, else `defer-to-human` — nothing on this frame can install by itself, so an automatic cycle shows nothing and waits), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent` — which path the most recent install dispatch used), `adbdReachable` (bool, on-demand probe of the ROM's adbd on 127.0.0.1:5555 — the headless-install precondition), `loopbackAdbAllowed` (bool — both *Trusted Network* and *Allow the frame to start its own adbd* are on, i.e. whether the app is permitted to open that port at all), `tcpAdbArmedByApp` (bool — adbd is listening because this frame started it; the teardown that closes it runs when the action ends, and a `true` that outlives an install means the next launch will close it), `needsHumanConfirmation` (bool — the staged update is retryable but every silent transport failed, so the index page carries a standing notice asking for a click at the frame), `installFiredAtMs` (when an install was last dispatched, 0 when nothing is pending — persisted precisely so a pending install can settle in a process that never fired it)), a `watchdog` block (`staleMs`/`staleLimitMs` — how long nothing has been on screen and when that counts as wedged; `level`/`lastAction`/`lastActionAtMs` — how far down the recovery ladder this wedge has already gone; `repairAttempts`, `probeMisses`, `ticks`; `paused`, `mainLoopAlive`/`mainLoopStallMs`, `downloadInFlightMs`, `offlineMs`, `autoReboot`), battery/memory/uptime telemetry; debug builds add a `video` block (active player, TsPlayer loop telemetry, and the last video routing inputs: `codec` (the `stsd` fourcc the header probe read, absent when it could not identify one), `rotation`, `width`, `height`, `frameOrientation`) |
+| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; `app.version`/`versionName`/`buildNumber`/`variant`/`buildDate`/`gitSha`/`gitDirty` and an `app.signer` block (`signed`, `fingerprint` — SHA-256 of the installed certificate's DER, `subject`, `serial`, `validFrom`/`validTo`, `validity`, `algorithm`, `keyVerdict`) report which build is running and who signed it, the same facts the options dialog's **About** tab shows, and `app.createCount`/`app.processStartMs` — how many times the Activity has been built in this process and when the process started, which is how a report of "it reset itself" tells an Activity re-creation apart from a restart; device adds detected `platform`, plus `name` — the per-device label, present only when the frame has been named, so an unnamed frame's `device` block reads exactly as it did before the field existed; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`enabled`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `autoReboot` (the watchdog's reboot permission — a configuration field, so the config editor below can change it), `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, a `media` block (`rotationAssets`, `screenOn`, and — once an asset is on screen — `current` with `key`, `type` (`image`/`video`/`web`, plus `url` for a page), `backendId`, `width`, `height` (0 when unknown), `durationMs`, `local` (bool), plus `originalFileName`/`sizeBytes` when the backend reports them), a `brightness` block (`supported` — false on EO2, where nothing here changes; `step` and `floor` — the backlight level the user's BACK taps put, as an index and as the brightness it means, `persistedStep` — the same number read back out of SharedPreferences, so a `step` that disagrees with `persistedStep` means the level was raised by something that never wrote it down; `lastLightValue` — the last reading the light-sensor curve used, `applied` — what is on the panel right now (-1 before the first apply), and `screenOn`), an `input` block (`windowFocused` — whether this window holds input focus, the precondition for every keyboard binding; `activityPaused`; `focusedView` — simple class name of the view holding focus, or `none`, and it reads as a text editor if an editor ever keeps focus after the options dialog closes, which is what silences keys while everything else looks healthy; `lastKeyCode`/`lastKeyAtMs` — the last key the window was actually offered, so a keyboard delivering nothing shows as a timestamp that never moves), an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld` (bool — whether the frame holds `INSTALL_PACKAGES`), `installMode` (path the next install dispatch will take: `headless` when that permission is held, else `adbd` when the ROM's adbd is reachable, else `defer-to-human` — nothing on this frame can install by itself, so an automatic cycle shows nothing and waits), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent` — which path the most recent install dispatch used), `adbdReachable` (bool, on-demand probe of the ROM's adbd on 127.0.0.1:5555 — the headless-install precondition), `loopbackAdbAllowed` (bool — both *Trusted Network* and *Allow the frame to start its own adbd* are on, i.e. whether the app is permitted to open that port at all), `tcpAdbArmedByApp` (bool — adbd is listening because this frame started it; the teardown that closes it runs when the action ends, and a `true` that outlives an install means the next launch will close it), `needsHumanConfirmation` (bool — the staged update is retryable but every silent transport failed, so the index page carries a standing notice asking for a click at the frame), `installFiredAtMs` (when an install was last dispatched, 0 when nothing is pending — persisted precisely so a pending install can settle in a process that never fired it)), a `watchdog` block (`staleMs`/`staleLimitMs` — how long nothing has been on screen and when that counts as wedged; `level`/`lastAction`/`lastActionAtMs` — how far down the recovery ladder this wedge has already gone; `repairAttempts`, `probeMisses`, `ticks`; `paused`, `mainLoopAlive`/`mainLoopStallMs`, `downloadInFlightMs`, `offlineMs`, `autoReboot`), a `crash` block (`store`: `count`, `lastAtMs`, `lastVersionCode` — the build whose `mapping-<versionCode>.txt.gz` retraces the newest report — and `totalBytes`; `sources`: per-source startup-harvest outcomes, each `copied` / `empty` / `unchanged` / `budget-exhausted` / `unavailable`, plus `readLogs` `granted`/`denied`), battery/memory/uptime telemetry; debug builds add a `video` block (active player, TsPlayer loop telemetry, and the last video routing inputs: `codec` (the `stsd` fourcc the header probe read, absent when it could not identify one), `rotation`, `width`, `height`, `frameOrientation`) |
 | `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
 | `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
 | `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
+| `/crashes` | GET | HTML table of stored crash reports (below) — download and delete each one |
+| `/crash.json` | GET | JSON array of the same listing (`name`, `kind`, `epochMillis`, `versionCode`, `exception`, `size`, `lastModified`) |
+| `/crash/<name>` | GET | Streams one crash report as plain text |
+| `/crash/<name>/delete` | DELETE / POST | Deletes one crash report (retention pruning is separate and automatic) |
 | `/files` | GET | JSON list of uploaded files (`name`, `size`, `lastModified`) |
 | `/files/<name>` | GET | Streams an uploaded file |
 | `/files/<name>/delete` | DELETE / POST | Deletes an uploaded file |
@@ -234,10 +208,72 @@ captures the app's own curated event stream instead: `MainActivity.debugInformat
 **and** a 256 KB rolling on-disk file. Device telemetry (battery, memory, Wi-Fi, uptime) is
 collected on demand by `DeviceTelemetry` for `/state`.
 
-The file log is the only reliable post-mortem source: on the EO2 the vendor `ISystemWriteService`
-writes ~10 lines/second ("readSysfs could not contact remote"), so a `logcat -d` ring holds roughly
-13 minutes and any overnight incident is already gone by the time anyone can plug in adb. The
-watchdog therefore writes a `heartbeat` line every 10 minutes even when nothing is wrong
-(`tick`, `stale`, `limit`, `level`, `action`, `network`/`offlineFor`, `screen`, `PAUSED`,
-`UNACKED_PROBES`) — about two weeks of history inside the rolling cap, and enough to tell
-"loop dead", "offline" and "blocked main thread" apart after the fact.
+The rolling file log is a *general* post-mortem source, and it exists because on the EO2 the vendor
+`ISystemWriteService` writes ~10 lines/second ("readSysfs could not contact remote"), so a
+`logcat -d` ring holds roughly 13 minutes and any overnight incident is already gone by the time
+anyone can plug in adb. The watchdog therefore writes a `heartbeat` line every 10 minutes even when
+nothing is wrong (`tick`, `stale`, `limit`, `level`, `action`, `network`/`offlineFor`, `screen`,
+`PAUSED`, `UNACKED_PROBES`) — about two weeks of history inside the rolling cap, and enough to tell
+"loop dead", "offline" and "blocked main thread" apart after the fact. A *crash* is no longer
+something you have to catch in that window: it gets its own durable report, below.
+
+## Crash dumps
+
+`CrashReporter` is the process's only `Thread.UncaughtExceptionHandler`, installed from
+`Eo1Application.attachBaseContext` — before any Activity exists, because the crashes worth reading
+are often the ones that happen during `MainActivity.onCreate`. Each one writes a plaintext report
+into `filesDir/crashes`, then preserves the contract the app has always had: a +120 s HOME relaunch
+alarm and `System.exit(2)`. It never chains to the framework handler (that would put a crash dialog
+on an unattended screen) and the alarm/exit live in a `finally`, so a report that fails to write
+still restarts the frame.
+
+**One file per event**, named so that a listing needs no body reads:
+
+```
+crash-<epochMillis>-<seq>-<kind>-<versionCode>.txt     kind = java | logcat | dropbox | anr
+```
+
+The body is a `Key: value` header (time, version, device, thread, exception, memory, free disk,
+uptime, and what each optional source found), the full trace with its `Caused by` chain, the last
+50 `AppLogger` ring lines as the lead-up, and a JSON block for tooling. Traces are written by an
+*iterative* cause walk, not `printStackTrace`: that recurses per cause and would raise
+`StackOverflowError` on a dying thread's stack, losing the whole report.
+
+**Retention**, enforced on write and at startup: 14 days, and a 4 MB total past which the oldest
+reports go. The newest report is never evicted.
+
+### What is captured, and what you may not get
+
+| Source | When | Honest expectation |
+|---|---|---|
+| `java` | the instant it happens, from the handler | Always available. This is the one that matters. |
+| `logcat` | `logcat -d -b system` at startup, filtered down to debuggerd's native-crash lines | Needs `READ_LOGS`. There is **no `crash` buffer on API 19** (`LOG_ID_CRASH` arrived in Android 7.0; this ROM's `logcat` knows only `main`/`system`/`radio`), so the `system` buffer is where a segfault lands. A denied or failing `logcat` is reported `unavailable`, never stored as a report — the child's exit status is checked, because its error text would otherwise look like output. |
+| `dropbox` | a copy of the crash-named artifacts in `/data/system/dropbox` at startup | Most likely `unavailable`: a non-system uid cannot traverse it on API 19. Only `*crash*`/`*tombstone*`/`*anr*` `.txt`/`.txt.gz` files are copied (a real device's directory is ~159 `event_data@*.txt` per tombstone), and `.gz` is decompressed on the way in. |
+| `anr` | the same, from `/data/anr` | Same. |
+
+`/state`'s `crash.sources` distinguishes *"nothing crashed"* (`empty`) from *"we could not look"*
+(`unavailable`) — and from `unchanged`, meaning a scrape found nothing new since the last boot, which
+is what stops a night of boot loops from spending the whole 4 MB cap re-copying one ANR trace.
+Copying is capped per boot, and a copied artifact is **copied into `filesDir/crashes`** — no crash
+route reads anywhere else, so nothing reaches `/data` in place. Harvesting the two framework
+directories through the device's adbd would work, but it would mean opening TCP adb as root to
+satisfy a diagnostics read, and the app does not do that for anything other than an install.
+
+### Decoding a release trace
+
+Release is R8-minified, and `proguard-rules.pro` keeps `SourceFile,LineNumberTable` — so a frame
+reads `a.b.c(SourceFile:17)` and means nothing without the mapping the build produced. Every publish
+archives it beside the APK as `mapping-<versionCode>.txt.gz`, and the `<versionCode>` in a report's
+name is exactly the key that selects it:
+
+```bash
+curl -o dump.txt 'http://<frame>:8080/crash/<name>'   # 1. the report
+gunzip -k mapping-<versionCode>.txt.gz                # 2. the build's mapping, from the update dir
+"$ANDROID_HOME/cmdline-tools/latest/bin/retrace" mapping-<versionCode>.txt dump.txt   # 3. readable
+```
+
+`/crashes` shows the needed file name per row, and the index page carries a line whenever the store
+is non-empty. These pages are ungated, like `/logs` and `/files`: a report is the thing you need on
+the frame that is currently dead, and the flag that would gate it can only be set at that frame's
+own screen. Reports hold absolute paths, versions and exception text — never the configuration, the
+token, or SharedPreferences, which the reporter does not read.

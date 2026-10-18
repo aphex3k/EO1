@@ -71,6 +71,22 @@ public interface WebController {
     /** Deletes an uploaded file by name. */
     boolean deleteUploadedFile(String name);
 
+    /** The crash-report directory, for callers that only need to size it. */
+    File crashDir();
+
+    /** Lists the stored crash reports, newest first. */
+    CrashStore.Info[] listCrashDumps();
+
+    /**
+     * Resolves a crash report by name.
+     *
+     * @return the file, or {@code null} if missing/unsafe.
+     */
+    File crashDumpFile(String name);
+
+    /** Deletes one crash report by explicit operator action. Retention pruning is separate. */
+    boolean deleteCrashDump(String name);
+
     /**
      * The self-update staging directory ({@code filesDir/updates}). The web server uses it as
      * the temp dir for {@code POST /update} APK uploads — deliberately not the media upload

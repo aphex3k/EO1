@@ -11,12 +11,20 @@
 #   EO1_UPDATE_DIR     Local staging dir (default: ./update-out).
 #   EO1_UPDATE_REMOTE  Optional rsync target, user@host:/path. Mirrors the staging dir.
 #   EO1_UPDATE_NOTES   Optional free-text note embedded in the manifest.
+#   EO1_UPDATE_MAPPING_OPTIONAL
+#                      Set to publish without the R8 mapping even when the build did not produce
+#                      one. Unset (default) makes a missing mapping a hard error: release is always
+#                      minified, so without an archived mapping a crash dump from this build can
+#                      never be decoded.
 #
 # Signing is read from the gitignored root local.properties:
 #   eo1.signing.store.file / eo1.signing.store.password /
 #   eo1.signing.key.alias (default EO1) / eo1.signing.key.password
 #
-# The APK is published as eo1-release-<VERSION_CODE>.apk next to update-manifest.json.
+# The APK is published as eo1-release-<VERSION_CODE>.apk next to update-manifest.json, and the
+# build's R8 mapping as mapping-<VERSION_CODE>.txt.gz. The mapping exists only to decode crash dumps
+# (docs/WEBSERVER.md "Crash dumps") and is deliberately NOT referenced in the manifest, so no frame
+# ever downloads it.
 # VERSION_CODE must be strictly greater than the last published one (monotonic, recorded
 # in <UPDATE_DIR>/.last-published-version).
 
@@ -97,6 +105,38 @@ fi
 APK_NAME="eo1-release-$VERSION_CODE.apk"
 cp "$APK" "$UPDATE_DIR/$APK_NAME"
 
+# Archive the R8 mapping next to the APK. Release sets minifyEnabled=true, so crash dumps from this
+# build name obfuscated classes and are only readable against this file — and a crash report carries
+# its versionCode, which is exactly the key (<code> is strictly increasing, so versionCode -> mapping
+# is 1:1). Never referenced from update-manifest.json: frames have no use for it.
+MAPPING_SRC="$ROOT/app/build/outputs/mapping/release/mapping.txt"
+MAPPING_NAME=""
+if [ -f "$MAPPING_SRC" ]; then
+    if command -v gzip >/dev/null 2>&1; then
+        MAPPING_NAME="mapping-$VERSION_CODE.txt.gz"
+        gzip -9 -c "$MAPPING_SRC" > "$UPDATE_DIR/$MAPPING_NAME"
+    else
+        MAPPING_NAME="mapping-$VERSION_CODE.txt"
+        cp "$MAPPING_SRC" "$UPDATE_DIR/$MAPPING_NAME"
+        echo "WARNING: gzip not found; published uncompressed as $MAPPING_NAME" >&2
+    fi
+    if command -v shasum >/dev/null 2>&1; then
+        MAPPING_SHA=$(shasum -a 256 "$UPDATE_DIR/$MAPPING_NAME" | awk '{print $1}')
+    else
+        MAPPING_SHA=$(sha256sum "$UPDATE_DIR/$MAPPING_NAME" | awk '{print $1}')
+    fi
+elif [ -n "${EO1_UPDATE_MAPPING_OPTIONAL:-}" ]; then
+    echo "WARNING: no R8 mapping found and EO1_UPDATE_MAPPING_OPTIONAL is set - publishing without one." >&2
+    echo "         Crash dumps from versionCode $VERSION_CODE will NOT be retraceable." >&2
+else
+    echo "ERROR: build produced no $MAPPING_SRC" >&2
+    echo "       Release builds set minifyEnabled=true, so R8 must emit a mapping. Publishing without" >&2
+    echo "       one recreates the failure this archive exists to prevent: a crash on a frame that can" >&2
+    echo "       never be decoded. If you deliberately disabled minification, re-run with" >&2
+    echo "       EO1_UPDATE_MAPPING_OPTIONAL=1." >&2
+    exit 1
+fi
+
 MANIFEST="$UPDATE_DIR/update-manifest.json"
 cat > "$MANIFEST" <<EOF
 {
@@ -120,6 +160,12 @@ fi
 echo
 echo "Published (staged in $UPDATE_DIR):"
 echo "  $APK_NAME  sha256=$SHA256  size=$SIZE"
+if [ -n "$MAPPING_NAME" ]; then
+    echo "  $MAPPING_NAME  sha256=$MAPPING_SHA  size=$(wc -c < "$UPDATE_DIR/$MAPPING_NAME" | tr -d '[:space:]')"
+    echo "                 retrace with: gunzip -k $MAPPING_NAME && \$ANDROID_HOME/cmdline-tools/latest/bin/retrace mapping-$VERSION_CODE.txt <dump>"
+else
+    echo "  (no R8 mapping archived - crash dumps from this build are not retraceable)"
+fi
 echo "  update-manifest.json -> $EO1_UPDATE_HOST/$APK_NAME"
 echo
 cat "$MANIFEST"

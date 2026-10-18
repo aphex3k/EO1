@@ -275,6 +275,19 @@ public class WebServer {
             }
             return "fileGet";
         }
+        if (path.equals("/crashes")) {
+            return "crashesPage";
+        }
+        if (path.equals("/crash.json")) {
+            return "crashJson";
+        }
+        if (path.startsWith("/crash/")) {
+            String rest = path.substring("/crash/".length());
+            if (rest.endsWith("/delete")) {
+                return "crashDelete";
+            }
+            return "crashGet";
+        }
         if (path.equals("/upload")) {
             return "upload";
         }
@@ -544,6 +557,55 @@ public class WebServer {
                 }
                 String name = urlDecode(decodePathSegment(path, "/delete"));
                 boolean ok = controller.deleteUploadedFile(name);
+                sendJson(os, ok ? 200 : 404, ok ? okJson("deleted") : errorJson("not found"));
+                break;
+            }
+
+            case "crashesPage":
+                if (!method.equals("GET")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                send(os, 200, "text/html; charset=utf-8", renderCrashesPage());
+                break;
+
+            case "crashJson":
+                if (!method.equals("GET")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                send(os, 200, "application/json", renderCrashListJson());
+                break;
+
+            case "crashGet": {
+                if (!method.equals("GET")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                String name = urlDecode(segmentAfter(path, "/crash/", null));
+                File f = controller.crashDumpFile(name);
+                if (f == null || !f.isFile()) {
+                    send(os, 404, "text/plain", "not found");
+                    return;
+                }
+                streamFile(os, f, contentTypeFor(f.getName()));
+                break;
+            }
+
+            case "crashDelete": {
+                if (!method.equals("DELETE") && !method.equals("POST")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                // Same-origin, like the config writes. A delete needs no secret, but this frame
+                // renders arbitrary LAN pages into its own kiosk WebView, and a simple cross-origin
+                // POST is enough to wipe the only evidence of the crash being investigated.
+                if (!configWriteAllowed(headers, boundPort)) {
+                    sendJson(os, 403, errorJson("cross-origin request rejected"));
+                    return;
+                }
+                String name = urlDecode(segmentAfter(path, "/crash/", "/delete"));
+                boolean ok = controller.deleteCrashDump(name);
                 sendJson(os, ok ? 200 : 404, ok ? okJson("deleted") : errorJson("not found"));
                 break;
             }
@@ -949,7 +1011,13 @@ public class WebServer {
                 + "button{margin:2px}a{color:#8cf}</style>");
         sb.append(indexHeadingHtml(platform, deviceName, safeIp(), boundPort));
         sb.append("<p>").append(escapeHtml(controller.appBuildSummary())).append("</p>");
-        sb.append("<p><a href=\"/state\">state</a> · <a href=\"/logs\">logs</a> · <a href=\"/files\">files (json)</a></p>");
+        sb.append("<p><a href=\"/state\">state</a> · <a href=\"/logs\">logs</a> · ")
+                .append("<a href=\"/crashes\">crashes</a> · ")
+                .append("<a href=\"/files\">files (json)</a></p>");
+        String crashNotice = crashNotice();
+        if (crashNotice != null) {
+            sb.append("<p style=\"color:#f88\">").append(crashNotice).append("</p>");
+        }
 
         sb.append("<h2>Upload</h2>");
         sb.append("<form action=\"/upload\" method=\"post\" enctype=\"multipart/form-data\">");
@@ -1378,6 +1446,101 @@ public class WebServer {
                 + "catch(e){}}poll();setInterval(poll,3000);</script>";
     }
 
+    /** One line above the fold when this frame is holding crash reports. */
+    private String crashNotice() {
+        try {
+            // stats(), not listCrashDumps(): the notice needs a count and a timestamp, both of which
+            // are in the file names. Reading the store's headers here would open every report on
+            // every load of the landing page, on a device slow enough to feel it.
+            CrashStore.Stats stats = CrashStore.stats(controller.crashDir());
+            if (stats.count == 0) {
+                return null;
+            }
+            return stats.count + " crash report(s) stored, most recent "
+                    + escapeHtml(CrashStore.localTime(stats.lastAtMs))
+                    + " &mdash; see <a href=\"/crashes\">crashes</a>.";
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * The {@code /crashes} page. Server-rendered with a plain reload link rather than the {@code
+     * /logs} page's 3 s polling: the store only changes when a process dies or one starts.
+     */
+    private String renderCrashesPage() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<!doctype html><meta charset=\"utf-8\"><title>")
+                .append(deviceNamePrefixHtml(deviceName()))
+                .append(escapeHtml(controller.platform())).append(" crashes</title>")
+                .append("<style>body{font:12px monospace;background:#111;color:#eee;padding:8px}")
+                .append("table{border-collapse:collapse}td,th{padding:3px 8px;text-align:left}")
+                .append("a{color:#8cf}button{font:11px monospace}</style>")
+                .append("<p><a href=\"/\">back</a> · <a href=\"/crash.json\">json</a> · ")
+                .append("<a href=\"/crashes\">reload</a></p>");
+
+        CrashStore.Info[] dumps;
+        try {
+            dumps = controller.listCrashDumps();
+        } catch (Throwable t) {
+            // A listing that cannot be read must still answer 200, not wedge this thread.
+            sb.append("<p>crash store unreadable: ").append(escapeHtml(String.valueOf(t))).append("</p>");
+            return sb.toString();
+        }
+        if (dumps.length == 0) {
+            sb.append("<p>no crash reports stored. Reports are kept for 14 days, or until the store ")
+                    .append("passes 4 MB.<br>Native and ANR captures are scraped at startup — ")
+                    .append("<a href=\"/state\">/state</a> reports whether each source was readable.</p>");
+            return sb.toString();
+        }
+        sb.append("<p>").append(dumps.length)
+                .append(" report(s). A release trace is obfuscated: retrace it against ")
+                .append("<code>mapping-&lt;versionCode&gt;.txt.gz</code>, archived beside the APK.")
+                .append("</p>");
+        sb.append("<table><tr><th>When</th><th>Kind</th><th>Exception / source</th>")
+                .append("<th>Size</th><th>Mapping</th><th></th><th></th></tr>");
+        for (CrashStore.Info d : dumps) {
+            String href = "/crash/" + escapeHtml(urlEncode(d.name));
+            sb.append("<tr><td>").append(escapeHtml(CrashStore.localTime(d.epochMillis))).append("</td>")
+                    .append("<td>").append(escapeHtml(d.kind)).append("</td>")
+                    .append("<td>").append(escapeHtml(d.exception != null ? d.exception : d.name))
+                    .append("</td>")
+                    .append("<td>").append(d.sizeBytes / 1024L).append(" KB</td>")
+                    .append("<td>mapping-").append(d.versionCode).append(".txt.gz</td>")
+                    .append("<td><a href=\"").append(href).append("\">Download</a></td>")
+                    .append("<td><button onclick=\"del('")
+                    .append(escapeHtmlJs(urlEncode(d.name))).append("')\">Delete</button></td>")
+                    .append("</tr>");
+        }
+        sb.append("</table>");
+        sb.append("<script>function del(n){if(!confirm('Delete crash report '+n+'?'))return;")
+                .append("fetch('/crash/'+encodeURIComponent(n)+'/delete',{method:'POST'})")
+                .append(".then(function(){location.reload();});}</script>");
+        return sb.toString();
+    }
+
+    private String renderCrashListJson() {
+        JsonArray arr = new JsonArray();
+        CrashStore.Info[] dumps;
+        try {
+            dumps = controller.listCrashDumps();
+        } catch (Throwable t) {
+            return arr.toString();
+        }
+        for (CrashStore.Info d : dumps) {
+            JsonObject o = new JsonObject();
+            o.addProperty("name", d.name);
+            o.addProperty("kind", d.kind);
+            o.addProperty("epochMillis", d.epochMillis);
+            o.addProperty("versionCode", d.versionCode);
+            o.addProperty("exception", d.exception);
+            o.addProperty("size", d.sizeBytes);
+            o.addProperty("lastModified", d.lastModified);
+            arr.add(o);
+        }
+        return arr.toString();
+    }
+
     private String renderFileListJson() {
         UploadedMedia.FileInfo[] files = controller.listUploadedFiles();
         JsonArray arr = new JsonArray();
@@ -1394,13 +1557,17 @@ public class WebServer {
     // --- helpers ---
 
     private String decodePathSegment(String path) {
-        // path like /files/<name>; return <name>
-        return path.substring("/files/".length());
+        return segmentAfter(path, "/files/", null);
     }
 
     private String decodePathSegment(String path, String suffix) {
-        String rest = path.substring("/files/".length());
-        if (rest.endsWith(suffix)) {
+        return segmentAfter(path, "/files/", suffix);
+    }
+
+    /** The one path segment after {@code prefix}, minus an optional trailing {@code suffix}. */
+    private static String segmentAfter(String path, String prefix, String suffix) {
+        String rest = path.substring(prefix.length());
+        if (suffix != null && rest.endsWith(suffix)) {
             rest = rest.substring(0, rest.length() - suffix.length());
         }
         return rest;
@@ -1603,6 +1770,8 @@ public class WebServer {
                 return "OK";
             case 400:
                 return "Bad Request";
+            case 403:
+                return "Forbidden";
             case 404:
                 return "Not Found";
             case 405:
