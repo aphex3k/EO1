@@ -51,6 +51,27 @@ public class SettingsManager {
      * floor resets to its default every time the Activity is rebuilt.
      */
     private static final String PREF_MIN_BRIGHTNESS_STEP = "min_brightness_step";
+    /**
+     * SharedPreferences key for the operator's free-form label for <em>this</em> frame ("Kitchen").
+     * Like the flags above it is never part of {@code configuration.json} and never exported: it
+     * names one box, so carrying it to another on import would mislabel that one. Empty means unset —
+     * every surface then identifies the frame by platform and IP address alone, exactly as before the
+     * field existed.
+     */
+    private static final String PREF_DEVICE_NAME = "device_name";
+    /**
+     * Display bound for {@link #PREF_DEVICE_NAME}. Chars rather than code points: it is the same bound
+     * the on-device field and the web page put on their inputs, so what an operator types is what is
+     * stored. Cut on a code-point boundary, so a pair straddling the limit goes whole.
+     */
+    static final int DEVICE_NAME_MAX_CHARS = 64;
+    /**
+     * Overlay/log line this label is reported under. Shared because the map is keyed by it: the
+     * resume-time seed ({@code MainActivity.onResume}) and every write have to land on one line.
+     */
+    static final String DEBUG_KEY_DEVICE_NAME = "device name";
+    /** Byte bound, so a label of 4-byte code points still cannot outgrow a line of the state document. */
+    static final int DEVICE_NAME_MAX_UTF8_BYTES = 128;
     private Configuration configuration = new Configuration();
     public Configuration getConfiguration() {
         return this.configuration;
@@ -201,6 +222,115 @@ public class SettingsManager {
             sb.append(Character.forDigit(b & 0xF, 16));
         }
         return sb.toString();
+    }
+
+    /**
+     * The operator's label for this frame, for the debug overlay, the LAN page and {@code /state}.
+     * Persisted in the app's default SharedPreferences, never in {@code configuration.json}.
+     *
+     * @return the stored name, sanitised; {@code ""} when unset, unreadable or the hosting activity is
+     *         gone. Never {@code null} — every caller treats empty as "no name, show the IP".
+     */
+    public String deviceName() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return "";
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs == null) {
+                return "";
+            }
+            // Sanitised on the way out, not just on the way in: the preferences file is writable
+            // out of band (adb shell), and one surviving newline would forge a line of the overlay
+            // and of eo1-app.log, both of which are formatted "key: value\n".
+            return sanitizeDeviceName(prefs.getString(PREF_DEVICE_NAME, ""));
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    /**
+     * Stores {@code requested} as this frame's label and refreshes the overlay line. Both writers —
+     * the options dialog and {@code POST /devicename} — go through here, so the sanitising and the
+     * re-emit cannot drift apart. Deliberately does not call {@code settingsChanged()}: a rename
+     * concerns neither the rotation nor the schedule.
+     *
+     * @param requested the typed name; empty clears it.
+     * @return the name actually stored (so a caller can report the truncation it caused).
+     */
+    public String setDeviceName(String requested) {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return "";
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs != null) {
+                prefs.edit().putString(PREF_DEVICE_NAME, sanitizeDeviceName(requested)).apply();
+            }
+        } catch (Exception ignored) {
+        }
+        // Re-read rather than echo the argument, so under a concurrent write from the other surface
+        // the line shows the last value that actually landed.
+        String stored = deviceName();
+        // The debug map is only ever added to, so a cleared name has to say so out loud — otherwise
+        // the overlay keeps advertising a label nobody set any more.
+        listener.debugInformationProvided(new DebugInformation(DEBUG_KEY_DEVICE_NAME,
+                stored.isEmpty() ? "(unset)" : stored));
+        return stored;
+    }
+
+    /**
+     * The one canonical form of a device name: no control characters, no surrounding whitespace, no
+     * longer than the two bounds above. Idempotent, which is what lets {@link #deviceName()} apply it
+     * on reads as well as writes.
+     */
+    static String sanitizeDeviceName(String raw) {
+        if (raw == null) {
+            return "";
+        }
+        StringBuilder kept = new StringBuilder(raw.length());
+        for (int i = 0; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (!Character.isISOControl(c)) {
+                kept.append(c);
+            }
+        }
+        String name = kept.toString().trim();
+        if (name.length() > DEVICE_NAME_MAX_CHARS) {
+            int end = DEVICE_NAME_MAX_CHARS;
+            if (Character.isHighSurrogate(name.charAt(end - 1))) {
+                end--;
+            }
+            name = name.substring(0, end);
+        }
+        int bytes = 0;
+        int end = 0;
+        while (end < name.length()) {
+            int codePoint = name.codePointAt(end);
+            int width = utf8Bytes(codePoint);
+            if (bytes + width > DEVICE_NAME_MAX_UTF8_BYTES) {
+                break;
+            }
+            bytes += width;
+            end += Character.charCount(codePoint);
+        }
+        // Cutting on the byte bound can leave a space that was interior before the cut.
+        return name.substring(0, end).trim();
+    }
+
+    private static int utf8Bytes(int codePoint) {
+        if (codePoint < 0x80) {
+            return 1;
+        }
+        if (codePoint < 0x800) {
+            return 2;
+        }
+        if (codePoint < 0x10000) {
+            return 3;
+        }
+        return 4;
     }
 
     protected SettingsManager (SettingsManagerListener listener) {

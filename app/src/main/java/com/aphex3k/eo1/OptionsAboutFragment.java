@@ -1,18 +1,36 @@
 package com.aphex3k.eo1;
 
+import android.content.Context;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
+import android.widget.EditText;
 import android.widget.TextView;
+import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.Fragment;
 
-/** Read-only: what this binary is, and who signed it. Nothing here writes to the configuration. */
+/**
+ * What this binary is and who signed it — read-only, and nothing on this tab writes to
+ * {@code configuration.json}. The exception is the device name at the top: it is stored in the
+ * key/value store instead, on its own button rather than on the dialog's Save, because a page that
+ * has been swiped away has no views left to read (see {@code res/layout/options_about.xml}).
+ */
 public class OptionsAboutFragment extends Fragment {
 
+    private final SettingsManager settingsManager;
+    private EditText deviceNameField;
+
+    public OptionsAboutFragment(SettingsManager settingsManager) {
+        this.settingsManager = settingsManager;
+    }
+
+    /** Required: the pager re-instantiates a page reflectively when restoring saved state. */
     public OptionsAboutFragment() {
+        this.settingsManager = null;
     }
 
     @Nullable
@@ -37,6 +55,35 @@ public class OptionsAboutFragment extends Fragment {
         text(view, R.id.textViewAboutValidity, signer.validity());
         text(view, R.id.textViewAboutAlgorithm, signer.algorithm);
         text(view, R.id.textViewAboutVerdict, "Signing key: " + signer.keyVerdict);
+
+        deviceNameField = view.findViewById(R.id.editTextDeviceName);
+        if (deviceNameField != null) {
+            // Seeded from the store, never from restored view state (the field is saveEnabled=false):
+            // the stored name is the truth, this field is a view of it.
+            deviceNameField.setText(settingsManager != null ? settingsManager.deviceName() : "");
+        }
+        Button set = view.findViewById(R.id.btnSetDeviceName);
+        if (set != null) {
+            set.setOnClickListener(v -> commitDeviceName());
+        }
+    }
+
+    private void commitDeviceName() {
+        Context context = getContext();
+        EditText field = deviceNameField;
+        if (context == null || field == null) {
+            return;
+        }
+        if (settingsManager == null) {
+            Toast.makeText(context, "Device name unavailable", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        String stored = settingsManager.setDeviceName(field.getText().toString());
+        // Show what was stored, not what was typed: the store trims and bounds the name.
+        field.setText(stored);
+        field.setSelection(stored.length());
+        Toast.makeText(context, stored.isEmpty() ? "Device name cleared"
+                : "Device name set: " + stored, Toast.LENGTH_SHORT).show();
     }
 
     private static void text(View root, int id, String value) {

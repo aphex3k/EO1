@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Read-only on purpose: no EditText, nothing focusable, no selectable text. A view that takes
-     focus in this dialog keeps its input connection alive past the window's death, which on API 19
-     routes hardware keys away from MainActivity and silences C, Space and the soft buttons. -->
+<!-- Read-only apart from the one device-name field at the top. Everything below describes the binary
+     and the key that signed it, and stays non-focusable on purpose: a view that takes focus in this
+     dialog keeps its input connection alive past the window's death, which on API 19 routes hardware
+     keys away from MainActivity and silences C, Space and the soft buttons. The name field cannot
+     avoid focus — it has to be typeable — so it relies on OptionsDialogFragment.releaseInputFocus()
+     the same way the Media tab's fields already do, and it commits on its own button rather than on
+     the dialog's Save: ViewPager2 destroys the views of a page that is scrolled off-screen, so a Save
+     reaching for this field could be reading a view that no longer exists and would blank the name. -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -15,6 +20,48 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
+            android:text="Device Name"
+            android:textAppearance="@style/TextAppearance.AppCompat.Large" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8sp"
+            android:text="Labels this frame in the debug overlay and on the web page. Stored on the device only — never in configuration.json, so importing a configuration cannot rename another frame. Empty means unnamed."
+            android:textSize="18sp" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="12sp">
+
+            <!-- saveEnabled=false: this field has an id, and a page swiped away has its view
+                 destroyed and later restored. Restoring uncommitted typing over the stored value
+                 would show a name that was never saved. -->
+            <EditText
+                android:id="@+id/editTextDeviceName"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:saveEnabled="false"
+                android:inputType="text"
+                android:maxLength="64"
+                android:hint="Kitchen"
+                android:textSize="22sp" />
+
+            <Button
+                android:id="@+id/btnSetDeviceName"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center_vertical"
+                android:text="Set" />
+        </LinearLayout>
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24sp"
             android:text="This Build"
             android:textAppearance="@style/TextAppearance.AppCompat.Large" />
 

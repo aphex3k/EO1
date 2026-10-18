@@ -20,6 +20,25 @@ public interface WebController {
     /** The hardware platform label ({@code "EO1"} or {@code "EO2"}) for display in the UI. */
     String platform();
 
+    /**
+     * The operator's label for this frame ("Kitchen"), for the page header. Device-local: like the
+     * trusted-network flags it is never part of the configuration document, so exporting or importing
+     * a configuration cannot relabel another frame.
+     *
+     * @return the name, or {@code ""} when unset — the caller then identifies the frame by platform
+     *         and address alone.
+     */
+    String deviceName();
+
+    /**
+     * Replaces this frame's device name. Sanitised and persisted by the implementor, which also
+     * refreshes the on-screen copy; nothing else about the running app changes.
+     *
+     * @param requested the name as submitted; empty clears it.
+     * @return the name actually stored.
+     */
+    String setDeviceName(String requested);
+
     /** Builds the full {@code /state} JSON document. */
     String buildStateJson();
 
