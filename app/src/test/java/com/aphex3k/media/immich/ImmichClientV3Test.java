@@ -16,6 +16,7 @@ import java.io.IOException;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -35,6 +36,9 @@ public class ImmichClientV3Test {
 
     @Before
     public void startServer() throws IOException {
+        // The store is process-wide, exactly as in production; without this a session from one
+        // test's host could satisfy another test's client.
+        ImmichSessionStore.clearForTests();
         server = new MockWebServer();
         server.start();
     }
@@ -193,6 +197,100 @@ public class ImmichClientV3Test {
             assertTrue(expected.getMessage(), expected.getMessage().contains("a-1"));
         }
         assertEquals("the listed tag must not be re-created", 2, server.getRequestCount());
+    }
+
+    /**
+     * What authentication actually costs now: one credentials exchange per session, and a bearer
+     * token on everything after it. The password must appear in exactly one request body.
+     */
+    @Test
+    public void credentialsBuyOneLoginAndEveryLaterRequestCarriesTheToken() throws Exception {
+        server.enqueue(json(201, "{\"userId\":\"user-1\",\"accessToken\":\"at\"}"));
+        // A list without a match: one request per call, so the header assertions below line up
+        // with the requests actually made.
+        server.enqueue(json(200, "[{\"id\":\"tag-2\",\"name\":\"other\"}]"));
+        server.enqueue(json(200, "[{\"id\":\"tag-2\",\"name\":\"other\"}]"));
+
+        ImmichClientV3 client =
+                new ImmichClientV3(server.url("/").toString(), "user-1", "secret", null);
+        client.login();
+        client.listTaggedAssetIds("EO1_INCOMPATIBLE");
+        client.listTaggedAssetIds("EO1_INCOMPATIBLE");
+
+        RecordedRequest login = server.takeRequest();
+        assertEquals("/api/auth/login", login.getPath());
+        assertTrue("the password is spent here and nowhere else",
+                login.getBody().readUtf8().contains("\"password\":\"secret\""));
+        assertNull("a login must not carry a session it is about to replace",
+                login.getHeader("Authorization"));
+
+        RecordedRequest first = server.takeRequest();
+        assertEquals("Bearer at", first.getHeader("Authorization"));
+        assertNull("cookie replay is gone; one credential, not two", first.getHeader("Cookie"));
+        assertEquals("Bearer at", server.takeRequest().getHeader("Authorization"));
+    }
+
+    /** A second client for the same account — what a pool rebuild builds — must not log in again. */
+    @Test
+    public void aRebuiltClientReusesTheSessionInsteadOfLoggingInAgain() throws Exception {
+        String host = server.url("/").toString();
+        server.enqueue(json(201, "{\"userId\":\"user-1\",\"accessToken\":\"at\"}"));
+        server.enqueue(json(200, "[]"));
+
+        new ImmichClientV3(host, "user-1", "secret", null).login();
+        ImmichClientV3 rebuilt = new ImmichClientV3(host, "user-1", "secret", null);
+        rebuilt.listTaggedAssetIds("EO1_INCOMPATIBLE");
+
+        assertTrue("the rebuilt client must still be authenticated", rebuilt.isLoggedIn());
+        assertEquals(2, server.getRequestCount());
+        assertEquals("/api/auth/login", server.takeRequest().getPath());
+        assertEquals("Bearer at", server.takeRequest().getHeader("Authorization"));
+    }
+
+    /**
+     * The version probe runs before any login, so a token left over from an earlier session must
+     * stay off it: a spent one would 401 the probe and raise a version warning that has nothing to
+     * do with the server's version.
+     */
+    @Test
+    public void theVersionProbeGoesOutWithoutAToken() throws Exception {
+        String host = server.url("/").toString();
+        server.enqueue(json(201, "{\"userId\":\"user-1\",\"accessToken\":\"at\"}"));
+        server.enqueue(json(200, "{\"major\":3,\"minor\":2,\"patch\":2}"));
+
+        new ImmichClientV3(host, "user-1", "secret", null).login();
+        new ImmichClientV3(host, "user-1", "secret", null).probeServerVersion();
+
+        server.takeRequest();
+        assertNull(server.takeRequest().getHeader("Authorization"));
+    }
+
+    /**
+     * A download whose token aged out mid-flight: the retry has to be a <em>fresh</em> call. Handing
+     * the same Retrofit call to {@code execute()} twice throws "Already Executed", and an expired
+     * token makes that path ordinary rather than theoretical.
+     */
+    @Test
+    public void aStreamRejectedMidFlightIsRetriedWithANewToken() throws Exception {
+        String host = server.url("/").toString();
+        server.enqueue(json(201, "{\"userId\":\"user-1\",\"accessToken\":\"old\"}"));
+        server.enqueue(json(401, "{\"message\":\"Unauthorized\",\"statusCode\":401}"));
+        server.enqueue(json(201, "{\"userId\":\"user-1\",\"accessToken\":\"fresh\"}"));
+        server.enqueue(new MockResponse().setResponseCode(200)
+                .setHeader("Content-Type", "image/jpeg").setBody("bytes"));
+
+        ImmichClientV3 client = new ImmichClientV3(host, "user-1", "secret", null);
+        client.login();
+        java.io.InputStream in = client.originalStream("a-1");
+        assertNotNull(in);
+        in.close();
+
+        assertEquals(4, server.getRequestCount());
+        server.takeRequest();
+        assertEquals("Bearer old", server.takeRequest().getHeader("Authorization"));
+        server.takeRequest();
+        assertEquals("the retry must carry the token the re-login minted",
+                "Bearer fresh", server.takeRequest().getHeader("Authorization"));
     }
 
     private static MockResponse json(int code, String body) {

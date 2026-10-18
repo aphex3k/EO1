@@ -6,6 +6,8 @@ import static org.junit.Assert.assertTrue;
 
 import com.aphex3k.eo1.ApiServiceGenerator;
 import com.aphex3k.eo1.TestConfiguration;
+import com.aphex3k.media.immich.ImmichAuthInterceptor;
+import com.aphex3k.media.immich.ImmichSessionStore;
 
 import org.junit.AssumptionViolatedException;
 import org.junit.Before;
@@ -37,19 +39,32 @@ public class ImmichApiServiceTest {
 
         if (userId == null) {
 
-            this.apiService = ApiServiceGenerator.createService(ImmichApiService.class, "https://demo.immich.app/", null, null);
+            final String host = "https://demo.immich.app/";
+            final ImmichSessionStore.Session session =
+                    ImmichSessionStore.get().attach(host, email, password);
+            this.apiService = ApiServiceGenerator.createService(ImmichApiService.class, host,
+                    null, null, new ImmichAuthInterceptor(session));
 
             try {
-                Response<ImmichApiLoginResponse> response = apiService.login(
-                        new ImmichApiLogin(email, password)
-                ).execute();
+                // The same route the app takes: the credentials buy a token once, and every request
+                // after that carries the token rather than the password.
+                session.token(new ImmichSessionStore.LoginRunner() {
+                    @Override
+                    public String run() throws java.io.IOException {
+                        Response<ImmichApiLoginResponse> response = apiService.login(
+                                new ImmichApiLogin(email, password)
+                        ).execute();
 
-                if (response.code() != 201) {
-                    throw new AssumptionViolatedException("Did somebody change the password of the demo account?");
-                }
+                        if (response.code() != 201) {
+                            throw new AssumptionViolatedException(
+                                    "Did somebody change the password of the demo account?");
+                        }
 
-                assert response.body() != null;
-                userId = response.body().getUserId();
+                        assert response.body() != null;
+                        userId = response.body().getUserId();
+                        return response.body().getAccessToken();
+                    }
+                });
             }
             catch (UnknownHostException e) {
                 throw new AssumptionViolatedException(e.getMessage());

@@ -36,10 +36,11 @@ import retrofit2.Response;
  * Immich client for the whole 3.x API line (endpoints verified identical through 3.3.3),
  * implemented over the frozen {@code com.aphex3k.immichApi} service surface.
  *
- * <p>One instance owns one Retrofit service with its own in-memory session cookie
- * jar, so each configured Immich backend keeps an independent session. The session
- * persists across rotation ticks; a 401 mid-flight triggers one transparent re-login
- * instead of the legacy re-login-per-download behaviour.
+ * <p>One instance owns one Retrofit service, and authenticates through the process-wide
+ * {@link ImmichSessionStore} rather than a session of its own: the token is a bearer JWT attached
+ * to every request that needs one, it is renewed when its own expiry says so or when the server
+ * answers 401, and it survives this instance being replaced by the next pool rebuild. The
+ * username and password are spent on {@code /api/auth/login} and on nothing else.
  *
  * <p>{@code @Keep}: the band table instantiates this class reflectively
  * ({@code ImmichMediaBackend#instantiate}), so the release build must not strip
@@ -60,12 +61,24 @@ public class ImmichClientV3 implements ImmichClient {
     private final ImmichApiService service;
     private final String userid;
     private final String password;
-    private volatile boolean loggedIn;
+    private final ImmichSessionStore.Session session;
+
+    /** Held by the store to mint a token; never calls back into {@link #login()}. */
+    private final ImmichSessionStore.LoginRunner loginRunner =
+            new ImmichSessionStore.LoginRunner() {
+                @Override
+                public String run()
+                        throws AuthenticationFailedException, AuthenticationUnavailableException,
+                        InvalidCredentialsException, IOException {
+                    return doLogin();
+                }
+            };
 
     public ImmichClientV3(String host, String userid, String password,
                           @Nullable ApiServiceGenerator.ProgressListener progressListener) {
-        this.service = ApiServiceGenerator.createService(
-                ImmichApiService.class, host, null, progressListener);
+        this.session = ImmichSessionStore.get().attach(host, userid, password);
+        this.service = ApiServiceGenerator.createService(ImmichApiService.class, host, null,
+                progressListener, new ImmichAuthInterceptor(session));
         this.userid = userid;
         this.password = password;
     }
@@ -98,8 +111,21 @@ public class ImmichClientV3 implements ImmichClient {
         }
     }
 
+    /**
+     * Makes sure this backend holds a usable token — which, after a pool rebuild or a config
+     * reload, usually means reusing the one the process already has and touching no network.
+     * The exceptions below are therefore raised by the login this call may trigger, not by the
+     * call itself.
+     */
     @Override
     public void login()
+            throws AuthenticationFailedException, AuthenticationUnavailableException,
+            InvalidCredentialsException, IOException {
+        session.token(loginRunner);
+    }
+
+    /** What the session store runs when it actually needs a new token. */
+    private String doLogin()
             throws AuthenticationFailedException, AuthenticationUnavailableException,
             InvalidCredentialsException, IOException {
         Response<ImmichApiLoginResponse> response =
@@ -121,12 +147,16 @@ public class ImmichClientV3 implements ImmichClient {
         if (userId.isEmpty()) {
             throw new InvalidCredentialsException();
         }
-        loggedIn = true;
+        // The one place the token is read out of the login response. It used to be discarded and
+        // the session carried by a replayed cookie instead; Immich's cookie is this same JWT, so
+        // holding it here changes nothing about what the server sees and everything about what
+        // this app knows — an expiry it can check, and a credential it can stop sending.
+        return loginResponse.getAccessToken();
     }
 
     @Override
     public boolean isLoggedIn() {
-        return loggedIn;
+        return session.hasToken();
     }
 
     @Override
@@ -204,22 +234,29 @@ public class ImmichClientV3 implements ImmichClient {
 
     @Override
     public InputStream originalStream(String assetId) throws IOException, MediaDownloadFailedException {
-        return openStreaming(service.downloadFile(assetId, null));
+        return openStreaming(() -> service.downloadFile(assetId, null));
     }
 
     @Override
     public InputStream thumbnailStream(String assetId) throws IOException, MediaDownloadFailedException {
-        return openStreaming(service.getAssetThumbnail(assetId, ImmichSizeFormat.preview, null));
+        return openStreaming(() -> service.getAssetThumbnail(assetId, ImmichSizeFormat.preview, null));
     }
 
     @Override
     public InputStream videoPlaybackStream(String assetId) throws IOException, MediaDownloadFailedException {
-        return openStreaming(service.playAssetVideo(assetId, null));
+        return openStreaming(() -> service.playAssetVideo(assetId, null));
     }
 
-    private InputStream openStreaming(Call<okhttp3.ResponseBody> call)
+    /**
+     * Takes a factory rather than a {@code Call} because a stream that answered 401 needs a
+     * second attempt, and a Retrofit call can only be executed once — handing the same instance to
+     * {@link #withSession} twice threw {@code IllegalStateException: Already Executed}. Expired
+     * tokens make that 401 an ordinary Tuesday on this path, which is the one that feeds the
+     * display.
+     */
+    private InputStream openStreaming(CallFactory<okhttp3.ResponseBody> callFactory)
             throws IOException, MediaDownloadFailedException {
-        Response<okhttp3.ResponseBody> response = withSession(() -> call);
+        Response<okhttp3.ResponseBody> response = withSession(callFactory);
         if (!response.isSuccessful() || response.body() == null) {
             int code = response.code();
             throw new MediaDownloadFailedException("Failed downloading immich asset: HTTP " + code);
@@ -311,17 +348,28 @@ public class ImmichClientV3 implements ImmichClient {
     }
 
     /**
-     * Executes an authenticated call; on a 401 the session is re-established once and the
-     * call retried. Retrofit calls are one-shot, so the call factory is invoked again.
+     * Executes an authenticated call against a token known to be current: renewed before the first
+     * attempt if its own expiry has arrived, and re-established once if the server disagrees and
+     * answers 401. Retrofit calls are one-shot, so the call factory is invoked again.
+     *
+     * <p>A refused re-login propagates as an {@code IOException} <em>with a cause</em>, which is
+     * how {@link com.aphex3k.eo1.MediaManager} tells "this asset is undecodable" from "this frame
+     * could not reach its server": the second is nobody's asset and must not get tagged.
      */
     private <T> Response<T> withSession(CallFactory<T> callFactory) throws IOException {
+        try {
+            session.renewIfSpent(loginRunner);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("immich login failed: " + e, e);
+        }
         Response<T> response = callFactory.newCall().execute();
         if (response.code() == 401) {
             try {
-                loggedIn = false;
-                login();
+                session.reauthenticate(loginRunner);
             } catch (Exception e) {
-                throw new IOException("re-login failed", e);
+                throw new IOException("re-login failed: " + e, e);
             }
             response = callFactory.newCall().execute();
         }

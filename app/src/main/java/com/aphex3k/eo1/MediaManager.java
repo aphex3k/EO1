@@ -446,7 +446,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 backend.initialize();
             } catch (Exception e) {
                 Log.e(TAG, "rebuildPool: backend '" + backendId + "' initialization failed", e);
-                postException(ui, new BackendUnavailableException(e));
+                // A backend that cannot come up makes rebuildPool run on every tick, so without the
+                // same once-per-thing guard the degraded path above uses, an unreachable server or
+                // a wrong password would toast for the rest of the frame's life. Keyed on the root
+                // cause's class: what actually changed between one failing tick and the next.
+                String reason = "init:" + rootCause(e).getClass().getName();
+                if (warningsShown.add(backendId + '@' + generationFingerprint + '@' + reason)) {
+                    postException(ui, new BackendUnavailableException(e));
+                }
                 continue;
             }
             // A backend that came up degraded still belongs in the rotation; tell the user
@@ -649,6 +656,15 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 }
             }
         });
+    }
+
+    /** The innermost cause — the part of a wrapped failure that distinguishes one from another. */
+    private static Throwable rootCause(Throwable t) {
+        Throwable c = t;
+        while (c.getCause() != null && c.getCause() != c) {
+            c = c.getCause();
+        }
+        return c;
     }
 
     private void postException(UiPoster ui, Exception e) {

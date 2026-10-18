@@ -4,6 +4,13 @@ public class AuthenticationFailedException extends Exception {
     private final int code;
 
     public AuthenticationFailedException(int code) {
+        this(code, code == 401
+                ? "the Immich server rejected these credentials"
+                : "the Immich login response carried no user id");
+    }
+
+    public AuthenticationFailedException(int code, String message) {
+        super(message);
         this.code = code;
     }
 
