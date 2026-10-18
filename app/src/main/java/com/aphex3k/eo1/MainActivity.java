@@ -98,6 +98,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long VIDEO_WATCHDOG_POLL_MS = 2000L;
     private static final long VIDEO_STALL_THRESHOLD_MS = 8000L;
     /**
+     * Shortest window worth trusting as a playback-rate sample. Deliberately below
+     * {@link #VIDEO_STALL_THRESHOLD_MS}, so a clip that is merely slow is reported as slow before
+     * it is misread as stalled.
+     */
+    private static final long VIDEO_RATE_WINDOW_MS = 5000L;
+    /**
      * How long a page may take to show signs of life. Loads that neither paint nor report an error
      * (a black-holed TCP connect) are caught here rather than left covering the screen.
      */
@@ -135,6 +141,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int lastVideoHeight;
     private String lastVideoCodec;
     private String lastFrameOrientation;
+    /**
+     * Throughput of the asset last routed. Held as one immutable reference rather than four fields
+     * so the web-server thread reading /state cannot see stats from two different assets.
+     */
+    private VideoHeaderProbe.StreamStats lastVideoStats = VideoHeaderProbe.StreamStats.UNKNOWN;
+    /** Measured playback rate of the playing video, x100: 100 is realtime, 60 is 0.6x slow. */
+    private int videoPlaybackRateX100 = -1;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
@@ -202,6 +215,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int videoWatchdogLastPosition = -1;
     private long videoWatchdogLastProgressMs = 0L;
     private boolean videoWatchdogRecoverAttempted = false;
+    /** Start of the window the playback-rate estimate is measured across. */
+    private long videoRateAnchorMs = 0L;
+    private int videoRateAnchorPosition = -1;
     /** True after Immich slideshow / MQTT / version check have been started for this resume. */
     private boolean coreLoopStarted = false;
     /**
@@ -1598,6 +1614,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogLastPosition = -1;
         videoWatchdogLastProgressMs = 0L;
         videoWatchdogRecoverAttempted = false;
+        videoRateAnchorMs = 0L;
+        videoRateAnchorPosition = -1;
+        // No watchdog, no measurement: TsPlayer skips this arm entirely, so leaving the previous
+        // MediaPlayer asset's rate standing would attribute it to a clip that was never watched.
+        videoPlaybackRateX100 = -1;
     }
 
     private void startVideoWatchdog(String assetId, File file,
@@ -1655,6 +1676,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         int position = videoPlayer.getCurrentPosition();
         long now = System.currentTimeMillis();
+        measurePlaybackRate(position, now);
 
         if (position != videoWatchdogLastPosition) {
             videoWatchdogLastPosition = position;
@@ -1677,7 +1699,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 seekTarget = 0;
             }
             debugInformationProvided(new DebugInformation("video",
-                    "stall recover pos=" + position + " seek=" + seekTarget + " duration=" + duration));
+                    "stall recover pos=" + position + " seek=" + seekTarget + " duration=" + duration
+                            + " rate=" + describePlaybackRate()));
             try {
                 videoPlayer.seekTo(seekTarget);
                 videoPlayer.play();
@@ -1697,6 +1720,40 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         restoreImageViewAfterVideoFailure();
         assetFallback(assetId, activityReference, true, file, stage);
+    }
+
+    /**
+     * Ratio of media time advanced to wall time across one window, x100.
+     *
+     * <p>This is the only signal that separates "smooth but slow" from "fine". Everything else in
+     * the playback path — {@code onError}, {@code onInfo}, the stall check two lines above — needs
+     * playback to <em>stop</em> to notice anything, and a decoder running at 0.6x never stops: it
+     * advances, just not as fast as the clock. Re-anchors whenever position jumps backwards, which
+     * is a native loop rather than a rate.
+     *
+     * @param position player position just read, in ms
+     * @param now      wall clock that reading was taken on, in ms
+     */
+    private void measurePlaybackRate(int position, long now) {
+        if (videoRateAnchorMs == 0L || position < videoRateAnchorPosition || now < videoRateAnchorMs) {
+            videoRateAnchorMs = now;
+            videoRateAnchorPosition = position;
+            return;
+        }
+        long elapsed = now - videoRateAnchorMs;
+        if (elapsed < VIDEO_RATE_WINDOW_MS) {
+            return;
+        }
+        videoPlaybackRateX100 = (int) Math.min(Integer.MAX_VALUE,
+                (position - videoRateAnchorPosition) * 100L / elapsed);
+        videoRateAnchorMs = now;
+        videoRateAnchorPosition = position;
+    }
+
+    /** The last measured playback rate as a multiple of realtime, or "n/a" before one completes. */
+    private String describePlaybackRate() {
+        return videoPlaybackRateX100 < 0 ? "n/a"
+                : String.format(Locale.ROOT, "%.2fx", videoPlaybackRateX100 / 100.0);
     }
 
     // ------------------------------------------------------------------
@@ -2084,16 +2141,40 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastVideoWidth = width;
         lastVideoHeight = height;
         lastVideoCodec = codec;
+        lastVideoStats = probe.stats;
         lastFrameOrientation = framePortrait ? "portrait" : "landscape";
         Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
                 + " coded=" + width + "x" + height
                 + " frame=" + lastFrameOrientation + " player="
-                + (forceFallback ? "MediaPlayer" : "TsPlayer"));
+                + (forceFallback ? "MediaPlayer" : "TsPlayer")
+                + " " + describeStream(probe.stats));
         debugInformationProvided(new DebugInformation("videoRouting",
                 "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
                         + " frame=" + lastFrameOrientation + " -> "
-                        + (forceFallback ? "MediaPlayer" : "TsPlayer")));
+                        + (forceFallback ? "MediaPlayer" : "TsPlayer") + "; "
+                        + describeStream(probe.stats)));
         return !forceFallback;
+    }
+
+    /** Sample-table facts in one line, each part omitted when the file did not give it. */
+    private static String describeStream(VideoHeaderProbe.StreamStats s) {
+        if (s.fpsMilli <= 0 && s.avgFrameBytes <= 0 && s.bitRateBps <= 0) {
+            return "stream unknown";
+        }
+        StringBuilder sb = new StringBuilder("stream");
+        if (s.fpsMilli > 0) {
+            sb.append(String.format(Locale.ROOT, " %.3ffps", s.fpsMilli / 1000.0));
+        }
+        if (s.avgFrameBytes > 0) {
+            sb.append(' ').append(s.avgFrameBytes).append("B/frame");
+        }
+        if (s.peakFrameBytes > 0) {
+            sb.append(" peak ").append(s.peakFrameBytes).append('B');
+        }
+        if (s.bitRateBps > 0) {
+            sb.append(String.format(Locale.ROOT, " %.1f Mbps", s.bitRateBps / 1e6));
+        }
+        return sb.toString();
     }
 
     /**
@@ -2515,6 +2596,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (lastFrameOrientation != null) {
                 video.addProperty("frameOrientation", lastFrameOrientation);
             }
+            VideoHeaderProbe.StreamStats stream = lastVideoStats;
+            video.addProperty("fpsMilli", stream.fpsMilli);
+            video.addProperty("avgFrameBytes", stream.avgFrameBytes);
+            video.addProperty("peakFrameBytes", stream.peakFrameBytes);
+            video.addProperty("bitRateBps", stream.bitRateBps);
+            video.addProperty("playbackRateX100", videoPlaybackRateX100);
             if (tsVideoView != null) {
                 video.addProperty("generation", tsVideoView.getLoopGeneration());
                 video.addProperty("errors", tsVideoView.getVideoErrorCount());

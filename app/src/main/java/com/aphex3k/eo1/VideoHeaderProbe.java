@@ -25,7 +25,9 @@ import java.util.Set;
  *       applies the rotation itself when decoding, so callers use the value for player
  *       routing and scale-factor choices, never as a {@code Matrix.postRotate} angle;</li>
  *   <li>the coded video dimensions, from the first video sample entry in
- *       {@code moov/trak/mdia/minf/stbl/stsd}.</li>
+ *       {@code moov/trak/mdia/minf/stbl/stsd};</li>
+ *   <li>the same track's {@link StreamStats} — frame rate, mean and peak bytes per frame and
+ *       bits per second — from {@code mdhd} and {@code stsz}.</li>
  * </ul>
  *
  * <p>Deliberately no {@code MediaMetadataRetriever}: opening a file through mediaserver grabs
@@ -46,9 +48,11 @@ public final class VideoHeaderProbe {
     private static final int FOURCC_TRAK = fourcc("trak");
     private static final int FOURCC_TKHD = fourcc("tkhd");
     private static final int FOURCC_MDIA = fourcc("mdia");
+    private static final int FOURCC_MDHD = fourcc("mdhd");
     private static final int FOURCC_MINF = fourcc("minf");
     private static final int FOURCC_STBL = fourcc("stbl");
     private static final int FOURCC_STSD = fourcc("stsd");
+    private static final int FOURCC_STSZ = fourcc("stsz");
     private static final int FOURCC_ROT = fourcc("rot ");
 
     private VideoHeaderProbe() {
@@ -57,27 +61,97 @@ public final class VideoHeaderProbe {
     /**
      * Probe result. {@code rotationDeg}: 0/90/180/270 or -1 (unknown). Dims: 0 = unknown.
      * {@code codec}: lower-case fourcc of the first recognised video sample description, or
-     * null when the file gave no readable one.
+     * null when the file gave no readable one. {@code stats} are the throughput facts of that
+     * same track — never null, {@link StreamStats#UNKNOWN} when the file had no readable
+     * sample table.
      */
     public static final class Probe {
         public final int rotationDeg;
         public final int codedWidth;
         public final int codedHeight;
         public final String codec;
+        public final StreamStats stats;
 
         public Probe(int rotationDeg, int codedWidth, int codedHeight, String codec) {
+            this(rotationDeg, codedWidth, codedHeight, codec, StreamStats.UNKNOWN);
+        }
+
+        public Probe(int rotationDeg, int codedWidth, int codedHeight, String codec, StreamStats stats) {
             this.rotationDeg = rotationDeg;
             this.codedWidth = codedWidth;
             this.codedHeight = codedHeight;
             this.codec = codec;
+            this.stats = stats != null ? stats : StreamStats.UNKNOWN;
         }
     }
 
-    /** Sample-description facts read out of one {@code trak} box. */
+    /**
+     * How much data a clip asks the decoder to absorb, which no other part of this app can see.
+     *
+     * <p>Frame count and media duration come from {@code stsz} and {@code mdhd}, so unlike every
+     * platform route to the same facts this costs no mediaserver handle. It exists because the
+     * EO2's ceiling is not raised as an error: AGENTS.md already records that an over-large coded
+     * side makes that decoder "garble video *without raising an error*, so waiting for a failure
+     * would show garbage forever and never reach the fallback." Sub-realtime playback is the same
+     * class of silent ceiling, and these numbers are what distinguishes it from a playback-path bug.
+     */
+    public static final class StreamStats {
+        public static final StreamStats UNKNOWN = new StreamStats(-1, -1, -1, -1);
+
+        /** Frames per second, x1000 (29970 for 29.97), or -1. */
+        public final int fpsMilli;
+        /** Mean bytes per frame, or -1. The sustained load on the decode path. */
+        public final long avgFrameBytes;
+        /** Largest single frame in the file, or -1. What one I-frame makes the decoder swallow. */
+        public final long peakFrameBytes;
+        /** Sustained bits per second, or -1. */
+        public final long bitRateBps;
+
+        StreamStats(int fpsMilli, long avgFrameBytes, long peakFrameBytes, long bitRateBps) {
+            this.fpsMilli = fpsMilli;
+            this.avgFrameBytes = avgFrameBytes;
+            this.peakFrameBytes = peakFrameBytes;
+            this.bitRateBps = bitRateBps;
+        }
+
+        static StreamStats of(TrackStats s) {
+            if (s == null || s.timescale <= 0 || s.duration <= 0 || s.sampleCount <= 0) {
+                return UNKNOWN;
+            }
+            long frames = s.sampleCount;
+            // Bounded before the multiply, so a bogus timescale cannot overflow the product.
+            int fpsMilli = frames > Long.MAX_VALUE / (1000L * s.timescale)
+                    ? -1
+                    : (int) Math.min(Integer.MAX_VALUE, frames * 1000L * s.timescale / s.duration);
+            if (!s.sizesKnown) {
+                return new StreamStats(fpsMilli, -1, -1, -1);
+            }
+            return new StreamStats(fpsMilli, s.sampleBytesSum / frames, s.sampleBytesMax,
+                    s.sampleBytesSum > Long.MAX_VALUE / (8L * s.timescale)
+                            ? -1 : s.sampleBytesSum * 8L * s.timescale / s.duration);
+        }
+    }
+
+    /** Sample-description and sample-table facts read out of one {@code trak} box. */
     private static final class SampleEntry {
         String codec;
         int width;
         int height;
+        TrackStats stats;
+    }
+
+    /**
+     * One track's timing and sample sizes. Collected per {@code trak} and adopted only by the
+     * track that turns out to own the video sample description, so an audio-first QuickTime file
+     * cannot lend the video track its sample count.
+     */
+    private static final class TrackStats {
+        int timescale;
+        long duration;
+        long sampleCount;
+        long sampleBytesSum;
+        long sampleBytesMax;
+        boolean sizesKnown;
     }
 
     /**
@@ -230,7 +304,7 @@ public final class VideoHeaderProbe {
             off = end;
         }
         int rotation = rotBox >= 0 ? rotBox : rotTkhd;
-        return new Probe(rotation, video.width, video.height, video.codec);
+        return new Probe(rotation, video.width, video.height, video.codec, StreamStats.of(video.stats));
     }
 
     /** Rotation from a trak box's tkhd (-1 when it has none), plus that track's video entry. */
@@ -250,7 +324,11 @@ public final class VideoHeaderProbe {
                     rotation = r;
                 }
             } else if (type == FOURCC_MDIA && out.codec == null) {
-                parseMdia(data, off, childEnd, out);
+                TrackStats stats = new TrackStats();
+                parseMdia(data, off, childEnd, out, stats);
+                if (out.codec != null && out.stats == null) {
+                    out.stats = stats;
+                }
             }
             off = childEnd;
         }
@@ -322,8 +400,11 @@ public final class VideoHeaderProbe {
                     "kavi", "mp4v", "s263", "s264", "s265", "vc1 ", "vvc1", "wvc1",
                     "3iv1", "3iv2", "3ivx")));
 
-    /** Walks mdia → minf → stbl → stsd, filling {@code out} from this track's video entry. */
-    private static void parseMdia(byte[] data, int start, int end, SampleEntry out) {
+    /**
+     * Walks mdia (recording its {@code mdhd} timing) then minf → stbl, filling {@code out} from
+     * this track's video entry and {@code stats} from its sample table.
+     */
+    private static void parseMdia(byte[] data, int start, int end, SampleEntry out, TrackStats stats) {
         int off = start + 8;
         while (off + 8 <= end) {
             int type = (int) u32(data, off + 4);
@@ -331,8 +412,10 @@ public final class VideoHeaderProbe {
             if (childEnd <= off || childEnd > end) {
                 return;
             }
-            if (type == FOURCC_MINF) {
-                parseMinf(data, off, childEnd, out);
+            if (type == FOURCC_MDHD) {
+                parseMdhd(data, off, childEnd, stats);
+            } else if (type == FOURCC_MINF) {
+                parseMinf(data, off, childEnd, out, stats);
                 if (out.codec != null) {
                     return;
                 }
@@ -341,7 +424,7 @@ public final class VideoHeaderProbe {
         }
     }
 
-    private static void parseMinf(byte[] data, int start, int end, SampleEntry out) {
+    private static void parseMinf(byte[] data, int start, int end, SampleEntry out, TrackStats stats) {
         int off = start + 8;
         while (off + 8 <= end) {
             int type = (int) u32(data, off + 4);
@@ -350,7 +433,7 @@ public final class VideoHeaderProbe {
                 return;
             }
             if (type == FOURCC_STBL) {
-                parseStbl(data, off, childEnd, out);
+                parseStbl(data, off, childEnd, out, stats);
                 if (out.codec != null) {
                     return;
                 }
@@ -359,7 +442,11 @@ public final class VideoHeaderProbe {
         }
     }
 
-    private static void parseStbl(byte[] data, int start, int end, SampleEntry out) {
+    /**
+     * Walks the whole sample table rather than stopping at {@code stsd}: in a QuickTime file the
+     * {@code stsz} that gives the frame count and sizes sits well after it, past stts/stss/sdtp/stsc.
+     */
+    private static void parseStbl(byte[] data, int start, int end, SampleEntry out, TrackStats stats) {
         int off = start + 8;
         while (off + 8 <= end) {
             int type = (int) u32(data, off + 4);
@@ -369,10 +456,78 @@ public final class VideoHeaderProbe {
             }
             if (type == FOURCC_STSD) {
                 parseStsd(data, off, childEnd, out);
+            } else if (type == FOURCC_STSZ) {
+                parseStsz(data, off, childEnd, stats);
+            }
+            if (out.codec != null && stats.sizesKnown) {
                 return;
             }
             off = childEnd;
         }
+    }
+
+    /**
+     * {@code mdhd} v0/v1: the media timescale and the track's duration in it. Their ratio is the
+     * clip's exact length, which is what turns a frame count into a frame rate.
+     */
+    private static void parseMdhd(byte[] data, int start, int end, TrackStats out) {
+        int body = start + 8;
+        if (body + 4 > end) {
+            return;
+        }
+        if ((data[body] & 0xFF) == 1) {
+            if (body + 32 > end) {
+                return;
+            }
+            out.timescale = s32(data, body + 20);
+            out.duration = u64(data, body + 24);
+        } else {
+            if (body + 20 > end) {
+                return;
+            }
+            out.timescale = s32(data, body + 12);
+            out.duration = u32(data, body + 16);
+        }
+    }
+
+    /**
+     * {@code stsz}: the sample count, and either one size for every sample or the per-sample list.
+     * A {@code stsz} the read window cut short leaves {@link TrackStats#sizesKnown} false rather
+     * than reporting an average over the part that happened to be in range.
+     */
+    private static void parseStsz(byte[] data, int start, int end, TrackStats out) {
+        int body = start + 8;
+        if (body + 12 > end) {
+            return;
+        }
+        long uniform = u32(data, body + 4);
+        long count = u32(data, body + 8);
+        if (count <= 0) {
+            return;
+        }
+        out.sampleCount = count;
+        if (uniform > 0) {
+            out.sampleBytesSum = uniform <= Long.MAX_VALUE / count ? uniform * count : -1;
+            out.sampleBytesMax = uniform;
+            out.sizesKnown = out.sampleBytesSum > 0;
+            return;
+        }
+        int readable = (int) Math.min(count, (end - body - 12L) / 4L);
+        if (readable != count) {
+            return;
+        }
+        long sum = 0;
+        long max = 0;
+        for (int i = 0; i < readable; i++) {
+            long sz = u32(data, body + 12 + i * 4);
+            sum += sz;
+            if (sz > max) {
+                max = sz;
+            }
+        }
+        out.sampleBytesSum = sum;
+        out.sampleBytesMax = max;
+        out.sizesKnown = true;
     }
 
     /** Coded width/height sit at 32/34 bytes into every VideoSampleEntry, after its fourcc. */

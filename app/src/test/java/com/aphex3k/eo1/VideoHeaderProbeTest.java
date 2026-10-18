@@ -2,6 +2,7 @@ package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -14,7 +15,8 @@ import java.nio.charset.StandardCharsets;
 /**
  * JVM tests for VideoHeaderProbe using synthetic in-memory ISOBMFF boxes:
  * tkhd v0/v1 matrices (identity/90/180/270), the ISO 23001-8 {@code rot } override,
- * a moov at the file tail, missing/truncated moov, and non-ISOBMFF extensions.
+ * a moov at the file tail, missing/truncated moov, non-ISOBMFF extensions, and the mdhd/stsz
+ * sample table behind {@link VideoHeaderProbe.StreamStats}.
  */
 public class VideoHeaderProbeTest {
 
@@ -125,6 +127,33 @@ public class VideoHeaderProbeTest {
 
     private static byte[] rotBox(int degrees) {
         return box("rot ", u32(degrees * 65536));
+    }
+
+    /** mdhd v0: the media timescale and the track's duration in it. */
+    private static byte[] mdhd(int timescale, int duration) {
+        return box("mdhd", cat(new byte[]{0, 0, 0, 0}, u32(0), u32(0), u32(timescale), u32(duration)));
+    }
+
+    /** stsz with one size for every sample. */
+    private static byte[] stszUniform(int sampleSize, int count) {
+        return box("stsz", cat(new byte[]{0, 0, 0, 0}, u32(sampleSize), u32(count)));
+    }
+
+    /** stsz with a per-sample size list — the ordinary shape, and where the peak frame comes from. */
+    private static byte[] stszSizes(int... sizes) {
+        byte[] list = new byte[sizes.length * 4];
+        for (int i = 0; i < sizes.length; i++) {
+            System.arraycopy(u32(sizes[i]), 0, list, i * 4, 4);
+        }
+        return box("stsz", cat(new byte[]{0, 0, 0, 0}, u32(0), u32(sizes.length), list));
+    }
+
+    /** A trak the sample-table parsers can actually find things in: mdhd before minf, stsz in stbl. */
+    private static byte[] trakWithStats(byte[] tkhd, String fourCc, int width, int height,
+                                        int timescale, int duration, byte[] stsz) {
+        return box("trak", tkhd,
+                box("mdia", mdhd(timescale, duration), box("minf", box("stbl",
+                        stsdEntry(fourCc, width, height), stsz))));
     }
 
     private File writeFile(String name, byte[] data) throws Exception {
@@ -272,6 +301,73 @@ public class VideoHeaderProbeTest {
         assertEquals(-1, p.rotationDeg);
         assertEquals(0, p.codedWidth);
         assertEquals(0, p.codedHeight);
+        assertSame(VideoHeaderProbe.StreamStats.UNKNOWN, p.stats);
+    }
+
+    // --- sample-table throughput --------------------------------------------------------
+
+    @Test
+    public void uniformSampleTableReportsFpsBitrateAndBytes() throws Exception {
+        // 60 samples over 1200/600 = 2 s, 1000 B each: 30 fps, 240 kbit/s.
+        byte[] moov = box("moov", trakWithStats(tkhdV0(0, 1, -1, 0), "avc1", 1920, 1080,
+                600, 1200, stszUniform(1000, 60)));
+        VideoHeaderProbe.StreamStats s = VideoHeaderProbe.probe(writeFile("uniform.mp4", moov)).stats;
+        assertEquals(30000, s.fpsMilli);
+        assertEquals(1000, s.avgFrameBytes);
+        assertEquals(1000, s.peakFrameBytes);
+        assertEquals(240000, s.bitRateBps);
+    }
+
+    @Test
+    public void perSampleSizesGiveMeanAndPeakFrame() throws Exception {
+        // The peak is the I-frame the decoder has to swallow in one frame time; no platform API
+        // reports it without going through mediaserver, which is what this probe exists to avoid.
+        byte[] moov = box("moov", trakWithStats(tkhdV0(1, 0, 0, 1), "avc1", 1920, 1080,
+                1000, 1000, stszSizes(100, 300, 200)));
+        VideoHeaderProbe.StreamStats s = VideoHeaderProbe.probe(writeFile("sizes.mp4", moov)).stats;
+        assertEquals(3000, s.fpsMilli);
+        assertEquals(200, s.avgFrameBytes);
+        assertEquals(300, s.peakFrameBytes);
+        assertEquals(4800, s.bitRateBps);
+    }
+
+    @Test
+    public void audioTrackFirstDoesNotLendTheVideoTrackItsSampleTable() throws Exception {
+        byte[] moov = box("moov",
+                trakWithStats(tkhdV0(1, 0, 0, 1), "mp4a", 0, 0, 44100, 441000, stszUniform(160, 441)),
+                trakWithStats(tkhdV0(1, 0, 0, 1), "avc1", 1920, 1080, 30000, 300000, stszUniform(4096, 300)));
+        VideoHeaderProbe.StreamStats s =
+                VideoHeaderProbe.probe(writeFile("audiofirst.mov", moov)).stats;
+        assertEquals(30000, s.fpsMilli);
+        assertEquals(4096, s.avgFrameBytes);
+    }
+
+    @Test
+    public void noSampleTableIsUnknownStatsButStillRoutes() throws Exception {
+        // Losing the throughput facts must never cost the caller the facts it already had.
+        byte[] moov = box("moov", trak(tkhdV0(0, 1, -1, 0), 1920, 1080));
+        VideoHeaderProbe.Probe p = VideoHeaderProbe.probe(writeFile("nostats.mov", moov));
+        assertEquals(270, p.rotationDeg);
+        assertEquals(1920, p.codedWidth);
+        assertEquals("avc1", p.codec);
+        assertEquals(-1, p.stats.fpsMilli);
+        assertEquals(-1, p.stats.avgFrameBytes);
+        assertEquals(-1, p.stats.bitRateBps);
+    }
+
+    @Test
+    public void truncatedSizeListLeavesBytesUnknownButStillReportsFps() throws Exception {
+        // stsz claims more samples than the buffer holds. An average over only the part that
+        // happened to be in range would be a wrong number wearing a right one.
+        byte[] stsz = box("stsz", cat(new byte[]{0, 0, 0, 0}, u32(0), u32(1000),
+                cat(u32(500), u32(500))));
+        byte[] moov = box("moov", box("trak", tkhdV0(1, 0, 0, 1),
+                box("mdia", mdhd(30000, 300000), box("minf", box("stbl",
+                        stsdEntry("avc1", 1920, 1080), stsz)))));
+        VideoHeaderProbe.StreamStats s = VideoHeaderProbe.probe(writeFile("truncstsz.mp4", moov)).stats;
+        assertEquals(100000, s.fpsMilli);
+        assertEquals(-1, s.avgFrameBytes);
+        assertEquals(-1, s.bitRateBps);
     }
 
     // --- helpers ----------------------------------------------------------------------
