@@ -1320,6 +1320,86 @@ public class MediaManagerCyclingTest {
         assertTrue(mm.consumeWebFallbackSlot(listener.displayedKeys.get(1)));
     }
 
+    // ---------------------------------------------------------------- by-asset display
+
+    @Test
+    public void pinnedAssetDisplaysFirstEvenBeforeThePoolIsBuilt() throws Exception {
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(backendA(8)), listener, 7L);
+        File cache = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        // No tick has run, so there is no pool to check the key against: accepted on trust and
+        // resolved once this tick has fetched the catalog.
+        assertTrue(mm.queueAssetDisplay("fakeA:a6"));
+        mm.showNextImageLocked(cache, uploads, directPoster, false);
+        assertEquals("fakeA:a6", listener.displayedKeys.get(0));
+
+        // A swap, not an insertion: the rest of the cycle still walks every other asset once.
+        Set<String> rest = new HashSet<>();
+        for (int i = 1; i < 8; i++) {
+            mm.showNextImageLocked(cache, uploads, directPoster, false);
+            rest.add(listener.displayedKeys.get(i));
+        }
+        assertEquals(7, rest.size());
+        assertFalse(rest.contains("fakeA:a6"));
+    }
+
+    @Test
+    public void knownPoolRefusesAnUnknownKeyAndKeepsTheSkippedRecordInLine() throws Exception {
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(backendA(5)), listener, 3L);
+        File cache = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+        mm.showNextImageLocked(cache, uploads, directPoster, false);
+
+        // The pool is built now, so a key it does not hold is refused without a rotation.
+        assertFalse(mm.queueAssetDisplay("fakeC:a0"));
+        assertFalse(mm.queueAssetDisplay("fakeA:nope"));
+        assertFalse(mm.queueAssetDisplay(""));
+        assertFalse(mm.queueAssetDisplay(null));
+        assertEquals(1, listener.displayedKeys.size());
+
+        Set<String> unshown = new HashSet<>();
+        for (int i = 0; i < 5; i++) {
+            unshown.add("fakeA:a" + i);
+        }
+        unshown.remove(listener.displayedKeys.get(0));
+        String pinned = unshown.iterator().next();
+
+        assertTrue(mm.queueAssetDisplay(pinned));
+        mm.showNextImageLocked(cache, uploads, directPoster, false);
+        assertEquals(pinned, listener.displayedKeys.get(1));
+
+        for (int i = 2; i < 5; i++) {
+            mm.showNextImageLocked(cache, uploads, directPoster, false);
+        }
+        assertEquals("every asset of the cycle shown exactly once", 5,
+                new HashSet<>(listener.displayedKeys).size());
+    }
+
+    @Test
+    public void pinningAnAssetAlreadyShownThisCycleRewindsWithoutRefetching() throws Exception {
+        FakeBackend a = backendA(3);
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 5L);
+        File cache = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+        for (int i = 0; i < 3; i++) {
+            mm.showNextImageLocked(cache, uploads, directPoster, false);
+        }
+        assertEquals(0, mm.rotationListSize());
+
+        // The tick that follows would normally refetch a fresh, reshuffled generation; the pin goes
+        // back over the records this pool already holds instead.
+        assertTrue(mm.queueAssetDisplay(listener.displayedKeys.get(0)));
+        mm.showNextImageLocked(cache, uploads, directPoster, false);
+
+        assertEquals(listener.displayedKeys.get(0), listener.displayedKeys.get(3));
+        assertEquals(1, a.fetchCount.get());
+        assertEquals(2, mm.rotationListSize());
+    }
+
     /** Minimal {@link SettingsManagerListener} stub: real files dir, everything else no-op. */
     private static class StubSettingsListener implements SettingsManagerListener {
         private final File filesDir;

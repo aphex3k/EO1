@@ -29,6 +29,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 import okhttp3.HttpUrl;
@@ -89,8 +90,19 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
     /** Merged rotation pool; the worker thread consumes it with {@link #poolCursor}. */
     private final ArrayList<MediaAsset> pool = new ArrayList<>();
-    private final HashSet<String> poolKeys = new HashSet<>();
+    /**
+     * Keys of {@link #pool}, kept in step by every pool mutation. Concurrent because it is the only
+     * safe way to ask "is this asset in the rotation" from a thread that is not the rotation worker —
+     * the pool itself is read and written on that worker alone.
+     */
+    private final Set<String> poolKeys =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private int poolCursor;
+    /**
+     * Asset key pinned for the next rotation tick by {@link #queueAssetDisplay}; consumed (cleared)
+     * by that tick's {@link #applyAssetPin}. Null when nothing is pending.
+     */
+    private final AtomicReference<String> pinnedAssetKey = new AtomicReference<>();
     /** Backends of the current pool, keyed by configured backend id. */
     private final ConcurrentHashMap<String, MediaBackend> backendById = new ConcurrentHashMap<>();
     /** Live backends of the current pool generation; closed on the next rebuild. */
@@ -290,6 +302,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             postException(ui, new NoMediaFoundException());
             return;
         }
+        applyAssetPin();
 
         MediaAsset acquired = null;
         File playbackFile = null;
@@ -580,6 +593,84 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 Log.i(TAG, "refreshLocalUploads: " + added + " new local upload(s) added to rotation");
             }
         }
+    }
+
+    // ---------------------------------------------------------------- by-asset display
+
+    /**
+     * Asks that one specific rotation asset be what the next tick displays — the by-ID control
+     * {@code ?action=next} cannot offer, because a shuffled thousand-asset pool gives no way to land
+     * on a chosen record. Only the request is made here: {@link #applyAssetPin} resolves it on the
+     * rotation worker after that tick has fetched its catalogs, so no pool record is touched from the
+     * calling thread and a request that arrives before this process's first tick is still honored.
+     * Everything the tick then does is the ordinary rotation path, fallback ladder included.
+     *
+     * @param assetKey the pipeline key, {@code "backendId:rawId"} — the form {@code /state}'s
+     *                 {@code media.current.key} reports
+     * @return {@code false} when the key is empty or this generation's pool is known not to hold it.
+     *         A pool that has never been fetched is accepted on trust, and {@link #applyAssetPin}
+     *         reports it in the log if it turns out not to contain the asset.
+     */
+    boolean queueAssetDisplay(String assetKey) {
+        if (assetKey == null || assetKey.isEmpty()) {
+            return false;
+        }
+        if (!poolKeys.isEmpty() && !poolKeys.contains(assetKey)) {
+            Log.w(TAG, "queueAssetDisplay: " + assetKey + " is not in the rotation pool ("
+                    + poolKeys.size() + " asset(s))");
+            return false;
+        }
+        pinnedAssetKey.set(assetKey);
+        return true;
+    }
+
+    /**
+     * Drops a pending request no tick is going to consume — the caller knows that when the screen is
+     * meant to be off and the rotation loop is standing down. Compares before clearing, so an
+     * abandoned dispatch cannot cancel a later request's pin; a pin left set would otherwise put that
+     * asset on screen at the next real rotation, hours later and unprompted.
+     */
+    void cancelAssetDisplay(String assetKey) {
+        if (assetKey != null && pinnedAssetKey.compareAndSet(assetKey, null)) {
+            Log.i(TAG, "cancelAssetDisplay: dropped pending display of " + assetKey);
+        }
+    }
+
+    /**
+     * Moves the pinned record to {@link #poolCursor} so the sweep takes it first. A swap, not an
+     * insertion: the record that was next in line takes the pinned one's place, so it still comes up
+     * in this cycle instead of being skipped.
+     *
+     * <p>With the whole pool already consumed, the cursor restarts at the head — otherwise a pinned
+     * asset that had its turn earlier in the cycle would lose to the refetch that begins a fresh,
+     * reshuffled generation, and the request would display something else.
+     */
+    private void applyAssetPin() {
+        String key = pinnedAssetKey.getAndSet(null);
+        if (key == null) {
+            return;
+        }
+        int pinned = -1;
+        for (int i = 0; i < pool.size(); i++) {
+            if (key.equals(pool.get(i).key())) {
+                pinned = i;
+                break;
+            }
+        }
+        if (pinned < 0) {
+            Log.w(TAG, "showNextImage: pinned asset " + key + " is not in this cycle's pool");
+            postDebugInformation("Show", "Asset not in the rotation pool: " + key);
+            return;
+        }
+        int at = poolCursor;
+        if (at >= pool.size()) {
+            at = 0;
+            poolCursor = 0;
+        }
+        MediaAsset wasNext = pool.get(at);
+        pool.set(at, pool.get(pinned));
+        pool.set(pinned, wasNext);
+        Log.i(TAG, "showNextImage: pinned asset " + key + " takes this tick");
     }
 
     private void seedVideoDurations(List<MediaAsset> catalog) {

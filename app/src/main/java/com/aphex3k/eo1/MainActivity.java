@@ -2748,6 +2748,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      *
      * <p>{@code keyevent} is a debug-build-only admin action: it injects arbitrary keycodes,
      * so a release build refuses it (the web server also requires POST for it).
+     *
+     * <p>{@code show} is the other debug-only action, and the only one that is not a key press: it
+     * pins one rotation asset by ID as the next tick's display target, through
+     * {@link MediaManager#queueAssetDisplay} rather than by adding a second way to render an asset.
      */
     @Override
     public boolean control(String action, Map<String, String> params) {
@@ -2797,6 +2801,28 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             case "next":
                 task = this::showNextImage;
                 break;
+            case "show": {
+                // Debug-only: "the clip that misbehaves is #600 of 1000", which ?action=next cannot
+                // promise to reach. Checked and parked from this thread, which may read the pool's
+                // key set but never its records; the rotation worker picks the record up.
+                if (!BuildConfig.DEBUG || mediaManager == null) {
+                    return false;
+                }
+                final String assetKey = params != null ? params.get("asset") : null;
+                if (!mediaManager.queueAssetDisplay(assetKey)) {
+                    return false;
+                }
+                task = () -> {
+                    if (!brightnessManager.getShouldTheScreenBeOn()) {
+                        // Standing down for quiet hours means no tick will consume the pin. Dropping
+                        // it here keeps a request made while the panel was dark from surfacing
+                        // unprompted the moment it wakes.
+                        mediaManager.cancelAssetDisplay(assetKey);
+                    }
+                    showNextImage();
+                };
+                break;
+            }
             case "screen":
                 task = this::toggleScreenOn;
                 break;

@@ -87,7 +87,10 @@ public class WebServerRoutingTest {
         // Forcing a watchdog rung can reboot the device, so it may not be GET-reachable either.
         assertTrue(WebServer.controlAllows("POST", "watchdog"));
         assertFalse(WebServer.controlAllows("GET", "watchdog"));
-        // Every other action keeps its existing GET/POST behavior.
+        // Every other action keeps its existing GET/POST behavior — including the by-ID display,
+        // which only ever names an asset this frame's rotation already holds, so its debug-build
+        // gate is its whole boundary.
+        assertTrue(WebServer.controlAllows("GET", "show"));
         assertTrue(WebServer.controlAllows("GET", "next"));
         assertTrue(WebServer.controlAllows("POST", "next"));
         assertTrue(WebServer.controlAllows("GET", "check-updates"));
