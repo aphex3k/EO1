@@ -35,18 +35,33 @@ public class SettingsManagerTest {
                     + "\"password\":\"secret-pw\",\"apiVersion\":\"auto\"}],"
                     + "\"interval\":7,\"selectedTimeZoneId\":\"America/Los_Angeles\"}";
 
+    /**
+     * Tests reach the manager through here rather than building the listener inline, because
+     * SettingsManager holds its listener in a WeakReference: an inline listener is unreachable the
+     * moment the constructor returns, and when the collector takes it the failure is silent —
+     * saveConfiguration() sees a null listener and does nothing, so configuration.json never appears
+     * and some test fails on a missing file or a stale value, on whichever run the GC feels like it.
+     * Keeping it in a field makes it strongly reachable for the life of the test.
+     */
+    private FakeListener heldListener;
+
+    private SettingsManager managerIn(File filesDir) throws java.io.IOException {
+        heldListener = new FakeListener(filesDir);
+        return new SettingsManager(heldListener);
+    }
+
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 
     @Test
     public void trustedNetworkDefaultsOff() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertFalse(sm.isTrustedNetwork());
     }
 
     @Test
     public void trustedNetworkTogglePersists() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         sm.setTrustedNetwork(true);
         assertTrue(sm.isTrustedNetwork());
         sm.setTrustedNetwork(false);
@@ -56,7 +71,7 @@ public class SettingsManagerTest {
     /** Arming loopback adb is a root shell on the LAN, so it needs both flags — never one. */
     @Test
     public void loopbackAdbNeedsBothFlagsAndDefaultsOff() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertFalse(sm.isLoopbackAdbAllowed());
         assertFalse(sm.isLoopbackAdbEnabled());
 
@@ -93,7 +108,7 @@ public class SettingsManagerTest {
     @Test
     public void minimumBrightnessStepIsNotPartOfConfigurationDocument() throws Exception {
         File files = tmp.newFolder("files");
-        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        SettingsManager sm = managerIn(files);
         sm.setMinimumBrightnessStep(6);
         assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
 
@@ -105,7 +120,7 @@ public class SettingsManagerTest {
     @Test
     public void importValidWritesFileAndUpdatesLiveConfiguration() throws Exception {
         File files = tmp.newFolder("files");
-        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        SettingsManager sm = managerIn(files);
 
         assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
 
@@ -126,7 +141,7 @@ public class SettingsManagerTest {
     @Test
     public void exportIncludesCredentialsButNotTrustedFlag() throws Exception {
         File files = tmp.newFolder("files");
-        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        SettingsManager sm = managerIn(files);
         assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
         sm.setTrustedNetwork(true);
 
@@ -144,7 +159,7 @@ public class SettingsManagerTest {
 
     @Test
     public void exportDoesNotMutateLiveConfiguration() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
         sm.exportConfigurationJson();
         sm.exportConfigurationJson();
@@ -155,7 +170,7 @@ public class SettingsManagerTest {
 
     @Test
     public void importLegacyFlatTripleIsMigrated() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertNull(sm.importConfiguration(
                 "{\"host\":\"https://legacy.local\",\"userid\":\"u@e.com\",\"password\":\"p\"}"));
         assertEquals(1, sm.getConfiguration().validBackendCount());
@@ -164,7 +179,7 @@ public class SettingsManagerTest {
 
     @Test
     public void importInvalidJsonIsRejectedWithoutReplacingConfiguration() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
 
         String error = sm.importConfiguration("this is not json");
@@ -177,7 +192,7 @@ public class SettingsManagerTest {
 
     @Test
     public void importWithoutUsableBackendIsRejected() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
 
         String error = sm.importConfiguration("{}");
         assertNotNull(error);
@@ -187,14 +202,14 @@ public class SettingsManagerTest {
 
     @Test
     public void importEmptyBodyIsRejected() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertNotNull(sm.importConfiguration(null));
         assertNotNull(sm.importConfiguration("   "));
     }
 
     @Test
     public void trustedNetworkTokenIsGeneratedOnceAndStable() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         String first = sm.trustedNetworkToken();
         assertNotNull(first);
         assertEquals(32, first.length());
@@ -207,7 +222,7 @@ public class SettingsManagerTest {
     @Test
     public void trustedNetworkTokenIsNotPartOfConfigurationDocument() throws Exception {
         File files = tmp.newFolder("files");
-        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        SettingsManager sm = managerIn(files);
         String token = sm.trustedNetworkToken();
         assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
 
@@ -219,13 +234,13 @@ public class SettingsManagerTest {
 
     @Test
     public void deviceNameDefaultsEmpty() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertEquals("", sm.deviceName());
     }
 
     @Test
     public void setDeviceNameReturnsWhatWasStored() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertEquals("Kitchen", sm.setDeviceName("Kitchen"));
         assertEquals("Kitchen", sm.deviceName());
         assertEquals("", sm.setDeviceName(""));
@@ -240,7 +255,7 @@ public class SettingsManagerTest {
      */
     @Test
     public void setDeviceNameStripsControlCharsAndTrims() throws Exception {
-        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        SettingsManager sm = managerIn(tmp.newFolder("files"));
         assertEquals("Kitchen", sm.setDeviceName("Kitchen\n"));
         assertEquals("Kitchen", sm.setDeviceName("  Kitchen \t"));
         // An interior control character merges the words around it rather than leaving a hole.
@@ -295,7 +310,7 @@ public class SettingsManagerTest {
     @Test
     public void deviceNameIsNotPartOfConfigurationDocument() throws Exception {
         File files = tmp.newFolder("files");
-        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        SettingsManager sm = managerIn(files);
         sm.setDeviceName("Kitchen");
         assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
 
@@ -306,7 +321,7 @@ public class SettingsManagerTest {
     @Test
     public void importConfigurationDoesNotClearDeviceName() throws Exception {
         File files = tmp.newFolder("files");
-        SettingsManager sm = new SettingsManager(new FakeListener(files));
+        SettingsManager sm = managerIn(files);
         sm.setDeviceName("Kitchen");
         assertNull(sm.importConfiguration(VALID_CONFIG_JSON));
         assertEquals("Kitchen", sm.deviceName());
