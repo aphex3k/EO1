@@ -102,13 +102,14 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         // TextureView maps the surface buffer stretched into the view bounds, so a uniform
         // scale alone renders distorted/over-zoomed — compensate that anisotropic stretch
         // with per-axis factors.
-        float[] factors = cropScaleFactors(viewWidth, viewHeight, mVideoWidth, mVideoHeight, mVideoRotation);
+        // No rotation term, and no app-side postRotate: the platform MediaPlayer on these frames
+        // applies the display rotation while decoding, so mVideoWidth/mVideoHeight are the size of
+        // the buffer it produced *after* rotating — already the orientation this view must fill.
+        // Feeding the angle in a second time transposes an already-aligned buffer.
+        float[] factors = cropScaleFactors(viewWidth, viewHeight, mVideoWidth, mVideoHeight);
 
         Matrix transformMatrix = new Matrix();
         transformMatrix.setScale(factors[0], factors[1], pivotX, pivotY);
-        // No app-side rotation: the EO frames' platform MediaPlayer applies the display
-        // rotation itself when decoding, so postRotate(mVideoRotation) here would
-        // double-rotate. The probe value still selects the swapped scale factors.
         transformMatrix.postRotate(0, pivotX, pivotY);
         setTransform(transformMatrix);
 
@@ -134,47 +135,29 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
      * @return The matrix that displays the video content scaled and translated to the correct dimensions
      */
     public static float aspectScale(float viewWidth, float viewHeight, float videoWidth, float videoHeight) {
-        return rotationAwareAspectScale(viewWidth, viewHeight, videoWidth, videoHeight, 0);
+        return Math.max(viewWidth / videoWidth, viewHeight / videoHeight);
     }
 
     /**
-     * Center-crop scale for a video, swapping coded dimensions when rotation is 90 or 270 degrees.
-     */
-    public static float rotationAwareAspectScale(float viewWidth, float viewHeight, float videoWidth, float videoHeight, int rotation) {
-        float contentWidth = videoWidth;
-        float contentHeight = videoHeight;
-        if (rotation == 90 || rotation == 270) {
-            contentWidth = videoHeight;
-            contentHeight = videoWidth;
-        }
-
-        float scaleX = viewWidth / contentWidth;
-        float scaleY = viewHeight / contentHeight;
-
-        return Math.max(scaleX, scaleY);
-    }
-
-    /**
-     * Per-axis transform factors that display the video with true center-crop (aspect-fill),
+     * Per-axis transform factors that display the buffer with true center-crop (aspect-fill),
      * undistorted, in the view. TextureView first stretches the surface buffer into the view
-     * bounds, so each axis is then compensated by an inverse of that stretch — but for a 90/270
-     * display rotation the coded axes are swapped relative to the view, so the two factors must
-     * use the swapped dimensions. Using the same denominators for every rotation makes a rotated
-     * video render ~3:1 squished instead of a clean 90° turn.
+     * bounds, so each axis is then compensated by an inverse of that stretch.
+     *
+     * <p>Rotation is deliberately not an input. The platform decoder applies the display rotation
+     * before the frames reach this view, so the dimensions it reports already carry the turn: an
+     * EO2 playing a 1920x1080 clip whose matrix says -90 degrees logged
+     * {@code view=1080x1920 video=1080x1920} — already aligned, and the transform it wants is the
+     * identity. Turning the axes again for a 90/270 angle put the fill term at 1.7778 on both
+     * axes, which draws a 1080x1920 video at 1.78x scale: 3.2x the pixels, sampled out of a region
+     * about 1920x3413 wide, on hardware whose entire margin went into compositing that. What that
+     * cost on screen looked like a framerate problem, not a zoom one.
      */
     public static float[] cropScaleFactors(float viewWidth, float viewHeight,
-                                           float videoWidth, float videoHeight, int rotation) {
-        float fillScale = rotationAwareAspectScale(viewWidth, viewHeight, videoWidth, videoHeight, rotation);
-        float sx;
-        float sy;
-        if (rotation == 90 || rotation == 270) {
-            sx = fillScale * videoHeight / viewHeight;
-            sy = fillScale * videoWidth / viewWidth;
-        } else {
-            sx = fillScale * videoWidth / viewWidth;
-            sy = fillScale * videoHeight / viewHeight;
-        }
-        return new float[]{sx, sy};
+                                           float videoWidth, float videoHeight) {
+        float fillScale = aspectScale(viewWidth, viewHeight, videoWidth, videoHeight);
+        return new float[]{
+                fillScale * videoWidth / viewWidth,
+                fillScale * videoHeight / viewHeight};
     }
 
     private int readVideoRotation(String path) {

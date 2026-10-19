@@ -1686,6 +1686,37 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
+        // Reaching here means the position has not moved since the previous poll. If it stopped at
+        // or beyond the duration the player reports, that is the end of the cycle, and it is
+        // announced here because nothing else announces it: a clip whose last frames sit past that
+        // duration never raises onCompletion, so setLooping(true) has no end-of-stream to loop on
+        // and play() is a no-op while the player still believes it is PLAY. Measured on an EO2, the
+        // result was 23.6 s of correct playback and then the position pinned at 23000 of a 23000 ms
+        // duration for 8.4 s — a still frame for a quarter of every loop, restarted only by the
+        // stall threshold below and logged as if it were a hang.
+        //
+        // Requiring the stop rather than just the crossing matters. The reported duration is shorter
+        // than the media (the file's mvhd says 14173 ticks of 600; the player says 23000 ms of a
+        // 23621 ms clip) and position was observed advancing well past it — 23647, 24581, 24766 ms —
+        // so `position >= duration` alone cuts off frames that were still playing.
+        int cycleEndMs = videoPlayer.getDuration();
+        if (cycleEndMs > 0 && position >= cycleEndMs) {
+            debugInformationProvided(new DebugInformation("video",
+                    "loop restart pos=" + position + " duration=" + cycleEndMs
+                            + " rate=" + describePlaybackRate()));
+            try {
+                videoPlayer.seekTo(0);
+                videoPlayer.play();
+            } catch (Exception e) {
+                handleException(e);
+            }
+            videoWatchdogLastPosition = -1;
+            videoWatchdogLastProgressMs = now;
+            videoWatchdogRecoverAttempted = false;
+            scheduleVideoWatchdogCheck();
+            return;
+        }
+
         if (now - videoWatchdogLastProgressMs < VIDEO_STALL_THRESHOLD_MS) {
             scheduleVideoWatchdogCheck();
             return;
