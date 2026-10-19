@@ -148,6 +148,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private VideoHeaderProbe.StreamStats lastVideoStats = VideoHeaderProbe.StreamStats.UNKNOWN;
     /** Measured playback rate of the playing video, x100: 100 is realtime, 60 is 0.6x slow. */
     private int videoPlaybackRateX100 = -1;
+    /** Spread of the rate windows since this display was armed, and how many there were. */
+    private int videoPlaybackRateMinX100 = -1;
+    private int videoPlaybackRateMaxX100 = -1;
+    private int videoPlaybackRateSamples;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
@@ -1619,6 +1623,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // No watchdog, no measurement: TsPlayer skips this arm entirely, so leaving the previous
         // MediaPlayer asset's rate standing would attribute it to a clip that was never watched.
         videoPlaybackRateX100 = -1;
+        videoPlaybackRateMinX100 = -1;
+        videoPlaybackRateMaxX100 = -1;
+        videoPlaybackRateSamples = 0;
     }
 
     private void startVideoWatchdog(String assetId, File file,
@@ -1775,10 +1782,39 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (elapsed < VIDEO_RATE_WINDOW_MS) {
             return;
         }
-        videoPlaybackRateX100 = (int) Math.min(Integer.MAX_VALUE,
+        int rateX100 = (int) Math.min(Integer.MAX_VALUE,
                 (position - videoRateAnchorPosition) * 100L / elapsed);
+        videoPlaybackRateX100 = rateX100;
+        // A single reading cannot tell a pipeline that is uniformly late from one that keeps up
+        // and hitches, and those want different fixes; the first measurements of the slow clip
+        // misled exactly because only the latest window was kept.
+        if (videoPlaybackRateSamples == 0 || rateX100 < videoPlaybackRateMinX100) {
+            videoPlaybackRateMinX100 = rateX100;
+        }
+        if (videoPlaybackRateSamples == 0 || rateX100 > videoPlaybackRateMaxX100) {
+            videoPlaybackRateMaxX100 = rateX100;
+        }
+        videoPlaybackRateSamples++;
         videoRateAnchorMs = now;
         videoRateAnchorPosition = position;
+    }
+
+    /** Position of the player actually in use, or -1 when it cannot answer. */
+    private int activePositionMs() {
+        try {
+            return videoPlayer != null ? videoPlayer.getCurrentPosition() : -1;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /** Duration the player actually in use believes the clip has, or -1 when it cannot answer. */
+    private int activeDurationMs() {
+        try {
+            return videoPlayer != null ? videoPlayer.getDuration() : -1;
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     /** The last measured playback rate as a multiple of realtime, or "n/a" before one completes. */
@@ -2633,6 +2669,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             video.addProperty("peakFrameBytes", stream.peakFrameBytes);
             video.addProperty("bitRateBps", stream.bitRateBps);
             video.addProperty("playbackRateX100", videoPlaybackRateX100);
+            video.addProperty("playbackRateMinX100", videoPlaybackRateMinX100);
+            video.addProperty("playbackRateMaxX100", videoPlaybackRateMaxX100);
+            video.addProperty("playbackRateSamples", videoPlaybackRateSamples);
+            // From whichever player is actually showing the clip. These used to be read off
+            // tsVideoView unconditionally, so on the MediaPlayer path they reported 0 — which is
+            // how the slow-playback investigation ended up reconstructing a lap from the stall
+            // log's timestamps instead of reading the position it had already measured.
+            video.addProperty("durationMs", activeDurationMs());
+            video.addProperty("positionMs", activePositionMs());
             if (tsVideoView != null) {
                 video.addProperty("generation", tsVideoView.getLoopGeneration());
                 video.addProperty("errors", tsVideoView.getVideoErrorCount());
@@ -2640,8 +2685,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 video.addProperty("surfaceReady", tsVideoView.isSurfaceReady());
                 video.addProperty("recreatingForLoop", tsVideoView.isRecreatingForLoop());
                 video.addProperty("path", tsVideoView.getActivePath());
-                video.addProperty("durationMs", tsVideoView.getDuration());
-                video.addProperty("positionMs", tsVideoView.getCurrentPosition());
                 JsonObject loopPerf = new JsonObject();
                 loopPerf.addProperty("restartLatencyMs", tsVideoView.getLastRestartLatencyMs());
                 loopPerf.addProperty("createPlayerMs", tsVideoView.getLastCreatePlayerMs());
