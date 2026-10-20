@@ -86,23 +86,30 @@ Square or unknown aspect, and unknown rotation, keep the TsPlayer default. The d
 logged and reported via `debugInformationProvided` plus the debug `/state` `video` block
 (`rotation`, `width`, `height`, `frameOrientation`; `active` shows the effective player).
 
-The fallback view performs rotation-aware **center-crop (aspect-fill)**:
-`TextureVideoView.updateTextureViewSize` compensates the TextureView's buffer-stretch mapping
-with per-axis factors (`cropScaleFactors`), so video fills the viewport, is cropped on the
-long axis, and is neither stretched nor over-zoomed. For a 90°/270° display rotation the coded
-axes are swapped relative to the view, so `cropScaleFactors` uses the swapped dimensions for
-`sx`/`sy` — using the un-swapped denominators renders a rotated clip ~3:1 squished instead of
-a clean 90° turn.
+The fallback view performs **center-crop (aspect-fill)**: `TextureVideoView.updateTextureViewSize`
+compensates the TextureView's buffer-stretch mapping with per-axis factors (`cropScaleFactors`), so
+video fills the viewport, is cropped on the long axis, and is neither stretched nor over-zoomed.
 
-The fallback deliberately applies **no** `postRotate` of its own: device testing on the EO
-frames showed the platform MediaPlayer decoder rotates display-rotated video itself, so any
-app-side `postRotate` doubles up. The probe's **clockwise** value therefore drives only the
-routing decision and the swapped `cropScaleFactors` dimensions for 90°/270° content. It is
-handed down per asset through `VideoPlayerController.setDisplayRotation` →
-`TextureVideoView.setDisplayRotation` — the platform `MediaMetadataRetriever` read inside
-`TextureVideoView` is unreliable on the EO frames (returns 0 for files whose `tkhd` matrix
-is non-identity), so it is only consulted when the probe yields "unknown" (-1). This keeps
-the scale decision identical to the rotation that drove the routing decision.
+Rotation is deliberately **not** an input to that arithmetic. The platform MediaPlayer on these
+frames applies the display rotation while decoding, so `onVideoSizeChanged` reports the buffer
+*already turned*: a 1920x1080 clip with a −90° matrix arrives as `video=1080x1920` into a
+`view=1080x1920` view, and the transform it wants is the identity. `cropScaleFactors` used to swap
+the axes a second time for 90°/270° content, which made that case a uniform `1.7778` magnification —
+a native-resolution portrait clip composited at 3.2× the pixels, sampled from a region about
+1920x3413 wide. The old comment claimed the un-swapped denominators rendered a rotated clip "~3:1
+squished"; that premise was the coded dimensions, which is not what this view is handed. On screen
+the over-zoom looked like video playing below realtime rather than like a geometry bug, and it cost
+an investigation two wrong hypotheses before `TextureVideoView`'s own debug line
+(`view=… video=… rotation=… scale=(…)`) was read. It is the reason the same file plays at 1.00×
+interior and still cannot hold framerate.
+
+For the same reason the fallback applies **no** `postRotate` of its own — the decoder's rotation
+would make it double up. The probe's **clockwise** value therefore drives the routing decision and
+this view's debug log line, and nothing else. It is handed down per asset through
+`VideoPlayerController.setDisplayRotation` → `TextureVideoView.setDisplayRotation` — the platform
+`MediaMetadataRetriever` read inside `TextureVideoView` is unreliable on the EO frames (returns 0 for
+files whose `tkhd` matrix is non-identity), so it is only consulted when the probe yields "unknown"
+(-1).
 
 ## Looping (native)
 

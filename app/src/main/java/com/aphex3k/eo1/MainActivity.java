@@ -104,6 +104,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private static final long VIDEO_RATE_WINDOW_MS = 5000L;
     /**
+     * Media progress below this (x100) counts as making no headway. Past the end of a clip the
+     * position inches rather than stopping — measured at 0.00x to 0.02x — so anything above this is
+     * still genuinely playing and must not be cut short.
+     */
+    private static final int LOOP_TAIL_RATE_X100 = 50;
+    /**
+     * How far past the end a position may sit and still be believed. Measured restarts land 5 to
+     * 375 ms past the file's own length; anything orders of magnitude beyond that is a bogus read
+     * from a player that has not settled, not a clip that has finished.
+     */
+    private static final int LOOP_END_SLACK_MS = 30000;
+    /**
      * How long a page may take to show signs of life. Loads that neither paint nor report an error
      * (a black-holed TCP connect) are caught here rather than left covering the screen.
      */
@@ -146,8 +158,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * so the web-server thread reading /state cannot see stats from two different assets.
      */
     private VideoHeaderProbe.StreamStats lastVideoStats = VideoHeaderProbe.StreamStats.UNKNOWN;
+    /** The clip's real length from its own header; the player's can be shorter than this. */
+    private long lastVideoDurationMs = -1L;
     /** Measured playback rate of the playing video, x100: 100 is realtime, 60 is 0.6x slow. */
     private int videoPlaybackRateX100 = -1;
+    /** Spread of the rate windows since this display was armed, and how many there were. */
+    private int videoPlaybackRateMinX100 = -1;
+    private int videoPlaybackRateMaxX100 = -1;
+    private int videoPlaybackRateSamples;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
     private BrightnessManager brightnessManager;
@@ -218,6 +236,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** Start of the window the playback-rate estimate is measured across. */
     private long videoRateAnchorMs = 0L;
     private int videoRateAnchorPosition = -1;
+    /** When the watchdog last read the position, so progress can be judged per poll. */
+    private long videoWatchdogPrevPollMs = 0L;
     /** True after Immich slideshow / MQTT / version check have been started for this resume. */
     private boolean coreLoopStarted = false;
     /**
@@ -1616,9 +1636,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogRecoverAttempted = false;
         videoRateAnchorMs = 0L;
         videoRateAnchorPosition = -1;
+        videoWatchdogPrevPollMs = 0L;
         // No watchdog, no measurement: TsPlayer skips this arm entirely, so leaving the previous
         // MediaPlayer asset's rate standing would attribute it to a clip that was never watched.
         videoPlaybackRateX100 = -1;
+        videoPlaybackRateMinX100 = -1;
+        videoPlaybackRateMaxX100 = -1;
+        videoPlaybackRateSamples = 0;
     }
 
     private void startVideoWatchdog(String assetId, File file,
@@ -1678,10 +1702,68 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         long now = System.currentTimeMillis();
         measurePlaybackRate(position, now);
 
-        if (position != videoWatchdogLastPosition) {
+        // Both questions below are about the previous poll, so they have to be answered before the
+        // bookkeeping replaces those readings.
+        int previousPositionMs = videoWatchdogLastPosition;
+        long sincePreviousMs = now - videoWatchdogPrevPollMs;
+        videoWatchdogPrevPollMs = now;
+
+        boolean parked = position == previousPositionMs;
+        // Media advanced less than half as fast as the clock across one poll interval. Measured per
+        // poll rather than from the rate window, which needs VIDEO_RATE_WINDOW_MS to fill and so
+        // left the seam open for seconds even after the crawl had begun.
+        boolean creeping = !parked && previousPositionMs >= 0 && sincePreviousMs > 0
+                && (position - previousPositionMs) * 100L < sincePreviousMs * LOOP_TAIL_RATE_X100;
+
+        if (!parked) {
             videoWatchdogLastPosition = position;
             videoWatchdogLastProgressMs = now;
             videoWatchdogRecoverAttempted = false;
+        }
+
+        // The end of the cycle, announced here because nothing else announces it. A clip whose last
+        // frames sit past the duration the player reports never raises onCompletion, so
+        // setLooping(true) has no end-of-stream to loop on and play() is a no-op while the player
+        // still believes it is PLAY — on an EO2 that read as a decoder hung for 8.4 s every lap.
+        //
+        // Two things hide that boundary. The player's duration is shorter than the media it is
+        // holding (23000 ms reported for a 23621 ms file, because the QuickTime mvhd timescale of
+        // 600 cannot divide the frame period evenly), so ending on the player's number truncates
+        // frames still running. And past that point the position does not freeze, it creeps
+        // (23011, 23169, 23374, 23879 ms) — so "did not move between polls" is never true either,
+        // and every change-based test re-arms the stall threshold instead of firing. Hence the
+        // file's own length where the probe could read one, and no headway meaning stopped OR
+        // creeping. Which end to demand depends on which of the two was seen: a position that has
+        // not moved at all is at the end as far as the player is concerned, and some files stop dead
+        // at the shortened number without ever passing it, so demanding the file's length there
+        // would skip this branch and leave the 8 s threshold to notice.
+        int reportedMs = videoPlayer.getDuration();
+        long fileMs = lastVideoDurationMs;
+        int cycleEndMs = parked ? reportedMs : (int) Math.max((long) reportedMs, fileMs);
+        // A position absurdly far past the end is a bad reading rather than a finished clip: a
+        // freshly created player has been observed reporting values near the epoch, and acting on
+        // one every poll would turn the loop into a restart storm.
+        if (cycleEndMs > 0 && position >= cycleEndMs
+                && position - cycleEndMs <= LOOP_END_SLACK_MS && (parked || creeping)) {
+            debugInformationProvided(new DebugInformation("video",
+                    "loop restart pos=" + position + " end=" + cycleEndMs
+                            + " (" + (parked ? "parked" : "creeping")
+                            + " player=" + reportedMs + " file=" + fileMs + ")"
+                            + " rate=" + describePlaybackRate()));
+            try {
+                videoPlayer.seekTo(0);
+                videoPlayer.play();
+            } catch (Exception e) {
+                handleException(e);
+            }
+            videoWatchdogLastPosition = -1;
+            videoWatchdogLastProgressMs = now;
+            videoWatchdogRecoverAttempted = false;
+            scheduleVideoWatchdogCheck();
+            return;
+        }
+
+        if (!parked) {
             scheduleVideoWatchdogCheck();
             return;
         }
@@ -1744,10 +1826,39 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (elapsed < VIDEO_RATE_WINDOW_MS) {
             return;
         }
-        videoPlaybackRateX100 = (int) Math.min(Integer.MAX_VALUE,
+        int rateX100 = (int) Math.min(Integer.MAX_VALUE,
                 (position - videoRateAnchorPosition) * 100L / elapsed);
+        videoPlaybackRateX100 = rateX100;
+        // A single reading cannot tell a pipeline that is uniformly late from one that keeps up
+        // and hitches, and those want different fixes; the first measurements of the slow clip
+        // misled exactly because only the latest window was kept.
+        if (videoPlaybackRateSamples == 0 || rateX100 < videoPlaybackRateMinX100) {
+            videoPlaybackRateMinX100 = rateX100;
+        }
+        if (videoPlaybackRateSamples == 0 || rateX100 > videoPlaybackRateMaxX100) {
+            videoPlaybackRateMaxX100 = rateX100;
+        }
+        videoPlaybackRateSamples++;
         videoRateAnchorMs = now;
         videoRateAnchorPosition = position;
+    }
+
+    /** Position of the player actually in use, or -1 when it cannot answer. */
+    private int activePositionMs() {
+        try {
+            return videoPlayer != null ? videoPlayer.getCurrentPosition() : -1;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /** Duration the player actually in use believes the clip has, or -1 when it cannot answer. */
+    private int activeDurationMs() {
+        try {
+            return videoPlayer != null ? videoPlayer.getDuration() : -1;
+        } catch (Exception e) {
+            return -1;
+        }
     }
 
     /** The last measured playback rate as a multiple of realtime, or "n/a" before one completes. */
@@ -2142,6 +2253,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastVideoHeight = height;
         lastVideoCodec = codec;
         lastVideoStats = probe.stats;
+        lastVideoDurationMs = probe.stats.durationMs;
         lastFrameOrientation = framePortrait ? "portrait" : "landscape";
         Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
                 + " coded=" + width + "x" + height
@@ -2610,9 +2722,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             video.addProperty("avgFrameBytes", stream.avgFrameBytes);
             video.addProperty("peakFrameBytes", stream.peakFrameBytes);
             video.addProperty("bitRateBps", stream.bitRateBps);
+            video.addProperty("fileDurationMs", stream.durationMs);
             video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
                     lastVideoWidth, lastVideoHeight, stream.fpsMilli));
             video.addProperty("playbackRateX100", videoPlaybackRateX100);
+            video.addProperty("playbackRateMinX100", videoPlaybackRateMinX100);
+            video.addProperty("playbackRateMaxX100", videoPlaybackRateMaxX100);
+            video.addProperty("playbackRateSamples", videoPlaybackRateSamples);
+            // From whichever player is actually showing the clip. These used to be read off
+            // tsVideoView unconditionally, so on the MediaPlayer path they reported 0 — which is
+            // how the slow-playback investigation ended up reconstructing a lap from the stall
+            // log's timestamps instead of reading the position it had already measured.
+            video.addProperty("durationMs", activeDurationMs());
+            video.addProperty("positionMs", activePositionMs());
             if (tsVideoView != null) {
                 video.addProperty("generation", tsVideoView.getLoopGeneration());
                 video.addProperty("errors", tsVideoView.getVideoErrorCount());
@@ -2620,8 +2742,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 video.addProperty("surfaceReady", tsVideoView.isSurfaceReady());
                 video.addProperty("recreatingForLoop", tsVideoView.isRecreatingForLoop());
                 video.addProperty("path", tsVideoView.getActivePath());
-                video.addProperty("durationMs", tsVideoView.getDuration());
-                video.addProperty("positionMs", tsVideoView.getCurrentPosition());
                 JsonObject loopPerf = new JsonObject();
                 loopPerf.addProperty("restartLatencyMs", tsVideoView.getLastRestartLatencyMs());
                 loopPerf.addProperty("createPlayerMs", tsVideoView.getLastCreatePlayerMs());

@@ -96,7 +96,7 @@ public final class VideoHeaderProbe {
      * class of silent ceiling, and these numbers are what distinguishes it from a playback-path bug.
      */
     public static final class StreamStats {
-        public static final StreamStats UNKNOWN = new StreamStats(-1, -1, -1, -1);
+        public static final StreamStats UNKNOWN = new StreamStats(-1, -1, -1, -1, -1);
 
         /** Frames per second, x1000 (29970 for 29.97), or -1. */
         public final int fpsMilli;
@@ -106,12 +106,22 @@ public final class VideoHeaderProbe {
         public final long peakFrameBytes;
         /** Sustained bits per second, or -1. */
         public final long bitRateBps;
+        /**
+         * The clip's real length in ms, from the video track's {@code mdhd}. It is not the same
+         * number {@code MediaPlayer.getDuration()} returns: a QuickTime movie whose {@code mvhd}
+         * timescale cannot divide its frame period evenly makes the player report a duration
+         * *shorter* than the frames it holds — 23000 ms measured for a 23621 ms file. Anything
+         * deciding when a clip has actually ended needs this value, not the player's. -1 unknown.
+         */
+        public final long durationMs;
 
-        StreamStats(int fpsMilli, long avgFrameBytes, long peakFrameBytes, long bitRateBps) {
+        StreamStats(int fpsMilli, long avgFrameBytes, long peakFrameBytes, long bitRateBps,
+                    long durationMs) {
             this.fpsMilli = fpsMilli;
             this.avgFrameBytes = avgFrameBytes;
             this.peakFrameBytes = peakFrameBytes;
             this.bitRateBps = bitRateBps;
+            this.durationMs = durationMs;
         }
 
         static StreamStats of(TrackStats s) {
@@ -119,16 +129,19 @@ public final class VideoHeaderProbe {
                 return UNKNOWN;
             }
             long frames = s.sampleCount;
+            long durationMs = s.duration > Long.MAX_VALUE / 1000L
+                    ? -1 : s.duration * 1000L / s.timescale;
             // Bounded before the multiply, so a bogus timescale cannot overflow the product.
             int fpsMilli = frames > Long.MAX_VALUE / (1000L * s.timescale)
                     ? -1
                     : (int) Math.min(Integer.MAX_VALUE, frames * 1000L * s.timescale / s.duration);
             if (!s.sizesKnown) {
-                return new StreamStats(fpsMilli, -1, -1, -1);
+                return new StreamStats(fpsMilli, -1, -1, -1, durationMs);
             }
             return new StreamStats(fpsMilli, s.sampleBytesSum / frames, s.sampleBytesMax,
                     s.sampleBytesSum > Long.MAX_VALUE / (8L * s.timescale)
-                            ? -1 : s.sampleBytesSum * 8L * s.timescale / s.duration);
+                            ? -1 : s.sampleBytesSum * 8L * s.timescale / s.duration,
+                    durationMs);
         }
     }
 

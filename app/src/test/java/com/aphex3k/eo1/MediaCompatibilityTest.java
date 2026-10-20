@@ -170,9 +170,11 @@ public class MediaCompatibilityTest {
         // verdict belongs in none of that — the clip is playable, merely slow — so the check is
         // asserted absent here even for bytes that would fail it on their numbers.
         File file = writeBytes("slow.mov", new byte[]{0, 0, 0, 0});
+        // IMG_1566.MOV's real numbers: 1920x1080 at 59.97 fps, 54,266 B/frame, 26.0 Mbps, 50.8 s.
         VideoHeaderProbe.Probe overBudget = new VideoHeaderProbe.Probe(
                 270, 1920, 1080, "avc1",
-                new VideoHeaderProbe.StreamStats(59970, 65005, 286193, 26034165L));
+                new VideoHeaderProbe.StreamStats(
+                        59970, 54266, 309364, 26034165L, 50793));
         assertNull(MediaCompatibility.incompatibleReasonForFile(
                 MediaType.VIDEO, file, overBudget));
         assertTrue(MediaCompatibility.incompatibleVideoThroughput(
