@@ -252,6 +252,184 @@ public class MediaManagerCyclingTest {
         }
     }
 
+    /**
+     * The throughput gate, end to end. Unlike every other routing verdict this one cannot be reached
+     * before the bytes exist — no backend reports a frame rate — so the asset's first appearance must
+     * fetch the original, judge it from the file, and descend within the same acquisition. What is
+     * being pinned down here is that the fetch is paid once ever, and that a clip which plays slowly
+     * but correctly is never tagged.
+     */
+    @Test
+    public void overThroughputVideoIsRoutedToPlaybackFallbackWithoutBeingTagged() throws Exception {
+        String videoId = "01234567-89ab-cdef-0123-456789abcdef";
+        // 1920x1080: at or under every other gate, so the only thing failing is decode throughput.
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, null, null, 1920, 1080);
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        final AtomicInteger marked = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        // 60 samples in one second of a 1000 timescale = 60 fps at 1920x1080:
+                        // 489,600 macroblocks/s, the measured-bad number expressed in integers.
+                        return new ByteArrayInputStream(isoVideoBytes(1920, 1080, 60));
+                    }
+                }, null, null);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(
+                                "transcoded-720p".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+
+            @Override
+            public void markIncompatible(MediaAsset asset) {
+                marked.incrementAndGet();
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals("the slow clip is still shown", 1, listener.displayedKeys.size());
+        assertEquals("fakeA:" + videoId, listener.displayedKeys.get(0));
+        assertEquals("nothing here is undecodable, so nothing is tagged", 0, marked.get());
+        assertEquals("the original must be fetched once to learn its frame rate",
+                1, originalOpens.get());
+        assertEquals(1, fallbackOpens.get());
+        assertTrue(new File(cacheDir, videoId + "_fb.mp4").isFile());
+        assertTrue("the original is kept, not discarded: the fallback may be those same bytes",
+                new File(cacheDir, videoId + ".mov").isFile());
+        assertTrue(listener.exceptions.isEmpty());
+
+        // Second cycle: the verdict is remembered, so the original is never opened again and the
+        // cached fallback is reused rather than re-pulled.
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals("the remembered verdict must not re-download the original",
+                1, originalOpens.get());
+        assertEquals("the fallback is cached like an original, so it is not re-fetched",
+                1, fallbackOpens.get());
+        assertEquals(2, listener.displayedKeys.size());
+        assertEquals(0, marked.get());
+    }
+
+    /**
+     * A clip inside the throughput budget must take the original and stay there — the regression
+     * this guards is a gate so eager that it sends perfectly good video to a lower-quality source.
+     */
+    @Test
+    public void videoWithinThroughputBudgetStillPlaysItsOriginal() throws Exception {
+        String videoId = "01234567-89ab-cdef-0123-456789abcdef";
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, null, null, 1920, 1080);
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        // 30 fps at 1920x1080 = 244,800 macroblocks/s: the measured-good number.
+                        return new ByteArrayInputStream(isoVideoBytes(1920, 1080, 30));
+                    }
+                }, null, null);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream("x".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals(1, listener.displayedKeys.size());
+        assertEquals("a healthy clip plays its original", 1, originalOpens.get());
+        assertEquals("and never touches the degraded source", 0, fallbackOpens.get());
+        assertTrue(new File(cacheDir, videoId + ".mov").isFile());
+        assertFalse(new File(cacheDir, videoId + "_fb.mp4").exists());
+    }
+
+    /**
+     * Minimal ISOBMFF: {@code ftyp} + one {@code trak} carrying {@code mdhd} (1000 timescale, 1 s),
+     * an {@code avc1} sample entry at the given coded size, and one {@code stsz} entry per frame.
+     * Enough for {@link VideoHeaderProbe} to report {@code codedWidth/codedHeight} and
+     * {@code stats.fpsMilli}; nothing else in the file is read.
+     */
+    private static byte[] isoVideoBytes(int width, int height, int framesPerSecond) {
+        byte[] mdhd = box("mdhd", cat(new byte[]{0, 0, 0, 0}, u32(0), u32(0),
+                u32(1000), u32(1000)));
+        byte[] entry = cat(new byte[6], u16(1), new byte[16], u16(width), u16(height),
+                u32(0x00480000), u32(0), new byte[4], u16(1), new byte[4]);
+        byte[] stsd = box("stsd", cat(new byte[]{0, 0, 0, 0}, u32(1),
+                cat(u32(8 + entry.length), "avc1".getBytes(StandardCharsets.US_ASCII), entry)));
+        byte[] stsz = box("stsz", cat(new byte[]{0, 0, 0, 0}, u32(1024), u32(framesPerSecond)));
+        byte[] stbl = box("stbl", stsd, stsz);
+        byte[] minf = box("minf", stbl);
+        byte[] mdia = box("mdia", mdhd, minf);
+        byte[] tkhd = box("tkhd", cat(new byte[]{0, 0, 0, 0}, new byte[76]));
+        byte[] trak = box("trak", tkhd, mdia);
+        byte[] moov = box("moov", trak);
+        return cat(box("ftyp", cat(u32(0x20202020), "isom".getBytes(StandardCharsets.US_ASCII))),
+                moov);
+    }
+
+    private static byte[] u32(int v) {
+        return new byte[]{(byte) (v >>> 24), (byte) (v >>> 16), (byte) (v >>> 8), (byte) v};
+    }
+
+    private static byte[] u16(int v) {
+        return new byte[]{(byte) (v >>> 8), (byte) v};
+    }
+
+    private static byte[] cat(byte[]... parts) {
+        int len = 0;
+        for (byte[] p : parts) {
+            len += p.length;
+        }
+        byte[] out = new byte[len];
+        int off = 0;
+        for (byte[] p : parts) {
+            System.arraycopy(p, 0, out, off, p.length);
+            off += p.length;
+        }
+        return out;
+    }
+
+    private static byte[] box(String type, byte[]... payload) {
+        return cat(u32(8 + cat(payload).length), type.getBytes(StandardCharsets.US_ASCII),
+                cat(payload));
+    }
+
     private static MediaAsset remoteAsset(String id, String backendId) {
         return new MediaAsset(id, backendId, MediaType.IMAGE, -1, null,
                 id + ".jpg", null, null, null, 0, 0);

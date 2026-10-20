@@ -2259,18 +2259,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 + " coded=" + width + "x" + height
                 + " frame=" + lastFrameOrientation + " player="
                 + (forceFallback ? "MediaPlayer" : "TsPlayer")
-                + " " + describeStream(probe.stats));
+                + " " + describeStream(probe));
         debugInformationProvided(new DebugInformation("videoRouting",
                 "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
                         + " frame=" + lastFrameOrientation + " -> "
                         + (forceFallback ? "MediaPlayer" : "TsPlayer") + "; "
-                        + describeStream(probe.stats)));
+                        + describeStream(probe)));
         return !forceFallback;
     }
 
     /** Sample-table facts in one line, each part omitted when the file did not give it. */
-    private static String describeStream(VideoHeaderProbe.StreamStats s) {
-        if (s.fpsMilli <= 0 && s.avgFrameBytes <= 0 && s.bitRateBps <= 0) {
+    private static String describeStream(VideoHeaderProbe.Probe probe) {
+        VideoHeaderProbe.StreamStats s = probe.stats;
+        // Named out in full rather than abbreviated: megabytes per second is the other reading a
+        // reader would take from "MB/s", and the two differ by three orders of magnitude here.
+        long macroblocksPerSecond = MediaCompatibility.videoMacroblocksPerSecond(
+                probe.codedWidth, probe.codedHeight, s.fpsMilli);
+        if (s.fpsMilli <= 0 && s.avgFrameBytes <= 0 && s.bitRateBps <= 0
+                && macroblocksPerSecond < 0) {
             return "stream unknown";
         }
         StringBuilder sb = new StringBuilder("stream");
@@ -2285,6 +2291,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         if (s.bitRateBps > 0) {
             sb.append(String.format(Locale.ROOT, " %.1f Mbps", s.bitRateBps / 1e6));
+        }
+        if (macroblocksPerSecond >= 0) {
+            sb.append(' ').append(macroblocksPerSecond).append(" macroblocks/s");
         }
         return sb.toString();
     }
@@ -2714,6 +2723,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             video.addProperty("peakFrameBytes", stream.peakFrameBytes);
             video.addProperty("bitRateBps", stream.bitRateBps);
             video.addProperty("fileDurationMs", stream.durationMs);
+            video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
+                    lastVideoWidth, lastVideoHeight, stream.fpsMilli));
             video.addProperty("playbackRateX100", videoPlaybackRateX100);
             video.addProperty("playbackRateMinX100", videoPlaybackRateMinX100);
             video.addProperty("playbackRateMaxX100", videoPlaybackRateMaxX100);

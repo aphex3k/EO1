@@ -1,5 +1,6 @@
 package com.aphex3k.eo1;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -104,6 +105,93 @@ public class MediaCompatibilityTest {
         // Images have their own (accepted OOM) path for oversized content.
         assertNull(MediaCompatibility.incompatibleVideoResolution(MediaType.IMAGE, 3840, 2160));
         assertNull(MediaCompatibility.incompatibleVideoResolution(null, 3840, 2160));
+    }
+
+    @Test
+    public void throughputGateAcceptsWhatTheDecoderKeepsUpWith() {
+        // 1080p29.97 measured at 1.00x on a real EO2. The 720p60 row is the point of the whole gate:
+        // it is the encode such assets get routed to, so if it failed here the ladder would descend
+        // into a source it then refused for the same reason, forever.
+        assertThroughputAccepted(1920, 1080, 29970);
+        assertThroughputAccepted(1280, 720, 59940);
+        assertThroughputAccepted(1920, 1080, 24000);
+        assertThroughputAccepted(854, 480, 59940);
+        // Portrait-coded video of the same pixel count must score identically: the product is what
+        // matters, not which side is longer.
+        assertThroughputAccepted(1080, 1920, 29970);
+    }
+
+    @Test
+    public void throughputGateRejectsWhatTheDecoderRunsSlowlyOn() {
+        // 1920x1080 at 59.97 fps measured 0.13x on that same EO2, with no error ever reported.
+        assertThroughputRejected(1920, 1080, 59970);
+        assertThroughputRejected(1080, 1920, 59970);
+        assertThroughputRejected(1920, 1080, 50000);
+        assertThroughputRejected(3840, 2160, 29970);
+    }
+
+    @Test
+    public void unknownThroughputInputsPass() {
+        // Conservative in both directions: an unknown frame rate is not evidence of a slow clip, and
+        // rerouting healthy video to a lower-quality encode on missing data is its own harm.
+        assertNull(MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.VIDEO, 0, 1080, 59970));
+        assertNull(MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.VIDEO, 1920, -1, 59970));
+        assertNull(MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.VIDEO, 1920, 1080, 0));
+        assertNull(MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.VIDEO, 1920, 1080, -1));
+    }
+
+    @Test
+    public void throughputGateAppliesToVideoOnly() {
+        assertNull(MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.IMAGE, 3840, 2160, 59970));
+        assertNull(MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.WEB, 3840, 2160, 59970));
+        assertNull(MediaCompatibility.incompatibleVideoThroughput(
+                null, 3840, 2160, 59970));
+    }
+
+    @Test
+    public void macroblockRateIsTheNumberTheGateCompares() {
+        // Pinned to the two measurements the threshold was set from, so a change to the formula has
+        // to move these deliberately rather than silently.
+        assertEquals(244555, MediaCompatibility.videoMacroblocksPerSecond(1920, 1080, 29970));
+        assertEquals(489355, MediaCompatibility.videoMacroblocksPerSecond(1920, 1080, 59970));
+        assertEquals(-1, MediaCompatibility.videoMacroblocksPerSecond(1920, 1080, 0));
+    }
+
+    @Test
+    public void fileTierNeverReportsAThroughputVerdict() throws Exception {
+        // The trap this guards is specific: LocalMediaBackend.fetchCatalog feeds this method's result
+        // straight into CompatibilitySidecar, which excludes the file from rotation. A throughput
+        // verdict belongs in none of that — the clip is playable, merely slow — so the check is
+        // asserted absent here even for bytes that would fail it on their numbers.
+        File file = writeBytes("slow.mov", new byte[]{0, 0, 0, 0});
+        // IMG_1566.MOV's real numbers: 1920x1080 at 59.97 fps, 54,266 B/frame, 26.0 Mbps, 50.8 s.
+        VideoHeaderProbe.Probe overBudget = new VideoHeaderProbe.Probe(
+                270, 1920, 1080, "avc1",
+                new VideoHeaderProbe.StreamStats(
+                        59970, 54266, 309364, 26034165L, 50793));
+        assertNull(MediaCompatibility.incompatibleReasonForFile(
+                MediaType.VIDEO, file, overBudget));
+        assertTrue(MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.VIDEO, 1920, 1080, 59970) != null);
+    }
+
+    private static void assertThroughputAccepted(int width, int height, int fpsMilli) {
+        assertNull(width + "x" + height + " at " + fpsMilli + " milli-fps should fit the budget",
+                MediaCompatibility.incompatibleVideoThroughput(
+                        MediaType.VIDEO, width, height, fpsMilli));
+    }
+
+    private static void assertThroughputRejected(int width, int height, int fpsMilli) {
+        String reason = MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.VIDEO, width, height, fpsMilli);
+        assertTrue("expected " + width + "x" + height + " at " + fpsMilli
+                + " milli-fps to exceed the budget", reason != null);
     }
 
     private static void assertVideoResolutionRejected(int width, int height) {
