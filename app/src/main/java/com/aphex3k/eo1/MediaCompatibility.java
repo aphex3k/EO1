@@ -104,6 +104,21 @@ public final class MediaCompatibility {
      */
     public static final int MAX_VIDEO_SIDE_PX = 1920;
 
+    /**
+     * Sustained macroblock throughput this device's video decoder keeps up with. Past it a clip
+     * still decodes — it just decodes <em>slowly</em>, which is not a condition any player reports.
+     *
+     * <p>Measured on an EO2 with one file at two frame rates: 1920x1080 at 29.97 fps is 244,555
+     * macroblocks/s and plays at 1.00x; the same size at 59.97 fps is 489,343 and runs at 0.13x.
+     * This budget sits 23% above the first and 39% below the second, so 1080p30 and 720p60 both
+     * pass and only genuinely over-specified video is rerouted.
+     *
+     * <p>It is a throughput limit, not a resolution one, which is why it cannot be expressed as a
+     * side length or a frame rate alone: 720p60 fits where 1080p60 does not, and 1080p30 fits where
+     * 1080p60 does not. Only the product of the two says the right thing.
+     */
+    public static final long MAX_VIDEO_MACROBLOCKS_PER_SECOND = 300_000L;
+
     private MediaCompatibility() {
     }
 
@@ -175,6 +190,59 @@ public final class MediaCompatibility {
     }
 
     /**
+     * Sustained macroblock throughput a clip asks of the decoder — the number
+     * {@link #MAX_VIDEO_MACROBLOCKS_PER_SECOND} is compared against, exposed so reporting and the
+     * gate can never disagree about how it is derived.
+     *
+     * @param codedWidth coded content width in pixels, or {@code <= 0} when unknown
+     * @param codedHeight coded content height in pixels, or {@code <= 0} when unknown
+     * @param fpsMilli frame rate x1000, or {@code <= 0} when unknown
+     * @return macroblocks per second, or -1 when any input is unknown
+     */
+    public static long videoMacroblocksPerSecond(int codedWidth, int codedHeight, int fpsMilli) {
+        if (codedWidth <= 0 || codedHeight <= 0 || fpsMilli <= 0) {
+            return -1;
+        }
+        long macroblocks = (long) ((codedWidth + 15) / 16) * ((codedHeight + 15) / 16);
+        return macroblocks * fpsMilli / 1000L;
+    }
+
+    /**
+     * Decode-throughput check for a video whose coded size and frame rate are known.
+     *
+     * <p>Like {@link #incompatibleVideoResolution} this only ever asks for a different source, and
+     * for no other tier is that distinction more important: the asset it fires on <em>does</em>
+     * play, so nothing downstream will ever conclude it is broken, and a check that reported
+     * incompatibility here would tag thousands of perfectly usable clips. It must never reach
+     * {@code tagAssetAsIncompatible} or {@code knownIncompatibleKeys}.
+     *
+     * <p>Conservative like the other tiers: an unknown dimension or an unknown frame rate yields
+     * {@code null}, because rerouting healthy video to a lower-quality source on the strength of
+     * missing data is worse than the slow playback being avoided.
+     *
+     * @param type media type of the asset
+     * @param codedWidth coded content width in pixels, or {@code <= 0} when unknown
+     * @param codedHeight coded content height in pixels, or {@code <= 0} when unknown
+     * @param fpsMilli frame rate x1000 (59970 for 59.97 fps), or {@code <= 0} when unknown
+     * @return a human-readable reason when the clip demands more throughput than this device has,
+     *         or {@code null} when it fits or cannot be judged
+     */
+    @Nullable
+    public static String incompatibleVideoThroughput(@Nullable MediaType type, int codedWidth,
+                                                     int codedHeight, int fpsMilli) {
+        if (type != MediaType.VIDEO) {
+            return null;
+        }
+        long perSecond = videoMacroblocksPerSecond(codedWidth, codedHeight, fpsMilli);
+        if (perSecond < 0 || perSecond <= MAX_VIDEO_MACROBLOCKS_PER_SECOND) {
+            return null;
+        }
+        return "video " + codedWidth + "x" + codedHeight + " at " + (fpsMilli / 1000.0)
+                + " fps needs " + perSecond + " macroblocks/s, above this device's "
+                + MAX_VIDEO_MACROBLOCKS_PER_SECOND + " decode throughput limit";
+    }
+
+    /**
      * Codec check for a video whose sample description is known — read from the file by
      * {@link VideoHeaderProbe}, or reported by a backend that carries one.
      *
@@ -213,11 +281,31 @@ public final class MediaCompatibility {
      */
     @Nullable
     public static String incompatibleReasonForFile(MediaType type, @Nullable File file) {
+        return incompatibleReasonForFile(type, file, null);
+    }
+
+    /**
+     * The same content check for a caller that already holds a {@link VideoHeaderProbe} result for
+     * these bytes, so a video is never parsed twice to answer the codec and throughput questions.
+     *
+     * <p>The throughput check is deliberately <em>not</em> folded in here, even though both are
+     * video-content checks with the same shape. Every caller of this method treats a non-null
+     * result as "undecodable": {@code MediaManager} discards the bytes and
+     * {@code LocalMediaBackend.fetchCatalog} turns it into a sidecar report that excludes the file
+     * from rotation altogether. A throughput verdict belongs in neither of those places — it is
+     * routed by its own call site, which is why it has one.
+     *
+     * @param probed a previous probe of {@code file}, or null to read it here
+     */
+    @Nullable
+    public static String incompatibleReasonForFile(MediaType type, @Nullable File file,
+                                                   @Nullable VideoHeaderProbe.Probe probed) {
         if (type == null || file == null || !file.isFile() || file.length() == 0) {
             return null;
         }
         if (type == MediaType.VIDEO) {
-            return incompatibleVideoCodec(type, VideoHeaderProbe.probe(file).codec);
+            VideoHeaderProbe.Probe probe = probed != null ? probed : VideoHeaderProbe.probe(file);
+            return incompatibleVideoCodec(type, probe.codec);
         }
         if (type != MediaType.IMAGE) {
             return null;

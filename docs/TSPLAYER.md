@@ -65,6 +65,13 @@ So `MainActivity.displayVideo` routes each video before choosing a player. Input
   yields 0.
 - **Frame orientation** — the display's `Configuration.orientation` (verify on the EO2 that
   physically turning the frame actually flips it; only a sensor path is warranted if not).
+- **Frame rate** — also from the probe, via `mdhd` (timescale and duration) and the `stsz` sample
+  count. This one is *not* an input to the player choice above; nothing about TsPlayer vs
+  MediaPlayer depends on it. It selects the **source** instead: a clip whose coded size x frame rate
+  exceeds `MediaCompatibility.MAX_VIDEO_MACROBLOCKS_PER_SECOND` decodes too slowly to watch but
+  raises no error, so `MediaManager` starts it at the backend's `/video/playback` fallback. See
+  AGENTS.md, "No client-side transcoding", for why that verdict is taken on the bytes rather than
+  from catalog metadata.
 
 Routing rule — force the MediaPlayer/`TextureVideoView` fallback when:
 

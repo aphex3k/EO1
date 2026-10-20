@@ -119,6 +119,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private final Set<String> knownIncompatibleKeys =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     /**
+     * Asset keys whose video asks for more sustained macroblock throughput than this device has.
+     *
+     * <p>Kept apart from {@link #knownIncompatibleKeys} on purpose, and it must stay that way: these
+     * files are decodable, they are only decoded too slowly, so nothing here may be discarded and
+     * nothing may be tagged. Same lifetime by design — forgotten on restart, so a server that later
+     * produces an encode, or a device that gets a faster replacement, is re-judged from the bytes.
+     */
+    private final Set<String> tooDemandingVideoKeys =
+            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+    /**
      * Backend warnings already shown, keyed by backend id, config fingerprint and the warning
      * text itself. A failing pool makes {@link #rebuildPool} run again on every tick, so
      * without this a degraded backend would toast once per rotation interval. Keying on the
@@ -847,7 +857,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (asset.localPath != null) {
             // Already on disk: no download to avoid and no cache to overflow, so the decoder gets
             // the bytes and decides. Its verdict is filed as a sidecar report, not a silent skip.
+            // The throughput verdict is not consulted here either: a local upload has no degraded
+            // source to be routed to, so rerouting it would mean not showing it at all.
             return true;
+        }
+        if (tooDemandingVideoKeys.contains(key)) {
+            Log.i(TAG, "acquireAsset: " + key + " exceeds this device's decode throughput;"
+                    + " starting at the fallback source");
+            return false;
         }
         if (asset.sizeBytes != null && asset.sizeBytes > MAX_ASSET_BYTES) {
             Log.w(TAG, "acquireAsset: " + key + " original is " + asset.sizeBytes
@@ -862,6 +879,38 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     + "; routing to the fallback source");
             return false;
         }
+        return true;
+    }
+
+    /**
+     * Notes that an asset's original is decodable but asks for more sustained decode throughput than
+     * this device has, so every later acquisition of it starts at the backend's fallback source.
+     *
+     * <p>Returning true only means "descend now". {@link #acquireAsset} already falls through to the
+     * fallback when obtaining an original yields null, so a verdict taken on bytes already in hand
+     * costs one download and never a slow display cycle — which is the whole reason this is decided
+     * against the file rather than from catalog metadata that never carries a frame rate.
+     *
+     * <p>The original is deliberately <em>not</em> discarded, unlike every other verdict in this
+     * class. If the server has no encode, its fallback endpoint serves these same bytes, and keeping
+     * the cached copy is what stops the frame fetching 158 MB twice over to display one clip.
+     *
+     * @param probe the probe already run on the file for the codec check, reused here so a video's
+     *              {@code moov} is read once per acquisition rather than twice
+     */
+    private boolean noteVideoOverThroughputBudget(MediaAsset asset,
+                                                  @Nullable VideoHeaderProbe.Probe probe) {
+        if (asset.type != MediaType.VIDEO || probe == null) {
+            return false;
+        }
+        String reason = MediaCompatibility.incompatibleVideoThroughput(
+                asset.type, probe.codedWidth, probe.codedHeight, probe.stats.fpsMilli);
+        if (reason == null) {
+            return false;
+        }
+        tooDemandingVideoKeys.add(asset.key());
+        Log.w(TAG, "acquireRemoteFile: " + asset.key() + " - " + reason
+                + "; starting it at the fallback source, original kept cached");
         return true;
     }
 
@@ -890,6 +939,20 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             File artifact = acquireRemoteFile(asset, fallback, cacheDir, reportProgress);
             if (artifact == null) {
                 return null;
+            }
+            // A server with nothing transcoded answers the degraded request with the original bytes
+            // under a different name. When a throughput verdict is what sent us here, that is worth
+            // saying out loud: the asset is over the device's decode budget and the encode that
+            // would rescue it does not exist yet, so it will still play slowly. Logged only — the
+            // artifact is kept, and so is the verdict. Either one dropped turns this into a loop
+            // that re-fetches the same bytes every cycle, because a fallback that is deleted is
+            // never in cache to be hit next time.
+            if (asset.type == MediaType.VIDEO && asset.sizeBytes != null
+                    && artifact.length() == asset.sizeBytes
+                    && tooDemandingVideoKeys.contains(asset.key())) {
+                Log.i(TAG, "acquireAsset: " + asset.key() + " fallback is the original byte for byte"
+                        + " (" + artifact.length() + " B); the server has no encode for it yet, so it"
+                        + " will still play slowly on this device");
             }
             // A server with nothing transcoded answers the degraded request with the original
             // bytes, so this rung can be exactly as undecodable as the first one. Handing it to a
@@ -973,8 +1036,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 if (fallback) {
                     return cacheFile;
                 }
-                String reason = MediaCompatibility.incompatibleReasonForFile(asset.type, cacheFile);
+                VideoHeaderProbe.Probe probe = asset.type == MediaType.VIDEO
+                        ? VideoHeaderProbe.probe(cacheFile) : null;
+                String reason = MediaCompatibility.incompatibleReasonForFile(
+                        asset.type, cacheFile, probe);
                 if (reason == null) {
+                    if (noteVideoOverThroughputBudget(asset, probe)) {
+                        return null;
+                    }
                     return cacheFile;
                 }
                 Log.w(TAG, "acquireRemoteFile: cached " + cacheFile.getName() + " is " + reason
@@ -1050,12 +1119,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                                 + cacheFile.getName(), e);
                     }
                     if (!fallback) {
-                        String reason = MediaCompatibility.incompatibleReasonForFile(asset.type, cacheFile);
+                        VideoHeaderProbe.Probe probe = asset.type == MediaType.VIDEO
+                                ? VideoHeaderProbe.probe(cacheFile) : null;
+                        String reason = MediaCompatibility.incompatibleReasonForFile(
+                                asset.type, cacheFile, probe);
                         if (reason != null) {
                             Log.w(TAG, "acquireRemoteFile: " + cacheFile.getName() + " is " + reason
                                     + "; discarding it and falling back for " + asset.key());
                             deleteCachedFile(cacheFile);
                             knownIncompatibleKeys.add(asset.key());
+                            return null;
+                        }
+                        if (noteVideoOverThroughputBudget(asset, probe)) {
                             return null;
                         }
                     }
