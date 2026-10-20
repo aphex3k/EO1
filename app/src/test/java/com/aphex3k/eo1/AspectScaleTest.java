@@ -37,45 +37,35 @@ public class AspectScaleTest {
     }
 
     @Test
-    public void rotationAwareScaleTest() {
-        float noRotation = TextureVideoView.rotationAwareAspectScale(1080, 1920, 1920, 1080, 0);
-        assertEquals(1.7777778, noRotation, 0.0001);
-
-        float rotatedPortrait = TextureVideoView.rotationAwareAspectScale(1080, 1920, 1920, 1080, 90);
-        assertEquals(1.0, rotatedPortrait, 0.0001);
-
-        float rotatedLandscape = TextureVideoView.rotationAwareAspectScale(1080, 1920, 1080, 1920, 270);
-        assertEquals(1.7777778, rotatedLandscape, 0.0001);
-    }
-
-    @Test
     public void cropScaleFactorsTest() {
         // Landscape video in a portrait view: fill height, crop the sides, no distortion,
         // and no uniform-scale over-zoom (the old setScale(s, s) bug).
-        float[] landscapeInPortrait = TextureVideoView.cropScaleFactors(1080, 1920, 1920, 1080, 0);
+        float[] landscapeInPortrait = TextureVideoView.cropScaleFactors(1080, 1920, 1920, 1080);
         assertEquals(3.1604938f, landscapeInPortrait[0], 0.0001);
         assertEquals(1.0f, landscapeInPortrait[1], 0.0001);
 
         // Same aspect as the view: the factors stay 1.0 (no extra zoom beyond the view stretch).
-        float[] sameAspect = TextureVideoView.cropScaleFactors(1080, 1920, 720, 1280, 0);
+        float[] sameAspect = TextureVideoView.cropScaleFactors(1080, 1920, 720, 1280);
         assertEquals(1.0f, sameAspect[0], 0.0001);
         assertEquals(1.0f, sameAspect[1], 0.0001);
 
-        // 90/270-degree rotated 1920x1080 content in a 1080x1920 view: the rotated clip's
-        // display axes are transposed relative to the view, so sx/sy use the swapped dims
-        // (the decoder applies the rotation itself) — the un-swapped denominators render
-        // a rotated clip ~3:1 squished.
-        float[] rotated90 = TextureVideoView.cropScaleFactors(1080, 1920, 1920, 1080, 90);
-        assertEquals(0.5625f, rotated90[0], 0.0001);
-        assertEquals(1.7777778f, rotated90[1], 0.0001);
-
-        float[] rotated270 = TextureVideoView.cropScaleFactors(1080, 1920, 1920, 1080, 270);
-        assertEquals(0.5625f, rotated270[0], 0.0001);
-        assertEquals(1.7777778f, rotated270[1], 0.0001);
-
         // Oversized 4K landscape source downscales to fill the portrait view (crop sides).
-        float[] downscale = TextureVideoView.cropScaleFactors(1080, 1920, 4096, 2160, 0);
+        float[] downscale = TextureVideoView.cropScaleFactors(1080, 1920, 4096, 2160);
         assertEquals(3.3711934f, downscale[0], 0.0001);
         assertEquals(1.0f, downscale[1], 0.0001);
+    }
+
+    @Test
+    public void rotatedVideoAlreadyMatchesTheViewAndMustNotBeScaled() {
+        // The case measured on an EO2 playing a 1920x1080 clip with a -90 degree display matrix:
+        // the decoder rotates before this view sees a pixel, so onVideoSizeChanged reports the
+        // buffer as 1080x1920 into a 1080x1920 view. Transposing those axes a second time because
+        // the angle is 90/270 produced (1.7778, 1.7778) — a native-resolution video composited at
+        // 1.78x scale, 3.2x the pixels — and read on screen as video playing below realtime.
+        float[] alreadyAligned = TextureVideoView.cropScaleFactors(1080, 1920, 1080, 1920);
+        assertEquals(1.0f, alreadyAligned[0], 0.0001);
+        assertEquals(1.0f, alreadyAligned[1], 0.0001);
+
+        assertEquals(1.0f, TextureVideoView.aspectScale(1080, 1920, 1080, 1920), 0.0001);
     }
 }

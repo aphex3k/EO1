@@ -316,6 +316,21 @@ public class VideoHeaderProbeTest {
         assertEquals(1000, s.avgFrameBytes);
         assertEquals(1000, s.peakFrameBytes);
         assertEquals(240000, s.bitRateBps);
+        assertEquals(2000, s.durationMs);
+    }
+
+    @Test
+    public void reportsTheFilesOwnDurationWhenThePlayerRoundsItDown() throws Exception {
+        // The measured shape of IMG_6518.MOV: 708 samples over 14173 ticks of a 600 timescale. That
+        // is 23621 ms of media, and MediaPlayer reports 23000 ms for the same file — so anything
+        // deciding when the clip has ended from the player's number truncates the last 0.6 s and
+        // then waits forever for a position that only creeps. The file's own length has to be
+        // readable separately, which is what durationMs is for.
+        byte[] moov = box("moov", trakWithStats(tkhdV0(0, 1, -1, 0), "avc1", 1920, 1080,
+                600, 14173, stszUniform(65005, 708)));
+        VideoHeaderProbe.StreamStats s = VideoHeaderProbe.probe(writeFile("600ts.mov", moov)).stats;
+        assertEquals(23621, s.durationMs);
+        assertEquals(29972, s.fpsMilli);
     }
 
     @Test
@@ -329,6 +344,7 @@ public class VideoHeaderProbeTest {
         assertEquals(200, s.avgFrameBytes);
         assertEquals(300, s.peakFrameBytes);
         assertEquals(4800, s.bitRateBps);
+        assertEquals(1000, s.durationMs);
     }
 
     @Test
@@ -353,6 +369,7 @@ public class VideoHeaderProbeTest {
         assertEquals(-1, p.stats.fpsMilli);
         assertEquals(-1, p.stats.avgFrameBytes);
         assertEquals(-1, p.stats.bitRateBps);
+        assertEquals(-1, p.stats.durationMs);
     }
 
     @Test
