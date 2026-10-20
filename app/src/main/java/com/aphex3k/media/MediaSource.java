@@ -79,7 +79,19 @@ public final class MediaSource {
     }
 
     public static MediaSource remoteVideoPlayback(@NonNull Opener opener) {
-        return new MediaSource(Kind.REMOTE_VIDEO_PLAYBACK_FALLBACK, null, opener, null, null, null);
+        return remoteVideoPlayback(opener, null);
+    }
+
+    /**
+     * @param expectedBytes the size the playback endpoint would deliver, when the backend can ask
+     *     without fetching it. A server with nothing transcoded answers this endpoint with the
+     *     original file, so a value equal to the asset's own size means the degraded rung holds
+     *     nothing to gain — and on a 158 MB clip, finding that out by downloading it is the cost.
+     */
+    public static MediaSource remoteVideoPlayback(@NonNull Opener opener,
+                                                  @Nullable Long expectedBytes) {
+        return new MediaSource(Kind.REMOTE_VIDEO_PLAYBACK_FALLBACK, null, opener, null,
+                expectedBytes, null);
     }
 
     public static MediaSource remoteUrl(@NonNull String url) {
@@ -92,5 +104,15 @@ public final class MediaSource {
 
     public boolean isFallback() {
         return kind == Kind.REMOTE_THUMBNAIL_FALLBACK || kind == Kind.REMOTE_VIDEO_PLAYBACK_FALLBACK;
+    }
+
+    /**
+     * True for the video degraded source only. Distinct from {@link #isFallback()} because this is
+     * the one whose answer can turn out to be the original file itself — a preview thumbnail is
+     * always a different, smaller artifact, whereas {@code /video/playback} falls back to serving
+     * the untouched asset whenever no transcode exists.
+     */
+    public boolean isVideoPlayback() {
+        return kind == Kind.REMOTE_VIDEO_PLAYBACK_FALLBACK;
     }
 }

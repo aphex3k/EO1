@@ -293,6 +293,49 @@ public class ImmichClientV3Test {
                 "Bearer fresh", server.takeRequest().getHeader("Authorization"));
     }
 
+    @Test
+    public void playbackProbeReadsTheTotalFromContentRangeNotTheTwoByteBody() throws Exception {
+        server.enqueue(json(201, "{\"userId\":\"user-1\",\"accessToken\":\"at\","
+                + "\"userEmail\":\"u@x.io\",\"status\":\"success\"}"));
+        // A server that honours the range answers 206 with Content-Length of the slice. Taking that
+        // as the file's size would call every transcode on earth two bytes long, and the identity
+        // check in MediaManager would then never match — so this is the case worth pinning.
+        server.enqueue(new MockResponse().setResponseCode(206)
+                .setHeader("Content-Range", "bytes 0-0/12345678")
+                .setBody("a"));
+
+        ImmichClientV3 client = new ImmichClientV3(server.url("/").toString(), "u", "p", null);
+        client.login();
+        assertEquals(Long.valueOf(12345678L), client.videoPlaybackSize("a-1"));
+
+        server.takeRequest();
+        assertEquals("bytes=0-0", server.takeRequest().getHeader("Range"));
+    }
+
+    @Test
+    public void playbackProbeUsesContentLengthWhenRangeIsIgnored() throws Exception {
+        server.enqueue(json(201, "{\"userId\":\"user-1\",\"accessToken\":\"at\","
+                + "\"userEmail\":\"u@x.io\",\"status\":\"success\"}"));
+        // No Content-Range and a 200: the server intends to send the whole body, so its declared
+        // length is the file's length.
+        server.enqueue(new MockResponse().setResponseCode(200).setBody("abcdefgh"));
+
+        ImmichClientV3 client = new ImmichClientV3(server.url("/").toString(), "u", "p", null);
+        client.login();
+        assertEquals(Long.valueOf(8L), client.videoPlaybackSize("a-1"));
+    }
+
+    @Test
+    public void playbackProbeSaysUnknownRatherThanWrongWhenNoSizeIsAdvertised() throws Exception {
+        server.enqueue(json(201, "{\"userId\":\"user-1\",\"accessToken\":\"at\","
+                + "\"userEmail\":\"u@x.io\",\"status\":\"success\"}"));
+        server.enqueue(new MockResponse().setResponseCode(206).setBody("a"));
+
+        ImmichClientV3 client = new ImmichClientV3(server.url("/").toString(), "u", "p", null);
+        client.login();
+        assertNull("a 206 without Content-Range must not guess", client.videoPlaybackSize("a-1"));
+    }
+
     private static MockResponse json(int code, String body) {
         return new MockResponse().setResponseCode(code)
                 .setHeader("Content-Type", "application/json")

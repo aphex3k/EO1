@@ -330,6 +330,92 @@ public class MediaManagerCyclingTest {
     }
 
     /**
+     * The gate's own failure mode: routing to a degraded source that is not degraded. When
+     * {@code /video/playback} answers with the original file, the "fallback" is a second copy of the
+     * bytes already on disk, so the asset ends up fetched twice and cached twice — measured on an
+     * EO2 as 158 MB under two names, still playing at 0.18x. The probe exists so this case is
+     * recognised before the download, and the two verdicts must not re-trigger each other afterwards.
+     */
+    @Test
+    public void overThroughputVideoWithoutTranscodeKeepsTheOriginalAndFetchesOnce() throws Exception {
+        String videoId = "01234567-89ab-cdef-0123-456789abcdef";
+        final byte[] originalBytes = isoVideoBytes(1920, 1080, 60);
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, (long) originalBytes.length, null, 1920, 1080);
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        final AtomicInteger sizeProbes = new AtomicInteger();
+        final AtomicInteger marked = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        return new ByteArrayInputStream(originalBytes);
+                    }
+                }, null, (long) originalBytes.length);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                sizeProbes.incrementAndGet();
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(originalBytes);
+                    }
+                }, (long) originalBytes.length);
+            }
+
+            @Override
+            public void markIncompatible(MediaAsset asset) {
+                marked.incrementAndGet();
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals("the asset is displayed", 1, listener.displayedKeys.size());
+        assertEquals("nothing is undecodable here", 0, marked.get());
+        assertEquals("the duplicate is never fetched", 0, fallbackOpens.get());
+        assertEquals("the original is fetched once", 1, originalOpens.get());
+        assertTrue(new File(cacheDir, videoId + ".mov").isFile());
+        assertFalse("no second copy under the fallback name",
+                new File(cacheDir, videoId + "_fb.mp4").exists());
+
+        // The probe and the throughput verdict must not drive each other: cycle two must neither
+        // re-probe nor re-download, and must not re-add a verdict that sends it probing again.
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(2, listener.displayedKeys.size());
+        assertEquals("the original is not re-fetched", 1, originalOpens.get());
+        assertEquals(0, fallbackOpens.get());
+        assertEquals("the probe is not repeated every cycle", 1, sizeProbes.get());
+        assertEquals(0, marked.get());
+
+        // A duplicate already on disk is removed, not merely avoided from here on: 158 MB of nothing
+        // competing with useful files for eviction on a device with about a gigabyte free. This case
+        // needs its own assertion because the asset is already marked as having no transcode, so the
+        // cycle that follows never walks the fallback path that discovered the duplication — which is
+        // exactly how an old file would otherwise sit there forever.
+        File leftover = new File(cacheDir, videoId + "_fb.mp4");
+        java.nio.file.Files.write(leftover.toPath(), originalBytes);
+        assertTrue(leftover.isFile());
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertFalse("an existing byte-identical fallback must be deleted", leftover.isFile());
+        assertEquals(3, listener.displayedKeys.size());
+        assertEquals(0, fallbackOpens.get());
+        assertEquals(1, sizeProbes.get());
+    }
+
+    /**
      * A clip inside the throughput budget must take the original and stay there — the regression
      * this guards is a gate so eager that it sends perfectly good video to a lower-quality source.
      */

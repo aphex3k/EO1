@@ -8,6 +8,7 @@ import okhttp3.ResponseBody;
 import retrofit2.Call;
 import retrofit2.http.Body;
 import retrofit2.http.GET;
+import retrofit2.http.Headers;
 import retrofit2.http.POST;
 import retrofit2.http.PUT;
 import retrofit2.http.Path;
@@ -57,6 +58,21 @@ public interface ImmichApiService {
     @GET("/api/assets/{id}/video/playback")
     @Streaming
     Call<ResponseBody> playAssetVideo(
+            @Path("id") String id,
+            @Query("key") String key
+    );
+
+    /**
+     * A one-byte range request against the endpoint {@link #playAssetVideo} streams from, so the
+     * response's own length can be read without fetching the file. {@code @Streaming} is load-bearing
+     * here rather than an optimisation: if a server ignores {@code Range} and starts sending the
+     * whole asset, a buffered body would be a 158 MB allocation on an 800 MB device.
+     */
+    @Keep
+    @GET("/api/assets/{id}/video/playback")
+    @Streaming
+    @Headers("Range: bytes=0-0")
+    Call<ResponseBody> probeAssetVideoPlayback(
             @Path("id") String id,
             @Query("key") String key
     );
