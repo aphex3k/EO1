@@ -248,6 +248,69 @@ public class ImmichClientV3 implements ImmichClient {
     }
 
     /**
+     * Asks the playback endpoint how big its answer would be, without taking it.
+     *
+     * <p>The status code decides which header is the truth. A {@code 206} that honoured the range
+     * reports {@code Content-Length: 2}, and reading that as the file's size would call every
+     * transcode on the server a two-byte file; the total lives after the {@code /} in
+     * {@code Content-Range}. A plain {@code 200} means the server ignored {@code Range} and the
+     * body it is about to send is the whole asset, so {@code Content-Length} is correct there.
+     * Anything ambiguous yields {@code null}, which callers read as "assume there is something
+     * worth fetching" — the safe direction, because the mistake it avoids is skipping a rung that
+     * would have worked.
+     */
+    @Override
+    public Long videoPlaybackSize(String assetId) throws IOException, MediaDownloadFailedException {
+        Response<okhttp3.ResponseBody> response =
+                withSession(() -> service.probeAssetVideoPlayback(assetId, null));
+        okhttp3.ResponseBody body = response.body();
+        try {
+            if (!response.isSuccessful()) {
+                throw new MediaDownloadFailedException(
+                        "Failed probing immich playback: HTTP " + response.code());
+            }
+            if (response.code() == 206) {
+                return contentRangeTotal(response.headers().get("Content-Range"));
+            }
+            String length = response.headers().get("Content-Length");
+            if (length == null) {
+                return null;
+            }
+            try {
+                long parsed = Long.parseLong(length.trim());
+                return parsed > 0L ? parsed : null;
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        } finally {
+            if (body != null) {
+                body.close();
+            }
+        }
+    }
+
+    /** {@code bytes 0-0/165908629} to {@code 165908629}; anything else to null. */
+    private static Long contentRangeTotal(String contentRange) {
+        if (contentRange == null) {
+            return null;
+        }
+        int slash = contentRange.lastIndexOf('/');
+        if (slash < 0 || slash == contentRange.length() - 1) {
+            return null;
+        }
+        String total = contentRange.substring(slash + 1).trim();
+        if ("*".equals(total)) {
+            return null;
+        }
+        try {
+            long parsed = Long.parseLong(total);
+            return parsed > 0L ? parsed : null;
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
      * Takes a factory rather than a {@code Call} because a stream that answered 401 needs a
      * second attempt, and a Retrofit call can only be executed once — handing the same instance to
      * {@link #withSession} twice threw {@code IllegalStateException: Already Executed}. Expired

@@ -147,9 +147,26 @@ public class ImmichMediaBackend implements MediaBackend {
         final String rawId = asset.id;
         final ImmichClient c = client;
         if (asset.type == MediaType.VIDEO) {
-            return MediaSource.remoteVideoPlayback(() -> c.videoPlaybackStream(rawId));
+            return MediaSource.remoteVideoPlayback(() -> c.videoPlaybackStream(rawId),
+                    probePlaybackSize(c, rawId));
         }
         return MediaSource.remoteThumbnail(() -> c.thumbnailStream(rawId));
+    }
+
+    /**
+     * What the playback endpoint would deliver, or {@code null} when the server will not say.
+     * Failing to answer is deliberately quiet and non-fatal: it leaves the ladder exactly one
+     * request away from simply trying the download, which is the behaviour this probe exists to
+     * avoid paying for. A network that is down is discovered by that download, not here.
+     */
+    @androidx.annotation.Nullable
+    private static Long probePlaybackSize(ImmichClient c, String assetId) {
+        try {
+            return c.videoPlaybackSize(assetId);
+        } catch (Exception e) {
+            Log.d(TAG, "playback size probe failed for " + assetId + ": " + e);
+            return null;
+        }
     }
 
     /**

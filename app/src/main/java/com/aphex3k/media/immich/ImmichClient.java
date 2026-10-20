@@ -68,6 +68,14 @@ public interface ImmichClient {
     InputStream videoPlaybackStream(String assetId) throws IOException, MediaDownloadFailedException;
 
     /**
+     * The size {@link #videoPlaybackStream} would deliver, without downloading it — or {@code null}
+     * when the server makes that unknown. A backend answers the playback request with the original
+     * file whenever nothing is transcoded, so comparing this against the asset's own size is what
+     * distinguishes a degraded source worth fetching from a second copy of the bytes already held.
+     */
+    Long videoPlaybackSize(String assetId) throws IOException, MediaDownloadFailedException;
+
+    /**
      * Finds or creates a tag named {@code tagName} on this server and adds {@code assetId}
      * to it.
      *

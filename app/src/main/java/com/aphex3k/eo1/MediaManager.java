@@ -127,7 +127,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * produces an encode, or a device that gets a faster replacement, is re-judged from the bytes.
      */
     private final Set<String> tooDemandingVideoKeys =
-            Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
+            Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
+    /**
+     * Video assets whose degraded source turns out to be the original file itself, because the
+     * server has nothing transcoded for them. Remembered so the two verdicts cannot chase each other:
+     * the throughput check wants to route away from the original, and this says there is nowhere to
+     * route to. Without it every cycle would re-probe the endpoint, re-add the throughput verdict,
+     * re-probe, and download the same 158 MB in a circle.
+     */
+    private final Set<String> noTranscodeVideoKeys =
+            Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
     /**
      * Backend warnings already shown, keyed by backend id, config fingerprint and the warning
      * text itself. A failing pool makes {@link #rebuildPool} run again on every tick, so
@@ -804,6 +813,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             Log.w(TAG, "acquireAsset: no backend for asset " + asset.key());
             return null;
         }
+        if (noTranscodeVideoKeys.contains(asset.key())) {
+            // Taking the original because there is nothing to degrade to must not mean quietly
+            // tolerating a duplicate left on disk by the run that worked that out.
+            discardByteIdenticalFallback(asset, cacheDir);
+        }
         if (!originalUsable(asset)) {
             return acquireResolvedFallback(asset, backend, cacheDir, reportProgress);
         }
@@ -861,7 +875,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             // source to be routed to, so rerouting it would mean not showing it at all.
             return true;
         }
-        if (tooDemandingVideoKeys.contains(key)) {
+        if (tooDemandingVideoKeys.contains(key) && !noTranscodeVideoKeys.contains(key)) {
             Log.i(TAG, "acquireAsset: " + key + " exceeds this device's decode throughput;"
                     + " starting at the fallback source");
             return false;
@@ -900,7 +914,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     private boolean noteVideoOverThroughputBudget(MediaAsset asset,
                                                   @Nullable VideoHeaderProbe.Probe probe) {
-        if (asset.type != MediaType.VIDEO || probe == null) {
+        if (asset.type != MediaType.VIDEO || probe == null || noTranscodeVideoKeys.contains(asset.key())) {
             return false;
         }
         String reason = MediaCompatibility.incompatibleVideoThroughput(
@@ -914,6 +928,64 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return true;
     }
 
+    /**
+     * Takes the original because this asset has no transcode, and makes sure no byte-identical
+     * fallback survives to say otherwise.
+     *
+     * <p>A duplicate under the {@code _fb} name is pure loss twice over: it doubles the bytes on a
+     * device with about a gigabyte of free space, and because the cache keys eviction on file name it
+     * competes for that space with files that decode differently. It also buys nothing — those bytes
+     * are the same stream the original already failed to keep up with. So it is not merely avoided
+     * going forward: an existing one, left by an earlier build or by a probe the server could not
+     * answer, is deleted here.
+     *
+     * <p>Remembering the asset in {@link #noTranscodeVideoKeys} is what keeps this from looping. The
+     * throughput verdict says "go to the fallback", the fallback says "there isn't one", and without
+     * the mark each would re-arm the other every cycle.
+     */
+    @Nullable
+    private File useOriginalWithoutTranscode(MediaAsset asset, MediaBackend backend, File cacheDir,
+                                             boolean reportProgress, @Nullable String why)
+            throws Exception {
+        noTranscodeVideoKeys.add(asset.key());
+        discardByteIdenticalFallback(asset, cacheDir);
+        if (why != null) {
+            Log.i(TAG, "acquireAsset: " + asset.key() + " - " + why);
+        }
+        MediaSource original = backend.resolveOriginal(asset);
+        if (original == null) {
+            return null;
+        }
+        return original.isLocal() ? original.localFile
+                : acquireRemoteFile(asset, original, cacheDir, reportProgress);
+    }
+
+    /**
+     * Deletes a fallback artifact that turns out to be the original's bytes under another name.
+     *
+     * <p>Called separately from the paths that discover this, because both verdicts live only for the
+     * life of the process: an asset already marked as having no transcode goes straight to the
+     * original and would never again walk the branch that removes a duplicate an earlier run wrote.
+     * A file whose length differs from the asset's is a real transcode and is left alone — the point
+     * is to remove copies, not to discard the degraded source the gates exist to reach.
+     */
+    private void discardByteIdenticalFallback(MediaAsset asset, File cacheDir) {
+        if (asset.type != MediaType.VIDEO) {
+            return;
+        }
+        File duplicate = new File(cacheDir, cacheFileName(asset.id, asset.originalFileName,
+                asset.originalPath, ImmichType.VIDEO, true));
+        if (!duplicate.isFile()) {
+            return;
+        }
+        if (asset.sizeBytes != null && duplicate.length() != asset.sizeBytes) {
+            return;
+        }
+        Log.i(TAG, "acquireAsset: " + asset.key() + " removing byte-identical fallback "
+                + duplicate.getName() + " (" + duplicate.length() + " B) from cache");
+        deleteCachedFile(duplicate);
+    }
+
     /** The backend's degraded source for an asset, or a quiet skip when it has none. */
     @Nullable
     private File acquireResolvedFallback(MediaAsset asset, MediaBackend backend, File cacheDir,
@@ -922,6 +994,20 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (fallback == null || fallback.opener == null) {
             Log.w(TAG, "acquireAsset: " + asset.key() + " - no fallback source, skipping");
             return null;
+        }
+        // Both video gates route here assuming the degraded source is the smaller one. A server with
+        // nothing transcoded answers /video/playback with the ORIGINAL file, so that assumption is
+        // simply false, and paying it off means fetching 158 MB twice to display the same slow clip
+        // twice — measured on an EO2, where the cache ended up holding the asset's bytes under two
+        // names. When the endpoint reports its answer is the asset's own size there is nothing to
+        // degrade to, so take the original and remember that, which is also what stops the
+        // throughput verdict and this probe from driving each other round and round.
+        if (fallback.isVideoPlayback() && fallback.expectedBytes != null
+                && asset.sizeBytes != null
+                && fallback.expectedBytes.longValue() == asset.sizeBytes.longValue()) {
+            return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
+                    "the degraded source is the original byte for byte (" + asset.sizeBytes
+                            + " B); no transcode exists");
         }
         return acquireFallbackSource(asset, fallback, cacheDir, reportProgress);
     }
@@ -940,19 +1026,20 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             if (artifact == null) {
                 return null;
             }
-            // A server with nothing transcoded answers the degraded request with the original bytes
-            // under a different name. When a throughput verdict is what sent us here, that is worth
-            // saying out loud: the asset is over the device's decode budget and the encode that
-            // would rescue it does not exist yet, so it will still play slowly. Logged only — the
-            // artifact is kept, and so is the verdict. Either one dropped turns this into a loop
-            // that re-fetches the same bytes every cycle, because a fallback that is deleted is
-            // never in cache to be hit next time.
-            if (asset.type == MediaType.VIDEO && asset.sizeBytes != null
-                    && artifact.length() == asset.sizeBytes
-                    && tooDemandingVideoKeys.contains(asset.key())) {
-                Log.i(TAG, "acquireAsset: " + asset.key() + " fallback is the original byte for byte"
-                        + " (" + artifact.length() + " B); the server has no encode for it yet, so it"
-                        + " will still play slowly on this device");
+            // The probe is the cheap way to avoid a fallback that is only a copy of the original;
+            // this is the guarantee that one does not survive when the probe could not answer. A
+            // server with nothing transcoded answers the degraded request with the original bytes
+            // under a different name, and the file is worthless in that shape whatever it cost to
+            // obtain, so it is deleted rather than kept and reasoned about later.
+            if (asset.type == MediaType.VIDEO && fallback.isVideoPlayback()
+                    && asset.sizeBytes != null && artifact.length() == asset.sizeBytes) {
+                MediaBackend backend = backendById.get(asset.backendId);
+                if (backend == null) {
+                    return artifact;
+                }
+                return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
+                        "the fetched degraded source is the original byte for byte ("
+                                + artifact.length() + " B); discarding the duplicate");
             }
             // A server with nothing transcoded answers the degraded request with the original
             // bytes, so this rung can be exactly as undecodable as the first one. Handing it to a
