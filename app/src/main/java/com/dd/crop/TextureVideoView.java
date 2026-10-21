@@ -64,6 +64,11 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     private boolean mIsVideoPrepared;
     private boolean mIsPlayCalled;
 
+    // Wall clock of the last frame this view actually composited, 0 until one arrives. This is the only
+    // evidence the app can get that pixels reached the screen: a player that reports a position and an
+    // error-free prepare while painting nothing leaves every other signal looking healthy.
+    private volatile long mLastFrameAtMs;
+
     private State mState;
 
     public enum State {
@@ -195,6 +200,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         mVideoRotation = 0;
         mVideoWidth = 0;
         mVideoHeight = 0;
+        mLastFrameAtMs = 0L;
         mState = State.UNINITIALIZED;
     }
 
@@ -601,6 +607,14 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
 
     @Override
     public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surface) {
+        mLastFrameAtMs = System.currentTimeMillis();
+    }
 
+    /**
+     * @return wall-clock milliseconds of the last frame composited into this view's surface, or 0 when
+     *         no frame has arrived since the current data source was set
+     */
+    public long getLastFrameAtMs() {
+        return mLastFrameAtMs;
     }
 }
