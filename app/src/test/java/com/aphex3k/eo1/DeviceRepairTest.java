@@ -55,7 +55,7 @@ public class DeviceRepairTest {
         assertEquals("svc wifi disable", DeviceRepair.CMD_WIFI_DISABLE);
         assertEquals("svc wifi enable", DeviceRepair.CMD_WIFI_ENABLE);
         assertEquals("reboot", DeviceRepair.CMD_REBOOT);
-        assertEquals("pm disable com.geniatech.upgrade/.UpdateReceiver",
+        assertEquals("pm disable com.geniatech.upgrade",
                 DeviceRepair.CMD_DISABLE_VENDOR_UPDATER);
         assertEquals("pm disable com.electricobjects.updater/.CheckUpdateReceiver",
                 DeviceRepair.CMD_DISABLE_EO_UPDATER_CHECK);
@@ -126,18 +126,22 @@ public class DeviceRepairTest {
     }
 
     @Test
-    public void silencesEveryUpdaterReceiverWithoutTouchingThePackages() {
+    public void silencesEachPollerWithOneCommand() {
         FakeExecutor executor = new FakeExecutor();
 
         List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(executor);
 
-        // Components, not packages: a receiver is what each alarm and each BOOT_COMPLETED reaches,
-        // so disabling it cuts the wake while leaving whatever else the vendor package offers alone.
+        // One command per poller, at the level that poller is decided at: the vendor OTA package
+        // whole, because a component list cannot cover services or a trigger path a firmware update
+        // adds later, and the Electric Objects receivers by name, because that widening was measured
+        // as unnecessary and would cost a second system-uid force-stop. VendorPollers reads exactly
+        // this split, so the two files cannot drift — see VendorPollersTest.
         assertEquals(DeviceRepair.VENDOR_UPDATER_COMMANDS, executor.executed);
         assertEquals(3, steps.size());
         for (DeviceRepair.Step step : steps) {
             assertTrue(step.command, step.ok());
         }
+        assertTrue(executor.executed.get(0).startsWith("pm disable com.geniatech.upgrade"));
     }
 
     @Test

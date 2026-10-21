@@ -2051,14 +2051,28 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
-     * Best-effort, once per process, from {@code onCreate}: ask the device's own adbd to disable the
-     * receivers behind the ROM's two OTA pollers (see {@link DeviceRepair#VENDOR_UPDATER_COMMANDS}).
-     * Deliberately not part of the core loop — adbd is loopback, so Wi-Fi has nothing to do with it,
-     * and a frame that boots into a dead network is precisely the one whose poller still fires every
-     * 15 minutes. Kept out of the watchdog ladder too: this is not a repair and must never block the
-     * caller. A frame whose ROM has no such package says so once in {@code /logs} and moves on. The
-     * attempt is claimed before the thread starts, so an unreachable adbd costs one log line, not a
-     * retry loop; the next launch tries again.
+     * Best-effort, once per process, from {@code onCreate}: make sure the ROM's two OTA pollers cannot
+     * wake this frame, and report which of the two answers is the case (see {@link
+     * DeviceRepair#VENDOR_UPDATER_COMMANDS} and {@link VendorPollers}).
+     *
+     * <p>It asks the framework first and adbd second, in that order, for one reason: what a {@code pm}
+     * command reports is whether the transport answered, not whether the poller is silent. Loopback
+     * adbd accepts a connection and then never reads a byte while a host {@code adb} client is
+     * attached to the frame, so a bench run used to log {@code unreachable
+     * (SocketTimeoutException)} on a device that had been quiet for days, and no amount of reading
+     * that line told anyone which of the two it was. So: a frame whose pollers the framework already
+     * has excluded from intent resolution opens no socket at all — no package force-stop, no timeout,
+     * a verdict instead. A frame that is genuinely armed gets one attempt through adbd, and whatever
+     * adbd said is then re-read through {@link VendorPollers}, because the re-read is the answer.
+     *
+     * <p>Deliberately not part of the core loop — adbd is loopback, so Wi-Fi has nothing to do with
+     * it, and a frame that boots into a dead network is precisely the one whose poller still fires
+     * every 15 minutes. Kept out of the watchdog ladder too: this is not a repair and must never
+     * block the caller. It only ever {@code probe()}s, never {@code ensureTcpAdbd()}s — silencing a
+     * poller nobody asked about must not open a root port on the LAN. A frame whose ROM has no such
+     * package says so once in {@code /logs} and moves on. The attempt is claimed before the thread
+     * starts, so an unreachable adbd costs one log line, not a retry loop; the next launch tries
+     * again.
      */
     private void silenceVendorUpdater() {
         if (vendorUpdaterAttempted) {
@@ -2069,18 +2083,31 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public void run() {
                 try {
+                    VendorPollers.Reader reader = VendorPollers.readerFor(MainActivity.this);
+                    List<VendorPollers.Verdict> before = VendorPollers.audit(reader);
+                    if (VendorPollers.allQuiet(before)) {
+                        String quiet = "silenced, verified without adbd: "
+                                + VendorPollers.summarize(before);
+                        Log.i(TAG, "vendor updater: " + quiet);
+                        debugInformationProvided(new DebugInformation("vendorUpdater", quiet));
+                        return;
+                    }
+                    String attempted;
                     if (!AdbdInstallClient.probe()) {
                         // Silencing the vendor pollers is not an action anyone asked for, so unlike a
                         // reached watchdog rung it never opens a root port on the LAN — it uses one
                         // that is already there. On an EO1 that makes this a logged no-op.
-                        Log.i(TAG, "vendor updater: skipped, adbd is not listening");
-                        debugInformationProvided(new DebugInformation("vendorUpdater",
-                                "skipped: adbd is not listening"));
-                        return;
+                        attempted = "adbd is not listening, nothing written";
+                    } else {
+                        AdbdInstallClient client = new AdbdInstallClient();
+                        List<DeviceRepair.Step> steps =
+                                DeviceRepair.silenceVendorUpdater(client::exec);
+                        attempted = DeviceRepair.describe(steps);
                     }
-                    AdbdInstallClient client = new AdbdInstallClient();
-                    List<DeviceRepair.Step> steps = DeviceRepair.silenceVendorUpdater(client::exec);
-                    String outcome = DeviceRepair.describe(steps);
+                    List<VendorPollers.Verdict> after = VendorPollers.audit(reader);
+                    String fix = VendorPollers.needsHuman(after);
+                    String outcome = "after " + attempted + " -> " + VendorPollers.summarize(after)
+                            + (fix.isEmpty() ? "" : " | " + fix);
                     Log.i(TAG, "vendor updater: " + outcome);
                     debugInformationProvided(new DebugInformation("vendorUpdater", outcome));
                 } catch (Throwable t) {

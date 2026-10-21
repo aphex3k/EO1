@@ -37,18 +37,41 @@ public final class DeviceRepair {
     /** Cold-restarts the frame. Last resort, and opt-in. */
     public static final String CMD_REBOOT = "reboot";
     /**
-     * Silences the ROM's vendor OTA poller. {@code com.geniatech.upgrade} ({@code
-     * /system/app/Update.apk}) keeps an hourly {@code AlarmManager} alarm
-     * ({@code act=com.upgrade.time.checkupdate}) whose broadcast starts {@code UpdateReceiver} →
-     * {@code IntervalCheckUpdateService} → a plain-HTTP GET to {@code www.geniatech.net}. That
-     * domain is a dead CNAME chain, so every hour — and on every BOOT_COMPLETED / Wi-Fi state
-     * change, which reach the same receiver — the frame wakes and prints an
-     * {@code UnknownHostException} to {@code System.err}. Disabling the receiver rather than the
-     * package cuts all of those trigger paths while leaving the rest of the vendor package intact.
-     * A ROM without the package is not a failure: {@code pm} reports an error and we log it.
+     * Silences the ROM's vendor OTA poller by taking the whole {@code com.geniatech.upgrade} package
+     * ({@code /system/app/Update.apk}) out of intent resolution. The poller keeps an hourly
+     * {@code AlarmManager} alarm ({@code act=com.upgrade.time.checkupdate}) whose broadcast starts
+     * {@code UpdateReceiver} → {@code IntervalCheckUpdateService} → a plain-HTTP GET to
+     * {@code www.geniatech.net}; that domain is a dead CNAME chain, so every hour — and on every
+     * BOOT_COMPLETED / Wi-Fi / ethernet state change, which reach the same receiver — the frame
+     * wakes to print an {@code UnknownHostException} to {@code System.err}.
+     *
+     * <p>The package, not the receiver, is the unit because a component list is only as good as the
+     * components someone wrote down: the same package also exports {@code .UpdateService},
+     * {@code IntervalCheckUpdateService} and six activities, any of which an explicit
+     * {@code startService} or broadcast can reach while only a receiver is off — and a firmware
+     * update can add a trigger this file never enumerated. It is also the only form the frame can
+     * verify for itself: {@link VendorPollers} reads a package-level state back through
+     * {@code getApplicationEnabledSetting}, which on API 19 needs no permission this app lacks.
+     *
+     * <p>Two consequences. {@code com.geniatech.upgrade} is {@code android.uid.system}, so a
+     * package-level disable goes through the framework's force-stop path ({@code PACKAGE_CHANGED}
+     * with {@code EXTRA_DONT_KILL_APP} clear) rather than a quiet component toggle — which is why
+     * {@link VendorPollers} asks first, so this is issued for a package that is not already disabled
+     * and not once per launch forever. And disabling does not dequeue an alarm that is already armed:
+     * {@code AlarmManagerService} cancels alarms for removals, not for enable-state changes, so the
+     * hourly wake keeps happening — delivering nothing — until the next boot, after which nothing
+     * re-arms it, because BOOT_COMPLETED no longer resolves to this package.
+     *
+     * <p>The asymmetry with {@link #CMD_DISABLE_EO_UPDATER_CHECK} below is deliberate, not an
+     * unfinished migration: the Electric Objects poller was verified landed as two component
+     * disables, and widening it buys the same service-path coverage at the cost of a second
+     * system-uid force-stop. Do not "finish" it without evidence that a path outside those two
+     * receivers still wakes a frame. A ROM without either package is not a failure: {@code pm}
+     * reports an error, {@link VendorPollers} reads it as {@code ABSENT}, and we log it once.
      */
-    public static final String CMD_DISABLE_VENDOR_UPDATER =
-            "pm disable com.geniatech.upgrade/.UpdateReceiver";
+    public static final String CMD_DISABLE_VENDOR_UPDATER = "pm disable com.geniatech.upgrade";
+    /** The package this command names, kept separate so {@link VendorPollers} can ask about it. */
+    public static final String PKG_VENDOR_UPDATER = "com.geniatech.upgrade";
     /**
      * Silences the Electric Objects cloud updater ({@code /system/app/com.electricobjects.updater.apk},
      * same {@code android.uid.system}), which wakes every <em>15</em> minutes on
@@ -67,6 +90,8 @@ public final class DeviceRepair {
      */
     public static final String CMD_DISABLE_EO_UPDATER_BOOT =
             "pm disable com.electricobjects.updater/.BootCompletedReceiver";
+    /** The package those two components live in, for {@link VendorPollers}. */
+    public static final String PKG_EO_UPDATER = "com.electricobjects.updater";
 
     /** Pause between disable and enable so the framework can settle. */
     public static final long WIFI_TOGGLE_SETTLE_MS = 3000L;
@@ -143,10 +168,17 @@ public final class DeviceRepair {
     }
 
     /**
-     * Disables the receivers behind every poller the ROM ships. Best effort, one command each, no
-     * fallback: whatever {@code pm} said is the answer, and a frame missing one of the packages
-     * carries on to the next. As in {@link #repairWifi}, an adbd that could not be reached at all
-     * stops the sequence — the remaining commands cannot land either.
+     * Issues every silencing command the ROM needs, one per entry in {@link
+     * #VENDOR_UPDATER_COMMANDS} — the whole package where the package is the unit, the named
+     * components where it is not. Best effort, no fallback: whatever {@code pm} said is the answer,
+     * and a frame missing one of the packages carries on to the next. As in {@link #repairWifi}, an
+     * adbd that could not be reached at all stops the sequence — the remaining commands cannot land
+     * either.
+     *
+     * <p>What this returns describes the transport, not the frame: a {@code =ok} proves adbd answered,
+     * and an already-silent frame must not force-stop a package again just to hear one. Ask {@link
+     * VendorPollers} which is which, and call this only for a poller it reports as not yet silenced
+     * the way this vocabulary intends.
      */
     public static List<Step> silenceVendorUpdater(Executor executor) {
         List<Step> steps = new ArrayList<Step>(VENDOR_UPDATER_COMMANDS.size());
