@@ -206,6 +206,46 @@ network" for 13 hours while every part of the app was correctly reporting the si
 
 Force any rung on a debug build with `POST /control?action=watchdog&level=<1..5>`.
 
+### Vendor OTA pollers
+
+Not a rung — this runs once from `MainActivity.onCreate`, on its own thread, and never blocks or
+restarts anything. The ROM ships two pollers the frame must not answer to: `com.geniatech.upgrade`
+(`/system/app/Update.apk`, an hourly alarm plus BOOT_COMPLETED and every Wi-Fi/ethernet state change,
+pointed at the dead `www.geniatech.net`) and `com.electricobjects.updater` (a 15-minute repeating
+alarm pointed at Electric Objects' cloud). Both are `android.uid.system`.
+
+At launch the app asks **the framework** whether they are already excluded from intent resolution
+(`VendorPollers`, through `getApplicationEnabledSetting` / `getComponentEnabledSetting`, which API 19
+gates on nothing but the cross-user check) and reaches for loopback adbd only when the answer says
+work remains. Read the line in `/logs` accordingly:
+
+| line | meaning |
+|------|---------|
+| `vendor updater: silenced, verified without adbd: …` | the framework says the wake paths are closed. Nothing was written this launch, and nothing needed writing |
+| `vendor updater: after pm disable …=ok -> …=quiet(…)` | the write landed and was confirmed by re-reading |
+| `vendor updater: after adbd is not listening, nothing written -> …=armed(…) \| needs human: adb shell pm disable com.geniatech.upgrade …` | this frame cannot silence itself. Type the commands the line carries, over USB root adb — the setting persists across reboots |
+
+A frame with a host `adb` client attached on USB is in that last group by design: its loopback adbd
+accepts the connection and never reads a byte, which is what used to make every bench run log
+`unreachable (SocketTimeoutException)` on a device that had been silent for days. The read-back is
+what separates that from a genuinely armed frame.
+
+Two things the read is not: a `dumpsys package` **Resolver Table entry is not evidence a component is
+enabled** — KitKat lists disabled components there regardless of state, which is why it must never be
+used as the check. Read `User 0: … enabled=N` (0 DEFAULT, 1 ENABLED, 2 DISABLED, 3 DISABLED_USER, 4
+DISABLED_UNTIL_USED), `pm list packages -d`, or `/data/system/users/0/package-restrictions.xml`. And a
+disable does not dequeue an alarm that is already armed — `AlarmManagerService` cancels alarms for
+removals, not for enable-state changes — so the hourly wake keeps firing, delivering nothing, until the
+next boot, after which nothing re-arms it.
+
+Rolling one back takes *both* forms, because `pm enable <package>` does not clear a leftover
+`<disabled-components>` entry:
+
+```bash
+adb shell pm enable com.geniatech.upgrade && adb shell pm enable com.geniatech.upgrade/.UpdateReceiver
+adb shell pm enable com.electricobjects.updater/.CheckUpdateReceiver && adb shell pm enable com.electricobjects.updater/.BootCompletedReceiver
+```
+
 ## Logs / past state
 
 Raw system logcat is not readable by a normal (non-root) Android app, so the log feature

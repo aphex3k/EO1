@@ -79,6 +79,9 @@ This guide assumes your EO2 already has an IP address on your network that is kn
   1. `adb connect EO_IP_ADDRESS`
 - Disable the EO2 app
   1. `adb shell pm disable com.electricobjects.app`
+- Disable the vendor firmware updater too, so the frame stops waking itself hourly to phone a dead host
+  1. `adb shell pm disable com.geniatech.upgrade`
+  2. The app asks the frame to do this itself at every launch, through its own loopback `adbd` — but that path is dead while a host `adb` client is attached (and on an EO1, always), so running it once here is what makes it stick. A package-level disable covers every entry point the package exports and survives a reboot; `/logs` says whether the frame still has work to do. See [docs/WEBSERVER.md](docs/WEBSERVER.md#vendor-ota-pollers)
 - Download the latest release apk from this repo and install it using this command:
   1. `adb install -r PATH/TO/eo1-app-release.apk`
 - At this point, when you reboot your EO2, the configuration window should pop up. You can either attempt to connect a keyboard to the EO2 to edit the file directly, or follow these instructions to create the configuration.json file manually
