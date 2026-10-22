@@ -84,6 +84,21 @@ public class TsPlayerController implements VideoPlayerController {
         return videoView.getDuration();
     }
 
+    /**
+     * TsPlayer renders through a SurfaceView the .so owns: there is no per-frame callback to hook, and
+     * its reported position falls back to wall-clock elapsed time when the native clock is unusable
+     * (TsVideoView), so anything measured against it would be measuring a timer rather than a decoder.
+     */
+    @Override
+    public boolean supportsPaintSignal() {
+        return false;
+    }
+
+    @Override
+    public long getLastFrameAtMs() {
+        return 0L;
+    }
+
     @Override
     public void seekTo(int positionMs) {
         videoView.seekTo(positionMs);

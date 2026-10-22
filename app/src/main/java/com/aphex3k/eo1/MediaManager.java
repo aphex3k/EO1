@@ -138,6 +138,19 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private final Set<String> noTranscodeVideoKeys =
             Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
     /**
+     * Video assets that were handed to a player at every rung and put nothing on the screen.
+     *
+     * <p>Deliberately <em>not</em> written to the backend as a tag, unlike every other verdict here.
+     * The fourcc tier asserts something about the file, and this asserts only that this device's
+     * decoder produced no pixels from it — a claim the sample description can look clean while the
+     * profile, level or sustained throughput says otherwise. Flagging such an asset would tell the
+     * operator their library is broken when all they own is a black panel, and a wrongly-written tag is
+     * visible in Immich long after the frame that made it is gone. So the mark is in-memory, forgotten on
+     * restart, and its only effect is that the asset is shown as its still preview instead.
+     */
+    private final Set<String> renderSilentVideoKeys =
+            Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
+    /**
      * Backend warnings already shown, keyed by backend id, config fingerprint and the warning
      * text itself. A failing pool makes {@link #rebuildPool} run again on every tick, so
      * without this a degraded backend would toast once per rotation interval. Keying on the
@@ -1357,13 +1370,25 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     @Override
     public void displayThumbnailAsset(Activity activity, String assetKey, boolean isVideo) {
+        displayFallbackSource(activity, assetKey, isVideo, true);
+    }
+
+    /**
+     * @param tagOnDeadEnd false when the asset reaching this rung is not evidence about the file. The
+     *                     ladder's own terminal rung passes true; the render-silent still passes false,
+     *                     because a frame that produced no pixels has already been judged by this
+     *                     device once and a server that cannot answer with a preview is not the user's
+     *                     problem to be tagged for.
+     */
+    private void displayFallbackSource(final Activity activity, final String assetKey,
+                                       final boolean isVideo, final boolean tagOnDeadEnd) {
         final String key = assetKey;
         new Thread(new Runnable() {
             @Override
             public void run() {
                 MediaBackend backend = backendForKey(key);
                 if (backend == null) {
-                    Log.w(TAG, "displayThumbnailAsset: no backend for asset " + key);
+                    Log.w(TAG, "displayFallbackSource: no backend for asset " + key);
                     return;
                 }
                 MediaAsset asset = assetFromKey(key, isVideo);
@@ -1371,15 +1396,19 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 try {
                     source = backend.resolveThumbnailFallback(asset);
                 } catch (Exception e) {
-                    Log.w(TAG, "displayThumbnailAsset: " + key, e);
+                    Log.w(TAG, "displayFallbackSource: " + key, e);
                     postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
-                    tagAssetAsIncompatible(key);
+                    if (tagOnDeadEnd) {
+                        tagAssetAsIncompatible(key);
+                    }
                     return;
                 }
                 if (source == null || source.opener == null) {
-                    Log.i(TAG, "displayThumbnailAsset: backend '" + backend.getId()
+                    Log.i(TAG, "displayFallbackSource: backend '" + backend.getId()
                             + "' has no fallback for " + key);
-                    tagAssetAsIncompatible(key);
+                    if (tagOnDeadEnd) {
+                        tagAssetAsIncompatible(key);
+                    }
                     return;
                 }
                 try {
@@ -1401,12 +1430,47 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                         }
                     });
                 } catch (Exception e) {
-                    Log.w(TAG, "displayThumbnailAsset: " + key, e);
+                    Log.w(TAG, "displayFallbackSource: " + key, e);
                     postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
-                    tagAssetAsIncompatible(key);
+                    if (tagOnDeadEnd) {
+                        tagAssetAsIncompatible(key);
+                    }
                 }
             }
         }, "thumbnail-" + key).start();
+    }
+
+    /**
+     * Whether this asset's video is known to put nothing on this device's screen. True only for the
+     * life of the process; a restart re-judges it from the pixels.
+     */
+    public boolean isRenderSilent(String assetKey) {
+        return assetKey != null && renderSilentVideoKeys.contains(assetKey);
+    }
+
+    /**
+     * Records that a video produced no frame at every rung of the ladder. Never tags anything — see
+     * {@link #renderSilentVideoKeys} for why this verdict is different from the rest.
+     *
+     * @return true the first time this key is recorded, so the caller can log once and skip otherwise
+     */
+    public boolean noteRenderSilent(String assetKey) {
+        if (assetKey == null) {
+            return false;
+        }
+        if (!renderSilentVideoKeys.add(assetKey)) {
+            return false;
+        }
+        Log.w(TAG, "noteRenderSilent: " + assetKey + " put nothing on screen at every rung; showing its"
+                + " still preview instead (not tagging it — this says nothing about the file, and is"
+                + " forgotten on restart)");
+        postDebugInformation("video", "render-silent " + assetKey);
+        return true;
+    }
+
+    /** Displays a render-silent video as its still preview. Idempotent; records nothing. */
+    public void showRenderSilentStill(Activity activity, String assetKey) {
+        displayFallbackSource(activity, assetKey, false, false);
     }
 
     /**
@@ -1422,6 +1486,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     @Override
     public void tagAssetAsIncompatible(final String assetKey) {
+        if (isRenderSilent(assetKey)) {
+            // Refused on purpose, and checked here rather than at each call site because this is the
+            // one verdict that must never reach the server. A render-silent clip is displayed as its
+            // still preview from here on, and that still is itself displayed through the ladder's
+            // terminal rung — so without this gate, a preview Glide cannot decode would tag an asset
+            // whose video this device merely failed to draw, on every rotation that reaches it.
+            Log.i(TAG, "tagAssetAsIncompatible: " + assetKey + " is held as render-silent on this"
+                    + " device, not incompatible with it; leaving the backend untagged");
+            postDebugInformation("Incompatible", "skipped " + assetKey
+                    + " — render-silent verdict, deliberately never tagged");
+            return;
+        }
         new Thread(new Runnable() {
             @Override
             public void run() {

@@ -46,6 +46,21 @@ public interface VideoPlayerController {
 
     int getDuration();
 
+    /**
+     * Whether this engine can prove that a frame reached the screen. Where it cannot, the caller must
+     * not wait for {@link #getLastFrameAtMs()} to move — there is nothing behind it.
+     */
+    boolean supportsPaintSignal();
+
+    /**
+     * Wall-clock milliseconds of the last composited video frame, or 0 when none has arrived since the
+     * current data source was set. Meaningless unless {@link #supportsPaintSignal()} is true.
+     *
+     * <p>Polled rather than delivered as a callback on purpose: {@link #release()} detaches the listener,
+     * so a callback-only signal would go quiet during exactly the handoffs that need it.
+     */
+    long getLastFrameAtMs();
+
     void seekTo(int positionMs);
 
     /**

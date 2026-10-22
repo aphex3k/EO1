@@ -111,6 +111,16 @@ public class MediaPlayerController implements VideoPlayerController {
     }
 
     @Override
+    public boolean supportsPaintSignal() {
+        return true;
+    }
+
+    @Override
+    public long getLastFrameAtMs() {
+        return videoView.getLastFrameAtMs();
+    }
+
+    @Override
     public void seekTo(int positionMs) {
         videoView.seekTo(positionMs);
     }

@@ -116,6 +116,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private static final int LOOP_END_SLACK_MS = 30000;
     /**
+     * How long a video may take to put its first frame on screen. A clip whose bytes are accepted but
+     * never composited raises no error and stops no clock, so a deadline on the picture is the only way
+     * to notice that class at all. Set well above this hardware's slowest observed warm-up: a false
+     * positive costs one descent down the ladder, never a dropped asset.
+     */
+    private static final long VIDEO_PAINT_TIMEOUT_MS = 12000L;
+    /** How often {@link #VIDEO_PAINT_TIMEOUT_MS} is re-checked while an attempt is live. */
+    private static final long VIDEO_PAINT_POLL_MS = 500L;
+    /**
      * How long a page may take to show signs of life. Loads that neither paint nor report an error
      * (a black-holed TCP connect) are caught here rather than left covering the screen.
      */
@@ -129,6 +138,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private View lastVisibleView;
     private String lastVisibleAsset = "";
     private String activeVideoAssetId = "";
+    /**
+     * Which file and which rung the current video attempt is on, readable from the web server's thread.
+     * An original and the server's degraded encode of the same clip are the same size, duration and
+     * codec — the path is the only thing on {@code /state} that tells them apart, and therefore the only
+     * thing that says whether the compatibility ladder actually descended.
+     */
+    private volatile String activeVideoPath = "";
+    private volatile String activeVideoStage = "";
     private ImageView imageView;
     private TextureVideoView mediaPlayerVideoView;
     private TsVideoView tsVideoView;
@@ -238,6 +255,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int videoRateAnchorPosition = -1;
     /** When the watchdog last read the position, so progress can be judged per poll. */
     private long videoWatchdogPrevPollMs = 0L;
+    /**
+     * Watches whether the current video display attempt has produced a frame at all. The position
+     * watchdog above cannot do this: it is armed from {@code onVideoPrepared} (so an attempt whose
+     * {@code prepareAsync()} never returns is watched by nothing) and its only evidence is that the
+     * timeline moved, which a decoder that accepts bytes and paints nothing keeps doing indefinitely.
+     */
+    private Runnable videoPaintRunnable;
+    private String videoPaintAssetId = "";
+    private File videoPaintFile;
+    private WeakReference<MainActivity> videoPaintActivityReference;
+    private DisplayStage videoPaintStage = DisplayStage.ORIGINAL;
+    private long videoPaintStartMs;
+    /** Latched once a frame of this attempt is on screen, so a later freeze is not a never-painted. */
+    private volatile boolean videoPaintProduced;
+    /** Whether the photo underneath has been stepped aside yet for this attempt. */
+    private boolean videoPaintRevealed;
+    /** Set while an unpainted attempt is parked by a pause or quiet hours, waiting to be resumed. */
+    private boolean videoPaintAwaitingResume;
+    private long videoPaintPausedMs;
     /** True after Immich slideshow / MQTT / version check have been started for this resume. */
     private boolean coreLoopStarted = false;
     /**
@@ -380,6 +416,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (this.appLogger == null) {
             // Only reachable if Eo1Application#onCreate itself failed.
             this.appLogger = new AppLogger(this);
+        }
+        // Said out loud, and written to the log that survives, because this is the one fact about a
+        // frame's video path that cannot be recovered afterwards: logcat on a device that has been up for
+        // hours is gone, and a panel that lost its preferred engine looks from outside exactly like a
+        // panel showing a video that renders nothing. The line above reaches logcat only.
+        String tsLoadError = TsPlayerNative.getLoadError();
+        if (tsLoadError != null) {
+            this.appLogger.info(TAG, "TsPlayer native library unavailable (" + tsLoadError
+                    + "); every video on this frame runs on the platform MediaPlayer");
         }
         if (CrashReporter.get() == null) {
             // ...and if its install failed too, the frame would otherwise be back on the framework
@@ -603,6 +648,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 startWebLoadWatchdog();
             }
         }
+        // Same reasoning for a video caught mid-attempt by the options dialog or a screen toggle:
+        // pausing dropped its poll, and without this the photo would stay over a running clip for the
+        // rest of the interval with nothing left to notice.
+        resumeVideoPaintPollIfPending();
 
         int permissionCheckStorage = ContextCompat.checkSelfPermission(MainActivity.this, WRITE_EXTERNAL_STORAGE);
         if (permissionCheckStorage != PackageManager.PERMISSION_GRANTED) {
@@ -723,6 +772,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     protected void onPause() {
         this.activityPaused = true;
         cancelVideoWatchdog();
+        pauseVideoPaintPoll();
         cancelWebLoadWatchdog();
         if (webView != null && lastVisibleView == webView) {
             webView.onPause();
@@ -883,6 +933,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // hideWebView() paused the page; making it visible again would not unfreeze it.
             webView.onResume();
         }
+        // A video whose first frame was still owed when quiet hours began: its surface was hidden
+        // along with everything else, so the deadline resumes only once the panel can paint again.
+        resumeVideoPaintPollIfPending();
         applyCurrentBrightness();
     }
 
@@ -1189,9 +1242,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             cancelVideoWatchdog();
+            cancelVideoPaintWatchdog();
             // No video is active while an image shows; a stale video callback (incl. one from a
             // null-assetId fallback stream) must not match activeVideoAssetId.
             activeVideoAssetId = "";
+            // Cleared with it: a frame permanently showing a photo must not keep reporting the last
+            // video's file and rung, which is otherwise indistinguishable from a live descent.
+            activeVideoPath = "";
+            activeVideoStage = "";
 
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
@@ -1296,8 +1354,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return;
             }
             cancelVideoWatchdog();
+            cancelVideoPaintWatchdog();
             // No video is active while a page shows; a stale video callback must not match.
             activeVideoAssetId = "";
+            activeVideoPath = "";
+            activeVideoStage = "";
             // Asset handoff: free the exclusive Amlogic video pipeline before the browser view.
             videoPlayer.release();
             videoPlayer.setVisibility(View.INVISIBLE);
@@ -1468,8 +1529,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         webUrlOnScreen = "";
         activeWebAssetId = "";
         hideWebView();
-        imageView.setVisibility(View.VISIBLE);
-        lastVisibleView = imageView;
+        revealPhotoView();
         // Cleared, not set to the image: the screen content changed behind the display methods'
         // same-asset check, so the next tick must be allowed to re-show this very photo.
         lastVisibleAsset = "";
@@ -1537,11 +1597,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private void restoreImageViewAfterVideoFailure() {
         cancelVideoWatchdog();
+        cancelVideoPaintWatchdog();
         videoPlayer.release();
         videoPlayer.setVisibility(View.INVISIBLE);
         hideWebView();
-        imageView.setVisibility(View.VISIBLE);
-        lastVisibleView = imageView;
+        revealPhotoView();
     }
 
     /**
@@ -1599,12 +1659,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             mediaManager.removeFromCache(file);
             return;
         }
-        if (isVideo && stage == DisplayStage.ORIGINAL && file != null
+        if (isVideo && stage == DisplayStage.ORIGINAL && file != null && preferTsPlayer
                 && mediaManager.isUsableLocalVideo(file)) {
             // The original's bytes are already on disk (routing is content-deterministic, so a
             // re-fetch through /video/playback would be the same bytes): replay them on the
             // other engine rather than re-downloading. ORIGINAL_REPLAY is the rung after this,
             // so a second failure here cannot loop back into another replay.
+            //
+            // Gated on preferTsPlayer because the point of this rung is a second engine: with the
+            // native library unavailable there is only one, and displayVideo re-derives the choice
+            // from the file's own header, so replaying it selects the engine that just failed. With
+            // no other engine to try, spend the cycle on the degraded source instead.
             Log.i(TAG, "playbackFallback: reusing local original for " + assetId);
             lastVisibleAsset = "";
             displayVideo(file, assetId, DisplayStage.ORIGINAL_REPLAY);
@@ -1971,8 +2036,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // The browser view sits above the image, so claiming the image is on screen only works
             // if the page is taken away first.
             hideWebView();
-            imageView.setVisibility(View.VISIBLE);
-            lastVisibleView = imageView;
+            revealPhotoView();
             mediaManager.showNextImage(this);
         } catch (Exception e) {
             handleException(e);
@@ -2219,6 +2283,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
+        // A video this device has already rendered nothing from, at every rung, is not worth another
+        // black interval: show the still the server can make instead. Judged before the player is
+        // touched, so the clip is not even decoded on the way. Stamps the rotation clock because a
+        // still preview is a display — the kiosk watchdog must not read this as a wedge.
+        if (stage == DisplayStage.ORIGINAL && mediaManager != null
+                && mediaManager.isRenderSilent(assetId)) {
+            lastRotationActivityMs = System.currentTimeMillis();
+            activeVideoPath = "";
+            activeVideoStage = "";
+            Log.i(TAG, "displayVideo: " + assetId + " renders nothing on this device; showing its still");
+            debugInformationProvided(new DebugInformation("displayVideo", "render-silent still "
+                    + assetId));
+            mediaManager.showRenderSilentStill(this, assetId);
+            return;
+        }
+
         lastRotationActivityMs = System.currentTimeMillis();
         debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
@@ -2388,6 +2468,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                         WeakReference<MainActivity> activityReference,
                                         boolean allowTsFallback, DisplayStage stage) {
         controller.stop();
+        activeVideoPath = file.getAbsolutePath();
+        activeVideoStage = stage.name();
         // TsPlayer SurfaceView must be VISIBLE to get a surface; MediaPlayer TextureView can stay
         // invisible until prepared (ImageView covers both until then).
         if (controller == tsPlayerController) {
@@ -2404,10 +2486,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 try {
                     if (!MainActivity.this.isDestroyed()) {
                         hideWebView();
-                        Glide.with(MainActivity.this).clear(imageView);
-                        imageView.setVisibility(View.INVISIBLE);
+                        // "Prepared" is a promise about the file, not about the screen. Where the engine
+                        // can prove a frame arrived, the photo stays put until it does, so an attempt
+                        // that decodes to nothing leaves the picture that was already there instead of
+                        // an empty black root. TsPlayer offers no such proof, so it keeps hiding the
+                        // photo up front — its surface sits below the ImageView either way.
+                        if (!controller.supportsPaintSignal()) {
+                            revealVideoSurface(controller.getView());
+                        }
                         controller.setVisibility(View.VISIBLE);
-                        lastVisibleView = controller.getView();
                         lastVisibleAsset = file.getAbsolutePath();
                         controller.setLooping(true);
                         controller.setFocusable(false);
@@ -2486,6 +2573,180 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         controller.setDisplayRotation(lastVideoRotation);
         controller.setDataSource(file.getPath());
         controller.setLooping(true);
+        // Armed here, before any callback: an attempt whose prepareAsync() never returns and never
+        // raises is exactly the case the prepared-armed position watchdog cannot see.
+        startVideoPaintWatchdog(assetId, file, activityReference, controller, stage);
+    }
+
+    /**
+     * Steps the photo aside for the surface that is now showing something, and records which view is on
+     * screen so {@code turnScreenOn} and the failure paths uncover the right one.
+     *
+     * <p>The ImageView is hidden, never cleared. {@code Glide.clear()} empties the drawable, and every
+     * recovery path in this class reveals the photo by setting it VISIBLE — so clearing here meant that
+     * after the first video of a process, "show the image underneath" showed an empty view over a black
+     * root. The next image asset clears and reloads it in {@code displayPicture} regardless.
+     */
+    private void revealVideoSurface(View videoView) {
+        imageView.setVisibility(View.INVISIBLE);
+        lastVisibleView = videoView;
+        videoPaintRevealed = true;
+    }
+
+    private void startVideoPaintWatchdog(String assetId, File file,
+                                         WeakReference<MainActivity> activityReference,
+                                         VideoPlayerController controller, DisplayStage stage) {
+        cancelVideoPaintWatchdog();
+        if (assetId == null) {
+            return;
+        }
+        videoPaintAssetId = assetId;
+        videoPaintFile = file;
+        videoPaintActivityReference = activityReference;
+        videoPaintStage = stage;
+        videoPaintStartMs = System.currentTimeMillis();
+        // An engine with no per-frame proof cannot fail this check, and must not be watched by it:
+        // getLastFrameAtMs() is a constant 0 there, so arming the poll would spend 12 seconds and then
+        // descend the ladder on every TsPlayer display. The photo was already stepped aside at
+        // prepared, which is the whole of what this check can say about that engine.
+        videoPaintProduced = !controller.supportsPaintSignal();
+        videoPaintRevealed = videoPaintProduced;
+        if (!videoPaintProduced) {
+            scheduleVideoPaintCheck();
+        }
+    }
+
+    private void cancelVideoPaintWatchdog() {
+        if (videoPaintRunnable != null) {
+            handler.removeCallbacks(videoPaintRunnable);
+            videoPaintRunnable = null;
+        }
+        videoPaintAssetId = "";
+        videoPaintFile = null;
+        videoPaintActivityReference = null;
+        videoPaintAwaitingResume = false;
+    }
+
+    /**
+     * Stops polling without dropping the obligation. A display the operator switched away — options
+     * dialog, quiet hours, the screen toggle — cannot composite frames while it is away, so it must
+     * neither spend the deadline nor be forgotten by it.
+     */
+    private void pauseVideoPaintPoll() {
+        if (videoPaintRunnable == null || videoPaintAssetId.isEmpty()) {
+            return;
+        }
+        handler.removeCallbacks(videoPaintRunnable);
+        videoPaintRunnable = null;
+        videoPaintAwaitingResume = !videoPaintProduced;
+        videoPaintPausedMs = System.currentTimeMillis();
+    }
+
+    /** Puts an unpainted attempt back on the clock, with the parked time deducted from its budget. */
+    private void resumeVideoPaintPollIfPending() {
+        if (!videoPaintAwaitingResume) {
+            return;
+        }
+        videoPaintAwaitingResume = false;
+        if (videoPaintAssetId.isEmpty() || !videoPaintAssetId.equals(activeVideoAssetId)) {
+            return;
+        }
+        videoPaintStartMs += System.currentTimeMillis() - videoPaintPausedMs;
+        // turnScreenOn restores only {@code lastVisibleView}, and an attempt that has not painted is
+        // still holding the photo — so the surface would come back INVISIBLE, compose nothing, and the
+        // deadline would spend itself on our own visibility bookkeeping rather than on the clip.
+        videoPlayer.setVisibility(View.VISIBLE);
+        scheduleVideoPaintCheck();
+    }
+
+    private void scheduleVideoPaintCheck() {
+        if (videoPaintRunnable != null) {
+            handler.removeCallbacks(videoPaintRunnable);
+        }
+        videoPaintRunnable = this::runVideoPaintCheck;
+        handler.postDelayed(videoPaintRunnable, VIDEO_PAINT_POLL_MS);
+    }
+
+    /**
+     * One look at whether the current display attempt has produced a frame: reveal the video when it
+     * has, descend one rung of the ladder when it has not often enough to be believed.
+     */
+    private void runVideoPaintCheck() {
+        if (videoPaintRunnable == null || videoPaintAssetId.isEmpty()) {
+            return;
+        }
+        final String assetId = videoPaintAssetId;
+        final File file = videoPaintFile;
+        final WeakReference<MainActivity> activityReference = videoPaintActivityReference;
+        final DisplayStage stage = videoPaintStage;
+        if (!assetId.equals(activeVideoAssetId)) {
+            cancelVideoPaintWatchdog();
+            return;
+        }
+        if (!brightnessManager.getShouldTheScreenBeOn() || activityPaused) {
+            // Not a verdict — the panel is simply not ours to paint right now.
+            pauseVideoPaintPoll();
+            return;
+        }
+        long frameAtMs = videoPlayer.getLastFrameAtMs();
+        if (frameAtMs > 0L) {
+            if (!videoPaintProduced) {
+                videoPaintProduced = true;
+                Log.i(TAG, "video: first frame after " + (System.currentTimeMillis() - videoPaintStartMs)
+                        + "ms asset=" + assetId);
+                debugInformationProvided(new DebugInformation("video", "painted after "
+                        + (System.currentTimeMillis() - videoPaintStartMs) + "ms"));
+            }
+            if (!videoPaintRevealed) {
+                revealVideoSurface(videoPlayer.getView());
+            }
+            cancelVideoPaintWatchdog();
+            return;
+        }
+        long waitedMs = System.currentTimeMillis() - videoPaintStartMs;
+        if (waitedMs < VIDEO_PAINT_TIMEOUT_MS) {
+            scheduleVideoPaintCheck();
+            return;
+        }
+        Log.w(TAG, "video: " + (file != null ? file.getName() : assetId) + " produced no frame within "
+                + VIDEO_PAINT_TIMEOUT_MS / 1000L + "s (stage=" + stage + ")");
+        // activePositionMs, not the player directly: this check fires precisely when a player never
+        // reached a usable state, and getCurrentPosition() throws in exactly that state — an exception
+        // here would reach the global handler and restart the process over a diagnostic line.
+        debugInformationProvided(new DebugInformation("video", "no frame within "
+                + VIDEO_PAINT_TIMEOUT_MS / 1000L + "s stage=" + stage + " pos=" + activePositionMs()));
+        cancelVideoPaintWatchdog();
+        if (activityReference == null || activityReference.get() == null) {
+            return;
+        }
+        // Uncover the photo plane first, whatever the verdict ends up being: this is the one failure
+        // mode where nothing has put a pixel on the panel, so leaving the choice to the rung below could
+        // mean a black screen for the rest of the interval even if the next source never arrives.
+        restoreImageViewAfterVideoFailure();
+        if (stage == DisplayStage.FALLBACK) {
+            // The ladder has run out on a clip that was never *refused* — every rung accepted it and
+            // rendered nothing. That is not a verdict on the file, so it is not tagged: the asset is
+            // remembered as render-silent for this process and shown as its still preview instead.
+            MainActivity target = activityReference.get();
+            if (target != null && mediaManager != null) {
+                mediaManager.noteRenderSilent(assetId);
+                mediaManager.showRenderSilentStill(target, assetId);
+            }
+            return;
+        }
+        // Earlier rungs descend exactly as an error would, so a clip that silently paints nothing
+        // spends the same engine and degraded-source attempts as one that refuses to decode loudly.
+        assetFallback(assetId, activityReference, true, file, stage);
+    }
+
+    /**
+     * Puts the photo plane back on screen and records it as what is showing — the one place that pairing
+     * is written down, so no recovery path can uncover a view while leaving {@code lastVisibleView}
+     * pointing at a video surface nobody can see.
+     */
+    private void revealPhotoView() {
+        imageView.setVisibility(View.VISIBLE);
+        lastVisibleView = imageView;
     }
 
     @Override
@@ -2729,39 +2990,65 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         o.add("telemetry", DeviceTelemetry.snapshot(this));
 
+        // Reported on every build, not just debug. This is the block that answers "what is on the screen,
+        // and why is it black", and a release frame that cannot say which engine it chose, which rung of
+        // the ladder it is on, or whether a single frame ever composited leaves an operator staring at a
+        // black panel with no evidence to act on. The TsPlayer-internal counters stay debug-only.
+        JsonObject video = new JsonObject();
+        video.addProperty("active", videoPlayer == tsPlayerController ? "TsPlayer" : "MediaPlayer");
+        video.addProperty("preferTsPlayer", preferTsPlayer);
+        video.addProperty("tsAvailable", TsPlayerNative.isAvailable());
+        String tsLoadError = TsPlayerNative.getLoadError();
+        if (tsLoadError != null) {
+            video.addProperty("tsLoadError", tsLoadError);
+        }
+        if (!activeVideoPath.isEmpty()) {
+            video.addProperty("path", activeVideoPath);
+            video.addProperty("stage", activeVideoStage);
+        }
+        // "painted" is only a claim where the engine can actually answer it. TsPlayer has no per-frame
+        // signal, so reporting true there would be a tautology — and a tautology on the one field this
+        // block exists to answer is worse than the gap it replaces.
+        boolean paintSignal = videoPlayer.supportsPaintSignal();
+        video.addProperty("paintSignal", paintSignal);
+        if (paintSignal) {
+            video.addProperty("painted", videoPaintProduced);
+            long lastFrameAtMs = videoPlayer.getLastFrameAtMs();
+            video.addProperty("lastFrameAgeMs", lastFrameAtMs > 0L
+                    ? (System.currentTimeMillis() - lastFrameAtMs) : -1L);
+        }
+        if (currentAsset != null && currentAsset.type == MediaType.VIDEO) {
+            video.addProperty("renderSilent", mediaManager.isRenderSilent(currentAsset.key()));
+        }
+        video.addProperty("rotation", lastVideoRotation);
+        video.addProperty("width", lastVideoWidth);
+        video.addProperty("height", lastVideoHeight);
+        if (lastVideoCodec != null) {
+            video.addProperty("codec", lastVideoCodec);
+        }
+        if (lastFrameOrientation != null) {
+            video.addProperty("frameOrientation", lastFrameOrientation);
+        }
+        VideoHeaderProbe.StreamStats stream = lastVideoStats;
+        video.addProperty("fpsMilli", stream.fpsMilli);
+        video.addProperty("avgFrameBytes", stream.avgFrameBytes);
+        video.addProperty("peakFrameBytes", stream.peakFrameBytes);
+        video.addProperty("bitRateBps", stream.bitRateBps);
+        video.addProperty("fileDurationMs", stream.durationMs);
+        video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
+                lastVideoWidth, lastVideoHeight, stream.fpsMilli));
+        // From whichever player is actually showing the clip. These used to be read off
+        // tsVideoView unconditionally, so on the MediaPlayer path they reported 0 — which is
+        // how the slow-playback investigation ended up reconstructing a lap from the stall
+        // log's timestamps instead of reading the position it had already measured.
+        video.addProperty("durationMs", activeDurationMs());
+        video.addProperty("positionMs", activePositionMs());
         if (BuildConfig.DEBUG) {
-            JsonObject video = new JsonObject();
-            video.addProperty("active", videoPlayer == tsPlayerController ? "TsPlayer" : "MediaPlayer");
-            video.addProperty("preferTsPlayer", preferTsPlayer);
-            video.addProperty("tsAvailable", TsPlayerNative.isAvailable());
             video.addProperty("tsFallbacks", tsFallbackCount);
-            video.addProperty("rotation", lastVideoRotation);
-            video.addProperty("width", lastVideoWidth);
-            video.addProperty("height", lastVideoHeight);
-            if (lastVideoCodec != null) {
-                video.addProperty("codec", lastVideoCodec);
-            }
-            if (lastFrameOrientation != null) {
-                video.addProperty("frameOrientation", lastFrameOrientation);
-            }
-            VideoHeaderProbe.StreamStats stream = lastVideoStats;
-            video.addProperty("fpsMilli", stream.fpsMilli);
-            video.addProperty("avgFrameBytes", stream.avgFrameBytes);
-            video.addProperty("peakFrameBytes", stream.peakFrameBytes);
-            video.addProperty("bitRateBps", stream.bitRateBps);
-            video.addProperty("fileDurationMs", stream.durationMs);
-            video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
-                    lastVideoWidth, lastVideoHeight, stream.fpsMilli));
             video.addProperty("playbackRateX100", videoPlaybackRateX100);
             video.addProperty("playbackRateMinX100", videoPlaybackRateMinX100);
             video.addProperty("playbackRateMaxX100", videoPlaybackRateMaxX100);
             video.addProperty("playbackRateSamples", videoPlaybackRateSamples);
-            // From whichever player is actually showing the clip. These used to be read off
-            // tsVideoView unconditionally, so on the MediaPlayer path they reported 0 — which is
-            // how the slow-playback investigation ended up reconstructing a lap from the stall
-            // log's timestamps instead of reading the position it had already measured.
-            video.addProperty("durationMs", activeDurationMs());
-            video.addProperty("positionMs", activePositionMs());
             if (tsVideoView != null) {
                 video.addProperty("generation", tsVideoView.getLoopGeneration());
                 video.addProperty("errors", tsVideoView.getVideoErrorCount());
@@ -2781,8 +3068,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 loopPerf.addProperty("restartMethod", tsVideoView.getLastRestartMethod());
                 video.add("loopPerf", loopPerf);
             }
-            o.add("video", video);
         }
+        o.add("video", video);
 
         if (BuildConfig.DEBUG && !debugInformation.isEmpty()) {
             JsonObject debug = new JsonObject();
