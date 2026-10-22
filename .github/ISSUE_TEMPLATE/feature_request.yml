@@ -1,0 +1,87 @@
+name: "Feature request"
+description: "Something the frame should be able to do and currently cannot."
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This is a small project running on Android 4.4.2 hardware with about 800 MB of usable storage, no touchscreen, and a video decoder that fails silently rather than reporting an error. That constrains what is possible more than most repos, so the useful thing to put here is the *problem you have*, not the implementation you have in mind — there is often a cheaper way to the same result.
+
+        Two hard boundaries, so you are not surprised by a refusal: **no client-side transcoding or resizing** (the downloaded original is used as-is; there is no on-device FFmpeg), and **no ExoPlayer/Media3, no new heavy dependencies, and no raising of the API-19 platform pins**. An idea that needs any of those is a different product.
+
+        Please do not include your Immich password, your `configuration.json`, or anything from `/config` in an attachment — the password is stored in cleartext on the frame. `/state` is the credential-free equivalent.
+
+  - type: input
+    id: capability
+    attributes:
+      label: "What is the missing capability, in one sentence?"
+      description: "Say what the frame should do, not how you would build it."
+      placeholder: "e.g. I want the frame to show today's photos before last year's"
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: "What problem does it solve for you, and how would you want to use it?"
+      description: "Concrete detail helps: what you do with the frame day to day, what you do manually today to work around the gap, and what 'done' would look like from across the room. If you tried to get there with existing settings (multiple backends, quiet-hour cron expressions, the interval, a kiosk web page, local uploads) and it did not work, say what you set and what happened — that is sometimes a bug rather than a missing feature, and bugs get fixed first."
+      value: |
+        My situation:
+
+        What I do today instead:
+
+        What I would expect to see:
+
+        What I already tried with existing settings:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "Which area of the app does this touch?"
+      options:
+        - "Video playback and the display fallback ladder"
+        - "Photo display, cropping and orientation"
+        - "Which assets are in the rotation, and in what order"
+        - "Immich integration (search, albums, metadata, server versions)"
+        - "Local uploads / the web server's file handling"
+        - "Kiosk web pages"
+        - "Scheduling — quiet hours, interval, time zone"
+        - "Screen, brightness and hardware buttons"
+        - "Self-update and installation"
+        - "Kiosk watchdog and self-recovery"
+        - "The LAN web server pages and endpoints"
+        - "Configuration, options dialog, or documentation"
+        - "Something else / not sure"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: frames
+    attributes:
+      label: "Which frame would this be for?"
+      description: "EO1 and EO2 differ in real ways — light sensor, soft-touch buttons, power button, and whether the ROM has network adb — so a feature can be possible on one and not the other."
+      options:
+        - "Both EO1 and EO2"
+        - "EO1 only"
+        - "EO2 only"
+        - "Not applicable / not sure"
+    validations:
+      required: false
+
+  - type: textarea
+    id: assets
+    attributes:
+      label: "If your idea involves media the frame handles, describe the assets involved."
+      description: "Roughly how many, photo or video, typical size and resolution, and where they live (one Immich user, shared albums, uploads). Scale is usually the real constraint: the rotation pool holds compact records because the device cannot hold more, and originals over about a gigabyte are never fetched at all. A feature that is fine with 400 photos and impossible with 90,000 assets is worth saying so about. Please attach a throwaway example rather than a real family photo — originals carry EXIF GPS coordinates and stay indexed on GitHub."
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Anything else — a workaround you are living with, or an earlier issue or release this relates to"
+    validations:
+      required: false
