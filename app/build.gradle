@@ -37,7 +37,7 @@ android {
         else {
             versionCode = 1
         }
-        versionName project.hasProperty('VERSION_NAME') ? project.VERSION_NAME.toString() : "2.0.0"
+        versionName project.hasProperty('VERSION_NAME') ? project.VERSION_NAME.toString() : "2.0.1"
         multiDexEnabled true
         // Prefer Amlogic TsPlayer when libTsPlayer-jni loads; MediaPlayer remains fallback.
         buildConfigField "boolean", "USE_TSPLAYER", "true"
