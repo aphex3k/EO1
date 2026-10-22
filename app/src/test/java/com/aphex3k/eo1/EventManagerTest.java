@@ -2,6 +2,7 @@ package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -35,7 +36,7 @@ public class EventManagerTest {
     @Test
     public void eo1BackButtonRaisesBrightness() {
         assertTrue(eo1.onKeyDown(KeyEvent.KEYCODE_F4));
-        verify(listener, times(1)).adjustMinimumBrightness();
+        verify(listener, times(1)).adjustMinimumBrightness("button");
     }
 
     @Test
@@ -44,7 +45,7 @@ public class EventManagerTest {
         eo1.onKeyDown(KeyEvent.KEYCODE_F4);
         verify(listener, times(1)).toggleScreenOn();
         verify(listener, times(1)).checkForUpdates();
-        verify(listener, never()).adjustMinimumBrightness();
+        verify(listener, never()).adjustMinimumBrightness(anyString());
     }
 
     @Test

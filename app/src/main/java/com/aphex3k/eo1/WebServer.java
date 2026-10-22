@@ -317,13 +317,16 @@ public class WebServer {
 
     /**
      * Actions that may only be fired by POST. They are admin/destructive — arbitrary key
-     * injection, and forcing a kiosk-watchdog rung (whose top rung reboots the device) — so a
-     * cross-origin GET from any web page must not be able to drive them. Other actions keep
-     * their existing GET/POST behavior.
+     * injection, and forcing a kiosk-watchdog rung (whose top rung reboots the device) — or they
+     * change something the frame will still be doing after this request, which is why
+     * {@code brightness} is here: it walks the backlight step and <em>persists</em> the result, so a
+     * cross-origin {@code <img src="http://frame:8080/control?action=brightness">} from any page the
+     * operator ever visits would quietly dim a frame for good. Eight steps and it lands on the 0.3
+     * floor. Other actions keep their existing GET/POST behavior.
      */
     private static final java.util.Set<String> POST_ONLY_ACTIONS =
             java.util.Collections.unmodifiableSet(new java.util.HashSet<String>(
-                    java.util.Arrays.asList("keyevent", "watchdog")));
+                    java.util.Arrays.asList("keyevent", "watchdog", "brightness")));
 
     static boolean controlAllows(String method, String action) {
         if (action == null) {
@@ -1042,7 +1045,7 @@ public class WebServer {
         sb.append("<h2>Control</h2>");
         sb.append("<button onclick=\"ctrl('next')\">Next</button>")
                 .append("<button onclick=\"ctrl('screen')\">Screen</button>")
-                .append("<button onclick=\"ctrl('brightness')\">Brightness+</button>")
+                .append("<button onclick=\"ctrl('brightness','POST')\">Brightness+</button>")
                 .append("<button onclick=\"ctrl('check-updates')\">Check updates</button>")
                 .append("<button onclick=\"ctrl('install-staged')\">Install on the frame</button>")
                 .append("<button onclick=\"ctrl('update-reset')\">Update reset</button>")
@@ -1074,7 +1077,7 @@ public class WebServer {
      * string literal open for the next one to close.
      */
     static String controlSectionJs() {
-        return "function ctrl(a){fetch('/control?action='+a).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}"
+        return "function ctrl(a,m){fetch('/control?action='+a,{method:m||'GET'}).then(r=>r.json()).then(j=>alert(j.action+':'+(j.fired?'fired':'unknown')));}"
                 // An update no silent transport can install stays staged and says so here, instead of
                 // putting a confirmation dialog on an unattended screen. textContent, never innerHTML:
                 // expectedVersionName arrives in a manifest fetched off the network.

@@ -93,16 +93,90 @@ public class SettingsManagerTest {
      * itself every time the frame does.
      */
     @Test
-    public void minimumBrightnessStepDefaultsToTheFloorAndOutlivesTheManager() throws Exception {
+    public void minimumBrightnessStepOutlivesTheManager() throws Exception {
         FakeListener listener = new FakeListener(tmp.newFolder("files"));
 
         SettingsManager sm = new SettingsManager(listener);
-        assertEquals(0, sm.getMinimumBrightnessStep());
+        SettingsManager.forgetBrightnessLevel();
+        assertEquals("a frame nobody has adjusted is absent, not at step 0",
+                SettingsManager.STEP_ABSENT, sm.readMinimumBrightnessStep());
 
-        sm.setMinimumBrightnessStep(4);
-        assertEquals(4, sm.getMinimumBrightnessStep());
+        assertTrue("the store said it kept it", sm.setMinimumBrightnessStep(4));
+        assertEquals(4, sm.readMinimumBrightnessStep());
         // A fresh SettingsManager over the same prefs is what an Activity re-creation hands back.
-        assertEquals(4, new SettingsManager(listener).getMinimumBrightnessStep());
+        assertEquals(4, new SettingsManager(listener).readMinimumBrightnessStep());
+    }
+
+    /**
+     * Written with {@code commit()}, not {@code apply()}: a frame that is power-cycled or crashes a
+     * second after the tap never runs the queued disk write, and the level comes back as the default
+     * floor on the next boot. That is the report this whole path exists to answer, so the choice is
+     * pinned here rather than left to the reader of a one-word call.
+     */
+    @Test
+    public void minimumBrightnessStepIsWrittenSynchronously() throws Exception {
+        FakeListener listener = new FakeListener(tmp.newFolder("files"));
+
+        assertTrue(new SettingsManager(listener).setMinimumBrightnessStep(2));
+        assertTrue("a level saved with apply() is a level a hard exit can drop",
+                listener.prefs().lastWriteWasCommit);
+    }
+
+    /**
+     * A store that cannot answer must say so rather than agree with the tap: today it returns quietly,
+     * and "written" and "never stored" then read identically on {@code /state}.
+     */
+    @Test
+    public void minimumBrightnessStepReportsAStoreItCouldNotWrite() throws Exception {
+        FakeListener noPrefs = new FakeListener(tmp.newFolder("files")) {
+            @Override public SharedPreferences getDefaultSharedPreferences() { return null; }
+        };
+        assertFalse(new SettingsManager(noPrefs).setMinimumBrightnessStep(5));
+    }
+
+    /**
+     * "Nobody has ever adjusted this frame" and "the store would not say" both used to answer 0 —
+     * which is also the dimmest level the button has, so {@code /state} could not tell a dim frame
+     * from an untouched one, and the app could not tell whether to trust its own reading.
+     */
+    @Test
+    public void anAbsentStoreIsAnsweredDifferentlyFromAnUnreadableOne() throws Exception {
+        SettingsManager.forgetBrightnessLevel();
+        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+
+        assertEquals(SettingsManager.STEP_ABSENT, sm.readMinimumBrightnessStep());
+        assertEquals("absent", sm.minimumBrightnessStoreState());
+
+        // A deliberate floor is a value, not an absence: this is the frame an operator did set.
+        assertTrue(sm.setMinimumBrightnessStep(0));
+        assertEquals(0, sm.readMinimumBrightnessStep());
+        assertEquals("value", sm.minimumBrightnessStoreState());
+    }
+
+    /** A store that fails answers with the last level this process saw on disk, never the floor. */
+    @Test
+    public void anUnreadableStoreFallsBackToTheLastKnownLevel() throws Exception {
+        SettingsManager.forgetBrightnessLevel();
+        SettingsManager working = new SettingsManager(new FakeListener(tmp.newFolder("files-known")));
+        assertTrue(working.setMinimumBrightnessStep(5));
+        assertEquals(5, working.readMinimumBrightnessStep());
+
+        // A different files dir on purpose: the point is a store that will not open at all, and
+        // TemporaryFolder refuses a name this test has already taken.
+        SettingsManager broken = new SettingsManager(new FakeListener(tmp.newFolder("files-broken")) {
+            @Override public SharedPreferences getDefaultSharedPreferences() {
+                throw new IllegalStateException("store would not open");
+            }
+        });
+
+        assertEquals(SettingsManager.STEP_UNREADABLE, broken.readMinimumBrightnessStep());
+        assertEquals("unreadable", broken.minimumBrightnessStoreState());
+        assertEquals("the level this process last saw on disk, which is what BrightnessManager falls back to",
+                5, broken.lastKnownGoodBrightnessStep());
+
+        SettingsManager.forgetBrightnessLevel();
+        assertEquals("with nothing ever read, there is no level to fall back to and it says so",
+                SettingsManager.STEP_ABSENT, broken.lastKnownGoodBrightnessStep());
     }
 
     @Test
@@ -364,6 +438,8 @@ public class SettingsManagerTest {
         @Override public LayoutInflater getLayoutInflater() { return null; }
         @Override public Object getSystemService(String alarmService) { return null; }
         @Override public SharedPreferences getDefaultSharedPreferences() { return prefs; }
+        /** The same object {@link #getDefaultSharedPreferences()} hands out, typed. */
+        FakeSharedPreferences prefs() { return prefs; }
         @Override public void handleException(Exception e) {}
         @Override public void debugInformationProvided(DebugInformation debugInformation) {}
         @Override public void displayPicture(File finalTempFile, String assetId) {}
@@ -374,6 +450,13 @@ public class SettingsManagerTest {
     private static class FakeSharedPreferences implements SharedPreferences {
         private final Map<String, Object> values = new HashMap<String, Object>();
         private static final Object REMOVED = new Object();
+        /**
+         * Whether the most recent edit went in through {@code commit()} rather than {@code apply()}.
+         * In-memory, so the fake cannot model the durability difference itself; this records which
+         * door was used, which is the whole difference for the backlight level — a frame that is
+         * power-cycled or crashes moments after a tap never lets {@code apply()}'s queued write run.
+         */
+        boolean lastWriteWasCommit;
 
         @Override
         public Set<String> getStringSet(String key, Set<String> defValue) {
@@ -444,10 +527,15 @@ public class SettingsManagerTest {
             @Override public Editor putBoolean(String key, boolean value) { pending.put(key, value); return this; }
             @Override public Editor remove(String key) { pending.put(key, REMOVED); return this; }
             @Override public Editor clear() { clearAll = true; pending.clear(); return this; }
-            @Override public boolean commit() { apply(); return true; }
+            @Override public boolean commit() {
+                apply();
+                lastWriteWasCommit = true;
+                return true;
+            }
 
             @Override
             public void apply() {
+                lastWriteWasCommit = false;
                 if (clearAll) {
                     values.clear();
                     clearAll = false;

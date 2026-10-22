@@ -56,7 +56,9 @@ public class HardwareCapabilitiesTest {
     private void assertEo2(HardwareCapabilities caps) {
         assertEquals("EO2", caps.platform());
         assertFalse(caps.supportsLightSensor());
-        assertFalse(caps.supportsScreenBrightness());
+        // The panel takes a brightness value; only the button is missing. Gating the brightness
+        // action on this flag is what pinned every EO2 to the default floor.
+        assertTrue(caps.supportsScreenBrightness());
         assertFalse(caps.supportsBrightnessButton());
         assertTrue(caps.supportsPowerButton());
         assertEquals(android.view.KeyEvent.KEYCODE_POWER, caps.screenToggleKeyCode());

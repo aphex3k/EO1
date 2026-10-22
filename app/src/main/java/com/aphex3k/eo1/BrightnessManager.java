@@ -51,6 +51,39 @@ public class BrightnessManager {
     private int minimumBrightnessStep = MIN_STEP;
 
     /**
+     * Where {@link #minimumBrightnessStep} came from: {@code "prefs"} (read off disk), {@code "web"}
+     * or {@code "button"} (moved by an operator since), {@code "lastKnownGood"} (this process could
+     * not read the store and is using a value it read earlier), or {@code "default"} (nothing
+     * answered, so the frame is on the floor). The distinction is the whole point: a frame sitting at
+     * 0.3 because nobody ever adjusted it and a frame that lost its level are the same number and
+     * different facts.
+     */
+    private volatile String stepSource = "default";
+
+    /**
+     * Whether {@link #minimumBrightnessStep} is a fact about this frame or a placeholder for one.
+     * False only after a store that would not answer: the next step must then re-read and grow from
+     * what is actually stored, because a guess grown and written back is how a bad read becomes
+     * permanent. The first press clears it: a level somebody chose is a fact even when the store
+     * refused to keep it.
+     */
+    private volatile boolean stepAuthoritative = false;
+
+    /**
+     * The last level change this process made, for {@code /state}: from, to, who, when, durable.
+     * Volatile as a group because {@code /state} renders them on the web server's thread while the
+     * press that fills them happens on the UI thread, and a record that exists to answer "who moved
+     * this" must not be able to mix one press's {@code to} with the last press's {@code via}.
+     * {@code changedAtMs} of 0 means no press has happened in this process, so {@code durable}
+     * before that point describes nothing.
+     */
+    private volatile int changedFromStep = MIN_STEP;
+    private volatile int changedToStep = MIN_STEP;
+    private volatile String changedVia = "none";
+    private volatile long changedAtMs = 0L;
+    private volatile boolean changedDurably = true;
+
+    /**
      * The most recent light reading the curve used. Starts at {@link #minLux} so a platform with no
      * usable sensor (the EO2, and the EO1 before its first reading) sits exactly on the floor
      * instead of at whatever the hardware last happened to report.
@@ -77,8 +110,7 @@ public class BrightnessManager {
         this.store = store;
         this.sensorManager = sensorManager;
 
-        this.minimumBrightnessStep = clampStep(store != null ? store.getMinimumBrightnessStep() : MIN_STEP);
-        this.minBrightness = floorBrightness(this.minimumBrightnessStep);
+        restoreStep();
 
         Sensor registeredSensor = null;
         SensorEventListener sensorEventListener = null;
@@ -158,20 +190,149 @@ public class BrightnessManager {
         return lastLightValue;
     }
 
+    /** Where the current step came from: see {@link #stepSource}. */
+    public String stepSource() {
+        return stepSource;
+    }
+
+    /** Whether the level this manager holds was read from disk rather than inferred. */
+    public boolean isStepAuthoritative() {
+        return stepAuthoritative;
+    }
+
+    public int changedFromStep() {
+        return changedFromStep;
+    }
+
+    public int changedToStep() {
+        return changedToStep;
+    }
+
+    public String changedVia() {
+        return changedVia;
+    }
+
+    /** Epoch ms of the last step change this process made; 0 when it has made none. */
+    public long changedAtMs() {
+        return changedAtMs;
+    }
+
+    public boolean changedDurably() {
+        return changedDurably;
+    }
+
+    /** One line for the debug overlay, logcat and — what matters here — {@code eo1-app.log}. */
+    private void report(String key, String value) {
+        BrightnessManagerListener listener = this.brightnessListener.get();
+
+        if (listener != null) {
+            listener.debugInformationProvided(new DebugInformation(key, value));
+        }
+    }
+
     /**
-     * Every activation of the back button on the EO1 raises the floor one step; past the top it
-     * wraps back to the floor. The new level is persisted before it is applied, so a frame that
-     * dies a second later still comes back where the user left it.
+     * Reads the level back from the store, once, at construction — and records <em>how</em> that read
+     * answered. "Nobody has ever adjusted this frame" and "the store would not say" both end at
+     * {@link #MIN_STEP} as a number; only the second is a failure, and only the second may be
+     * silently grown from later.
      */
-    public void raiseMinimumBrightnessStep() {
-        this.minimumBrightnessStep = this.minimumBrightnessStep >= MAX_STEP ? MIN_STEP : this.minimumBrightnessStep + 1;
+    private void restoreStep() {
+        if (store == null) {
+            this.stepSource = "default";
+            this.stepAuthoritative = false;
+            this.minimumBrightnessStep = MIN_STEP;
+        } else {
+            int stored = store.readMinimumBrightnessStep();
+            if (stored >= MIN_STEP) {
+                this.stepSource = "prefs";
+                this.stepAuthoritative = true;
+                this.minimumBrightnessStep = clampStep(stored);
+            } else if (stored == SettingsManager.STEP_ABSENT) {
+                this.stepSource = "default";
+                this.stepAuthoritative = false;
+                this.minimumBrightnessStep = MIN_STEP;
+            } else {
+                int cached = store.lastKnownGoodBrightnessStep();
+                this.stepSource = cached >= MIN_STEP ? "lastKnownGood" : "default";
+                this.stepAuthoritative = false;
+                this.minimumBrightnessStep = clampStep(cached);
+            }
+        }
+        this.minBrightness = floorBrightness(this.minimumBrightnessStep);
+        this.changedFromStep = this.minimumBrightnessStep;
+        this.changedToStep = this.minimumBrightnessStep;
+    }
+
+    /**
+     * Every activation of the brightness control raises the floor one step; past the top it wraps
+     * back to the floor. The wrap reaching {@link #MIN_STEP} is a destination an operator chose by
+     * pressing again, not a reset — which is why the change is recorded with who asked for it
+     * ({@code /state}'s {@code lastChange} and one line in {@code eo1-app.log}) rather than prevented.
+     *
+     * <p>The new level is persisted before it is applied, so a frame that dies a second later still
+     * comes back where the user left it.
+     *
+     * <p>Reachable on a frame with no brightness <em>button</em> — the EO2's control is the web
+     * page's, which is the documented replacement for the soft keys it lacks. Nothing in this method
+     * is platform-specific, so nothing here asks.
+     *
+     * @param via what moved it — {@code "button"}, {@code "web"}, or anything else that proves to be
+     *            the source. Recorded, not trusted for permission.
+     * @return true when the new level was written down. A {@code false} means the panel changed and
+     *         the next boot will not remember it, which the caller has to say out loud.
+     */
+    public boolean raiseMinimumBrightnessStep(String via) {
+        final int base = steppedBase();
+        this.minimumBrightnessStep = base >= MAX_STEP ? MIN_STEP : base + 1;
         this.minBrightness = floorBrightness(this.minimumBrightnessStep);
 
-        if (store != null) {
-            store.setMinimumBrightnessStep(this.minimumBrightnessStep);
-        }
+        boolean durable = store != null && store.setMinimumBrightnessStep(this.minimumBrightnessStep);
+        // A press makes the level chosen, not guessed, whatever the store did with it — and
+        // unconditionally so: gating this on {@code durable} leaves a store that answers neither
+        // read nor write growing every press from the same stale cache, and the button stops
+        // moving the panel on the exact gesture the field report uses to recover a dim frame.
+        // Whether the choice outlived this process is a separate fact, reported as {@code durable}.
+        this.stepAuthoritative = true;
+
+        this.changedFromStep = base;
+        this.changedToStep = this.minimumBrightnessStep;
+        this.changedVia = via;
+        this.changedAtMs = System.currentTimeMillis();
+        this.changedDurably = durable;
+        this.stepSource = via;
+
+        report("brightness step", this.changedFromStep + " -> " + this.changedToStep + " via " + via
+                + (durable ? "" : " (NOT PERSISTED)"));
 
         notifyBrightnessChanged();
+        return durable;
+    }
+
+    /**
+     * The step to grow from. Normally the one this manager holds; after a read that could not be
+     * trusted, whatever the store says now instead, so a value this process guessed at can never be
+     * written back as though it had been chosen.
+     */
+    private int steppedBase() {
+        if (stepAuthoritative || store == null) {
+            return this.minimumBrightnessStep;
+        }
+        int stored = store.readMinimumBrightnessStep();
+        if (stored == SettingsManager.STEP_ABSENT) {
+            // The store answered this time and it genuinely holds nothing, which is a confirmed
+            // floor rather than a failure to know one.
+            this.stepAuthoritative = true;
+            return MIN_STEP;
+        }
+        if (stored >= MIN_STEP) {
+            this.stepAuthoritative = true;
+            return clampStep(stored);
+        }
+        int cached = store.lastKnownGoodBrightnessStep();
+        report("brightness step", "store would not answer; stepping from "
+                + (cached >= MIN_STEP ? "the last known level " + cached : "the floor")
+                + " — this frame has no confirmed level");
+        return cached >= MIN_STEP ? clampStep(cached) : this.minimumBrightnessStep;
     }
 
     /** A sensor reading: remember it, and let the listener re-derive the level from it. */
@@ -219,8 +380,18 @@ public class BrightnessManager {
         return minBrightnessFloor + (maxBrightness - minBrightnessFloor) * step / (float) MAX_STEP;
     }
 
-    /** A step from an older or newer build is not this build's business: fall back to the floor. */
+    /**
+     * A step outside this build's range — one written by a future build with more of them — goes to
+     * the nearest end, not to the floor. Sending it to {@link #MIN_STEP} would make a level the
+     * operator set at 1.0 read as 0.3 after an update, and the next tap would persist that, so the
+     * one value nobody chose is the one value a stray number must never become. The sentinel answers
+     * from {@link SettingsManager} are negative, so they land here and leave on the floor, which is
+     * what an unreadable or never-written store means.
+     */
     private static int clampStep(int step) {
-        return step < MIN_STEP || step > MAX_STEP ? MIN_STEP : step;
+        if (step < MIN_STEP) {
+            return MIN_STEP;
+        }
+        return step > MAX_STEP ? MAX_STEP : step;
     }
 }

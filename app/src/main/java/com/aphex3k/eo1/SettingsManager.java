@@ -4,6 +4,7 @@ import android.app.AlarmManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Build;
+import android.util.Log;
 
 import androidx.annotation.Keep;
 
@@ -21,6 +22,7 @@ import java.util.Objects;
 @Keep
 public class SettingsManager {
 
+    private static final String TAG = "SettingsManager";
     private final WeakReference<SettingsManagerListener> listener;
     private static final String CONFIG_FILENAME = "configuration.json";
     /**
@@ -155,34 +157,125 @@ public class SettingsManager {
     }
 
     /**
-     * The persisted backlight step, or 0 (the floor) if nothing was ever stored. Range clamping is
-     * {@link BrightnessManager}'s job — this is deliberately a dumb int, since what the number
-     * means belongs to the brightness code and not to where it is kept.
+     * {@link #readMinimumBrightnessStep()} could not find the key at all: nobody has ever adjusted
+     * this frame. A real answer, not a failure — it is what a fresh install looks like.
      */
-    public int getMinimumBrightnessStep() {
+    public static final int STEP_ABSENT = -1;
+    /**
+     * {@link #readMinimumBrightnessStep()} got no answer from the store: no host activity, no
+     * preferences, or a read that threw. This is NOT "the frame has no level", and treating it as
+     * such is how a frame dims itself and then writes the dimming back as if it had been asked to.
+     */
+    public static final int STEP_UNREADABLE = -2;
+    /**
+     * The last level any {@code SettingsManager} in this process saw on disk or wrote to it.
+     *
+     * <p>Static on purpose: {@code MainActivity.onCreate} builds a fresh {@code SettingsManager} (and
+     * a fresh {@code BrightnessManager}) on every re-creation of the Activity, and a re-creation is
+     * exactly the event this cache exists to survive. An instance field here would be empty at the
+     * only moment it is ever read.
+     */
+    private static volatile int lastKnownGoodStep = STEP_ABSENT;
+
+    /**
+     * The level this process last knew was on disk, or a sentinel if it never knew one. Reads a
+     * process value, but is an instance method so a caller's store — including a test's — is the
+     * only thing it can talk to.
+     */
+    public int lastKnownGoodBrightnessStep() {
+        return lastKnownGoodStep;
+    }
+
+    /**
+     * Drops the process cache. Only for tests: a static outlives the case that filled it, and one
+     * case's last-known-good leaking into the next would make a pass prove nothing.
+     */
+    static void forgetBrightnessLevel() {
+        lastKnownGoodStep = STEP_ABSENT;
+    }
+
+    /**
+     * The persisted backlight step, exactly: a step in range, {@link #STEP_ABSENT}, or
+     * {@link #STEP_UNREADABLE}. Range clamping is {@link BrightnessManager}'s job — this is
+     * deliberately a dumb int, since what the number means belongs to the brightness code and not to
+     * where it is kept.
+     *
+     * <p>The two failures are kept apart because they deserve different handling, and because
+     * collapsing them into {@code 0} — which used to happen, and which is also the dimmest level the
+     * button has — is the whole reason an EO1 that dimmed itself could not be told apart from one
+     * that was simply never adjusted.
+     */
+    public int readMinimumBrightnessStep() {
         SettingsManagerListener listener = this.listener.get();
         if (listener == null) {
-            return 0;
+            Log.w(TAG, "backlight level unreadable: settings store has no host activity");
+            return STEP_UNREADABLE;
         }
         try {
             SharedPreferences prefs = listener.getDefaultSharedPreferences();
-            return prefs != null ? prefs.getInt(PREF_MIN_BRIGHTNESS_STEP, 0) : 0;
+            if (prefs == null) {
+                Log.w(TAG, "backlight level unreadable: no default shared preferences");
+                return STEP_UNREADABLE;
+            }
+            if (!prefs.contains(PREF_MIN_BRIGHTNESS_STEP)) {
+                return STEP_ABSENT;
+            }
+            int step = prefs.getInt(PREF_MIN_BRIGHTNESS_STEP, STEP_ABSENT);
+            if (step == STEP_ABSENT) {
+                // The key was there a moment ago and is not now; honest answer is "absent".
+                return STEP_ABSENT;
+            }
+            lastKnownGoodStep = step;
+            return step;
         } catch (Exception e) {
-            return 0;
+            Log.w(TAG, "backlight level unreadable", e);
+            return STEP_UNREADABLE;
         }
     }
 
-    public void setMinimumBrightnessStep(int step) {
+    /**
+     * One of {@code "value"}, {@code "absent"}, {@code "unreadable"} — whether the store answered
+     * just now, reported nothing stored, or would not say. Reported in {@code /state} so "the frame
+     * dimmed itself" is answerable from the frame.
+     */
+    public String minimumBrightnessStoreState() {
+        int stored = readMinimumBrightnessStep();
+        if (stored >= 0) {
+            return "value";
+        }
+        return stored == STEP_ABSENT ? "absent" : "unreadable";
+    }
+
+    /**
+     * @return true when {@code step} is on disk. Written with {@code commit()}, not {@code apply()}:
+     *         {@code apply()} hands the write to a background thread that a hard exit never reaches,
+     *         and this app already lost a value that way once — see {@code ImmichSessionStore}, which
+     *         commits for the same reason. A level that lived only in memory comes back as the
+     *         default floor on the next boot, so the tap the frame was reported for would have been
+     *         undone by the next crash even without the gate that did undo it.
+     */
+    public boolean setMinimumBrightnessStep(int step) {
         SettingsManagerListener listener = this.listener.get();
         if (listener == null) {
-            return;
+            Log.e(TAG, "backlight level NOT persisted: settings store has no host activity");
+            return false;
         }
         try {
             SharedPreferences prefs = listener.getDefaultSharedPreferences();
-            if (prefs != null) {
-                prefs.edit().putInt(PREF_MIN_BRIGHTNESS_STEP, step).apply();
+            if (prefs == null) {
+                Log.e(TAG, "backlight level NOT persisted: no default shared preferences");
+                return false;
             }
-        } catch (Exception ignored) {
+            boolean durable = prefs.edit().putInt(PREF_MIN_BRIGHTNESS_STEP, step).commit();
+            if (!durable) {
+                Log.e(TAG, "backlight level NOT persisted: the preferences write failed");
+            } else if (step >= 0) {
+                lastKnownGoodStep = step;
+            }
+            return durable;
+        } catch (Exception e) {
+            Log.e(TAG, "backlight level NOT persisted", e);
+            return false;
         }
     }
 
