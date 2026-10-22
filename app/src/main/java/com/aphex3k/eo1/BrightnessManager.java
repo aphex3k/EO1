@@ -159,19 +159,25 @@ public class BrightnessManager {
     }
 
     /**
-     * Every activation of the back button on the EO1 raises the floor one step; past the top it
-     * wraps back to the floor. The new level is persisted before it is applied, so a frame that
-     * dies a second later still comes back where the user left it.
+     * Every activation of the brightness control raises the floor one step; past the top it wraps
+     * back to the floor. The new level is persisted before it is applied, so a frame that dies a
+     * second later still comes back where the user left it.
+     *
+     * <p>Reachable on a frame with no brightness <em>button</em> — the EO2's control is the web
+     * page's, which is the documented replacement for the soft keys it lacks. Nothing in this method
+     * is platform-specific, so nothing here asks.
+     *
+     * @return true when the new level was written down. A {@code false} means the panel changed and
+     *         the next boot will not remember it, which the caller has to say out loud.
      */
-    public void raiseMinimumBrightnessStep() {
+    public boolean raiseMinimumBrightnessStep() {
         this.minimumBrightnessStep = this.minimumBrightnessStep >= MAX_STEP ? MIN_STEP : this.minimumBrightnessStep + 1;
         this.minBrightness = floorBrightness(this.minimumBrightnessStep);
 
-        if (store != null) {
-            store.setMinimumBrightnessStep(this.minimumBrightnessStep);
-        }
+        boolean durable = store != null && store.setMinimumBrightnessStep(this.minimumBrightnessStep);
 
         notifyBrightnessChanged();
+        return durable;
     }
 
     /** A sensor reading: remember it, and let the listener re-derive the level from it. */

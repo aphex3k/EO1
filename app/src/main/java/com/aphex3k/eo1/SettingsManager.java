@@ -4,6 +4,7 @@ import android.app.AlarmManager;
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Build;
+import android.util.Log;
 
 import androidx.annotation.Keep;
 
@@ -21,6 +22,7 @@ import java.util.Objects;
 @Keep
 public class SettingsManager {
 
+    private static final String TAG = "SettingsManager";
     private final WeakReference<SettingsManagerListener> listener;
     private static final String CONFIG_FILENAME = "configuration.json";
     /**
@@ -158,31 +160,58 @@ public class SettingsManager {
      * The persisted backlight step, or 0 (the floor) if nothing was ever stored. Range clamping is
      * {@link BrightnessManager}'s job — this is deliberately a dumb int, since what the number
      * means belongs to the brightness code and not to where it is kept.
+     *
+     * <p>A failed read also answers 0, so it says so: "nobody has ever tapped this frame" and "the
+     * store would not answer" arrive at the same number, and only one of them is the floor the
+     * operator is looking at.
      */
     public int getMinimumBrightnessStep() {
         SettingsManagerListener listener = this.listener.get();
         if (listener == null) {
+            Log.w(TAG, "backlight level unreadable: settings store has no host activity");
             return 0;
         }
         try {
             SharedPreferences prefs = listener.getDefaultSharedPreferences();
-            return prefs != null ? prefs.getInt(PREF_MIN_BRIGHTNESS_STEP, 0) : 0;
+            if (prefs == null) {
+                Log.w(TAG, "backlight level unreadable: no default shared preferences");
+                return 0;
+            }
+            return prefs.getInt(PREF_MIN_BRIGHTNESS_STEP, 0);
         } catch (Exception e) {
+            Log.w(TAG, "backlight level unreadable", e);
             return 0;
         }
     }
 
-    public void setMinimumBrightnessStep(int step) {
+    /**
+     * @return true when {@code step} is on disk. Written with {@code commit()}, not {@code apply()}:
+     *         {@code apply()} hands the write to a background thread that a hard exit never reaches,
+     *         and this app already lost a value that way once — see {@code ImmichSessionStore}, which
+     *         commits for the same reason. A level that lived only in memory comes back as the
+     *         default floor on the next boot, so the tap the frame was reported for would have been
+     *         undone by the next crash even without the gate that did undo it.
+     */
+    public boolean setMinimumBrightnessStep(int step) {
         SettingsManagerListener listener = this.listener.get();
         if (listener == null) {
-            return;
+            Log.e(TAG, "backlight level NOT persisted: settings store has no host activity");
+            return false;
         }
         try {
             SharedPreferences prefs = listener.getDefaultSharedPreferences();
-            if (prefs != null) {
-                prefs.edit().putInt(PREF_MIN_BRIGHTNESS_STEP, step).apply();
+            if (prefs == null) {
+                Log.e(TAG, "backlight level NOT persisted: no default shared preferences");
+                return false;
             }
-        } catch (Exception ignored) {
+            boolean durable = prefs.edit().putInt(PREF_MIN_BRIGHTNESS_STEP, step).commit();
+            if (!durable) {
+                Log.e(TAG, "backlight level NOT persisted: the preferences write failed");
+            }
+            return durable;
+        } catch (Exception e) {
+            Log.e(TAG, "backlight level NOT persisted", e);
+            return false;
         }
     }
 

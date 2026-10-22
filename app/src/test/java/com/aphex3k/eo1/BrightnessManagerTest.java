@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -24,6 +25,7 @@ public class BrightnessManagerTest {
     private static BrightnessManager withStoredStep(MockBrightnessListener listener, int storedStep) {
         SettingsManager store = mock(SettingsManager.class);
         when(store.getMinimumBrightnessStep()).thenReturn(storedStep);
+        when(store.setMinimumBrightnessStep(anyInt())).thenReturn(true);
         return new BrightnessManager(listener, mock(SensorManager.class), new Eo1Capabilities(), store);
     }
 
@@ -170,6 +172,32 @@ public class BrightnessManagerTest {
         assertEquals(0.8f, brightnessManager.currentBrightness(), DELTA);
         assertEquals("waking must not fall back to the default floor",
                 0.8f, listener.currentBrightness, DELTA);
+    }
+
+    /**
+     * The EO2 has no brightness <em>button</em>, which was read as "no brightness control at all" and
+     * left its floor pinned at the default forever — the panel takes a value, the frame simply had no
+     * way to ask for one, and the web page's Brightness+ reported "fired" while nothing was stored.
+     * Nothing in the stepping or the storing is platform-specific, so a level set by any route has to
+     * land on the panel and in the store here exactly as it does on an EO1.
+     */
+    @Test
+    public void frameWithNoBrightnessButtonStillRaisesAndStoresTheFloor() {
+        MockBrightnessListener listener = new MockBrightnessListener();
+        SettingsManager store = mock(SettingsManager.class);
+        when(store.getMinimumBrightnessStep()).thenReturn(BrightnessManager.MIN_STEP);
+        when(store.setMinimumBrightnessStep(anyInt())).thenReturn(true);
+        BrightnessManager brightnessManager =
+                new BrightnessManager(listener, mock(SensorManager.class), new Eo2Capabilities(), store);
+
+        assertEquals(BrightnessManager.minBrightnessFloor, brightnessManager.minimumBrightness(), DELTA);
+
+        assertTrue("the store accepted the new level", brightnessManager.raiseMinimumBrightnessStep());
+        verify(store).setMinimumBrightnessStep(BrightnessManager.MIN_STEP + 1);
+        assertEquals(0.4f, brightnessManager.minimumBrightness(), DELTA);
+        // No sensor means no curve, so the floor is the whole answer — and it is now the set floor.
+        assertEquals("the level the panel was given must be the raised one",
+                0.4f, listener.currentBrightness, DELTA);
     }
 
     /** The EO2 has no light sensor and no brightness button; it sits exactly on the floor. */
