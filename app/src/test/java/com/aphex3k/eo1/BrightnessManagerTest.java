@@ -24,7 +24,7 @@ public class BrightnessManagerTest {
     /** A manager whose user level comes back from {@code storedStep}, on a platform with a sensor. */
     private static BrightnessManager withStoredStep(MockBrightnessListener listener, int storedStep) {
         SettingsManager store = mock(SettingsManager.class);
-        when(store.getMinimumBrightnessStep()).thenReturn(storedStep);
+        when(store.readMinimumBrightnessStep()).thenReturn(storedStep);
         when(store.setMinimumBrightnessStep(anyInt())).thenReturn(true);
         return new BrightnessManager(listener, mock(SensorManager.class), new Eo1Capabilities(), store);
     }
@@ -49,7 +49,7 @@ public class BrightnessManagerTest {
         assertTrue("The brightness manager should assume the screen is on to begin with",
                 brightnessManager.getShouldTheScreenBeOn());
 
-        brightnessManager.raiseMinimumBrightnessStep();
+        brightnessManager.raiseMinimumBrightnessStep("button");
 
         brightnessManager.toggleShouldTheScreenBeOn();
 
@@ -96,7 +96,7 @@ public class BrightnessManagerTest {
     public void tapSurvivesTheNextApply() {
         BrightnessManager brightnessManager = withStoredStep(new MockBrightnessListener(), BrightnessManager.MIN_STEP);
 
-        brightnessManager.raiseMinimumBrightnessStep();
+        brightnessManager.raiseMinimumBrightnessStep("button");
         float tapped = brightnessManager.currentBrightness();
 
         // What the rotation tick does next: re-derive from the ambient light. It must not fall
@@ -111,12 +111,13 @@ public class BrightnessManagerTest {
     public void rolloverWrapsBackToTheFloorNotBelowIt() {
         MockBrightnessListener listener = new MockBrightnessListener();
         SettingsManager store = mock(SettingsManager.class);
-        when(store.getMinimumBrightnessStep()).thenReturn(BrightnessManager.MIN_STEP);
+        when(store.readMinimumBrightnessStep()).thenReturn(BrightnessManager.MIN_STEP);
+        when(store.setMinimumBrightnessStep(anyInt())).thenReturn(true);
         BrightnessManager brightnessManager =
                 new BrightnessManager(listener, mock(SensorManager.class), new Eo1Capabilities(), store);
 
         for (int step = BrightnessManager.MIN_STEP + 1; step <= BrightnessManager.MAX_STEP; step++) {
-            brightnessManager.raiseMinimumBrightnessStep();
+            brightnessManager.raiseMinimumBrightnessStep("button");
             assertEquals(step, brightnessManager.getMinimumBrightnessStep());
             assertTrue("every step stays on or above the floor",
                     brightnessManager.minimumBrightness() >= BrightnessManager.minBrightnessFloor);
@@ -126,7 +127,7 @@ public class BrightnessManagerTest {
         }
 
         // One past the top: back to the floor the button starts at, never below it.
-        brightnessManager.raiseMinimumBrightnessStep();
+        brightnessManager.raiseMinimumBrightnessStep("button");
         assertEquals(BrightnessManager.MIN_STEP, brightnessManager.getMinimumBrightnessStep());
         assertEquals(BrightnessManager.minBrightnessFloor, brightnessManager.minimumBrightness(), DELTA);
         assertEquals(BrightnessManager.minBrightnessFloor, listener.currentBrightness, DELTA);
@@ -185,14 +186,14 @@ public class BrightnessManagerTest {
     public void frameWithNoBrightnessButtonStillRaisesAndStoresTheFloor() {
         MockBrightnessListener listener = new MockBrightnessListener();
         SettingsManager store = mock(SettingsManager.class);
-        when(store.getMinimumBrightnessStep()).thenReturn(BrightnessManager.MIN_STEP);
+        when(store.readMinimumBrightnessStep()).thenReturn(BrightnessManager.MIN_STEP);
         when(store.setMinimumBrightnessStep(anyInt())).thenReturn(true);
         BrightnessManager brightnessManager =
                 new BrightnessManager(listener, mock(SensorManager.class), new Eo2Capabilities(), store);
 
         assertEquals(BrightnessManager.minBrightnessFloor, brightnessManager.minimumBrightness(), DELTA);
 
-        assertTrue("the store accepted the new level", brightnessManager.raiseMinimumBrightnessStep());
+        assertTrue("the store accepted the new level", brightnessManager.raiseMinimumBrightnessStep("button"));
         verify(store).setMinimumBrightnessStep(BrightnessManager.MIN_STEP + 1);
         assertEquals(0.4f, brightnessManager.minimumBrightness(), DELTA);
         // No sensor means no curve, so the floor is the whole answer — and it is now the set floor.
@@ -204,7 +205,7 @@ public class BrightnessManagerTest {
     @Test
     public void noSensorMeansTheFloor() {
         SettingsManager store = mock(SettingsManager.class);
-        when(store.getMinimumBrightnessStep()).thenReturn(BrightnessManager.MIN_STEP);
+        when(store.readMinimumBrightnessStep()).thenReturn(BrightnessManager.MIN_STEP);
         SensorManager sensorManager = mock(SensorManager.class);
 
         BrightnessManager brightnessManager =
@@ -264,5 +265,108 @@ public class BrightnessManagerTest {
         verify(sensorManager, never()).getDefaultSensor(Sensor.TYPE_LIGHT);
         verify(sensorManager, never()).registerListener(any(SensorEventListener.class),
                 any(Sensor.class), any(Integer.class));
+    }
+
+    /**
+     * A store that would not answer is not a frame that was never adjusted. Both used to arrive at
+     * step 0, which is also the dimmest level there is — so a single failed read dimmed the panel to
+     * 0.3 and the operator's next tap wrote that dimming to disk as if it had been chosen.
+     */
+    @Test
+    public void unreadableStoreRestoresTheLastKnownLevelNotTheFloor() {
+        SettingsManager store = mock(SettingsManager.class);
+        when(store.readMinimumBrightnessStep()).thenReturn(SettingsManager.STEP_UNREADABLE);
+        when(store.lastKnownGoodBrightnessStep()).thenReturn(5);
+        when(store.setMinimumBrightnessStep(anyInt())).thenReturn(true);
+
+        BrightnessManager brightnessManager = new BrightnessManager(new MockBrightnessListener(),
+                mock(SensorManager.class), new Eo1Capabilities(), store);
+
+        assertEquals(5, brightnessManager.getMinimumBrightnessStep());
+        assertEquals(0.8f, brightnessManager.minimumBrightness(), DELTA);
+        assertEquals("lastKnownGood", brightnessManager.stepSource());
+        assertFalse("and it is a guess, so the next step must re-read",
+                brightnessManager.isStepAuthoritative());
+    }
+
+    /** A store that says nothing is stored answers {@code absent}, and the floor it shows is honest. */
+    @Test
+    public void absentStoreIsTheFloorWithAName() {
+        SettingsManager store = mock(SettingsManager.class);
+        when(store.readMinimumBrightnessStep()).thenReturn(SettingsManager.STEP_ABSENT);
+
+        BrightnessManager brightnessManager = new BrightnessManager(new MockBrightnessListener(),
+                mock(SensorManager.class), new Eo1Capabilities(), store);
+
+        assertEquals(BrightnessManager.minBrightnessFloor, brightnessManager.minimumBrightness(), DELTA);
+        assertEquals("default", brightnessManager.stepSource());
+    }
+
+    /**
+     * A step this build has never heard of came from a build with <em>more</em> steps, so the level
+     * nearest the one stored is the honest answer. Sending it to the floor is what made an ordinary
+     * number read as a frame nobody had ever touched.
+     */
+    @Test
+    public void aStepBeyondThisBuildsRangeClampsToTheBrightEnd() {
+        BrightnessManager brightnessManager = withStoredStep(new MockBrightnessListener(), BrightnessManager.MAX_STEP + 2);
+
+        assertEquals(BrightnessManager.MAX_STEP, brightnessManager.getMinimumBrightnessStep());
+        assertEquals(BrightnessManager.maxBrightness, brightnessManager.minimumBrightness(), DELTA);
+    }
+
+    /**
+     * The self-perpetuation guard: when the store could not be read at startup and can be read now,
+     * the new level grows from what is on disk, never from the value this process guessed at.
+     */
+    @Test
+    public void aFailedRestoreReReadsBeforeItWritesAnything() {
+        SettingsManager store = mock(SettingsManager.class);
+        when(store.readMinimumBrightnessStep())
+                .thenReturn(SettingsManager.STEP_UNREADABLE)
+                .thenReturn(4);
+        when(store.lastKnownGoodBrightnessStep()).thenReturn(SettingsManager.STEP_UNREADABLE);
+        when(store.setMinimumBrightnessStep(anyInt())).thenReturn(true);
+
+        BrightnessManager brightnessManager = new BrightnessManager(new MockBrightnessListener(),
+                mock(SensorManager.class), new Eo1Capabilities(), store);
+
+        assertEquals("nothing was known, so this process is on the floor",
+                BrightnessManager.MIN_STEP, brightnessManager.getMinimumBrightnessStep());
+
+        brightnessManager.raiseMinimumBrightnessStep("button");
+
+        verify(store).setMinimumBrightnessStep(5);
+        assertEquals("the level on disk, raised — not the guessed one", 5,
+                brightnessManager.getMinimumBrightnessStep());
+    }
+
+    /** Every step change says who asked, so the next "it dimmed by itself" is answered by reading. */
+    @Test
+    public void aStepChangeRemembersItsActorAndWhetherItLanded() {
+        SettingsManager store = persistingStoreAt(BrightnessManager.MAX_STEP);
+        BrightnessManager brightnessManager = new BrightnessManager(new MockBrightnessListener(),
+                mock(SensorManager.class), new Eo1Capabilities(), store);
+
+        assertTrue(brightnessManager.raiseMinimumBrightnessStep("web"));
+
+        assertEquals("web", brightnessManager.changedVia());
+        assertEquals(BrightnessManager.MAX_STEP, brightnessManager.changedFromStep());
+        assertEquals(BrightnessManager.MIN_STEP, brightnessManager.changedToStep());
+        assertTrue("a change made before /state is read has a timestamp", brightnessManager.changedAtMs() > 0L);
+        assertTrue(brightnessManager.changedDurably());
+
+        when(store.setMinimumBrightnessStep(anyInt())).thenReturn(false);
+        assertFalse(brightnessManager.raiseMinimumBrightnessStep("button"));
+        assertFalse("a level the panel has and the store does not is the report this exists for",
+                brightnessManager.changedDurably());
+    }
+
+    /** A store holding {@code storedStep} that says yes to every write. */
+    private static SettingsManager persistingStoreAt(int storedStep) {
+        SettingsManager store = mock(SettingsManager.class);
+        when(store.readMinimumBrightnessStep()).thenReturn(storedStep);
+        when(store.setMinimumBrightnessStep(anyInt())).thenReturn(true);
+        return store;
     }
 }

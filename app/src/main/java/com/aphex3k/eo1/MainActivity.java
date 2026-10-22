@@ -67,7 +67,10 @@ import com.bumptech.glide.request.target.Target;
 import com.dd.crop.TextureVideoView;
 import com.example.tsplayer.TsPlayerNative;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonNull;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonPrimitive;
 import com.google.gson.stream.MalformedJsonException;
 
 import java.io.File;
@@ -426,6 +429,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             this.appLogger.info(TAG, "TsPlayer native library unavailable (" + tsLoadError
                     + "); every video on this frame runs on the platform MediaPlayer");
         }
+        // What the backlight restore actually found, in the log that survives a reboot. A frame at
+        // 0.3 has one of three histories and they are not the same report: a level that came off
+        // disk, a level this process is guessing because the store would not answer, and a frame
+        // nobody has ever adjusted. logcat will be gone before anyone reads it.
+        this.appLogger.info(TAG, "backlight restored: step " + brightnessManager.getMinimumBrightnessStep()
+                + " (floor " + brightnessManager.minimumBrightness() + ") source "
+                + brightnessManager.stepSource() + ", store " + settingsManager.minimumBrightnessStoreState());
         if (CrashReporter.get() == null) {
             // ...and if its install failed too, the frame would otherwise be back on the framework
             // handler: a crash dialog on an unattended panel, and no relaunch alarm.
@@ -968,11 +978,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * "fired" while nothing changed.
      */
     @Override
-    public void adjustMinimumBrightness() {
+    public void adjustMinimumBrightness(String via) {
         // A tap is also "wake up" — quiet hours may have the panel dark on a level the user
         // already chose. Everything after that is the manager's: it steps, persists, and applies.
         this.brightnessManager.setShouldTheScreenBeOn(true);
-        if (!this.brightnessManager.raiseMinimumBrightnessStep() && appLogger != null) {
+        if (!this.brightnessManager.raiseMinimumBrightnessStep(via) && appLogger != null) {
             // The panel moved and the store did not: this level is gone at the next boot, and that
             // is the report this code path exists to answer. logcat alone would not survive it.
             appLogger.error(TAG, "brightness level changed but was NOT persisted on "
@@ -2944,14 +2954,35 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // `supported` is the panel's ability, not a control's existence — whether this device has a
         // button that would ever write the level is `capabilities.brightnessButton`. A frame showing
         // supported:true with step and persistedStep both 0 has simply never been adjusted.
+        // `step` is what this process is acting on; `persistedStep` is what is on disk right now, and
+        // is null when the store has nothing stored or would not answer — the two cases the old
+        // always-integer read made indistinguishable from a level of 0. `stepSource` names where
+        // `step` came from, and `lastChange` who moved it last.
+        final int persistedStep = settingsManager.readMinimumBrightnessStep();
+        final int cachedStep = settingsManager.lastKnownGoodBrightnessStep();
         JsonObject brightness = new JsonObject();
         brightness.addProperty("supported", capabilities.supportsScreenBrightness());
         brightness.addProperty("step", brightnessManager.getMinimumBrightnessStep());
-        brightness.addProperty("persistedStep", settingsManager.getMinimumBrightnessStep());
+        brightness.add("persistedStep", persistedStep >= 0
+                ? (JsonElement) new JsonPrimitive(persistedStep) : JsonNull.INSTANCE);
+        brightness.add("lastKnownGoodStep", cachedStep >= 0
+                ? (JsonElement) new JsonPrimitive(cachedStep) : JsonNull.INSTANCE);
+        brightness.addProperty("storeState", settingsManager.minimumBrightnessStoreState());
+        brightness.addProperty("stepSource", brightnessManager.stepSource());
+        brightness.addProperty("authoritative", brightnessManager.isStepAuthoritative());
         brightness.addProperty("floor", brightnessManager.minimumBrightness());
         brightness.addProperty("applied", lastAppliedBrightness);
         brightness.addProperty("lastLightValue", brightnessManager.lastLightValue());
         brightness.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
+
+        JsonObject lastChange = new JsonObject();
+        lastChange.addProperty("from", brightnessManager.changedFromStep());
+        lastChange.addProperty("to", brightnessManager.changedToStep());
+        lastChange.addProperty("via", brightnessManager.changedVia());
+        lastChange.addProperty("atMs", brightnessManager.changedAtMs());
+        lastChange.addProperty("durable", brightnessManager.changedDurably());
+        brightness.add("lastChange", lastChange);
+
         o.add("brightness", brightness);
 
         o.add("config", ConfigStateJson.configStateJson(settingsManager.getConfiguration()));
@@ -3284,7 +3315,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 task = this::toggleScreenOn;
                 break;
             case "brightness":
-                task = this::adjustMinimumBrightness;
+                task = () -> adjustMinimumBrightness("web");
                 break;
             case "config":
                 task = this::showConfigurationUI;

@@ -93,16 +93,18 @@ public class SettingsManagerTest {
      * itself every time the frame does.
      */
     @Test
-    public void minimumBrightnessStepDefaultsToTheFloorAndOutlivesTheManager() throws Exception {
+    public void minimumBrightnessStepOutlivesTheManager() throws Exception {
         FakeListener listener = new FakeListener(tmp.newFolder("files"));
 
         SettingsManager sm = new SettingsManager(listener);
-        assertEquals(0, sm.getMinimumBrightnessStep());
+        SettingsManager.forgetBrightnessLevel();
+        assertEquals("a frame nobody has adjusted is absent, not at step 0",
+                SettingsManager.STEP_ABSENT, sm.readMinimumBrightnessStep());
 
         assertTrue("the store said it kept it", sm.setMinimumBrightnessStep(4));
-        assertEquals(4, sm.getMinimumBrightnessStep());
+        assertEquals(4, sm.readMinimumBrightnessStep());
         // A fresh SettingsManager over the same prefs is what an Activity re-creation hands back.
-        assertEquals(4, new SettingsManager(listener).getMinimumBrightnessStep());
+        assertEquals(4, new SettingsManager(listener).readMinimumBrightnessStep());
     }
 
     /**
@@ -130,6 +132,51 @@ public class SettingsManagerTest {
             @Override public SharedPreferences getDefaultSharedPreferences() { return null; }
         };
         assertFalse(new SettingsManager(noPrefs).setMinimumBrightnessStep(5));
+    }
+
+    /**
+     * "Nobody has ever adjusted this frame" and "the store would not say" both used to answer 0 —
+     * which is also the dimmest level the button has, so {@code /state} could not tell a dim frame
+     * from an untouched one, and the app could not tell whether to trust its own reading.
+     */
+    @Test
+    public void anAbsentStoreIsAnsweredDifferentlyFromAnUnreadableOne() throws Exception {
+        SettingsManager.forgetBrightnessLevel();
+        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+
+        assertEquals(SettingsManager.STEP_ABSENT, sm.readMinimumBrightnessStep());
+        assertEquals("absent", sm.minimumBrightnessStoreState());
+
+        // A deliberate floor is a value, not an absence: this is the frame an operator did set.
+        assertTrue(sm.setMinimumBrightnessStep(0));
+        assertEquals(0, sm.readMinimumBrightnessStep());
+        assertEquals("value", sm.minimumBrightnessStoreState());
+    }
+
+    /** A store that fails answers with the last level this process saw on disk, never the floor. */
+    @Test
+    public void anUnreadableStoreFallsBackToTheLastKnownLevel() throws Exception {
+        SettingsManager.forgetBrightnessLevel();
+        SettingsManager working = new SettingsManager(new FakeListener(tmp.newFolder("files-known")));
+        assertTrue(working.setMinimumBrightnessStep(5));
+        assertEquals(5, working.readMinimumBrightnessStep());
+
+        // A different files dir on purpose: the point is a store that will not open at all, and
+        // TemporaryFolder refuses a name this test has already taken.
+        SettingsManager broken = new SettingsManager(new FakeListener(tmp.newFolder("files-broken")) {
+            @Override public SharedPreferences getDefaultSharedPreferences() {
+                throw new IllegalStateException("store would not open");
+            }
+        });
+
+        assertEquals(SettingsManager.STEP_UNREADABLE, broken.readMinimumBrightnessStep());
+        assertEquals("unreadable", broken.minimumBrightnessStoreState());
+        assertEquals("the level this process last saw on disk, which is what BrightnessManager falls back to",
+                5, broken.lastKnownGoodBrightnessStep());
+
+        SettingsManager.forgetBrightnessLevel();
+        assertEquals("with nothing ever read, there is no level to fall back to and it says so",
+                SettingsManager.STEP_ABSENT, broken.lastKnownGoodBrightnessStep());
     }
 
     @Test
