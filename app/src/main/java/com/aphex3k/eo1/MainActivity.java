@@ -2952,12 +2952,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // The whole backlight story in one place: what the user set, what the sensor last saw, and
         // what is actually on the panel. A "it dimmed by itself" report is answerable from this.
         // `supported` is the panel's ability, not a control's existence — whether this device has a
-        // button that would ever write the level is `capabilities.brightnessButton`. A frame showing
-        // supported:true with step and persistedStep both 0 has simply never been adjusted.
+        // button that would ever write the level is `capabilities.brightnessButton`.
         // `step` is what this process is acting on; `persistedStep` is what is on disk right now, and
-        // is null when the store has nothing stored or would not answer — the two cases the old
-        // always-integer read made indistinguishable from a level of 0. `stepSource` names where
-        // `step` came from, and `lastChange` who moved it last.
+        // is null when the store has nothing stored ("absent" in `storeState`) or would not answer
+        // ("unreadable" there) — the two cases the old always-integer read made indistinguishable
+        // from a level of 0. So `persistedStep: 0` now means an operator did put this frame on the
+        // floor by wrapping past the top step; a frame nobody ever adjusted reads null with
+        // `stepSource: "default"`. `lastKnownGood` is what an unreadable store is answered with,
+        // never the floor, and `lastChange` says who moved the level last.
         final int persistedStep = settingsManager.readMinimumBrightnessStep();
         final int cachedStep = settingsManager.lastKnownGoodBrightnessStep();
         JsonObject brightness = new JsonObject();

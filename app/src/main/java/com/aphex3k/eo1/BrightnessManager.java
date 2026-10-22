@@ -58,22 +58,30 @@ public class BrightnessManager {
      * 0.3 because nobody ever adjusted it and a frame that lost its level are the same number and
      * different facts.
      */
-    private String stepSource = "default";
+    private volatile String stepSource = "default";
 
     /**
      * Whether {@link #minimumBrightnessStep} is a fact about this frame or a placeholder for one.
      * False only after a store that would not answer: the next step must then re-read and grow from
      * what is actually stored, because a guess grown and written back is how a bad read becomes
-     * permanent.
+     * permanent. The first press clears it: a level somebody chose is a fact even when the store
+     * refused to keep it.
      */
-    private boolean stepAuthoritative = false;
+    private volatile boolean stepAuthoritative = false;
 
-    /** The last level change this process made, for {@code /state}: from, to, who, when, durable. */
-    private int changedFromStep = MIN_STEP;
-    private int changedToStep = MIN_STEP;
-    private String changedVia = "none";
-    private long changedAtMs = 0L;
-    private boolean changedDurably = true;
+    /**
+     * The last level change this process made, for {@code /state}: from, to, who, when, durable.
+     * Volatile as a group because {@code /state} renders them on the web server's thread while the
+     * press that fills them happens on the UI thread, and a record that exists to answer "who moved
+     * this" must not be able to mix one press's {@code to} with the last press's {@code via}.
+     * {@code changedAtMs} of 0 means no press has happened in this process, so {@code durable}
+     * before that point describes nothing.
+     */
+    private volatile int changedFromStep = MIN_STEP;
+    private volatile int changedToStep = MIN_STEP;
+    private volatile String changedVia = "none";
+    private volatile long changedAtMs = 0L;
+    private volatile boolean changedDurably = true;
 
     /**
      * The most recent light reading the curve used. Starts at {@link #minLux} so a platform with no
@@ -279,10 +287,12 @@ public class BrightnessManager {
         this.minBrightness = floorBrightness(this.minimumBrightnessStep);
 
         boolean durable = store != null && store.setMinimumBrightnessStep(this.minimumBrightnessStep);
-        if (durable) {
-            // Written down, so it is now a fact about this frame rather than this process's guess.
-            this.stepAuthoritative = true;
-        }
+        // A press makes the level chosen, not guessed, whatever the store did with it — and
+        // unconditionally so: gating this on {@code durable} leaves a store that answers neither
+        // read nor write growing every press from the same stale cache, and the button stops
+        // moving the panel on the exact gesture the field report uses to recover a dim frame.
+        // Whether the choice outlived this process is a separate fact, reported as {@code durable}.
+        this.stepAuthoritative = true;
 
         this.changedFromStep = base;
         this.changedToStep = this.minimumBrightnessStep;

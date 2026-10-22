@@ -362,6 +362,30 @@ public class BrightnessManagerTest {
                 brightnessManager.changedDurably());
     }
 
+    /**
+     * A store that answers neither read nor write grows every press from the same stale cache, and
+     * the panel stops moving — on the one gesture an operator reaches for when a frame has gone dim.
+     * A press has to press, whether or not it can be written down; whether it outlives the process is
+     * a separate fact, and it is {@code changedDurably()} that says so.
+     */
+    @Test
+    public void aPressStillStepsWhenNothingCanBeStored() {
+        SettingsManager store = mock(SettingsManager.class);
+        when(store.readMinimumBrightnessStep()).thenReturn(SettingsManager.STEP_UNREADABLE);
+        when(store.lastKnownGoodBrightnessStep()).thenReturn(3);
+        when(store.setMinimumBrightnessStep(anyInt())).thenReturn(false);
+
+        BrightnessManager brightnessManager = new BrightnessManager(new MockBrightnessListener(),
+                mock(SensorManager.class), new Eo1Capabilities(), store);
+
+        assertFalse("the store refused, and the frame says so",
+                brightnessManager.raiseMinimumBrightnessStep("button"));
+        assertEquals(4, brightnessManager.getMinimumBrightnessStep());
+        assertFalse(brightnessManager.raiseMinimumBrightnessStep("button"));
+        assertEquals("the second press moved it too", 5, brightnessManager.getMinimumBrightnessStep());
+        assertFalse(brightnessManager.changedDurably());
+    }
+
     /** A store holding {@code storedStep} that says yes to every write. */
     private static SettingsManager persistingStoreAt(int storedStep) {
         SettingsManager store = mock(SettingsManager.class);
