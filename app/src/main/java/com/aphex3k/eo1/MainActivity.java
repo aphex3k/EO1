@@ -959,16 +959,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         });
     }
 
+    /**
+     * Steps the brightness floor. Deliberately not gated on a capability: what is platform-specific
+     * is the <em>button</em>, and that gate lives where the key is read
+     * ({@link EventManager#onKeyDown(int)}). The panel write this ends up triggering is a plain
+     * window attribute, available on every device the app runs on — gating it on the button is what
+     * left an EO2 permanently at the default floor, with the web page's Brightness+ reporting
+     * "fired" while nothing changed.
+     */
     @Override
     public void adjustMinimumBrightness() {
-        if (!capabilities.supportsScreenBrightness()) {
-            Log.i(TAG, "adjustMinimumBrightness: ignored (" + capabilities.platform() + " has no screen brightness control)");
-            return;
-        }
         // A tap is also "wake up" — quiet hours may have the panel dark on a level the user
         // already chose. Everything after that is the manager's: it steps, persists, and applies.
         this.brightnessManager.setShouldTheScreenBeOn(true);
-        this.brightnessManager.raiseMinimumBrightnessStep();
+        if (!this.brightnessManager.raiseMinimumBrightnessStep() && appLogger != null) {
+            // The panel moved and the store did not: this level is gone at the next boot, and that
+            // is the report this code path exists to answer. logcat alone would not survive it.
+            appLogger.error(TAG, "brightness level changed but was NOT persisted on "
+                    + capabilities.platform() + " — it will reset to the floor on the next start");
+        }
     }
 
     @Override
@@ -2932,6 +2941,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // The whole backlight story in one place: what the user set, what the sensor last saw, and
         // what is actually on the panel. A "it dimmed by itself" report is answerable from this.
+        // `supported` is the panel's ability, not a control's existence — whether this device has a
+        // button that would ever write the level is `capabilities.brightnessButton`. A frame showing
+        // supported:true with step and persistedStep both 0 has simply never been adjusted.
         JsonObject brightness = new JsonObject();
         brightness.addProperty("supported", capabilities.supportsScreenBrightness());
         brightness.addProperty("step", brightnessManager.getMinimumBrightnessStep());

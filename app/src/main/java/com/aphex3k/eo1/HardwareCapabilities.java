@@ -17,10 +17,22 @@ public interface HardwareCapabilities {
     /** Ambient light sensor available (drives automatic screen brightness). */
     boolean supportsLightSensor();
 
-    /** The screen's minimum brightness is user-adjustable (F4 button / web "brightness" control). */
+    /**
+     * The display accepts an explicit brightness value — i.e. writing
+     * {@code WindowManager.LayoutParams.screenBrightness} does something. This is a property of the
+     * panel, <em>not</em> of any control that asks for it: both frames answer true, and the app
+     * already writes the attribute on an EO2 every rotation tick — what it has never been allowed to
+     * write there is anything other than the default. Nothing should gate the brightness
+     * <em>action</em> on this flag; {@link #supportsBrightnessButton()} is the flag that says whether
+     * a device has a control to raise.
+     */
     boolean supportsScreenBrightness();
 
-    /** A physical or soft-touch button exists that raises the minimum brightness. */
+    /**
+     * A physical or soft-touch button exists that raises the minimum brightness, so the key is worth
+     * listening for. Absent on the EO2, whose only brightness control is the web page's — which is
+     * the documented replacement for the soft keys it lacks, and reaches the same action ungated.
+     */
     boolean supportsBrightnessButton();
 
     /**

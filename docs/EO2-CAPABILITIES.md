@@ -33,14 +33,14 @@ No touchscreen: no `ABS_X`/`ABS_Y`/`ABS_MT_*` on any device.
 - `dumpsys sensorservice`: empty sensor list, 0 active listener registrations.
 - No sensor HAL in `/system/lib/hw/`.
 - `BrightnessManager` registers no `TYPE_LIGHT` listener at all on EO2 (`supportsLightSensor()` is false). Note: `"Reported Light Value: 0.175"` lines in logcat are **not** sensor readings — 0.175 is `Lux.FULL_MOON` (`minLux`), the value the curve is initialised to and never moves from without a sensor; `0.0` is the off-state constant.
-- Effective brightness is therefore the static floor (`minBrightness`, 0.3 at step 0). The back-button / web `brightness` action does **not** raise it here: `MainActivity.adjustMinimumBrightness()` is gated on `supportsScreenBrightness()`, which EO2 reports false, so the tap logs that it was ignored and changes nothing. (The row in §4 predates that gate.)
+- Effective brightness is therefore the static floor (`minBrightness`, 0.3 at step 0) — the floor is the whole story on a frame with no sensor, so **setting it is the only brightness control this device has**. The web `brightness` action raises it: the panel accepts a `screenBrightness` value like any other, and what EO2 lacks is the *button* (§2), not the capability. Until 2026-10-21 `MainActivity.adjustMinimumBrightness()` was gated on `supportsScreenBrightness()`, which EO2 reported false, so the action was a logged no-op here and the floor could never leave 0.3 by any route — while the web page still reported `brightness:fired`. See [WEBSERVER.md](WEBSERVER.md) for the control.
 
 ## 4. Key handling reachable on EO2 (verified via `input keyevent`)
 
 | Keycode | Key | App handler | Result |
 |---|---|---|---|
 | 132 | F2 | `toggleScreenOn()` | ✅ Works both directions: `screenOffWakeLock` released/acquired, TsPlayer `surfaceDestroyed`/`surfaceCreated`, `/state` `screenOn` flips True↔False |
-| 134 | F4 | `adjustMinimumBrightness()` | ✅ Reached (silent by design) and — as recorded here, before the capability gate existed — raised `Min Brightness` 0.3→0.5 after two presses. Now a logged no-op on EO2, since `supportsScreenBrightness()` is false; on EO1 the same tap steps the level and **persists it**, so it no longer resets to the floor when the app restarts |
+| 134 | F4 | `adjustMinimumBrightness()` | ⚠️ **Still ignored on EO2, but only on this path.** The keycode dispatch is gated on `supportsBrightnessButton()` ([EventManager.java](../app/src/main/java/com/aphex3k/eo1/EventManager.java)), and EO2 has no such button — F4 is the EO1 soft key, so an injected 134 lands on a handler this device is declared not to have. Raising the floor on EO2 is the web `brightness` action, which reaches the same method ungated and does persist it (§3). On EO1 the same tap steps the level and **persists it**, so it no longer resets to the floor when the app restarts |
 | 62 | SPACE | `showNextImage()` | ✅ Works — advanced through the pool (`displayVideo`/`displayPictures` logs, new assets downloaded) |
 | 31 | C | `showConfigurationUI()` | ✅ Works — in-app config dialog opens (MEDIA/MQTT tabs: backends, time zone, quiet-hours cron, slideshow interval, self-update URL/interval, Save) |
 | 47 | S | `openSystemSettings()` | ✅ Works — the EO2 **does ship an AOSP Settings app** (full UI: Wi-Fi, Display, Apps, Developer options, …) |
