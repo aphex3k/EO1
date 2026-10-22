@@ -1,0 +1,648 @@
+name: "Bug report"
+description: "Something the frame displays, rotates, connects to, or installs is not behaving."
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing. EO1/EO2 is an Android 4.4.2 app running on a frame that is usually mounted and hard to reach, so this form asks for what the frame can tell you about itself rather than for guesses.
+
+        **Check you are on a current build first.** [The releases page](https://github.com/aphex3k/EO1/releases) is the only place builds are published, and the APK there is named `eo1-release-<build number>.apk` (for example `eo1-release-13.apk`). **There is no debug APK** — all builds are made locally, and the `gitea.codingmerc.com` download links in the old template are dead. Everything this form asks for works on a release build, so you never need to install anything different in order to report a bug.
+
+        **Never paste into this issue:** your Immich password, your `configuration.json`, the output of `/config` or `/config/download`, or the configuration token shown in the options dialog. That password is stored in cleartext on the frame by design — it is a property of the app, not a mistake you made — so attaching any of those publishes a live credential to your photo library. `http://<frame-ip>:8080/state` is the credential-free substitute and is the single most useful file you can send.
+
+        **If you attach a photo or video, prefer a throwaway file.** These are somebody's family photographs: originals carry EXIF GPS coordinates and recognisable faces, and a GitHub attachment stays indexed even after the issue is closed. The *Example asset* section below explains what reproduces the bug without reproducing your life.
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        ## Your frame and its build
+
+        One screen answers most of this section: plug a USB keyboard into the frame, press **C** to open the options dialog, and swipe to the last tab, **About**. A photo or screenshot of that tab beats anything typed below (the tab is read-only — opening it changes nothing). There is no touch path to it on either model. Note that the on-screen version overlay only appears on debug builds, so a release frame's panel genuinely says nothing about itself while it is displaying.
+
+        If you cannot reach the About tab at all — a boot loop or a permanently black panel is exactly what stops you reaching it — leave the version fields blank rather than guessing. Each one's note says what to give instead.
+
+  - type: dropdown
+    id: device_model
+    attributes:
+      label: "Which frame is this?"
+      description: "Physically: EO1 has two soft-touch strips along the front edge and a light sensor; EO2 has one round power button. Digitally: the header of `http://<frame-ip>:8080/` leads with EO1 or EO2, and `/state` has `device.platform`."
+      options:
+        - "EO1"
+        - "EO2"
+        - "Both — it happens on either"
+        - "Not sure — I will paste the frame's web page header in 'Anything else' below"
+    validations:
+      required: true
+
+  - type: input
+    id: app_version
+    attributes:
+      label: "App version"
+      description: "The About tab's 'App version' row (e.g. 2.0.1). It is also the part before the last dot in the frame's web page header. If you cannot reach either, leave this blank rather than guessing — the APK file name you installed (e.g. `eo1-release-13.apk`) identifies the build just as well."
+      placeholder: "2.0.1"
+    validations:
+      required: false
+
+  - type: input
+    id: build_number
+    attributes:
+      label: "Build number"
+      description: "The About tab's 'Build number' row (e.g. 13). This is the number that actually identifies the binary: crash reports are named with it, and the mapping needed to read a release stack trace is published as `mapping-<build number>.txt.gz`. Two builds can share an app version; they never share a build number. If you cannot reach the About tab, leave this blank and give the APK file name you installed instead — in `eo1-release-13.apk` the number is the build number."
+      placeholder: "13"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: build_variant
+    attributes:
+      label: "Build variant — the About tab's 'Build variant' row"
+      description: "Debug and release differ beyond noise: debug-only features (the on-screen version line, jump-to-asset, key injection) are exactly the ones we would otherwise suggest and you cannot use, and release is minified so its traces need the mapping file."
+      options:
+        - "release"
+        - "debug"
+        - "Not sure — the About tab says something else (paste it in 'Anything else')"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: build_provenance
+    attributes:
+      label: "Anything unusual in the About tab? Tick what applies."
+      description: "These change triage completely: a build off a dirty tree is not reproducible from any tag, a debug-key build cannot self-update at all, and MISMATCH means the bytes are not ours."
+      options:
+        - label: "The 'Source' row ends in 'uncommitted changes' (a build made on someone's machine, not a published release)"
+          required: false
+        - label: "The signing line says 'debug key'"
+          required: false
+        - label: "The signing line says 'MISMATCH — not the expected release key'"
+          required: false
+        - label: "Nothing unusual — it all looks like a normal published release"
+          required: false
+
+  - type: dropdown
+    id: detected_platform
+    attributes:
+      label: "What does the frame call itself?"
+      description: "The web page's big heading reads something like 'EO1 frame @ 192.168.1.80 (port 8080)', or `/state` says it as `device.platform`. The app picks which hardware features exist from this detection, not from the physical device, so a misdetection on its own can explain dimming, brightness or button bugs."
+      options:
+        - "EO1"
+        - "EO2"
+        - "It calls itself EO1 but it is physically an EO2 (or the reverse)"
+        - "I cannot tell"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: hardware_behaviours
+    attributes:
+      label: "Check what the physical controls and sensors actually do."
+      description: "EO1 has front-edge soft-touch strips and a light sensor; EO2 has a power button and no light sensor. If a control does nothing at all, that is usually the wrong model being detected, not the button being broken."
+      options:
+        - label: "The front-edge soft-touch strips do nothing (EO1)"
+          required: false
+        - label: "The frame never dims in a dark room, or dims by itself (EO1)"
+          required: false
+        - label: "Brightness changes have no visible effect"
+          required: false
+        - label: "The power button does nothing the app can see (EO2)"
+          required: false
+        - label: "All of that behaves as expected for my model"
+          required: false
+    validations:
+      required: false
+
+  - type: dropdown
+    id: how_installed
+    attributes:
+      label: "How did the app get onto this frame?"
+      description: "This decides whether the frame can update itself at all. A frame that was sideloaded once and never given an update URL is frozen at that build, which is not a bug."
+      options:
+        - "Downloaded an eo1-release-N.apk from this repo's Releases page (N is the build number)"
+        - "Installed over adb by following the README"
+        - "It updated itself from a server I run (self-update)"
+        - "Someone else installed it / I don't know"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: update_manifest_configured
+    attributes:
+      label: "Is self-update configured on this frame?"
+      description: "Options dialog, first tab (labelled 'Media'), section 'Self-update', field 'Manifest URL' — it is empty by default. The same section has a 'Check interval (in minutes)' field: say what it says, since 'it never updated' is often just 'it has not checked yet'. Read the values off the screen — please do not photograph or screen-share this tab: while Trusted Network is on it displays the configuration token in plain text under the checkbox. Ticking the boxes tells us everything we need."
+      options:
+        - "Yes, there is a URL in the Manifest URL field"
+        - "No — the field is empty, so the frame never checks for an update"
+        - "I run my own update server and the frames point at it"
+        - "Not sure / I cannot get to the dialog"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: update_optins
+    attributes:
+      label: "Which of these self-update switches are ON right now?"
+      description: "Both live on the options dialog's first tab under 'Trusted network' and both default to OFF. Neither is saved in configuration.json, so no file you attach will show them — ticking the boxes is how you tell us. Read the state off the screen rather than photographing that tab: while Trusted Network is on it also displays the configuration token in plain text under the checkbox. Warning: loopback TCP adb has no loopback-only mode and is reachable as root from anywhere routable. The app opens it for one install and closes it immediately afterwards; please do not enable it as a standing debugging state."
+      options:
+        - label: "'Trusted Network' is ON"
+          required: false
+        - label: "'Allow loopback ADB for update installs' is ON"
+          required: false
+        - label: "Neither is on (so this frame cannot install an update silently)"
+          required: false
+        - label: "'Reboot the frame if nothing else recovers it' is also ON (this one IS in configuration.json, as autoReboot)"
+          required: false
+        - label: "I cannot tell without going to the frame"
+          required: false
+
+  - type: dropdown
+    id: update_symptom
+    attributes:
+      label: "If this report is about updating: what does the frame do when it tries?"
+      description: "The first answer is expected behaviour, not a defect. An automatic cycle deliberately puts nothing on a wall-mounted panel: the update stays staged and retryable, and the frame's web page carries a standing notice saying so. The confirmation dialog only appears when someone presses 'Install on the frame'. Do not press 'Update reset' before reporting — that throws away the staged APK."
+      options:
+        - "Nothing ever appears on screen and the version never changes"
+        - "The web page says an update is staged and waiting for someone to press Install"
+        - "I press 'Install on the frame' and confirm the dialog on the frame's screen"
+        - "An install starts and then the frame comes back on the old version"
+        - "The frame shows an update error in /logs or on the web page"
+        - "It installs fine — this report is about something else"
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        ## Immich server and configuration
+
+        Paste nothing that contains a password. `/state` shows the same backend structure with the secrets already stripped, and is nearly always the better attachment. Server host names are LAN names rather than secrets, but you have every right to replace one with a placeholder such as `https://immich.example.internal/` — just say that you did, and leave the rest of `/state` intact.
+
+  - type: input
+    id: immich_server_version
+    attributes:
+      label: "What Immich server version is the frame pointed at?"
+      description: "Open `http://<your-immich-host>/api/server/version` — that is the exact call this app makes, and it needs no login — and copy the major/minor/patch numbers. Immich's own Administration → About page shows the same string. Leave blank if you cannot tell. Why it matters: the supported band is the whole Immich 3.x line (3.0.0 up to but not including 4.0.0, verified through 3.3.3). A server OLDER than 3.0.0 is refused outright and nothing from it appears; a NEWER one is served best effort with a one-shot compatibility warning. Those two describe opposite failures, so 'it stopped showing photos' after an upgrade is a different bug from one that never worked."
+      placeholder: "e.g. 3.3.3"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: which_backend
+    attributes:
+      label: "Which backend is involved? (Configuration is a list of backends now, not a single server.)"
+      options:
+        - "Immich"
+        - "Local uploads (files uploaded through the frame's web page)"
+        - "Kiosk web page"
+        - "Mixed / several backends"
+        - "Not sure"
+    validations:
+      required: true
+
+  - type: input
+    id: backend_ids
+    attributes:
+      label: "If you run more than one backend, which one is affected — its id as it appears in your config (immich-1, immich-2, local, web-1)?"
+      description: "Log lines, warnings and asset keys are all prefixed with the backend id, and warnings de-duplicate per id — a second backend's toast can be silently suppressed. Leave blank if you have only one."
+      placeholder: "immich-1"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: api_version_pin
+    attributes:
+      label: "What does apiVersion say in your Immich backend entry?"
+      description: "A blank key and 'auto' are the same thing, and an unparseable value is relaxed back to auto, so a config that says nothing is not 'no probe'."
+      options:
+        - "auto (the default)"
+        - "A pinned version such as 3.1.0"
+        - "There is no apiVersion key in my config"
+        - "Not sure / cannot check"
+    validations:
+      required: false
+
+  - type: textarea
+    id: setup_shape
+    attributes:
+      label: "Your setup, in whatever words you like: how the Immich account is arranged, roughly how many assets the frame rotates through and how many of them are video, and where the server sits relative to the frame (same LAN, different VLAN, off-site, over a VPN)."
+      description: "One dedicated frame user per frame is the arrangement the README recommends; a shared album and your main account see different libraries, which decides what the frame can even ask for. The video ratio matters because the decoder gates route to a server transcode that frequently does not exist."
+      value: |
+        Account setup (one dedicated frame user / shared album / my main account):
+
+        Roughly how many assets the frame rotates through, and how many are video:
+
+        Where the server sits relative to the frame (same LAN, another VLAN, off-site, over a VPN):
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ### If you would rather attach your configuration file
+
+        An export of it contains the Immich password **twice**: once in `backends[].password` and once in the deprecated top-level `password` that the app mirrors back on save. `userid` (a real e-mail address) is duplicated the same way, and `mqttPassword` exists too. Deleting only one of them still posts your credential.
+
+  - type: checkboxes
+    id: config_redaction
+    attributes:
+      label: "Check every box before attaching a configuration.json (or an exported config)."
+      options:
+        - label: "I deleted every password value, INCLUDING the top-level host/userid/password mirror fields, which repeat the first backend's credentials a second time"
+          required: false
+        - label: "I blanked userid (a real e-mail address) and mqttPassword if present"
+          required: false
+        - label: "I know an export cannot show the device name, Trusted Network flag or configuration token (those live in SharedPreferences), so I answered the questions above instead of leaving them out"
+          required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        ## What is happening
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: "What kind of problem is this?"
+      description: "There are no per-area labels on this repo, so your choice here is the only area signal the issue will ever carry. Pick the one that matches what you SEE, not what you think is broken."
+      options:
+        - "Video playback — black panel or no picture (the clip plays fine on my phone or computer)"
+        - "Video playback — slow motion, stutter, or a freeze/jump when the clip loops"
+        - "Video playback — rotated, mirrored, upside down, or zoomed/cropped wrong"
+        - "A specific photo or video the frame skips, refuses, or flags as incompatible (HEIC/HEIF, HEVC/AV1 inside a .mov, very large files)"
+        - "Photo display — missing, wrong colours, garbled, or stuck on a stale image"
+        - "Immich connection — login, session, server version, TLS, or assets that account cannot see"
+        - "Rotation and media pool — which assets appear, how often, ordering, multiple backends, local uploads"
+        - "Screen and power — quiet hours, interval, brightness, power button, battery drain"
+        - "Self-update — checking, downloading, verifying, or installing a new version (including 'needs a person')"
+        - "Boot, crash, or the frame recovering / rebooting itself (kiosk watchdog)"
+        - "Kiosk web page in the rotation — a configured URL shows blank, an error page, a stale page, or is skipped"
+        - "LAN web server — the frame's own index page, /state, control buttons, config editor, uploads, crash dumps"
+        - "Documentation, setup help, or something else"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: symptoms
+    attributes:
+      label: "Check everything that applies to what you actually see on the screen:"
+      description: "These are the distinctions that decided past fixes and that prose cannot convey. A clip can be accepted, report success, advance its timeline, and paint nothing at all — that is a different defect from one that errors."
+      options:
+        - label: "The picture is black or blank, but the frame still rotates to the next item"
+          required: false
+        - label: "The picture is frozen — it never changes, and only comes back after a reboot or a long while"
+          required: false
+        - label: "Motion looks wrong: too slow, too fast, jerky, or stuttering"
+          required: false
+        - label: "The item is wrong at the moment a clip restarts or loops"
+          required: false
+        - label: "The image is sideways, upside down, MIRRORED/flipped, or too zoomed-in / cropped"
+          required: false
+        - label: "The item is skipped entirely — it never appears, or it flashes a message"
+          required: false
+        - label: "Some clips are fine and others are black (which of the two players handled each one is the whole question)"
+          required: false
+        - label: "A toast or on-screen text mentions the file, the codec, or the server"
+          required: false
+        - label: "A crash dialog appeared, or the frame rebooted itself"
+          required: false
+        - label: "None of those — it is a config, network, web-page or install problem"
+          required: false
+
+  - type: textarea
+    id: expected_actual
+    attributes:
+      label: "Describe what the frame is doing versus what you expected. Quote the exact wording of any toast, error or on-screen text."
+      description: "The wording is often the whole diagnosis: a server newer than the app's knowledge produces 'outside the supported range … continuing best effort', a server older than 3.0.0 produces 'older than the supported range … no client implementation available', and an unreachable endpoint produces 'Could not determine the Immich server version'. Those three need completely different fixes. In release the compatibility notice is a single ~3.5 second toast, so if you missed it, `/state` plus your server version say the same thing."
+      placeholder: |
+        What I see:
+        What I expected:
+        Exact wording of any message:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: since_when
+    attributes:
+      label: "When did it start?"
+      description: "In this project a regression's cause is usually an external event the app does not control."
+      options:
+        - "As long as I have had it set up"
+        - "Right after the frame installed a newer version by itself"
+        - "Right after I updated my Immich server"
+        - "Right after a Wi-Fi, router or network change"
+        - "Only at certain times of day, or it comes and goes"
+        - "This is a first-time setup"
+        - "I cannot tell"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: network_and_tls
+    attributes:
+      label: "Connection facts — tick all that apply. Android 4.4.2's TLS stack is a common silent cause."
+      description: "The frame's own TLS is ancient: it needs TLS 1.2 and older ciphers enabled on the server, so an Immich host that insists on TLS 1.3-only or perfect-forward-secrecy-only fails with SSL errors that look exactly like an app bug. The update manifest must be plain HTTP on a trusted LAN, because the device certificates are expired."
+      options:
+        - label: "The Immich server is reachable over plain http:// on my LAN"
+          required: false
+        - label: "It is https:// and I have already had to loosen ciphers or TLS versions for the frame"
+          required: false
+        - label: "I see SSL/TLS errors in /logs"
+          required: false
+        - label: "My update Manifest URL is https:// (this is expected to fail — the frames cannot validate TLS)"
+          required: false
+        - label: "The frame's clock looks wrong (this affects quiet hours and token expiry)"
+          required: false
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: "What did you do just before it went wrong, and does it happen again if you do that? Is it one specific photo or video, every time it comes round, or only sometimes?"
+      description: "'Every time' versus 'only sometimes' is load-bearing here: a per-asset verdict (undecodable bytes, an oversized clip) reproduces on the asset, while a wedge or a network failure does not and needs the log instead. Some verdicts are deliberately per-process, so 'a power-cycle fixed it' is itself a useful result — say so. CAUTION: stepping through the rotation with /control?action=next to reproduce a problem walks every asset down the real compatibility ladder and can write genuine EO1_INCOMPATIBLE tags into YOUR OWN Immich library. A handful of presses, not hundreds."
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: false
+
+  - type: textarea
+    id: schedule_fields
+    attributes:
+      label: "For anything timing-related: what do your quiet hours, time zone and slideshow interval say?"
+      description: "Paste them from `/state` (`config.quietHours`, `config.timezone`, `config.intervalMinutes`), or read them off the frame instead: options dialog (press **C** on a USB keyboard) → Media tab → the 'Quiet hours (cron)' rows, 'Slideshow interval (in minutes)', and 'Time Zone'. Transcribing by hand is fine. An empty quietHours list means the screen is never scheduled off. Not cosmetic — the panel is off whenever any 5-field cron expression matches the current minute in your selected time zone, so a wrong device clock makes a correct schedule look broken; update retries and 'next' pause while the activity is paused; and the watchdog deliberately judges nothing while the screen is off in quiet hours. A surprising number of 'nothing happens' reports are a schedule nobody remembers setting."
+      placeholder: "interval: 5 minutes · timezone: America/Los_Angeles · quietHours: 0 22-7 * * *"
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        ## Example asset — the part that actually gets a media bug fixed
+
+        **Please fill this section in if your problem involves a specific photo or video.** It is not a nicety: the app's whole media pipeline branches on a file's real codec, container, coded resolution, frame rate, rotation flag and byte size — and explicitly *not* on its file extension, because `.mov` and `.mp4` are containers rather than verdicts, and an iPhone `.mov` is HEVC by default while a `.jpg` can be HEIF. Several decisions are made by reading bytes out of the file itself, which no server response and no description can supply. The device's failure mode that hid longest was a decoder that accepts the bytes, reports success, advances the timeline, and paints nothing.
+
+        **Privacy, repeated on purpose:** do not attach a real family photo or home video. A phone original carries GPS coordinates, the make and model, the exact time and place, and recognisable faces of children — and it stays indexed on GitHub even if the issue is later closed. What reproduces every one of this app's checks is the file's *shape*, not its content: same container/extension, same codec, same resolution, same frame rate, same rotation flag, different pixels. A short throwaway clip shot with the same camera settings is exactly as useful. Please also do not attach anything from an album you do not own.
+
+        If only the genuine file reproduces the bug, say so in the issue and strip its metadata first (`exiftool -all= file.mp4`), or arrange a private way to send it — do not skip the asset over the privacy concern, and do not post it unredacted either.
+
+  - type: dropdown
+    id: asset_kind
+    attributes:
+      label: "What kind of asset is the problem with?"
+      description: "The two paths differ: a local upload is judged by extension and gets a `.incompat.txt` report written next to it, which excludes it from the rotation until that report is deleted; an Immich asset goes down a four-rung display ladder and leaves no file behind."
+      options:
+        - "Photo (from Immich)"
+        - "Video (from Immich)"
+        - "A website page (kiosk web backend)"
+        - "A file I uploaded to the frame's web page (local backend)"
+        - "All of them / unsure"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: web_page_symptoms
+    attributes:
+      label: "If this is about a kiosk web page in the rotation, check what you actually see."
+      description: "Whether a page worked is only known asynchronously, so these answers are the diagnosis, not just description. Stating the page URL verbatim is enough — never attach an exported config for this, which carries the Immich password twice."
+      options:
+        - label: "The page URL loads fine in a browser or phone on the same Wi-Fi"
+          required: false
+        - label: "It is https:// (Android 4.4's WebView is TLS-1.2-era — expect LAN http:// pages, not modern web apps)"
+          required: false
+        - label: "I see the previous photo instead of a blank panel"
+          required: false
+        - label: "I see a blank or black panel"
+          required: false
+        - label: "It shows the page for a moment then moves on (that is the 30-second load watchdog or an error, not a rotation bug)"
+          required: false
+        - label: "The frame froze or restarted rather than showing anything wrong (the kiosk watchdog, not the page)"
+          required: false
+    validations:
+      required: false
+
+  - type: input
+    id: asset_filename
+    attributes:
+      label: "The asset's original file name, exactly as Immich shows it"
+      description: "Copy it from the asset's info panel rather than retyping it, and give the name as the camera or server produced it — not a screenshot of the frame and not a re-exported copy, both of which discard the rotation matrix, codec and frame rate the bug is usually about. If you renamed the file yourself with a person's name, a place or a date, you can shorten it to something neutral (`IMG_6518.MOV`) and say that you did — what we need from the name is the camera convention it follows, not the title."
+      placeholder: "IMG_6518.MOV"
+    validations:
+      required: false
+
+  - type: dropdown
+    id: captured_with
+    attributes:
+      label: "What made the file?"
+      description: "The source device predicts the codec far better than the extension does, and this is the single most common cause of a black-screen video."
+      options:
+        - "iPhone or iPad (Camera settings → High Efficiency / HEVC)"
+        - "Android phone"
+        - "DSLR or mirrorless camera"
+        - "GoPro or action camera"
+        - "Screen recording, or converted from a GIF or another format"
+        - "A photo taken long ago / unknown source"
+        - "Don't know"
+    validations:
+      required: false
+
+  - type: input
+    id: asset_size_resolution
+    attributes:
+      label: "Roughly how big is the original file, and what resolution is it?"
+      description: "Both are checked against the device's own limits, not your settings. A file of the gigabyte class is never fetched at all — the frame starts from the server's preview instead. A video with a coded side over 1920 pixels is routed before anything is downloaded, because the decoder garbles it without raising an error. Note that Immich's info panel shows EXIF *display* dimensions while the app reads *coded* dimensions, and those differ (1088 vs 1920, say) — `/state` below gives the number that is actually being used."
+      placeholder: "e.g. 158 MB, 3840x2160"
+    validations:
+      required: false
+
+  - type: input
+    id: asset_fps_length
+    attributes:
+      label: "For a video: how long is it, and what frame rate, if you know?"
+      description: "Slow playback is a product, not a resolution: sustained macroblock throughput is pixels-times-frame-rate, so 720p60 fits where 1080p60 does not, and 1080p at 60 fps runs at roughly an eighth of real speed on this hardware. '1920x1080, 60 fps' lets a developer predict the verdict; 'it's slow' does not."
+      placeholder: "e.g. 24 s at 59.94 fps, or 1080p60 slo-mo from a phone"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: asset_geometry
+    attributes:
+      label: "Check any that apply to a video (leave blank for photos):"
+      description: "Non-zero rotation and an aspect opposite the panel's mounting orientation are both hard triggers that switch which player handles the clip, which is why they change what the fix is. 'Mirrored' is called out separately because a mirror is the one case this project has open and unfixed, and it reports as a rotation."
+      options:
+        - label: "It was filmed holding the phone sideways, or it has a rotation flag"
+          required: false
+        - label: "On the frame it appears upside-down or sideways"
+          required: false
+        - label: "On the frame it appears MIRRORED / flipped, not turned"
+          required: false
+        - label: "It is landscape but my frame is mounted portrait (or the reverse)"
+          required: false
+        - label: "It looks zoomed-in or cropped at the edges (this may be intended: photos and video fallback both center-crop to fill the panel, and nothing reads EXIF orientation for stills)"
+          required: false
+
+  - type: input
+    id: immich_has_encodes
+    attributes:
+      label: "Does your Immich server produce video encodes? (Administration → Settings → Video transcoding — enabled or off?)"
+      description: "This decides which failure you are looking at. When a server has no transcode, the app's last-resort playback URL answers with the original bytes again — the same undecodable file, fetched a second time. So 'black screen video' means something different depending on this one answer."
+      placeholder: "transcoding enabled / disabled / don't know"
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ### How to get those numbers yourself
+
+        **The frame itself is the best instrument — and it works on release builds.** While the problem asset is on screen, open `http://<the frame's IP>:8080/state` on a device on the same network (try port 80 if 8080 does not answer) and look at two blocks:
+
+        - `media.current` — `key` (shaped like `immich-1:8f3c…`, where the part after the colon is the asset's own Immich UUID and resolves directly in the Immich web UI), `originalFileName`, `sizeBytes`, `width`, `height`, `durationMs`, `backendId`.
+        - `video` — the frame's actual reading of the file: `active` (which player), `preferTsPlayer`, `tsAvailable` and `tsLoadError` (on a frame where the native TsPlayer library failed to load, *every* clip runs on the MediaPlayer fallback instead — that changes the whole diagnosis, so check this before blaming the codec), `path` and `stage` (`ORIGINAL`, `ORIGINAL_REPLAY` or `FALLBACK` — the only pair on the device that tells an original apart from the server's encode of the same clip), `codec` (the fourcc read out of the file, which is what distinguishes HEVC-in-`.mov` from HEIF-in-`.jpg`), `rotation`, `width`/`height`, `fpsMilli`, `macroblocksPerSecond`, `bitRateBps`, `renderSilent`, and `paintSignal`/`painted`/`lastFrameAgeMs` — `painted` is reported only when `paintSignal` is true, so on TsPlayer its absence is normal, not a finding.
+
+        Immich's own asset info panel gives the file name, size and display dimensions but **no codec at all** — no Immich response reports one.
+
+        On a computer with ffmpeg installed:
+
+        ```
+        ffprobe -v quiet -show_streams -show_format /path/to/file.mov
+        ```
+
+        Look for `codec_name`, `width`, `height`, `r_frame_rate`, `size`, and a `side_data` `Display Matrix` (any non-identity matrix means the clip is rotated).
+
+        Run it on a copy sitting in a neutral folder, or delete the `filename=` line before pasting — ffprobe prints the path you probed, which can carry your user name and album folder, and `creation_time`/GPS atoms come through with it.
+
+        Uploading a file to the frame's own web page makes it a local-backend asset, and `http://<frame-ip>:8080/files` lists what the frame made of it — including a `<name>.incompat.txt` report, which is a ready-made diagnosis with the exact failing check in it.
+
+  - type: checkboxes
+    id: example_asset_attached
+    attributes:
+      label: "Can you give us the file, or its exact identity?"
+      description: "GitHub accepts attachments dragged into the issue box up to 10 MB, so an iPhone original will usually not fit — that is why the asset key and an Immich link are first-class answers here. Note there is no way to force a RELEASE frame to display one chosen asset remotely (jump-to-asset exists only on debug builds), so attaching the file or naming its UUID is what lets a developer reproduce it on their own frame."
+      options:
+        - label: "I attached a sample file to this issue (a throwaway with the same format, not a real memory)"
+          required: false
+        - label: "I linked a copy — an Immich asset link or share link — and checked what it exposes before posting"
+          required: false
+        - label: "I gave the asset key from /state (media.current.key, shaped like 'immich-1:' followed by the asset's UUID) plus the file name and size"
+          required: false
+        - label: "I cannot share the exact file, but I attached or described a synthetic file with the same container, codec, resolution, frame rate and rotation"
+          required: false
+        - label: "I cannot provide any asset right now"
+          required: false
+
+  - type: textarea
+    id: example_asset_details
+    attributes:
+      label: "If you cannot attach the file: paste ffprobe output, or /state's media + video blocks, or describe it here."
+      description: "Minimum useful description: container, real codec, width x height, frame rate, rotation, file size. If pasting ffprobe output, delete the `filename=` line first — it prints the path you probed, which can carry your user name and album folder."
+      value: |
+        Paste /state's media and video blocks, or ffprobe output, between the fences below — or describe the file here in words.
+
+        ```
+        ```
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        ## Diagnostics to attach
+
+        Everything below is served by the frame's own LAN web server — plain HTTP, always on for the life of the app, and these read-only routes need no token and no Trusted Network flag. The server tries **port 80** and falls back to **8080**, so try `http://<frame-ip>/state` as well as `http://<frame-ip>:8080/state`; the bound port is printed in the page header. It never leaves your network: do not port-forward it in order to file a bug.
+
+        Finding the frame's IP without root: **Settings → Wi-Fi → the connected network** (press **S** on a USB keyboard at the frame to get to Android's settings), or your router's DHCP lease table. The options dialog's first tab also shows a Wi-Fi IP line, but only while Trusted Network is on. `/state` itself reports it as `network.wifi.ip`.
+
+        | URL | What it is |
+        |-----|------------|
+        | `/state` | One JSON document with almost the whole diagnosis: build facts and signing verdict, platform and capabilities (`device.platform`, `capabilities.lightSensor`/`screenBrightness`/`brightnessButton`/`powerButton`/`screenToggleKeyCode`, and a `brightness` block with `supported`/`step`/`floor`/`applied`/`lastLightValue`/`screenOn`), every backend (with **no secrets**), the asset on screen, the video block, watchdog, update, crash store, battery, memory, uptime. **The best single attachment.** |
+        | `/log/file?lines=2000` | The tail of the app's on-disk log. It keeps a heartbeat every 10 minutes, so on a healthy frame this holds weeks. Only the *live* half is served — the log rotates, so 'it stops halfway through the incident' is expected. |
+        | `/logs`, `/log.json?lines=500` | The in-memory ring buffer: 500 events, and it dies with the process. |
+        | `/crashes`, `/crash/<name>`, `/crash.json` | Crash reports. The name ends in the build number, which is what makes a minified release trace readable. Grab the **earliest** report that still exists, not just the newest — the store prunes at 14 days or 4 MB, so a crash loop overwrites its own oldest evidence. |
+        | `/files`, `/files/<name>` | Local uploads and their `.incompat.txt` compatibility reports. |
+
+        **`/state` contains no password and no userid — but it is not anonymous.** It also carries your Wi-Fi network name (`network.wifi.ssid`), the frame's IP address (`network.wifi.ip`), the device name you set (`device.name`), and the file name of whatever was on screen at that moment (`media.current.originalFileName`). Blank those four values before pasting if you would rather not publish them; just say that you did, and leave the rest of the document intact.
+
+        **Please do not run `adb logcat` and paste it.** On these devices logcat retains roughly thirteen minutes, so by the time you write this down it has rolled over; it also needs adb, which EO1 cannot do while its single port is in use. The frame's own log and crash store are the durable copies.
+
+        **Grab these as soon as the failure happens**, not days later — every one of them is time-limited. One caveat worth knowing: the web server starts partway through app startup, so a frame caught in a boot loop serves nothing for about two minutes at a time. Retry the URL, and remember that the crash which killed a process is reported by the *next* one.
+
+  - type: input
+    id: frame_address
+    attributes:
+      label: "What address do you use for the frame, and how did you find it? (IP and port, e.g. 192.168.1.87:8080)"
+      description: "A report that says 'the web page will not load' is usually a wrong-port problem. Redact the address if you like — say that you did."
+      placeholder: "192.168.1.87:8080"
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: diagnostics_attached
+    attributes:
+      label: "Tick what you actually attached — this tells us which evidence we can rely on and which has already rolled over."
+      options:
+        - label: "The /state JSON (view-source, select all, and paste between triple-backtick json fences — or save the page and attach the file)"
+          required: false
+        - label: "The log tail from /log/file?lines=2000"
+          required: false
+        - label: "One crash report from /crashes — its file name carries the build number we need"
+          required: false
+        - label: "A .incompat.txt compatibility report for a local upload that was refused"
+          required: false
+        - label: "A photo of the frame's lit screen (genuinely valuable: moiré, over-zoom, and mirror-versus-rotate are unreadable in text)"
+          required: false
+        - label: "Nothing yet — I will add it when asked"
+          required: false
+
+  - type: textarea
+    id: no_web_server
+    attributes:
+      label: "If you cannot reach the web server at all: what do you see instead?"
+      description: "Does the panel show anything? Is the frame on your Wi-Fi (check the router)? Does pressing C open the options dialog? Does the index page load but a specific URL not? These distinctions are how we tell 'no network' from 'the app never got far enough to open a socket'. If the About tab is the only thing you can reach, a photo of it still identifies the exact build."
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        ---
+
+        ## Before you submit
+
+        A last look, because this app's leak surface is specific and one careless attachment is the only permanent part of this issue.
+
+  - type: checkboxes
+    id: privacy_confirm
+    attributes:
+      label: "Confirm before submitting."
+      options:
+        - label: "No password and no configuration token appears anywhere in this issue — not in the body, an attachment, a screenshot, or a log. I did not paste /config, /config/download, or a configuration.json that still contains a password."
+          required: true
+        - label: "I did not attach a real personal photo or home video, or I have said so and we can arrange a private way to send it."
+          required: false
+        - label: "I have redacted my server's host name or the frame's IP address if I would rather not publish them."
+          required: false
+        - label: "I checked /state's network.wifi.ssid, network.wifi.ip, device.name and media.current.originalFileName and blanked any of them I would rather not publish."
+          required: false
+
+  - type: input
+    id: anything_else
+    attributes:
+      label: "Anything else — the exact wording of a message you saw, what you already tried, or a link"
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        One thing this form will never ask you to do, and you should not do it on your own either: do not bump an SDK level, add ExoPlayer or Media3, or upgrade OkHttp/Retrofit to "fix" a playback or TLS problem. ExoPlayer hangs this device's media stack completely — the frame stops responding to everything, including adb, and has to be power-cycled. The old Android pins are deliberate.

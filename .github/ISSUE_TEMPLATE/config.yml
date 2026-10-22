@@ -1,0 +1,14 @@
+blank_issues_enabled: true
+contact_links:
+  - name: "Install, setup and operations guide (README)"
+    url: "https://github.com/aphex3k/EO1/blob/main/README.md"
+    about: "How to get the APK onto an EO1 or EO2, how self-update and signing work, the Immich server versions that are supported, and the hardware caveats. Read this before filing — most 'it does not work' reports are one of those."
+  - name: "LAN web server: debugging and control (docs/WEBSERVER.md)"
+    url: "https://github.com/aphex3k/EO1/blob/main/docs/WEBSERVER.md"
+    about: "Everything the frame serves on http://<frame-ip>:8080 — /state, /logs, /log/file, /crashes, /files, the control buttons, and the kiosk watchdog's self-recovery ladder. This is where the artifacts a bug report needs come from."
+  - name: "Hardware notes (EO1-specs.md)"
+    url: "https://github.com/aphex3k/EO1/blob/main/EO1-specs.md"
+    about: "Panel size and orientation, memory and storage, ports, and what each model's buttons and sensors actually are."
+  - name: "Amlogic video playback (docs/TSPLAYER.md)"
+    url: "https://github.com/aphex3k/EO1/blob/main/docs/TSPLAYER.md"
+    about: "Why video is routed between two players, how scaling and rotation are decided, and why ExoPlayer is not an option on this hardware."
