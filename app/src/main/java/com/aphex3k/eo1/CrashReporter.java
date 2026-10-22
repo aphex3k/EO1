@@ -76,23 +76,37 @@ public final class CrashReporter implements Thread.UncaughtExceptionHandler {
     private static final Env DEVICE_ENV = new Env() {
         @Override
         public Map<String, String> snapshot(File baseDir) {
-            Map<String, String> h = new LinkedHashMap<>();
-            h.put("Version-Name", String.valueOf(BuildConfig.VERSION_NAME));
-            h.put("Version-Code", Integer.toString(BuildConfig.VERSION_CODE));
-            h.put("Build-Type", BuildConfig.DEBUG ? "debug" : "release");
-            h.put("Device-Manufacturer", String.valueOf(Build.MANUFACTURER));
-            h.put("Device-Model", String.valueOf(Build.MODEL));
-            h.put("Device-Name", String.valueOf(Build.DEVICE));
-            h.put("Android", String.valueOf(Build.VERSION.RELEASE)
-                    + " (API " + Build.VERSION.SDK_INT + ")");
-            Runtime rt = Runtime.getRuntime();
-            h.put("Memory-Bytes", (rt.totalMemory() - rt.freeMemory()) + "/" + rt.maxMemory());
-            h.put("Disk-Free-Bytes", Long.toString(freeBytes(baseDir)));
-            h.put("Uptime-Millis", Long.toString(SystemClock.uptimeMillis()));
-            h.put("Elapsed-Realtime-Millis", Long.toString(SystemClock.elapsedRealtime()));
-            return h;
+            return deviceFacts(baseDir);
         }
     };
+
+    /**
+     * The identity block every report header starts with. Package-private and {@code File}-based
+     * because {@link DiagnosticsReport} headers a report of its own with the same facts, and the
+     * two must not be able to disagree about what {@code Android} or {@code Disk-Free-Bytes} means.
+     *
+     * <p>Nothing here may reach a binder: a header key that can block is how a capture thread gets
+     * stranded past its deadline, which is why the signing verdict lives in a budgeted section
+     * instead. {@code StatFs} and {@code SystemClock} are the only two calls that leave the process,
+     * and neither can wait on another party.
+     */
+    static Map<String, String> deviceFacts(File baseDir) {
+        Map<String, String> h = new LinkedHashMap<>();
+        h.put("Version-Name", String.valueOf(BuildConfig.VERSION_NAME));
+        h.put("Version-Code", Integer.toString(BuildConfig.VERSION_CODE));
+        h.put("Build-Type", BuildConfig.DEBUG ? "debug" : "release");
+        h.put("Device-Manufacturer", String.valueOf(Build.MANUFACTURER));
+        h.put("Device-Model", String.valueOf(Build.MODEL));
+        h.put("Device-Name", String.valueOf(Build.DEVICE));
+        h.put("Android", String.valueOf(Build.VERSION.RELEASE)
+                + " (API " + Build.VERSION.SDK_INT + ")");
+        Runtime rt = Runtime.getRuntime();
+        h.put("Memory-Bytes", (rt.totalMemory() - rt.freeMemory()) + "/" + rt.maxMemory());
+        h.put("Disk-Free-Bytes", Long.toString(freeBytes(baseDir)));
+        h.put("Uptime-Millis", Long.toString(SystemClock.uptimeMillis()));
+        h.put("Elapsed-Realtime-Millis", Long.toString(SystemClock.elapsedRealtime()));
+        return h;
+    }
 
     /** A header with nothing but what a test supplies. */
     private static final Env NULL_ENV = new Env() {

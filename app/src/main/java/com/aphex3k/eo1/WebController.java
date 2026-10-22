@@ -88,6 +88,36 @@ public interface WebController {
     boolean deleteCrashDump(String name);
 
     /**
+     * The diagnostics-report directory ({@code filesDir/reports}). Held apart from the crash store on
+     * purpose: a frame that rebooted itself without dying has nothing to report there, and a file that
+     * appeared under {@code /crashes} would be read as a crash by the next person to open the page.
+     */
+    File reportDir();
+
+    /** Lists the stored diagnostics reports, newest first. */
+    DiagnosticsReport.Info[] listReports();
+
+    /**
+     * Resolves a diagnostics report by name.
+     *
+     * @return the file, or {@code null} if missing/unsafe.
+     */
+    File reportFile(String name);
+
+    /** Deletes one diagnostics report by explicit operator action. Retention pruning is separate. */
+    boolean deleteReport(String name);
+
+    /**
+     * Writes one diagnostics report now, because an operator asked, and returns what came of it.
+     *
+     * <p>Called on a web worker thread and expected to block it for up to
+     * {@link DiagnosticsReport#CAPTURE_DEADLINE_MS}: the collection happens on a thread of its own,
+     * which is what lets a capture that hangs on a wedged framework still answer. It must never reach
+     * for the UI thread — the UI thread is frequently the thing being diagnosed.
+     */
+    DiagnosticsReport.Result captureReport();
+
+    /**
      * The self-update staging directory ({@code filesDir/updates}). The web server uses it as
      * the temp dir for {@code POST /update} APK uploads — deliberately not the media upload
      * dir, which feeds the local rotation pool.

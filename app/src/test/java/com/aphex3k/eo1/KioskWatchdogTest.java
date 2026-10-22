@@ -32,6 +32,7 @@ public class KioskWatchdogTest {
         boolean mainLoopAlive = true;
         long progressToken = 0;
         boolean autoRebootEnabled;
+        final List<String> captures = new ArrayList<>();
 
         final List<String> actions = new ArrayList<>();
         final List<String> events = new ArrayList<>();
@@ -118,8 +119,17 @@ public class KioskWatchdogTest {
         }
 
         @Override
-        public void rebootDevice() {
+        public void rebootDevice(String reason) {
             actions.add("rebootDevice");
+        }
+
+        /**
+         * Deliberately kept out of {@link #actions}: a diagnostics capture is documentation, not a
+         * rung, and the existing assertions count actions per wedge.
+         */
+        @Override
+        public void captureDiagnostics(String reason) {
+            captures.add(reason);
         }
 
         @Override

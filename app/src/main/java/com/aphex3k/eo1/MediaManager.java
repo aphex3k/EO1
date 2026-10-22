@@ -164,6 +164,28 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private volatile MediaAsset currentAsset;
     /** Dead web pages walked past so far in this rotation cycle; see {@link #MAX_WEB_FALLBACKS_PER_CYCLE}. */
     private volatile int webFallbackDepth;
+    /**
+     * The last catalog fetch of each backend, as
+     * {@code ok|failed|degraded at <wall clock> — <detail>, N asset(s)}.
+     *
+     * <p>{@link #rebuildPool}'s two unhappy exits reach only {@code Log.e}/{@code Log.w}. On a
+     * sideloaded frame {@code READ_LOGS} is signature-level, so those lines land nowhere a person can
+     * read — which left "the server answered with nothing displayable" and "the server never answered"
+     * indistinguishable after the fact. This map is the difference, and it is what the diagnostics
+     * report reads.
+     */
+    private final ConcurrentHashMap<String, String> backendLastFetch = new ConcurrentHashMap<>();
+    /** Pool rebuilds that raised. Separates "the library is empty" from "the pool keeps failing". */
+    private volatile int rebuildFailureCount;
+    /** Acquire failures in the tail of the current sweep, and when the last one landed. */
+    private volatile int acquireFailureRun;
+    private volatile long lastAcquireFailureAtMs;
+    /**
+     * Acquire failures since the process started, next to the run above: a run of 2 on a frame that
+     * has failed 20 000 times is a healthy retry, and the same 2 is the whole story on a frame that
+     * has never failed before this minute.
+     */
+    private volatile long acquireFailureCount;
     /** Cache dir of the rotation currently in flight; guards removeFromCache's location check. */
     private volatile File mediaCacheDir;
     private volatile boolean poolStale;
@@ -364,10 +386,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 Log.w(TAG, "showNextImage: asset " + asset.key() + " failed", e);
                 postException(ui, e);
                 consecutiveAcquireFailures++;
+                acquireFailureRun = consecutiveAcquireFailures;
+                acquireFailureCount++;
+                lastAcquireFailureAtMs = System.currentTimeMillis();
                 continue;
             }
             if (playbackFile != null) {
                 acquired = asset;
+                acquireFailureRun = 0;
                 break;
             }
         }
@@ -499,11 +525,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 if (warningsShown.add(backendId + '@' + generationFingerprint + '@' + reason)) {
                     postException(ui, new BackendUnavailableException(e));
                 }
+                rebuildFailureCount++;
+                noteBackendFetch(backendId, "init-failed", 0,
+                        rootCause(e).getClass().getName() + ": "
+                                + clampFetchDetail(String.valueOf(e.getMessage())));
                 continue;
             }
             // A backend that came up degraded still belongs in the rotation; tell the user
             // once per thing that changed rather than once per tick.
             String warning = backend.compatibilityWarning();
+            String warnSuffix = warning == null ? "" : " | " + clampFetchDetail(warning);
             if (warning != null) {
                 if (warningsShown.add(backendId + '@' + generationFingerprint + '@' + warning)) {
                     Log.w(TAG, "rebuildPool: backend '" + backendId + "' is degraded: " + warning);
@@ -527,9 +558,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 Log.i(TAG, "rebuildPool: backend '" + backendId + "' (" + backend.getType() + ")"
                         + (version != null ? " " + version : "")
                         + " contributed " + count + " asset(s)");
+                noteBackendFetch(backendId, warning == null ? "ok" : "ok, degraded", count,
+                        backend.getType() + (version == null ? "" : " " + version) + warnSuffix);
             } catch (Exception e) {
                 Log.e(TAG, "rebuildPool: backend '" + backendId + "' catalog fetch failed", e);
                 postException(ui, new BackendUnavailableException(e));
+                rebuildFailureCount++;
+                noteBackendFetch(backendId, "failed", 0, e.getClass().getSimpleName() + ": "
+                        + clampFetchDetail(String.valueOf(e.getMessage())) + warnSuffix);
             }
         }
 
@@ -1566,9 +1602,89 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return ms != null ? ms : -1;
     }
 
-    /** Remaining assets in the current pool. */
+    /**
+     * Remaining assets in the current pool.
+     *
+     * <p>Named for what it returns: the tail of this pass, not the size of the library. A pool of
+     * 40 000 assets with 3 left reads as "3" here, which is the difference between a thin library
+     * and a frame that is rotating normally.
+     */
     int rotationListSize() {
         return Math.max(0, pool.size() - poolCursor);
+    }
+
+    /** Assets in the rotation pool, from the concurrent key set. Safe to call from any thread. */
+    public int poolKeyCount() {
+        return poolKeys.size();
+    }
+
+    /**
+     * Assets left in this pass. The cursor belongs to the rotation worker and is not volatile, so
+     * this may answer a little behind it — which is what a report wants anyway.
+     */
+    public int poolRemaining() {
+        return rotationListSize();
+    }
+
+    /** How far the current cycle has walked past dead web pages. */
+    public int webFallbackDepth() {
+        return webFallbackDepth;
+    }
+
+    /** Acquire failures in the tail of the current sweep. */
+    public int acquireFailureRun() {
+        return acquireFailureRun;
+    }
+
+    /** Acquire failures since the process started. */
+    public long acquireFailureCount() {
+        return acquireFailureCount;
+    }
+
+    public long lastAcquireFailureAtMs() {
+        return lastAcquireFailureAtMs;
+    }
+
+    /** Pool rebuilds that raised since the process started. */
+    public int rebuildFailureCount() {
+        return rebuildFailureCount;
+    }
+
+    /**
+     * Per-backend account of the last catalog fetch, newest answer wins. Keys are backend ids from
+     * configuration, so this names a host only as the operator already named it.
+     */
+    public java.util.Map<String, String> backendFetchRecords() {
+        return new java.util.LinkedHashMap<>(backendLastFetch);
+    }
+
+    /**
+     * The four verdict sets, as counts. Keys are deliberately withheld: a library of 40 000 assets
+     * would otherwise spend half a report's budget listing uuids, and the number is what answers
+     * "has this frame quietly given up on a slice of the library". Counts only is also what keeps a
+     * throughput verdict — which is a statement about this decoder, not about the user's files — from
+     * reading like one.
+     */
+    public String verdictCounts() {
+        return "incompatible=" + knownIncompatibleKeys.size()
+                + " tooDemanding=" + tooDemandingVideoKeys.size()
+                + " noTranscode=" + noTranscodeVideoKeys.size()
+                + " renderSilent=" + renderSilentVideoKeys.size();
+    }
+
+    private void noteBackendFetch(String backendId, String status, int count, String detail) {
+        backendLastFetch.put(backendId, status + " at "
+                + DiagnosticsReport.localTime(System.currentTimeMillis())
+                + " — " + detail + ", " + count + " asset(s)");
+    }
+
+    /** Keeps one exception message from out-growing the record it belongs to. */
+    private static String clampFetchDetail(String s) {
+        if (s == null) {
+            return "";
+        }
+        String one = s.replace('\n', ' ').replace('\r', ' ').trim();
+        return one.length() <= 200 ? one : one.substring(0, 200) + "...";
     }
 
     @Override

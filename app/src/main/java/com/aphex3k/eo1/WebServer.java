@@ -288,6 +288,25 @@ public class WebServer {
             }
             return "crashGet";
         }
+        // Diagnostics reports. A family of their own rather than another CrashStore kind, because the
+        // event they document is a decision the frame made, not a death — and /crashes would announce
+        // them as one.
+        if (path.equals("/reports")) {
+            return "reportsPage";
+        }
+        if (path.equals("/reports.json")) {
+            return "reportJson";
+        }
+        if (path.equals("/reports/capture")) {
+            return "reportCapture";
+        }
+        if (path.startsWith("/report/")) {
+            String rest = path.substring("/report/".length());
+            if (rest.endsWith("/delete")) {
+                return "reportDelete";
+            }
+            return "reportGet";
+        }
         if (path.equals("/upload")) {
             return "upload";
         }
@@ -609,6 +628,89 @@ public class WebServer {
                 }
                 String name = urlDecode(segmentAfter(path, "/crash/", "/delete"));
                 boolean ok = controller.deleteCrashDump(name);
+                sendJson(os, ok ? 200 : 404, ok ? okJson("deleted") : errorJson("not found"));
+                break;
+            }
+
+            case "reportsPage":
+                if (!method.equals("GET")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                send(os, 200, "text/html; charset=utf-8", renderReportsPage());
+                break;
+
+            case "reportJson":
+                if (!method.equals("GET")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                send(os, 200, "application/json", renderReportListJson());
+                break;
+
+            case "reportCapture": {
+                if (!method.equals("POST")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                // Same-origin only, and deliberately not token-gated — the precedent is crashDelete
+                // above: the flag that would carry the token can only be switched on at the dead
+                // frame's own screen, which is the situation this button exists for.
+                if (!configWriteAllowed(headers, boundPort)) {
+                    sendJson(os, 403, errorJson("cross-origin request rejected"));
+                    return;
+                }
+                // Blocks this worker for up to the capture deadline. Bounded, single-flighted and
+                // spaced inside the activity, so a page reload loop cannot mint reports.
+                DiagnosticsReport.Result r = controller.captureReport();
+                JsonObject o = new JsonObject();
+                if (r == null) {
+                    o.addProperty("ok", false);
+                    o.addProperty("msg", "no report was written: another capture is in flight, or"
+                            + " one finished less than "
+                            + (DiagnosticsReport.CAPTURE_SPACING_MS / 1000L) + "s ago, or the"
+                            + " capture did not finish in time");
+                } else {
+                    o.addProperty("ok", r.ok);
+                    o.addProperty("elapsedMs", r.elapsedMs);
+                    o.addProperty("bytes", r.bytes);
+                    if (r.ok) {
+                        o.addProperty("name", r.name);
+                        o.addProperty("url", "/report/" + urlEncode(r.name));
+                    } else {
+                        o.addProperty("msg", r.message);
+                    }
+                }
+                sendJson(os, 200, o);
+                break;
+            }
+
+            case "reportGet": {
+                if (!method.equals("GET")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                String name = urlDecode(segmentAfter(path, "/report/", null));
+                File f = controller.reportFile(name);
+                if (f == null || !f.isFile()) {
+                    send(os, 404, "text/plain", "not found");
+                    return;
+                }
+                streamFile(os, f, contentTypeFor(f.getName()));
+                break;
+            }
+
+            case "reportDelete": {
+                if (!method.equals("DELETE") && !method.equals("POST")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                if (!configWriteAllowed(headers, boundPort)) {
+                    sendJson(os, 403, errorJson("cross-origin request rejected"));
+                    return;
+                }
+                String name = urlDecode(segmentAfter(path, "/report/", "/delete"));
+                boolean ok = controller.deleteReport(name);
                 sendJson(os, ok ? 200 : 404, ok ? okJson("deleted") : errorJson("not found"));
                 break;
             }
@@ -1016,10 +1118,15 @@ public class WebServer {
         sb.append("<p>").append(escapeHtml(controller.appBuildSummary())).append("</p>");
         sb.append("<p><a href=\"/state\">state</a> · <a href=\"/logs\">logs</a> · ")
                 .append("<a href=\"/crashes\">crashes</a> · ")
+                .append("<a href=\"/reports\">reports</a> · ")
                 .append("<a href=\"/files\">files (json)</a></p>");
         String crashNotice = crashNotice();
         if (crashNotice != null) {
             sb.append("<p style=\"color:#f88\">").append(crashNotice).append("</p>");
+        }
+        String notice = reportNotice();
+        if (notice != null) {
+            sb.append("<p style=\"color:#fb3\">").append(notice).append("</p>");
         }
 
         sb.append("<h2>Upload</h2>");
@@ -1060,6 +1167,7 @@ public class WebServer {
                     .append("<button onclick=\"fillKey(62)\">SPACE</button>");
         }
 
+        sb.append(renderDiagnosticsSection());
         sb.append(renderConfigurationSection());
         sb.append(renderDeviceNameSection());
         sb.append(renderUpdateSection());
@@ -1067,7 +1175,99 @@ public class WebServer {
         sb.append("<script>");
         sb.append(controlSectionJs());
         sb.append("</script>");
+        sb.append("<script>");
+        sb.append(diagnosticsSectionJs());
+        sb.append("</script>");
         return sb.toString();
+    }
+
+    /**
+     * The index page's Diagnostics block: one button that produces the same file the frame produces
+     * before it reboots itself, and the newest few of those files. Amber rather than red, and said
+     * out loud to be not a crash — the thing a person scanning this page is looking for.
+     */
+    private String renderDiagnosticsSection() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<h2>Diagnostics</h2>");
+        sb.append("<p>")
+                .append("<button id=\"diagBtn\" onclick=\"captureReport()\">Capture now</button> ")
+                .append("<span id=\"diagStatus\"></span></p>");
+        sb.append("<p style=\"color:#999\">The same report the frame writes just before it reboots")
+                .append(" itself. Not a crash dump: it is one frame's account of its own state at one")
+                .append(" instant, and it is what to attach to a bug report.</p>");
+        DiagnosticsReport.Info[] reports;
+        try {
+            reports = controller.listReports();
+        } catch (Throwable t) {
+            sb.append("<p>reports unreadable: ").append(escapeHtml(String.valueOf(t)))
+                    .append("</p>");
+            return sb.toString();
+        }
+        sb.append("<table><tr><th>When</th><th>Trigger</th><th>Size</th><th></th><th></th></tr>");
+        if (reports.length == 0) {
+            sb.append("<tr><td colspan=\"5\">no reports stored. Reports are kept for 30 days,")
+                    .append(" or until the store passes 8 MB or 40 files.</td></tr>");
+        }
+        int shown = Math.min(reports.length, 5);
+        for (int i = 0; i < shown; i++) {
+            DiagnosticsReport.Info r = reports[i];
+            String href = "/report/" + escapeHtml(urlEncode(r.name));
+            sb.append("<tr><td>").append(escapeHtml(DiagnosticsReport.localTime(r.epochMillis)))
+                    .append("</td>")
+                    .append("<td>").append(escapeHtml(r.trigger)).append("</td>")
+                    .append("<td>").append(r.sizeBytes / 1024L).append(" KB</td>")
+                    .append("<td><a href=\"").append(href).append("\" download>Download</a></td>")
+                    .append("<td><button onclick=\"delReport('")
+                    .append(escapeHtmlJs(urlEncode(r.name))).append("')\">Delete</button></td>")
+                    .append("</tr>");
+        }
+        sb.append("</table>");
+        if (reports.length > shown) {
+            sb.append("<p>").append(reports.length - shown)
+                    .append(" more &mdash; <a href=\"/reports\">all reports</a></p>");
+        }
+        return sb.toString();
+    }
+
+    /**
+     * The Diagnostics block's JavaScript. Its own {@code <script>} element and package-private so the
+     * routing test can assert on the text it emits: a {@code <script>} is parsed whole before it runs,
+     * so one stray token here would silently undefine {@code captureReport} while the page still
+     * renders and the button still looks pressable.
+     */
+    static String diagnosticsSectionJs() {
+        // The status is set before the fetch resolves, because a capture on a wedged frame can take
+        // the whole deadline and a button that appears to do nothing invites a second click.
+        return "function captureReport(){var b=document.getElementById('diagBtn');"
+                + "var s=document.getElementById('diagStatus');"
+                + "if(b)b.disabled=true;if(s)s.textContent='capturing...';"
+                + "fetch('/reports/capture',{method:'POST'}).then(r=>r.json()).then(function(j){"
+                + "if(s)s.textContent=j.ok?('wrote '+j.name+' ('+Math.round(j.bytes/1024)+' KB in '"
+                + "+j.elapsedMs+'ms)'):(j.msg||'no report written');"
+                + "if(j.ok)setTimeout(function(){location.reload();},600);})"
+                + ".catch(function(){if(s)s.textContent='capture request failed';})"
+                + ".then(function(){if(b)b.disabled=false;});}"
+                + "function delReport(n){if(!confirm('Delete '+n+'?'))return;"
+                + "fetch('/report/'+n+'/delete',{method:'POST'}).then(r=>r.json())"
+                + ".then(function(){location.reload();});}";
+    }
+
+    /**
+     * One line saying what the frame has already written about itself. Reads {@code stats()} only, for
+     * the reason given at {@link #crashNotice()}: the landing page must not open every stored report.
+     */
+    private String reportNotice() {
+        try {
+            DiagnosticsReport.Stats s = DiagnosticsReport.stats(controller.reportDir());
+            if (s.count == 0) {
+                return null;
+            }
+            return "latest diagnostics report: " + escapeHtml(s.lastTrigger == null ? "?" : s.lastTrigger)
+                    + " at " + escapeHtml(DiagnosticsReport.localTime(s.lastAtMs))
+                    + " &mdash; see <a href=\"/reports\">reports</a>.";
+        } catch (Throwable t) {
+            return null;
+        }
     }
 
     /**
@@ -1460,6 +1660,89 @@ public class WebServer {
     }
 
     /** One line above the fold when this frame is holding crash reports. */
+    /**
+     * The {@code /reports} page: every diagnostics report the frame has kept, with what made it write
+     * each one. Same shape as {@code /crashes} — server-rendered, plain reload link — because this
+     * store only changes when the ladder reaches its last rung or someone presses the button.
+     */
+    private String renderReportsPage() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<!doctype html><meta charset=\"utf-8\"><title>")
+                .append(deviceNamePrefixHtml(deviceName()))
+                .append(escapeHtml(controller.platform())).append(" diagnostics reports</title>")
+                .append("<style>body{font:12px monospace;background:#111;color:#eee;padding:8px}")
+                .append("table{border-collapse:collapse}td,th{padding:3px 8px;text-align:left}")
+                .append("a{color:#8cf}button{font:11px monospace}</style>")
+                .append("<p><a href=\"/\">back</a> · <a href=\"/reports.json\">json</a> · ")
+                .append("<a href=\"/reports\">reload</a></p>");
+
+        DiagnosticsReport.Info[] reports;
+        try {
+            reports = controller.listReports();
+        } catch (Throwable t) {
+            sb.append("<p>report store unreadable: ").append(escapeHtml(String.valueOf(t)))
+                    .append("</p>");
+            return sb.toString();
+        }
+        if (reports.length == 0) {
+            sb.append("<p>no diagnostics reports stored. The frame writes one when the kiosk watchdog")
+                    .append(" reaches its reboot rung (whether or not the reboot was allowed) and when")
+                    .append(" the button on the <a href=\"/\">landing page</a> is pressed. Reports are")
+                    .append(" kept for 30 days, or until the store passes 8 MB or 40 files, and the")
+                    .append(" newest non-manual one is always kept.</p>");
+            return sb.toString();
+        }
+        sb.append("<p>").append(reports.length)
+                .append(" report(s). A <code>-reboot-</code> name means the frame was about to reboot")
+                .append(" itself; <code>-exhausted-</code> means it reached that rung and was not")
+                .append(" allowed to, or adbd refused; <code>-manual-</code> means someone asked.")
+                .append("</p>");
+        sb.append("<table><tr><th>When</th><th>Trigger</th><th>Reason</th><th>Size</th>")
+                .append("<th>Build</th><th></th><th></th></tr>");
+        for (DiagnosticsReport.Info r : reports) {
+            String href = "/report/" + escapeHtml(urlEncode(r.name));
+            sb.append("<tr><td>").append(escapeHtml(DiagnosticsReport.localTime(r.epochMillis)))
+                    .append("</td>")
+                    .append("<td>").append(escapeHtml(r.trigger)).append("</td>")
+                    .append("<td>").append(escapeHtml(r.reason == null ? r.name : r.reason))
+                    .append("</td>")
+                    .append("<td>").append(r.sizeBytes / 1024L).append(" KB</td>")
+                    .append("<td>").append(r.versionCode).append("</td>")
+                    .append("<td><a href=\"").append(href).append("\" download>Download</a></td>")
+                    .append("<td><button onclick=\"delReport('")
+                    .append(escapeHtmlJs(urlEncode(r.name))).append("')\">Delete</button></td>")
+                    .append("</tr>");
+        }
+        sb.append("</table>");
+        sb.append("<script>function delReport(n){if(!confirm('Delete '+n+'?'))return;")
+                .append("fetch('/report/'+n+'/delete',{method:'POST'}).then(r=>r.json())")
+                .append(".then(function(){location.reload();});}</script>");
+        return sb.toString();
+    }
+
+    /** The {@code /reports.json} listing: names and what the names carry, never a body read. */
+    private String renderReportListJson() {
+        JsonArray arr = new JsonArray();
+        DiagnosticsReport.Info[] reports;
+        try {
+            reports = controller.listReports();
+        } catch (Throwable t) {
+            return arr.toString();
+        }
+        for (DiagnosticsReport.Info r : reports) {
+            JsonObject o = new JsonObject();
+            o.addProperty("name", r.name);
+            o.addProperty("trigger", r.trigger);
+            o.addProperty("epochMillis", r.epochMillis);
+            o.addProperty("versionCode", r.versionCode);
+            o.addProperty("reason", r.reason);
+            o.addProperty("size", r.sizeBytes);
+            o.addProperty("lastModified", r.lastModified);
+            arr.add(o);
+        }
+        return arr.toString();
+    }
+
     private String crashNotice() {
         try {
             // stats(), not listCrashDumps(): the notice needs a count and a timestamp, both of which
