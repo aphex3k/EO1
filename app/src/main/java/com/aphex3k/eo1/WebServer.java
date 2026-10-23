@@ -1262,8 +1262,13 @@ public class WebServer {
             if (s.count == 0) {
                 return null;
             }
+            String refused = DiagnosticsReport.refusedDispatch(controller.reportDir());
             return "latest diagnostics report: " + escapeHtml(s.lastTrigger == null ? "?" : s.lastTrigger)
                     + " at " + escapeHtml(DiagnosticsReport.localTime(s.lastAtMs))
+                    // A -reboot- name says the frame asked. This is where a reader learns nothing
+                    // listened, which is the difference between a self-healed frame and a wedged one.
+                    + (refused == null ? "" : " &mdash; <b>its reboot command was refused</b> ("
+                            + escapeHtml(refused) + ")")
                     + " &mdash; see <a href=\"/reports\">reports</a>.";
         } catch (Throwable t) {
             return null;

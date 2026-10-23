@@ -2124,11 +2124,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             @Override
             public List<DeviceRepair.Step> run(AdbdInstallClient client) {
                 // The last instant at which a file can honestly say "this frame is about to reboot
-                // itself". Not in the watchdog: adbd still gets a say, and a report named -reboot-
-                // must not be able to assert a reboot that was never dispatched. Awaited, with a
-                // deadline — the reboot proceeds whether or not the report landed.
-                captureDiagnostics(DiagnosticsReport.TRIGGER_REBOOT, reason, true);
-                return DeviceRepair.reboot(client::exec);
+                // itself". Not in the watchdog: adbd still gets a say. Awaited, with a deadline — the
+                // reboot proceeds whether or not the report landed.
+                DiagnosticsReport.Result report =
+                        captureDiagnostics(DiagnosticsReport.TRIGGER_REBOOT, reason, true);
+                List<DeviceRepair.Step> steps = DeviceRepair.reboot(client::exec);
+                // Such a file can only ever claim the request, because a reboot that lands kills this
+                // thread before it could annotate itself. So record the outcome that IS still
+                // observable from here: adbd refusing the command. Left unrecorded, the report keeps
+                // asserting a reboot that the next genuine boot would be credited with completing.
+                if (report != null && report.ok && !steps.isEmpty()) {
+                    DeviceRepair.Step step = steps.get(0);
+                    if (!step.ok()) {
+                        DiagnosticsReport.recordDispatchOutcome(
+                                DiagnosticsReport.dirFor(MainActivity.this), report.name,
+                                step.outcome + (step.detail == null || step.detail.isEmpty()
+                                        ? "" : " (" + step.detail + ")"));
+                    }
+                }
+                return steps;
             }
         });
     }

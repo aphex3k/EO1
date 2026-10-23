@@ -380,6 +380,35 @@ public class DiagnosticsReportTest {
     }
 
     @Test
+    public void aRefusedRebootCommandIsNotCreditedWithTheBootAfterIt() throws IOException {
+        File baseDir = dir();
+        DiagnosticsReport.Result r =
+                capture(baseDir, content(DiagnosticsReport.TRIGGER_REBOOT, T0));
+        long laterBoot = T0 + 600_000L;
+        assertTrue("with nothing recorded, adjacency is the only evidence there is",
+                DiagnosticsReport.lastReboot(baseDir, laterBoot).contains("600s later"));
+
+        DiagnosticsReport.recordDispatchOutcome(baseDir, r.name, "UNREACHABLE (SocketTimeoutException)");
+
+        String answer = DiagnosticsReport.lastReboot(baseDir, laterBoot);
+        assertTrue(answer, answer.contains("but the command was refused"));
+        assertTrue(answer, answer.contains("SocketTimeoutException"));
+        assertFalse("a refused command cannot have caused the boot that followed it",
+                answer.contains("600s later"));
+        assertEquals("UNREACHABLE (SocketTimeoutException)",
+                DiagnosticsReport.refusedDispatch(baseDir));
+        assertTrue(DiagnosticsReport.statsJson(baseDir).toString()
+                .contains("\"lastDispatch\":\"UNREACHABLE (SocketTimeoutException)\""));
+
+        // The note is a record, not a report: it must not reach a listing, a route or the prune pass.
+        assertEquals(1, DiagnosticsReport.list(baseDir).length);
+        assertNull(DiagnosticsReport.resolve(baseDir, r.name + ".outcome"));
+        assertTrue(DiagnosticsReport.delete(baseDir, r.name));
+        assertFalse("deleting a report takes its note with it",
+                new File(baseDir, r.name + ".outcome").exists());
+    }
+
+    @Test
     public void theStoreSummarisesWithoutOpeningABody() throws IOException {
         File baseDir = dir();
         capture(baseDir, content(DiagnosticsReport.TRIGGER_EXHAUSTED, T0));

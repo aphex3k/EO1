@@ -647,7 +647,70 @@ public final class DiagnosticsReport {
     /** Deletes one report by explicit operator action. Nothing else ever removes a report early. */
     public static boolean delete(File baseDir, String name) {
         File f = resolve(baseDir, name);
-        return f != null && f.delete();
+        if (f == null || !f.delete()) {
+            return false;
+        }
+        File note = new File(baseDir, name + OUTCOME_SUFFIX);
+        if (note.isFile()) {
+            // A note about the command outlives its use once the report it describes is gone.
+            note.delete();
+        }
+        return true;
+    }
+
+    /**
+     * Name suffix of the record of what became of the reboot command a report was written for. Not a
+     * report: {@link #list} reads only {@code .txt} files and {@link #resolve} refuses anything else,
+     * so nothing that lists, serves or prunes the store ever sees it.
+     */
+    private static final String OUTCOME_SUFFIX = ".outcome";
+
+    /**
+     * Records that the reboot command {@code reportName} was written for did <em>not</em> land.
+     *
+     * <p>Only the refusal is ever recorded, and only because it is the one outcome that can still be
+     * written down: a reboot that lands takes the process with it before anything could annotate
+     * itself. So the absence of a record means {@code unknown}, never {@code succeeded} — which is the
+     * whole reason {@link #dispatchOutcome} answers with a nullable string instead of a boolean.
+     */
+    public static void recordDispatchOutcome(File baseDir, String reportName, String outcome) {
+        if (baseDir == null || reportName == null || parseStamp(reportName) == null) {
+            return;
+        }
+        Writer w = null;
+        try {
+            w = new OutputStreamWriter(new FileOutputStream(
+                    new File(baseDir, reportName + OUTCOME_SUFFIX)), UTF_8);
+            w.write(clamp(oneLine(outcome)) + "\n");
+        } catch (Throwable t) {
+            // The report already stands on its own; failing to add a note about it is not a finding.
+        } finally {
+            closeQuietly(w);
+        }
+    }
+
+    /**
+     * The recorded refusal for {@code reportName}, or {@code null} when nothing was recorded — which,
+     * for a reboot report, means the command's fate is unknown, not that it worked.
+     */
+    static String dispatchOutcome(File baseDir, String reportName) {
+        if (baseDir == null || reportName == null) {
+            return null;
+        }
+        File f = new File(baseDir, reportName + OUTCOME_SUFFIX);
+        if (!f.isFile()) {
+            return null;
+        }
+        BufferedReader r = null;
+        try {
+            r = new BufferedReader(new java.io.InputStreamReader(new FileInputStream(f), UTF_8));
+            String line = r.readLine();
+            return line == null || line.isEmpty() ? null : line;
+        } catch (Throwable t) {
+            return null;
+        } finally {
+            closeQuietly(r);
+        }
     }
 
     /**
@@ -668,7 +731,7 @@ public final class DiagnosticsReport {
         try {
             infos = list(baseDir, false);
         } catch (Throwable t) {
-            return new Stats(0, 0L, 0L, null);
+            return new Stats(0, 0L, 0L, null, null);
         }
         int keepNonManual = indexOfNewestNonManual(infos);
         long total = 0L;
@@ -740,7 +803,17 @@ public final class DiagnosticsReport {
         }
         return new Stats(infos.length, total,
                 infos.length == 0 ? 0L : infos[0].epochMillis,
-                infos.length == 0 ? null : infos[0].trigger);
+                infos.length == 0 ? null : infos[0].trigger,
+                infos.length == 0 ? null : infos[0].name);
+    }
+
+    /**
+     * What the store's newest report says about its own reboot command, when that command is known to
+     * have been refused — and {@code null} otherwise, which is not a claim that it worked.
+     */
+    public static String refusedDispatch(File baseDir) {
+        Stats s = stats(baseDir);
+        return TRIGGER_REBOOT.equals(s.lastTrigger) ? dispatchOutcome(baseDir, s.lastReport) : null;
     }
 
     /** The {@code /state} {@code diagnostics} block. */
@@ -751,7 +824,14 @@ public final class DiagnosticsReport {
         o.addProperty("lastAtMs", s.lastAtMs);
         o.addProperty("lastTrigger", s.lastTrigger == null ? "" : s.lastTrigger);
         o.addProperty("totalBytes", s.totalBytes);
-        o.addProperty("latestIsReboot", TRIGGER_REBOOT.equals(s.lastTrigger));
+        boolean rebootLatest = TRIGGER_REBOOT.equals(s.lastTrigger);
+        String refused = refusedDispatch(baseDir);
+        o.addProperty("latestIsReboot", rebootLatest);
+        // "unknown" is not "landed". A reboot that works takes the process before it can record
+        // anything, so the only outcome this can ever report is a refusal — and a reader who sees
+        // latestIsReboot without this key would be reading a name as if it were a result.
+        o.addProperty("lastDispatch",
+                !rebootLatest ? "" : (refused == null ? "unknown" : refused));
         return o;
     }
 
@@ -762,7 +842,9 @@ public final class DiagnosticsReport {
      *
      * <p>There is no boot counter and no {@code BOOT_COMPLETED} receiver in this app, so adjacency of
      * wall-clock stamps is the whole of the evidence — which is why "a power loss or a vendor reboot
-     * looks identical to nothing at all" is a named answer rather than a guess.
+     * looks identical to nothing at all" is a named answer rather than a guess. The one thing better
+     * than adjacency is a recorded refusal (see {@link #recordDispatchOutcome}), and it wins wherever
+     * the two disagree.
      */
     public static String lastReboot(File baseDir, long bootEpochMillis) {
         Info[] infos;
@@ -773,6 +855,16 @@ public final class DiagnosticsReport {
         }
         for (Info info : infos) {
             if (TRIGGER_REBOOT.equals(info.trigger) && info.epochMillis <= bootEpochMillis) {
+                // A refused command is a fact this app was alive to record, and it outranks the
+                // adjacency argument: the report proves the frame asked, the note proves nothing
+                // listened. Credit the following boot to it and the store would testify to a reboot
+                // that this very process watched fail.
+                String refused = dispatchOutcome(baseDir, info.name);
+                if (refused != null) {
+                    return "app-requested at " + localTime(info.epochMillis) + " (" + info.name
+                            + "), but the command was refused — " + refused
+                            + ", so the boot that followed is not its doing";
+                }
                 long deltaMs = bootEpochMillis - info.epochMillis;
                 return "app-requested at " + localTime(info.epochMillis) + " (" + info.name
                         + "), this boot began " + localTime(bootEpochMillis) + ", "
@@ -965,12 +1057,15 @@ public final class DiagnosticsReport {
         public final long totalBytes;
         public final long lastAtMs;
         public final String lastTrigger;
+        /** The newest report's name, so a summary can ask what became of its reboot command. */
+        public final String lastReport;
 
-        Stats(int count, long totalBytes, long lastAtMs, String lastTrigger) {
+        Stats(int count, long totalBytes, long lastAtMs, String lastTrigger, String lastReport) {
             this.count = count;
             this.totalBytes = totalBytes;
             this.lastAtMs = lastAtMs;
             this.lastTrigger = lastTrigger;
+            this.lastReport = lastReport;
         }
     }
 
