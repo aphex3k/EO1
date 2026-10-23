@@ -3539,7 +3539,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public DiagnosticsReport.Info[] listReports() {
-        return DiagnosticsReport.list(DiagnosticsReport.dirFor(this));
+        // readHeaders, unlike the store's own name-only callers: this feeds a page a person reads, and
+        // Reason — the one line saying why the frame wrote the file — lives in the header. Same choice
+        // CrashStore.list makes for /crashes. Bounded at 40 files x 1 KB, and only on this route:
+        // /state's summary and pruning keep reading names alone.
+        return DiagnosticsReport.list(DiagnosticsReport.dirFor(this), true);
     }
 
     @Override

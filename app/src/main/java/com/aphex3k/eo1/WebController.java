@@ -94,7 +94,7 @@ public interface WebController {
      */
     File reportDir();
 
-    /** Lists the stored diagnostics reports, newest first. */
+    /** Lists the stored diagnostics reports, newest first, each with the {@code Reason} from its header. */
     DiagnosticsReport.Info[] listReports();
 
     /**

@@ -1720,7 +1720,7 @@ public class WebServer {
         return sb.toString();
     }
 
-    /** The {@code /reports.json} listing: names and what the names carry, never a body read. */
+    /** The {@code /reports.json} listing: what the names carry, plus each one's header {@code Reason}. */
     private String renderReportListJson() {
         JsonArray arr = new JsonArray();
         DiagnosticsReport.Info[] reports;

@@ -8,7 +8,7 @@
 | `/crash/<name>` | GET | Streams one crash report as plain text |
 | `/crash/<name>/delete` | DELETE / POST | Deletes one crash report (retention pruning is separate and automatic) |
 | `/reports` | GET | HTML table of stored **diagnostics** reports (below) — what the frame wrote about its own state. Download and delete each one |
-| `/reports.json` | GET | JSON array of the same listing (`name`, `trigger`, `epochMillis`, `seq`, `versionCode`, `reason`, `size`, `lastModified`, `url`) — names and what the names carry, never a body read |
+| `/reports.json` | GET | JSON array of the same listing (`name`, `trigger`, `epochMillis`, `seq`, `versionCode`, `reason`, `size`, `lastModified`, `url`) — name fields plus each file's one-line `Reason` from its header, like `/crash.json`; nothing else of the body is read, and `/state`'s summary reads no file at all |
 | `/reports/capture` | POST | **Same origin.** Run one capture now (trigger `manual`) and answer with the file it wrote. Deliberately not token-gated — the flag that would carry the token can only be switched on at the dead frame's own screen, which is the situation the button exists for. Single-flighted and spaced by `CAPTURE_SPACING_MS` (30 s), so a page reload loop cannot mint reports |
 | `/report/<name>` | GET | Streams one diagnostics report (plain text; the store is name-guarded the same way `/crash/` is) |
 | `/report/<name>/delete` | DELETE / POST | Deletes one diagnostics report (retention is separate and automatic) |
