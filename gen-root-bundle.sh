@@ -1,0 +1,162 @@
+#!/bin/sh
+# Regenerate app/src/main/java/com/aphex3k/eo1/trust/RootBundle.java from certs/roots/*.pem.
+#
+# Root certificates the frames need in order to validate a modern HTTPS server are public data, so
+# they ship inside the APK instead of being downloaded: com.aphex3k.update already authenticates the
+# APK by signature, and a second fetch path for trust material would mean a second verifier and a
+# second set of failure modes for no gain. This script is the only sanctioned way to change that
+# material, and it exists so the emitted Java cannot disagree with the bytes it was given.
+#
+# Per certificate, four things are checked and any failure aborts before a byte is written:
+#
+#   it parses as an X.509 certificate          so the bundle cannot carry junk
+#   subject_hash_old is eight hex digits       that is the platform's naming rule; see SubjectHashOld
+#   it is not past its own notAfter            an expired anchor is inert, and bundling one makes
+#                                              "we ship the roots" a claim that quietly stops being
+#                                              true one day without any build changing
+#   PEM -> DER -> PEM reproduces the fingerprint  otherwise the reviewed bytes and the shipped bytes
+#                                              are different certificates
+#
+# The hash is emitted as a constant on purpose. Provisioning writes
+# /data/misc/keychain/cacerts-added/<hash>.<index>, and AGENTS.md requires every adbd command line to
+# be built from fixed constants — the name therefore has to be knowable at build time. Only the index
+# is resolved on the device, because two certificates can share a hash and which index is free depends
+# on what that particular frame already holds.
+#
+# Usage:  ./gen-root-bundle.sh [cert-dir] [output-java-file]
+
+set -e
+
+CERT_DIR="${1:-certs/roots}"
+OUT="${2:-app/src/main/java/com/aphex3k/eo1/trust/RootBundle.java}"
+TMP="${TMPDIR:-/tmp}/gen-root-bundle.$$"
+
+command -v openssl >/dev/null || { echo "openssl is required" >&2; exit 1; }
+[ -d "$CERT_DIR" ] || { echo "no certificate directory at $CERT_DIR" >&2; exit 1; }
+[ -n "$(ls "$CERT_DIR"/*.pem 2>/dev/null)" ] || { echo "no .pem files in $CERT_DIR" >&2; exit 1; }
+
+mkdir -p "$TMP"
+: > "$TMP/constants"
+: > "$TMP/entries"
+count=0
+
+for pem_file in "$CERT_DIR"/*.pem; do
+    [ -f "$pem_file" ] || continue
+    name=$(basename "$pem_file" .pem)
+    # A Java identifier from the file name: uppercase, dashes to underscores, nothing else surviving.
+    const=$(printf '%s' "$name" | tr 'a-z-' 'A-Z_' | tr -cd 'A-Za-z0-9_' | tr 'a-z' 'A-Z')
+    [ -n "$const" ] || { echo "$pem_file: file name yields no Java identifier" >&2; exit 1; }
+    literal_name="$const"
+
+    hash=$(openssl x509 -in "$pem_file" -noout -subject_hash_old 2>"$TMP/err") || {
+        echo "$pem_file: openssl could not read a certificate: $(cat "$TMP/err")" >&2; exit 1; }
+    hash=$(echo "$hash" | tr -d ' \r\n')
+    case "$hash" in
+        ???????? ) : ;;
+        *) echo "$pem_file: subject_hash_old '$hash' is not eight characters" >&2; exit 1 ;;
+    esac
+    case "$hash" in
+        *[!0-9a-f]*) echo "$pem_file: subject_hash_old '$hash' is not lowercase hex" >&2; exit 1 ;;
+    esac
+
+    openssl x509 -in "$pem_file" -noout -checkend 0 >/dev/null 2>&1 || {
+        echo "$pem_file: expired ($(openssl x509 -in "$pem_file" -noout -enddate | cut -d= -f2)) — do not bundle it" >&2
+        exit 1; }
+
+    fp_pem=$(openssl x509 -in "$pem_file" -noout -fingerprint -sha256 | sed 's/^.*Fingerprint=//' | tr -d ':')
+    openssl x509 -in "$pem_file" -outform DER -out "$TMP/$name.der" 2>/dev/null
+    fp_der=$(openssl x509 -inform DER -in "$TMP/$name.der" -noout -fingerprint -sha256 | sed 's/^.*Fingerprint=//' | tr -d ':')
+    [ "$fp_pem" = "$fp_der" ] || {
+        echo "$pem_file: PEM and its own DER disagree ($fp_pem vs $fp_der)" >&2; exit 1; }
+
+    subject=$(openssl x509 -in "$pem_file" -noout -subject | sed 's/^subject=//' | sed 's/\\/\\\\/g; s/"/\\"/g')
+
+    # One Java string literal per certificate: the PEM verbatim, line by line, so the generated file
+    # stays readable and a reviewer can diff it against the input.
+    awk -v name="$literal_name" '
+        { line[NR] = $0 }
+        END {
+            printf "    private static final String PEM_%s =\n", name
+            for (i = 1; i <= NR; i++) {
+                printf "            \"%s\\n\"%s\n", line[i], (i == NR ? ";" : "+")
+            }
+        }' "$pem_file" >> "$TMP/constants"
+
+    printf '        new Entry("%s", "%s", PEM_%s),\n' "$subject" "$hash" "$literal_name" >> "$TMP/entries"
+    count=$((count + 1))
+done
+
+mkdir -p "$(dirname "$OUT")"
+{
+    cat <<'HEADER'
+package com.aphex3k.eo1.trust;
+
+import java.io.ByteArrayInputStream;
+import java.security.cert.CertificateException;
+import java.security.cert.CertificateFactory;
+import java.security.cert.X509Certificate;
+
+/**
+ * The root certificates this build ships.
+ *
+ * <p><b>Generated by {@code ./gen-root-bundle.sh} — do not hand-edit.</b> The input is
+ * {@code certs/roots/*.pem} and the generator refuses to write anything for a certificate that does
+ * not parse, is past its own expiry, or disagrees with its own DER encoding. Where each file came
+ * from is recorded in {@code certs/roots/README.md}.
+ *
+ * <p>Constants rather than {@code assets/} or {@code res/raw}, for two reasons that both matter more
+ * than tidiness. This is trust material on a device whose release build runs
+ * {@code shrinkResources = true}, and an anchor that a resource-shrinking step decides is unreferenced
+ * is not something anyone wants to discover about a frame behind glass. And the store file name handed
+ * to a root shell has to be knowable at build time, because AGENTS.md requires every adbd command line
+ * to be built from fixed constants.
+ *
+ * <p>The hashes below are the platform's naming rule precomputed (see {@link SubjectHashOld}). They
+ * are what makes a wrong one visible in review: if a hash here stops matching the PEM beside it, the
+ * anchor is not trusted, silently, on every frame.
+ */
+public final class RootBundle {
+
+    /** One shipped anchor: the subject it was reviewed as, the name the store will give it, the PEM. */
+    public static final class Entry {
+        public final String subject;
+        public final String subjectHash;
+        public final String pem;
+
+        Entry(String subject, String subjectHash, String pem) {
+            this.subject = subject;
+            this.subjectHash = subjectHash;
+            this.pem = pem;
+        }
+
+        public X509Certificate certificate() throws CertificateException {
+            return (X509Certificate) CertificateFactory.getInstance("X.509")
+                    .generateCertificate(new ByteArrayInputStream(pem.getBytes()));
+        }
+    }
+
+HEADER
+    cat "$TMP/constants"
+    cat <<'MIDDLE'
+
+    public static final Entry[] ENTRIES = {
+MIDDLE
+    cat "$TMP/entries"
+    cat <<'FOOTER'
+    };
+
+    private RootBundle() {
+    }
+
+    public static Entry[] entries() {
+        return ENTRIES.clone();
+    }
+
+    public static int size() {
+        return ENTRIES.length;
+    }
+}
+FOOTER
+} > "$OUT"
+
+echo "wrote $OUT with $count root certificates"

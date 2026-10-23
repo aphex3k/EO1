@@ -62,6 +62,27 @@ public class SettingsManager {
      */
     private static final String PREF_DEVICE_NAME = "device_name";
     /**
+     * SharedPreferences key for whether the roots in {@code com.aphex3k.eo1.trust.RootBundle} are added
+     * to this device's own anchors when a TLS client is built.
+     *
+     * <p><b>On by default</b>, which is the opposite of the two flags above and is deliberate. Those
+     * grant a privilege — a root shell, an editable config over the LAN — so nothing happens until an
+     * operator asks. This one changes nothing about the device: it trusts a fixed set of public root
+     * certificates that shipped inside an APK the frame already verified by signature. The failure it
+     * protects against is the quiet one, where a frame whose Immich server moved to a current
+     * certificate shows a black screen and reports an error nobody can name, because the store it was
+     * shipped with in 2013 cannot build a path. A switch that has to be found and turned on fixes
+     * nothing on a frame behind glass.
+     *
+     * <p>It is still a switch, because an escape hatch from a trust decision has to be reachable
+     * without shipping another APK: off restores exactly the behaviour of every earlier build. Never in
+     * {@code configuration.json}, and never exported.
+     *
+     * <p>Public because {@code ApiServiceGenerator} reads it directly: a client can be built on a path
+     * that has a {@code Context} and no {@code SettingsManager} instance.
+     */
+    public static final String PREF_TRUST_BUNDLE = "trust_bundle";
+    /**
      * Display bound for {@link #PREF_DEVICE_NAME}. Chars rather than code points: it is the same bound
      * the on-device field and the web page put on their inputs, so what an operator types is what is
      * stored. Cut on a code-point boundary, so a pair straddling the limit goes whole.
@@ -154,6 +175,40 @@ public class SettingsManager {
      */
     public boolean isLoopbackAdbEnabled() {
         return isTrustedNetwork() && isLoopbackAdbAllowed();
+    }
+
+    /**
+     * Whether the shipped root bundle extends this device's anchors. On unless an operator turned it
+     * off — see {@link #PREF_TRUST_BUNDLE} for why this default is inverted from the other flags.
+     */
+    public boolean isTrustBundleEnabled() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return true;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            return prefs == null || prefs.getBoolean(PREF_TRUST_BUNDLE, true);
+        } catch (Exception e) {
+            // An unreadable store reads as on, never as off: "the setting could not be read" and
+            // "the operator asked for the old behaviour" must not answer the same way, because the
+            // second one is a decision and the first is a bug.
+            return true;
+        }
+    }
+
+    public void setTrustBundleEnabled(boolean enabled) {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs != null) {
+                prefs.edit().putBoolean(PREF_TRUST_BUNDLE, enabled).apply();
+            }
+        } catch (Exception ignored) {
+        }
     }
 
     /**

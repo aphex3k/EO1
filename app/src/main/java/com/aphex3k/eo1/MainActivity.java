@@ -69,6 +69,10 @@ import com.example.tsplayer.TsPlayerNative;
 import com.google.android.material.progressindicator.LinearProgressIndicator;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonNull;
+import com.aphex3k.eo1.trust.MergedTrust;
+import com.aphex3k.eo1.trust.RootBundle;
+import com.aphex3k.eo1.trust.TrustCensus;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.google.gson.stream.MalformedJsonException;
@@ -575,7 +579,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         });
                     }
 
-                });
+                    // `this` for the TLS context: an ssl:// broker builds its own, and must make the
+                    // same trust decision as every other connection on the frame.
+                }, this);
             }
         }
         catch (Exception e) {
@@ -3032,6 +3038,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.add("update", updateManager.stateJson());
         o.add("watchdog", watchdogStateJson());
         o.add("crash", crashBlockJson());
+        o.add("trust", trustBlockJson());
 
         o.add("telemetry", DeviceTelemetry.snapshot(this));
 
@@ -3199,6 +3206,68 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         } catch (Throwable t) {
             // Report whatever was assembled before the failure; never fail /state over this.
         }
+        return o;
+    }
+
+    /**
+     * The {@code /state} {@code trust} block: what this frame's certificate stores hold, what the app
+     * chose to trust on top of them, and what time the frame thinks it is.
+     *
+     * <p>This is the read-only half of the root-certificate feature, and it is the half that earns the
+     * rest. "A frame cannot reach Immich" has four causes that look identical from the display — a
+     * missing anchor, a cipher suite with nothing in common, a certificate outside its own window, and
+     * a wrong clock — and three of them cannot be told apart from this machine. The census answers all
+     * four at once: anchor counts per store, the shipped roots this device lacks, and {@code nowMs}
+     * against the workstation reading the page.
+     *
+     * <p>{@code mode} is the field to read first. {@code merged} means the bundle is in force for this
+     * app's connections; {@code platform-only} means it is not, and {@code detail} says whether that
+     * was the operator's choice or a refusal. Note what neither value claims: an app-local trust
+     * decision covers the Immich client and the update download, and cannot reach the kiosk
+     * {@code WebView}, whose engine validates inside Chromium. See docs/TRUST.md.
+     */
+    private JsonObject trustBlockJson() {
+        JsonObject o = new JsonObject();
+        try {
+            MergedTrust.Result trust = MergedTrust.last();
+            o.addProperty("mode", trust.mode);
+            o.addProperty("detail", trust.detail);
+            o.addProperty("enabled", settingsManager != null && settingsManager.isTrustBundleEnabled());
+            o.addProperty("bundleSize", RootBundle.size());
+            o.addProperty("platformAnchors", trust.platformAnchors);
+            o.addProperty("trustedAnchors", trust.mergedAnchors);
+            // The frame's own opinion about what time it is. Short-lived certificates make this a
+            // first-class diagnostic: nothing in this app sets the clock, and a frame powered off for a
+            // week can trust every anchor in the world and still reject all of them.
+            o.addProperty("nowMs", System.currentTimeMillis());
+
+            Date now = new Date();
+            JsonArray stores = new JsonArray();
+            stores.add(storeJson(TrustCensus.SYSTEM_STORE,
+                    TrustCensus.censusDirectory(new File(TrustCensus.SYSTEM_STORE), now)));
+            stores.add(storeJson(TrustCensus.USER_ADDED_STORE,
+                    TrustCensus.censusDirectory(new File(TrustCensus.USER_ADDED_STORE), now)));
+            o.add("stores", stores);
+        } catch (Throwable t) {
+            // Report whatever was assembled before the failure; /state must not 500 over a diagnosis.
+        }
+        return o;
+    }
+
+    /** One store's census, shaped the same whether or not the app was allowed to look inside it. */
+    private static JsonObject storeJson(String path, TrustCensus.Store store) {
+        JsonObject o = new JsonObject();
+        o.addProperty("path", path);
+        o.addProperty("readable", store.isKnown());
+        o.addProperty("total", store.total);
+        o.addProperty("expired", store.expired);
+        o.addProperty("notYetValid", store.notYetValid);
+        o.addProperty("unparseable", store.unparseable);
+        JsonArray missing = new JsonArray();
+        for (String entry : TrustCensus.missingFromBundle(store)) {
+            missing.add(entry);
+        }
+        o.add("missingBundleAnchors", missing);
         return o;
     }
 

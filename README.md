@@ -128,7 +128,7 @@ Template: [`configuration_example.json`](configuration_example.json).
 - **`apiVersion`** — per backend, so one frame can point at servers of different vintages. `"auto"` (the default) probes the server's version on first contact and uses the matching client; a pinned semver like `"3.1.0"` skips the probe and selects the client for that band (the current band is **all of 3.x**). A version newer than the band is served best effort by the newest client with a compatibility toast; only a version older than every band — or a backend that genuinely fails — disables just that backend, while the others keep rotating.
 - **Local backend** — optional, at most one (`"type": "local"`). Files uploaded through the web server appear in the rotation on the next interval tick, no restart; deleting a file drops it out.
 - **Website backend** — `"type": "web"`, **one entry per page**, and `host` is that page's address (`http://` or `https://`; nothing else is needed — no account, and the address is used exactly as written, so no trailing `/` is added). Each entry contributes one asset to the pool, so with 300 photos and 2 pages every page shows about once every 150 intervals. Nothing is downloaded or cached: the page is loaded fresh in a fullscreen, chrome-free browser view every time it comes up, and it holds the screen for the normal `interval`.
-- **Which pages work** — the frame renders with the browser built into Android 4.4 (a 2014 Chromium), so plan on LAN-hosted pages, static pages, or pages written for old engines. A modern JavaScript app will usually fail. `http://` works out of the box; `https://` depends on the certificates the frame's system trust store already has, and an untrusted one fails to load like any other dead page.
+- **Which pages work** — the frame renders with the browser built into Android 4.4 (a 2014 Chromium), so plan on LAN-hosted pages, static pages, or pages written for old engines. A modern JavaScript app will usually fail. `http://` works out of the box; `https://` depends on the certificates the frame's system trust store already has, and an untrusted one fails to load like any other dead page. Note that this is the one part of the app the shipped root bundle does **not** reach — the page is validated inside Chromium, which ignores any Java trust manager — so `docs/TRUST.md`'s app-local fix helps Immich and not a kiosk page.
 - **Quiet hours** — `quietHours` is a list of 5-field cron expressions (`minute hour day month weekday`); the screen is off whenever any entry matches the current minute in `selectedTimeZoneId`, so overlapping windows simply OR. `* 22-23,0-6 * * *` = off every night 22:00–06:59; `0 13 * * 1-5` = off weekdays at 13:00. Old `startQuietHour`/`endQuietHour` values are migrated to the equivalent expression on load; a single whole-hour window is mirrored back into those fields on save so older APKs keep working.
 - **Legacy configs** — an old file with flat `host`/`userid`/`password` is migrated on load to a single `immich-1` backend and rewritten on disk; the flat fields are kept mirrored on save so older APK versions can still read the file.
 - **Editing** — the options dialog's Media tab (press **C** on a connected keyboard on EO1) manages the list: add/remove Immich backends, add/remove the local one, add/remove websites, and edit host/username/password/API version (or just the page address) per row. Or edit `configuration.json` directly and reboot (EO2).
@@ -287,9 +287,12 @@ that directory from any plain-HTTP server the frames can reach and point `update
 > by a person holding a crash dump. Publishing fails if the build produced no mapping — if you
 > deliberately turned minification off, say so with `EO1_UPDATE_MAPPING_OPTIONAL=1`.
 
-> The frames cannot validate TLS (device certificates are expired), so keep the update host on
-> a trusted LAN. A LAN attacker who can rewrite the manifest or APK is still stopped by the
-> signer-certificate match — a new APK must be signed with the release keystore.
+> The update host is reached over plain HTTP, so keep it on a trusted LAN. The frames' own HTTPS is a
+> separate matter: the ROM's certificate store dates from about 2013 (156 anchors, 63 of them expired,
+> none of them Let's Encrypt's), and the app now adds current roots to it for its own connections —
+> see [docs/TRUST.md](docs/TRUST.md). Neither fact weakens the other. A LAN attacker who can rewrite
+> the manifest or APK is still stopped by the signer-certificate match — a new APK must be signed with
+> the release keystore.
 
 ## Further Reading
 
