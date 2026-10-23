@@ -29,20 +29,63 @@ public class AdbdInstallClientTest {
 
     private static final File APK = new File("/sdcard/Download/eo1-update.apk");
 
-    // ------------------------------------------------------------------- frame
+    // ---------------------------------------------------------------- messages
 
     @Test
-    public void frame_encodesHexLengthPrefix() {
-        assertEquals("000chost:version", new String(AdbdInstallClient.frame("host:version"), US_ASCII));
+    public void message_isLittleEndianAndTheMagicIsTheCommandsComplement() {
+        byte[] payload = "shell:echo hi".getBytes(US_ASCII);
+        byte[] wire = AdbdInstallClient.message(AdbdInstallClient.A_OPEN, 1L, 0L, payload);
+        assertEquals(24 + payload.length, wire.length);
+        assertEquals("cmd", AdbdInstallClient.A_OPEN, word(wire, 0));
+        assertEquals("arg0", 1L, word(wire, 4));
+        assertEquals("arg1", 0L, word(wire, 8));
+        assertEquals("data_length", payload.length, word(wire, 12));
+        assertEquals("checksum", AdbdInstallClient.checksum(payload), word(wire, 16));
+        assertEquals("magic", AdbdInstallClient.A_OPEN ^ 0xffffffffL, word(wire, 20));
     }
 
     @Test
-    public void frame_payloadLengthIsCorrect() {
-        byte[] framed = AdbdInstallClient.frame("shell:echo hi");
-        int payloadLen = framed.length - 4;
-        assertEquals("shell:echo hi".length(), payloadLen);
-        assertEquals("000d", new String(framed, 0, 4, US_ASCII));
-        assertEquals("shell:echo hi", new String(framed, 4, payloadLen, US_ASCII));
+    public void checksumIsTheByteSumAdbdComparesNotAcrcThirtyTwo() {
+        // The header's checksum word is a sum of the payload's bytes. Sending a CRC32 there — which
+        // is what the field's name in older sources suggests — is answered by a closed socket, so this
+        // is pinned against the real numbers a working exchange produced on the EO2.
+        String banner = "host::features=shell_v2,cmd,stat_v2,ls_v2,fixed_push_mkdir,apex,abb,"
+                + "fixed_push_symlink_timestamp,abb_exec,remount_shell,track_app,sendrecv_v2,"
+                + "sendrecv_v2_brotli,sendrecv_v2_lz4,sendrecv_v2_zstd,"
+                + "sendrecv_v2_dry_run_send,devicetracker_proto_format,devraw,app_info,"
+                + "server_status,track_mdns";
+        assertEquals(286, banner.length());
+        assertEquals(0x701dL, AdbdInstallClient.checksum(banner.getBytes(US_ASCII)));
+        assertEquals(0L, AdbdInstallClient.checksum(new byte[0]));
+        assertEquals(0x61L + 0x62L, AdbdInstallClient.checksum("ab".getBytes(US_ASCII)));
+    }
+
+    @Test
+    public void message_tagsAreTheFourccSpellingsThisRomsAdbdAnswers() {
+        // Nothing in the adb exchange negotiates these, so the wrong spelling reads to the daemon as
+        // garbage and to us as an unreachable device. Pinned to the ASCII on purpose: the EO2's adbd
+        // answered a tag built from "CNXN" and ignored 0x01000001 entirely, which is only discoverable
+        // by asking a real daemon — and this file's fake would happily agree with either.
+        assertEquals(0x4e584e43L, AdbdInstallClient.A_CNXN);
+        assertEquals(0x4e45504fL, AdbdInstallClient.A_OPEN);
+        assertEquals(0x59414b4fL, AdbdInstallClient.A_OKAY);
+        assertEquals(0x45534c43L, AdbdInstallClient.A_CLSE);
+        assertEquals(0x45545257L, AdbdInstallClient.A_WRTE);
+        assertEquals(0x48545541L, AdbdInstallClient.A_AUTH);
+        assertEquals("tag is its own four letters on the wire", 0x4e584e43L,
+                word(AdbdInstallClient.message(AdbdInstallClient.A_CNXN, 0L, 0L, new byte[0]), 0));
+    }
+
+    @Test
+    public void opNamesTheMessagesSoARefusalReadsAsItself() {
+        assertEquals("CNXN", AdbdInstallClient.op(AdbdInstallClient.A_CNXN));
+        assertEquals("AUTH", AdbdInstallClient.op(AdbdInstallClient.A_AUTH));
+        assertTrue(AdbdInstallClient.op(0x12345678L).contains("12345678"));
+    }
+
+    private static long word(byte[] wire, int at) {
+        return (wire[at] & 0xffL) | ((wire[at + 1] & 0xffL) << 8)
+                | ((wire[at + 2] & 0xffL) << 16) | ((wire[at + 3] & 0xffL) << 24);
     }
 
     // ----------------------------------------------------------------- classify
@@ -113,10 +156,10 @@ public class AdbdInstallClientTest {
             AdbdInstallClient client = new AdbdInstallClient("127.0.0.1", fake.port());
             AdbdInstallClient.Result r = client.install(APK);
             assertEquals(AdbdInstallClient.Outcome.SUCCESS, r.outcome);
-            assertEquals("host:version", fake.commands.get(0));
+            assertEquals("the handshake opened exactly one service", 1, fake.services().size());
             assertEquals(
                     "shell:pm install -r '/sdcard/Download/eo1-update.apk'; echo EO1PM_RC=$?",
-                    fake.commands.get(1));
+                    fake.services().get(0));
         } finally {
             fake.close();
         }
@@ -152,6 +195,22 @@ public class AdbdInstallClientTest {
             AdbdInstallClient client = new AdbdInstallClient("127.0.0.1", fake.port());
             AdbdInstallClient.Result r = client.install(APK);
             assertEquals(AdbdInstallClient.Outcome.UNREACHABLE, r.outcome);
+        } finally {
+            fake.close();
+        }
+    }
+
+    @Test
+    public void install_namesAuthorizationInsteadOfTimingOutOnIt() throws Exception {
+        FakeAdbd fake = new FakeAdbd("Success\nEO1PM_RC=0", true);
+        try {
+            AdbdInstallClient client = new AdbdInstallClient("127.0.0.1", fake.port());
+            AdbdInstallClient.Result r = client.install(APK);
+            // A secure ROM answers the handshake with AUTH. This client has no RSA key and must not
+            // grow one; what it must do is say so at once rather than spend the read timeout and
+            // report the same UNREACHABLE it reports for a daemon that is simply not there.
+            assertEquals(AdbdInstallClient.Outcome.UNREACHABLE, r.outcome);
+            assertTrue(r.detail, r.detail.contains("authorization"));
         } finally {
             fake.close();
         }
@@ -300,17 +359,31 @@ public class AdbdInstallClientTest {
     // ------------------------------------------------------------------ fake
 
     /**
-     * Speaks just enough of the adb wire protocol to serve one {@code
-     * host:version} and one {@code shell:} command. With {@code shellOutput ==
-     * null} the shell command is rejected with a FAIL status instead.
+     * A daemon-side stub that answers the way {@code adbd} is specified to respond, not the way this
+     * client reads. That distinction is the whole point of it: the fake this file used to carry
+     * accepted the same hex-length framing the client sent, so {@code install} passed here and failed
+     * on every frame ever built — and a test pair that agree with each other is how a protocol bug
+     * survives nine years.
+     *
+     * <p>{@code shellOutput == null} refuses the {@code OPEN}; {@code authRequired} answers the
+     * handshake with {@code AUTH}, which is what a {@code ro.adb.secure=1} ROM does to a host with no
+     * key.
      */
     private static final class FakeAdbd {
+        private static final long PEER_ID = 7L;
+
         private final ServerSocket server;
-        private final List<String> commands = new CopyOnWriteArrayList<String>();
+        private final List<String> services = new CopyOnWriteArrayList<String>();
         private final String shellOutput;
+        private final boolean authRequired;
 
         FakeAdbd(String shellOutput) throws IOException {
+            this(shellOutput, false);
+        }
+
+        FakeAdbd(String shellOutput, boolean authRequired) throws IOException {
             this.shellOutput = shellOutput;
+            this.authRequired = authRequired;
             server = new ServerSocket(0, 1, InetAddress.getLoopbackAddress());
             Thread t = new Thread(null, new Runnable() {
                 @Override
@@ -318,6 +391,7 @@ public class AdbdInstallClientTest {
                     try {
                         serveOne();
                     } catch (IOException ignored) {
+                        // The client closing early is a normal outcome of a refused service.
                     }
                 }
             }, "fake-adbd");
@@ -327,22 +401,28 @@ public class AdbdInstallClientTest {
 
         private void serveOne() throws IOException {
             Socket s = server.accept();
+            s.setTcpNoDelay(true);
             try {
                 InputStream in = s.getInputStream();
                 OutputStream out = s.getOutputStream();
-                commands.add(readCommand(in)); // host:version
-                out.write("OKAY".getBytes(US_ASCII));
-                out.write("0004".getBytes(US_ASCII));
-                out.write("0001".getBytes(US_ASCII));
-                out.flush();
-                commands.add(readCommand(in)); // shell:...
-                if (shellOutput == null) {
-                    out.write("FAILunknown service".getBytes(US_ASCII));
-                } else {
-                    out.write("OKAY".getBytes(US_ASCII));
-                    out.write(shellOutput.getBytes(Charset.forName("UTF-8")));
+                expect(read(in), AdbdInstallClient.A_CNXN);
+                if (authRequired) {
+                    send(out, AdbdInstallClient.A_AUTH, 1L, 2048L, "RSA");
+                    return;
                 }
-                out.flush();
+                send(out, AdbdInstallClient.A_CNXN, 0x01000001L, 4096L, "device::");
+
+                Received open = expect(read(in), AdbdInstallClient.A_OPEN);
+                long localId = open.arg0;
+                services.add(stripTrailingNul(new String(open.payload, US_ASCII)));
+                if (shellOutput == null) {
+                    send(out, AdbdInstallClient.A_CLSE, 0L, localId, "");
+                    return;
+                }
+                send(out, AdbdInstallClient.A_OKAY, PEER_ID, localId, "");
+                send(out, AdbdInstallClient.A_WRTE, PEER_ID, localId, shellOutput);
+                read(in); // the ack adbd waits for before it would send another WRTE
+                send(out, AdbdInstallClient.A_CLSE, PEER_ID, localId, "");
             } finally {
                 s.close();
             }
@@ -352,6 +432,10 @@ public class AdbdInstallClientTest {
             return server.getLocalPort();
         }
 
+        List<String> services() {
+            return services;
+        }
+
         void close() {
             try {
                 server.close();
@@ -359,13 +443,54 @@ public class AdbdInstallClientTest {
             }
         }
 
-        private static String readCommand(InputStream in) throws IOException {
-            byte[] len = new byte[4];
-            readFully(in, len);
-            int n = Integer.parseInt(new String(len, US_ASCII), 16);
-            byte[] payload = new byte[n];
-            readFully(in, payload);
-            return new String(payload, US_ASCII);
+        private static void send(OutputStream out, long cmd, long arg0, long arg1, String payload)
+                throws IOException {
+            out.write(AdbdInstallClient.message(cmd, arg0, arg1, payload.getBytes(US_ASCII)));
+            out.flush();
+        }
+
+        private static final class Received {
+            final long cmd;
+            final long arg0;
+            final byte[] payload;
+
+            Received(long cmd, long arg0, byte[] payload) {
+                this.cmd = cmd;
+                this.arg0 = arg0;
+                this.payload = payload;
+            }
+        }
+
+        private static Received read(InputStream in) throws IOException {
+            byte[] head = new byte[24];
+            readFully(in, head);
+            long cmd = word(head, 0);
+            int len = (int) word(head, 12);
+            byte[] payload = new byte[len];
+            if (len > 0) {
+                readFully(in, payload);
+            }
+            if (word(head, 20) != (cmd ^ 0xffffffffL)) {
+                throw new IOException("client sent a message whose magic does not match its command");
+            }
+            return new Received(cmd, word(head, 4), payload);
+        }
+
+        private static Received expect(Received got, long cmd) throws IOException {
+            if (got.cmd != cmd) {
+                throw new IOException("wanted " + AdbdInstallClient.op(cmd) + ", client sent "
+                        + AdbdInstallClient.op(got.cmd));
+            }
+            return got;
+        }
+
+        private static String stripTrailingNul(String s) {
+            return s.endsWith("\0") ? s.substring(0, s.length() - 1) : s;
+        }
+
+        private static long word(byte[] b, int at) {
+            return (b[at] & 0xffL) | ((b[at + 1] & 0xffL) << 8)
+                    | ((b[at + 2] & 0xffL) << 16) | ((b[at + 3] & 0xffL) << 24);
         }
 
         private static void readFully(InputStream in, byte[] buf) throws IOException {
@@ -373,7 +498,7 @@ public class AdbdInstallClientTest {
             while (off < buf.length) {
                 int n = in.read(buf, off, buf.length - off);
                 if (n < 0) {
-                    throw new IOException("unexpected EOF");
+                    throw new IOException("client hung up mid-message");
                 }
                 off += n;
             }
