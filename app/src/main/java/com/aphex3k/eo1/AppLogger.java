@@ -80,6 +80,23 @@ public final class AppLogger {
         this(new File(context.getFilesDir(), FILE_NAME));
     }
 
+    /** The live half of the rolling file. */
+    public File logFile() {
+        return logFile;
+    }
+
+    /**
+     * The older half, present from the second rotation onward.
+     *
+     * <p>Deliberately not {@code synchronized}: {@link #tailFile(int)} is, and it contends with every
+     * {@link #info} call, which holds this monitor across an open, a write and a close. A reader that
+     * only wants the path must not queue behind a stalled disk — which is exactly when
+     * {@link DiagnosticsReport} wants it.
+     */
+    public File rotatedFile() {
+        return rotatedFile;
+    }
+
     /**
      * Records an INFO event.
      */

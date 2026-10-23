@@ -79,6 +79,8 @@ import java.text.DateFormat;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
@@ -293,10 +295,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     };
     /** The pending tick was explicitly cleared (onPause / network pause); the next start must re-arm it. */
     private boolean timerStopped = false;
-    /** Rotation ticks since process start; a spike here means the timer chain forked. */
-    private int timerTickCount = 0;
+    /**
+     * Rotation ticks since process start; a spike here means the timer chain forked.
+     *
+     * <p>{@code volatile} because the diagnostics capture reads it from its own thread, and a
+     * non-volatile {@code long} read across threads is not atomic even where the JIT makes it look so.
+     */
+    private volatile int timerTickCount = 0;
     /** Epoch ms of the next scheduled rotation tick; 0L when the rotation timer is stopped. */
-    private long nextRotationAtMs = 0L;
+    private volatile long nextRotationAtMs = 0L;
     /** Avoid spamming "Waiting for network…" while still offline. */
     private boolean networkWaitNotified = false;
     /** Last percent value logged for the in-flight download; -1 until the first progress line. Guarded by downloadProgressLogLock. */
@@ -314,6 +321,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * must not look like a wedge.
      */
     private volatile long lastRotationActivityMs = 0L;
+    /**
+     * When something was last <em>proven</em> on the panel — a Glide resource ready, a page finished,
+     * a video surface revealed. Next to {@link #lastRotationActivityMs} this is the pair that makes a
+     * wedge visible: that clock is refreshed on every timer tick before {@code showNextImage} resolves
+     * (see {@link #runOnTimer}), so a frame whose rotation loop is alive and displaying nothing reports
+     * itself as fresh. Nothing here changes that clock — changing it would change when frames reboot.
+     */
+    private volatile long lastDisplayProvenAtMs = 0L;
+    private volatile long displayProvenCount;
+    /** Displays that fell to the next rung of the ladder. A run rate, not a verdict on the library. */
+    private volatile long displayFailedCount;
+    /** Process restarts this app asked of itself; separates a rung-4 restart from a wedge. */
+    private volatile int selfRestartCount;
     /** Start of the in-flight asset download; 0 when nothing is downloading. */
     private volatile long downloadStartedAtMs = 0L;
     /** Last byte-level progress event; lets a dead download stop counting as "in flight". */
@@ -1299,6 +1319,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                         imageView.setVisibility(View.VISIBLE);
                                         lastVisibleView = imageView;
                                         lastVisibleAsset = file.getAbsolutePath();
+                                        noteDisplayProven();
                                         return false;
                                     }
                                 })
@@ -1320,6 +1341,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                         imageView.setVisibility(View.VISIBLE);
                                         lastVisibleView = imageView;
                                         lastVisibleAsset = file.getAbsolutePath();
+                                        noteDisplayProven();
                                         return false;
                                     }
                                 })
@@ -1496,6 +1518,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
             webLoadProducedPaint = true;
             cancelWebLoadWatchdog();
+            noteDisplayProven();
             Log.i(TAG, "web: rendered " + url);
             debugInformationProvided(new DebugInformation("web", "rendered " + url));
         }
@@ -1552,6 +1575,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // Cleared, not set to the image: the screen content changed behind the display methods'
         // same-asset check, so the next tick must be allowed to re-show this very photo.
         lastVisibleAsset = "";
+        // A page this frame could not render never reaches assetFallback — it has no bytes and no
+        // second engine — so it counts here, or the failure total would read calm on a frame whose
+        // every web asset is dead.
+        displayFailedCount++;
         if (mediaManager != null) {
             mediaManager.webDisplayFailed(this, failedAssetId);
         }
@@ -1644,7 +1671,21 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (isVideo && !Objects.equals(assetId, activeVideoAssetId)) {
             return;
         }
+        // Counted here because this is the one funnel every display failure passes through on its way
+        // down the ladder; a photo Glide refused, a page that never painted and a clip that decoded to
+        // nothing all arrive at this line. Counted, not judged: a failure that reaches the last rung
+        // becomes an incompatibility verdict somewhere else.
+        displayFailedCount++;
         playbackFallback(assetId, activityReference, isVideo, file, stage);
+    }
+
+    /**
+     * Records that content was proven on the panel. Stamped at each display path's proof point and
+     * nowhere else — see {@link #lastDisplayProvenAtMs} for why the rotation clock cannot say this.
+     */
+    private void noteDisplayProven() {
+        lastDisplayProvenAtMs = System.currentTimeMillis();
+        displayProvenCount++;
     }
 
     /**
@@ -2064,7 +2105,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void repairNetwork() {
-        runAdbdTask("network-repair", new AdbdTask() {
+        runAdbdTask("network-repair", "network repair rung", new AdbdTask() {
             @Override
             public List<DeviceRepair.Step> run(AdbdInstallClient client) throws InterruptedException {
                 return DeviceRepair.repairWifi(client::exec, new DeviceRepair.Sleeper() {
@@ -2078,11 +2119,30 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
-    public void rebootDevice() {
-        runAdbdTask("reboot", new AdbdTask() {
+    public void rebootDevice(String reason) {
+        runAdbdTask("reboot", reason, new AdbdTask() {
             @Override
             public List<DeviceRepair.Step> run(AdbdInstallClient client) {
-                return DeviceRepair.reboot(client::exec);
+                // The last instant at which a file can honestly say "this frame is about to reboot
+                // itself". Not in the watchdog: adbd still gets a say. Awaited, with a deadline — the
+                // reboot proceeds whether or not the report landed.
+                DiagnosticsReport.Result report =
+                        captureDiagnostics(DiagnosticsReport.TRIGGER_REBOOT, reason, true);
+                List<DeviceRepair.Step> steps = DeviceRepair.reboot(client::exec);
+                // Such a file can only ever claim the request, because a reboot that lands kills this
+                // thread before it could annotate itself. So record the outcome that IS still
+                // observable from here: adbd refusing the command. Left unrecorded, the report keeps
+                // asserting a reboot that the next genuine boot would be credited with completing.
+                if (report != null && report.ok && !steps.isEmpty()) {
+                    DeviceRepair.Step step = steps.get(0);
+                    if (!step.ok()) {
+                        DiagnosticsReport.recordDispatchOutcome(
+                                DiagnosticsReport.dirFor(MainActivity.this), report.name,
+                                step.outcome + (step.detail == null || step.detail.isEmpty()
+                                        ? "" : " (" + step.detail + ")"));
+                    }
+                }
+                return steps;
             }
         });
     }
@@ -2096,13 +2156,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * Runs an adbd repair off the watchdog thread: adbd round-trips take seconds, and a timer task
      * that blocks cannot escalate. Only ever reached with {@link DeviceRepair}'s fixed commands.
      */
-    private void runAdbdTask(String label, AdbdTask task) {
+    private void runAdbdTask(String label, String reason, AdbdTask task) {
         if (repairRunning) {
-            Log.i(TAG, "watchdog: " + label + " skipped — another repair is in flight");
+            // Through the file log, not just logcat: a reboot rung that never reached adbd is exactly
+            // the silence a diagnostics report would otherwise have to explain.
+            logWatchdogEvent(label + " skipped — another repair is in flight", true);
             return;
         }
         repairRunning = true;
         final String name = label;
+        final String why = reason;
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -2116,6 +2179,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     if (armed.outcome != AdbdInstallClient.Outcome.SUCCESS
                             && armed.outcome != AdbdInstallClient.Outcome.ARMED) {
                         logWatchdogEvent(name + " skipped: adbd unavailable (" + armed.detail + ")", true);
+                        if ("reboot".equals(name)) {
+                            // The EO1 case, and the common one: the ladder decided to reboot, the
+                            // permission was granted, and the ROM's adbd is simply not there. Nothing
+                            // reboots and nothing else would ever have written a report.
+                            captureDiagnostics(DiagnosticsReport.TRIGGER_EXHAUSTED,
+                                    why + " — adbd unavailable (" + armed.detail + ")", false);
+                        }
                         return;
                     }
                     List<DeviceRepair.Step> steps = task.run(new AdbdInstallClient());
@@ -2209,6 +2279,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     @Override
     public void selfRestart() {
+        // Counted before anything else, because the process doing this is about to stop existing:
+        // a report after a rung-4 restart would otherwise look like one after a wedge.
+        selfRestartCount++;
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -2242,6 +2315,298 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             Log.i(TAG, "watchdog: " + message);
         }
         debugInformationProvided(new DebugInformation("watchdog", message));
+    }
+
+    // ------------------------------------------------------ diagnostics reports
+
+    /**
+     * Set while a capture thread is alive. Static because the activity is re-created and a capture
+     * outlives the instance that started it; two reports written at once would interleave their
+     * collectors and produce one file that describes neither moment.
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean DIAGNOSTICS_CAPTURING =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private static volatile long lastDiagnosticsCaptureAtMs = 0L;
+
+    /** The watchdog reached the reboot rung and nothing rebooted. Document that anyway. */
+    @Override
+    public void captureDiagnostics(String reason) {
+        captureDiagnostics(DiagnosticsReport.TRIGGER_EXHAUSTED, reason, false);
+    }
+
+    /**
+     * Writes one diagnostics report. Never on the calling thread for the collecting part: the caller
+     * is either the watchdog's single {@code Timer} thread — whose job is to keep escalating, so it
+     * must not be made to wait on a capture — or {@code eo1-reboot}, which has a device to reboot.
+     *
+     * <p>When {@code await} is set the caller joins for at most {@link
+     * DiagnosticsReport#CAPTURE_DEADLINE_MS} and then proceeds regardless. That is the whole contract:
+     * a report that cannot be written must never become the reason a frame does not recover, and the
+     * absence is logged so an empty {@code /reports} page reads as "the capture hung", not as "there
+     * was nothing to say".
+     *
+     * @return the outcome, or {@code null} when nothing was captured (already in flight, or too soon
+     *         after the last manual capture)
+     */
+    private DiagnosticsReport.Result captureDiagnostics(final String trigger, final String reason,
+                                                        boolean await) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        boolean spacingEnforced = DiagnosticsReport.TRIGGER_MANUAL.equals(trigger);
+        if (spacingEnforced && lastDiagnosticsCaptureAtMs != 0L
+                && now - lastDiagnosticsCaptureAtMs < DiagnosticsReport.CAPTURE_SPACING_MS) {
+            logWatchdogEvent("diagnostics capture skipped — one ran "
+                    + ((now - lastDiagnosticsCaptureAtMs) / 1000L) + "s ago", false);
+            return null;
+        }
+        if (!DIAGNOSTICS_CAPTURING.compareAndSet(false, true)) {
+            logWatchdogEvent("diagnostics capture skipped — another is in flight", false);
+            return null;
+        }
+        lastDiagnosticsCaptureAtMs = now;
+        final DiagnosticsReport.Content content = diagnosticsContent(trigger, reason);
+        final File dir = DiagnosticsReport.dirFor(this);
+        final DiagnosticsReport.Result[] holder = new DiagnosticsReport.Result[1];
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    holder[0] = DiagnosticsReport.capture(dir, content);
+                    if (!holder[0].ok) {
+                        logWatchdogEvent("diagnostics report failed: " + holder[0].message, true);
+                    }
+                } catch (Throwable t) {
+                    // A capture thread must never reach the global handler (System.exit(2)).
+                    Log.w(TAG, "diagnostics capture: " + t);
+                } finally {
+                    DIAGNOSTICS_CAPTURING.set(false);
+                }
+            }
+        }, "eo1-diag-capture");
+        worker.setDaemon(true);
+        worker.start();
+        if (!await) {
+            return null;
+        }
+        try {
+            worker.join(DiagnosticsReport.CAPTURE_DEADLINE_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        if (worker.isAlive()) {
+            logWatchdogEvent("diagnostics capture did not complete within "
+                    + DiagnosticsReport.CAPTURE_DEADLINE_MS + "ms", true);
+            return null;
+        }
+        return holder[0];
+    }
+
+    /**
+     * Assembles one report's inputs. The section order is the design: counters that only this
+     * process holds, then this process's own stacks, then the log, and only last the document that
+     * goes asking the framework things — so a framework that is the thing being diagnosed can cost
+     * the view of itself and never the evidence that it was asked.
+     */
+    private DiagnosticsReport.Content diagnosticsContent(String trigger, String reason) {
+        DiagnosticsReport.Content c = new DiagnosticsReport.Content();
+        c.trigger = trigger;
+        c.reason = reason;
+        c.triggerThread = Thread.currentThread().getName();
+        c.epochMillis = System.currentTimeMillis();
+        c.bootEpochMillis = PROCESS_START_MS - android.os.SystemClock.elapsedRealtime();
+        c.versionCode = BuildConfig.VERSION_CODE;
+        c.logFile = appLogger != null ? appLogger.logFile() : new File(getFilesDir(), "eo1-app.log");
+        c.rotatedLogFile = appLogger != null ? appLogger.rotatedFile() : null;
+        c.header.putAll(CrashReporter.deviceFacts(getFilesDir()));
+        c.header.put("Git-Source", BuildFacts.source());
+        c.header.put("Build-Date", BuildFacts.buildStamp());
+        String name = deviceName();
+        if (!name.isEmpty()) {
+            c.header.put("Frame-Name", name);
+        }
+        c.header.put("Capture-Deadline-Ms", Long.toString(DiagnosticsReport.CAPTURE_DEADLINE_MS));
+        c.header.put("Auto-Reboot-At-Decision", Boolean.toString(autoRebootEnabled()));
+        c.header.put("Android-Uptime", DeviceTelemetry.humanizeUptime(
+                android.os.SystemClock.elapsedRealtime()));
+        c.liveness = new DiagnosticsReport.Collector() {
+            @Override
+            public String collect() {
+                return diagnosticsLiveness();
+            }
+        };
+        c.threadDump = new DiagnosticsReport.Collector() {
+            @Override
+            public String collect() {
+                return diagnosticsThreadDump();
+            }
+        };
+        c.appLog = new DiagnosticsReport.Collector() {
+            @Override
+            public String collect() {
+                return DiagnosticsReport.tailLog(c.logFile, c.rotatedLogFile,
+                        DiagnosticsReport.APP_LOG_LINES);
+            }
+        };
+        c.state = new DiagnosticsReport.Collector() {
+            @Override
+            public String collect() {
+                return diagnosticsState();
+            }
+        };
+        return c;
+    }
+
+    /**
+     * Section 1: everything this process knows that no framework call can withhold. Pure field reads
+     * and one directory listing — which is why it has no time budget and cannot need one.
+     */
+    private String diagnosticsLiveness() {
+        long now = System.currentTimeMillis();
+        StringBuilder sb = new StringBuilder();
+        sb.append("process started   : ")
+                .append(DiagnosticsReport.localTime(PROCESS_START_MS))
+                .append(" (activity #").append(sActivityCreateCount)
+                .append(", self-restarts ").append(selfRestartCount).append(")\n");
+        sb.append("display proven    : ")
+                .append(lastDisplayProvenAtMs == 0L ? "never"
+                        : DiagnosticsReport.localTime(lastDisplayProvenAtMs)
+                                + " (" + ((now - lastDisplayProvenAtMs) / 1000L) + "s ago)")
+                .append("  count=").append(displayProvenCount).append('\n');
+        sb.append("display failures  : ").append(displayFailedCount).append('\n');
+        sb.append("rotation clock    : ")
+                .append(lastRotationActivityMs == 0L ? "never"
+                        : DiagnosticsReport.localTime(lastRotationActivityMs)
+                                + " (" + ((now - lastRotationActivityMs) / 1000L) + "s ago)")
+                .append("  [refreshed by every timer tick — see lastDisplayProvenAtMs]\n");
+        sb.append("rotation ticks    : ").append(timerTickCount)
+                .append("  next at ").append(nextRotationAtMs == 0L ? "unscheduled"
+                        : DiagnosticsReport.localTime(nextRotationAtMs)).append('\n');
+        sb.append("main thread       : acked ")
+                .append((now - mainLoopAckAtMs) / 1000L).append("s ago\n");
+        KioskWatchdog w = kioskWatchdog;
+        if (w != null) {
+            sb.append("watchdog          : level=").append(w.actedLevel())
+                    .append(" action=").append(w.lastAction())
+                    .append(" ticks=").append(w.ticks())
+                    .append(" probeMisses=").append(w.probeMisses())
+                    .append(" repairAttempts=").append(w.repairAttempts()).append('\n');
+            sb.append("                    last action ")
+                    .append(w.lastActionAtMs() == 0L ? "never"
+                            : (now - w.lastActionAtMs()) / 60_000L + "m ago").append('\n');
+            sb.append("                    stale=").append(w.staleMsNow() / 1000L).append("s")
+                    .append(" limit=").append(KioskWatchdog.staleLimitMs(intervalMs()) / 1000L)
+                    .append("s\n");
+            sb.append("rungs this wedge  : ").append(w.rungHistory()).append('\n');
+            Boolean up = w.cachedNetworkUp();
+            sb.append("network (cached)  : ")
+                    .append(up == null ? "never observed by the ladder"
+                            : (up.booleanValue() ? "up" : "down") + " as of "
+                                    + ((now - w.cachedNetworkAtMs()) / 1000L) + "s ago")
+                    .append('\n');
+            sb.append("screen/paused     : screen=")
+                    .append(w.cachedScreenOn() ? "should be on" : "should be off")
+                    .append(" paused=").append(w.cachedPaused() ? "yes (dialog in front)" : "no")
+                    .append('\n');
+        } else {
+            sb.append("watchdog          : not running\n");
+        }
+        sb.append("offline for         : ").append(offlineMs() / 1000L).append("s\n");
+        sb.append("download in flight  : ").append(downloadInFlightMs() / 1000L).append("s\n");
+        sb.append("window              : focused=").append(windowFocused)
+                .append(" view=").append(focusedView)
+                .append(" lastKey=").append(lastKeyEventCode).append('\n');
+        sb.append("video engine        : ").append(preferTsPlayer ? "TsPlayer" : "MediaPlayer")
+                .append(" paintSignal=").append(videoPlayer.supportsPaintSignal())
+                .append(" painted=").append(videoPaintProduced)
+                .append(" lastFrame=")
+                .append(videoPlayer.getLastFrameAtMs() == 0L ? "never"
+                        : ((now - videoPlayer.getLastFrameAtMs()) / 1000L) + "s ago")
+                .append('\n');
+        sb.append("active video        : path=").append(activeVideoPath)
+                .append(" stage=").append(activeVideoStage).append('\n');
+        if (mediaManager != null) {
+            MediaAsset current = mediaManager.getCurrentAsset();
+            sb.append("pool                : keys=").append(mediaManager.poolKeyCount())
+                    .append(" remainingThisPass=").append(mediaManager.poolRemaining())
+                    .append(" rebuildFailures=").append(mediaManager.rebuildFailureCount())
+                    .append('\n');
+            sb.append("acquire failures    : run=").append(mediaManager.acquireFailureRun())
+                    .append(" total=").append(mediaManager.acquireFailureCount())
+                    .append(" last=")
+                    .append(mediaManager.lastAcquireFailureAtMs() == 0L ? "never"
+                            : DiagnosticsReport.localTime(mediaManager.lastAcquireFailureAtMs()))
+                    .append(" webSkipped=").append(mediaManager.webFallbackDepth()).append('\n');
+            sb.append("verdicts (process)  : ").append(mediaManager.verdictCounts()).append('\n');
+            sb.append("current asset       : ");
+            if (current == null) {
+                sb.append("none\n");
+            } else {
+                sb.append(current.key()).append(' ').append(mediaTypeName(current.type))
+                        .append(" backend=").append(current.backendId)
+                        .append(' ').append(current.width).append('x').append(current.height)
+                        .append(" size=").append(current.sizeBytes == null ? "?" : current.sizeBytes)
+                        .append(" dur=").append(current.durationMs).append("ms")
+                        .append(" file=").append(current.originalFileName).append('\n');
+            }
+            sb.append("backends            :\n");
+            for (Map.Entry<String, String> e : mediaManager.backendFetchRecords().entrySet()) {
+                sb.append("  ").append(e.getKey()).append(": ").append(e.getValue()).append('\n');
+            }
+        }
+        sb.append("cache dir           : ")
+                .append(getCacheDir() == null ? "?" : getCacheDir().getAbsolutePath()).append('\n');
+        return sb.toString();
+    }
+
+    /**
+     * Section 2: this process's own stacks. The one part of a report that turns "the main thread ran
+     * nothing for two ticks" into a place in the code, and it needs no framework to answer.
+     */
+    private static String diagnosticsThreadDump() {
+        StringBuilder sb = new StringBuilder();
+        Map<Thread, StackTraceElement[]> traces = Thread.getAllStackTraces();
+        List<Thread> threads = new ArrayList<>(traces.keySet());
+        Collections.sort(threads, new Comparator<Thread>() {
+            @Override
+            public int compare(Thread a, Thread b) {
+                String an = a.getName() == null ? "" : a.getName();
+                String bn = b.getName() == null ? "" : b.getName();
+                return an.compareTo(bn);
+            }
+        });
+        for (Thread t : threads) {
+            StackTraceElement[] frames = traces.get(t);
+            sb.append('"').append(t.getName()).append('"')
+                    .append(t.isDaemon() ? " daemon" : "")
+                    .append(t.isAlive() ? "" : " (dead)")
+                    .append(" prio=").append(t.getPriority()).append('\n');
+            if (frames == null) {
+                sb.append("\t(no stack: the thread was not in one)\n");
+                continue;
+            }
+            int shown = Math.min(frames.length, DiagnosticsReport.THREAD_DUMP_MAX_FRAMES);
+            for (int i = 0; i < shown; i++) {
+                sb.append("\tat ").append(frames[i]).append('\n');
+            }
+            if (frames.length > shown) {
+                sb.append("\t... ").append(frames.length - shown).append(" more\n");
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Section 4: the {@code /state} document, unchanged. Pretty-printed for a human reading a
+     * {@code .txt} in a browser; on anything unexpected the compact form is written instead, because
+     * an unparseable answer is still the answer.
+     */
+    private String diagnosticsState() {
+        String json = buildStateJson();
+        try {
+            return new com.google.gson.GsonBuilder().setPrettyPrinting().create()
+                    .toJson(com.google.gson.JsonParser.parseString(json)) + "\n";
+        } catch (Throwable t) {
+            return json + "\n";
+        }
     }
 
     /** The watchdog's view of itself, for {@code /state}. */
@@ -2610,6 +2975,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView.setVisibility(View.INVISIBLE);
         lastVisibleView = videoView;
         videoPaintRevealed = true;
+        noteDisplayProven();
     }
 
     private void startVideoPaintWatchdog(String assetId, File file,
@@ -3032,6 +3398,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.add("update", updateManager.stateJson());
         o.add("watchdog", watchdogStateJson());
         o.add("crash", crashBlockJson());
+        o.add("diagnostics", diagnosticsBlockJson());
 
         o.add("telemetry", DeviceTelemetry.snapshot(this));
 
@@ -3179,6 +3546,41 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         return CrashStore.delete(CrashStore.dirFor(this), name);
     }
 
+    @Override
+    public File reportDir() {
+        return DiagnosticsReport.dirFor(this);
+    }
+
+    @Override
+    public DiagnosticsReport.Info[] listReports() {
+        // readHeaders, unlike the store's own name-only callers: this feeds a page a person reads, and
+        // Reason — the one line saying why the frame wrote the file — lives in the header. Same choice
+        // CrashStore.list makes for /crashes. Bounded at 40 files x 1 KB, and only on this route:
+        // /state's summary and pruning keep reading names alone.
+        return DiagnosticsReport.list(DiagnosticsReport.dirFor(this), true);
+    }
+
+    @Override
+    public File reportFile(String name) {
+        return DiagnosticsReport.resolve(DiagnosticsReport.dirFor(this), name);
+    }
+
+    @Override
+    public boolean deleteReport(String name) {
+        return DiagnosticsReport.delete(DiagnosticsReport.dirFor(this), name);
+    }
+
+    /**
+     * Writes one report on request from the LAN page. Runs the collection on the calling web worker
+     * through a capture thread it joins, and not through {@code runOnUiThread}: the thread this exists
+     * to diagnose may be the UI thread, and a capture that posts to it would wait on the hang it came
+     * to record.
+     */
+    @Override
+    public DiagnosticsReport.Result captureReport() {
+        return captureDiagnostics(DiagnosticsReport.TRIGGER_MANUAL, "requested over the LAN", true);
+    }
+
     /**
      * The {@code /state} {@code crash} block. Wrapped because a throw anywhere inside
      * {@link #buildStateJson} would otherwise 500 the whole document — the same reason
@@ -3198,6 +3600,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             o.add("sources", sources);
         } catch (Throwable t) {
             // Report whatever was assembled before the failure; never fail /state over this.
+        }
+        return o;
+    }
+
+    /**
+     * The {@code /state} {@code diagnostics} block: how much evidence the frame has been writing about
+     * itself, and whether the newest of it came from a reboot. Names only, so this costs a directory
+     * listing rather than a read per report — the same reason {@code CrashStore.stats} exists.
+     *
+     * <p>It is in {@code /state} rather than only on the reports page because the question it answers
+     * ("did the frame already document the thing you are about to report?") is asked while someone is
+     * still reading {@code /state}.
+     */
+    private JsonObject diagnosticsBlockJson() {
+        JsonObject o = new JsonObject();
+        try {
+            o.add("store", DiagnosticsReport.statsJson(DiagnosticsReport.dirFor(this)));
+        } catch (Throwable t) {
+            // As with the crash block: a summary that cannot be read is a missing key, not a 500.
         }
         return o;
     }
