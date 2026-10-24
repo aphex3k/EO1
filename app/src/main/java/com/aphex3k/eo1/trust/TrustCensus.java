@@ -165,6 +165,20 @@ public final class TrustCensus {
         return null;
     }
 
+    /**
+     * {@link #classifyFailure} as the suffix a failure report carries, so a frame says which gate it
+     * hit instead of leaving an operator to infer it from exception text. Returns "" for a failure
+     * that is not about trust at all — which is the more important half: a timeout that reads like a
+     * certificate problem sends someone to reinstall roots against a dead radio.
+     *
+     * <p>Nothing here is remembered. The verdict belongs to the report it is appended to, not to a
+     * process-wide fact a later, healthy connection would have to remember to clear.
+     */
+    public static String gateNote(Throwable error) {
+        String verdict = classifyFailure(error);
+        return verdict == null ? "" : " [TLS gate: " + verdict + "]";
+    }
+
     private static X509Certificate read(File file) {
         InputStream in = null;
         try {

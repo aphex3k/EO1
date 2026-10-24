@@ -1,113 +1,198 @@
 # EO1 and EO2 Replacement APK
 
-This repository is a rewrite of [spalt/EO1](https://github.com/spalt/EO1). The goal is to ideally use a
-self-hosted [immich.app](https://immich.app/) instance as a backend. This will allow **full self-custody** of the system.
+Replacement Android software for the Electric Objects **EO1** and **EO2** picture frames, which stops
+them depending on a vendor cloud that no longer exists. It is a rewrite of
+[spalt/EO1](https://github.com/spalt/EO1).
+
+Where the pictures come from is your choice: files you upload straight to the frame over your own
+LAN, an [immich.app](https://immich.app/) server you host, or web pages. All three merge into one
+rotation. Nothing in this app contacts a host you did not put into its configuration.
 
 ![photo of eo1 custom app development](_img/IMG_1451.jpg) ![photo of eo1 running custom app](_img/IMG_1452.jpg)
 
 This concept guarantees that you control all aspects of the images displayed on your EO1 and/or EO2 and they will never go offline or stop displaying art ever again, because someone else decided to do so!
 
-## Concept
+## Three sources
 
-On your smart device, you will run the immich app for your platform and device. It supports phones and tablets running iOS or Android. The app connects to the cloud hosting an instance of the immich server. You need to host it yourself or have someone host it for you!
+| Source | What you must have | What appears |
+|---|---|---|
+| **Files you upload to the frame** | Nothing but the frame and a browser on the same LAN. No server, no account, no password, no TLS — a connected LAN is enough | Every accepted file, straight off the frame's own storage |
+| **An Immich server** | Immich **3.x**, and an account's email and password — there is no API key | Everything that account can see, minus trash and archived/hidden |
+| **A web page** | A URL something serves | That page, rendered fresh each time it comes up |
 
-- A simple single-user configuration runs the same user credentials on the picture frame as well as on the smart device.
-- In a multi-user configuration, everyone can upload pictures to one shared album or several shared albums which is accessible from the account that is used on the frames.
-- The client app on the frames will select a random picture from the merged pool of all available pictures across every configured media backend (Immich albums from one or more hosts, plus optionally locally uploaded files).
-- A new picutre is chosen every interval.
-- A best effort is made that once every picture had been displayed once, the cycle starts anew.
+> **Uploads do not start working by themselves.** A frame's files only rotate once its configuration
+> holds a backend entry of type `local`. Nothing writes that entry for you — not the upload, not a
+> reboot — and until it exists, an uploaded file sits safely on disk, lists normally in the page's
+> Files table, looks perfectly healthy, and never reaches the screen. The options dialog's
+> **"+ Add Local uploads"** button writes it in one tap, and that tap is the entire configuration of
+> a serverless frame. [Why it needs hands once](docs/SETUP.md#the-one-step-that-needs-hands).
 
-<img src="_img/single_user.png" width=403/> <img src="_img/multi_user.png" width=403/>
+## Getting pictures on it with no server
 
-## Getting started
+Two minutes of this needs a browser; the first step needs the frame in your hands.
 
-The following documentation assumes, that you have set up Immich already.
+1. **Install the APK, once.** How depends on the board: [Setup for EO1](docs/SETUP.md#setup-for-eo1)
+   (the ROM's own browser, a keyboard and mouse via OTG) or [Setup for EO2](docs/SETUP.md#setup-for-eo2)
+   (`adb install -r`). Everything below needs only a browser.
+2. **Power-cycle it.** The app is the HOME replacement, so it takes the screen. On a frame with
+   nothing usable configured, the options dialog opens on the **Media** tab by itself — nothing to
+   press, nothing to type.
+3. **Press "+ Add Local uploads", then Save.** No server, no username, no password, no token.
+4. **Read the address off that screen.** The dialog shows a `Wi-Fi IP:` line on every build, with
+   nothing to enable. *Optional, and cheapest while you are there:* tick **Trusted Network**, which
+   additionally prints the configuration token under it — the one credential that turns the page's
+   reads into writes.
+5. **Open `http://<frame>/` from any device on the LAN** — if that is refused, `http://<frame>:8080/`.
+   No token, no flag, no login. The page header then names the address and port that actually bound.
+6. **Select up to 32 photos and press Upload.** They appear in the Files table at once.
+7. **They reach the panel within one interval** (minutes; default 5) — or when you press **Next**.
+   New files are interleaved into the current cycle's unshown tail, so an upload may not be the very
+   next picture.
+8. **To replace a photo, Delete the old one first.** Re-uploading a name that is already there lands
+   as `name_1.jpg`, and both stay in the rotation.
 
-### Requirements
+Uploads survive a self-update (install is `pm install -r`, and `/data` is untouched). A factory
+reset, an uninstall, or *Clear data* erases them: they live inside the app's private directory.
 
-- Immich server **3.x** — anything from **3.0.0** up to **4.0.0** (endpoints verified against the **3.3.3** OpenAPI spec). Immich’s HTTP API does change between major releases: a server newer than anything this build knows is still tried, with a one-off compatibility toast, and the photos rotate if it works. A server older than 3.0.0 is skipped with a toast, since its API predates this app.
-- You need a way to connect a keyboard and mouse to your EO1 frame.  You can get one of these [USB OTG Adapters](https://www.amazon.com/gp/product/B01C6032G0/?&_encoding=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=a2e10d0fcebbd4425ace19f040a24e27&camp=1789&creative=9325) and connect a [USB keyboard with hub built-in](https://www.amazon.com/gp/search?ie=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=56fac2fd57bf775c7512756260c58b6e&camp=1789&creative=9325&index=pc-hardware&keywords=usb) to it, then a USB mouse to the keyboard
-  - Alternatively, you can get an [OTG Hub](https://www.amazon.com/dp/B01HYJLZH6?psc=1&ref=ppx_yo2ov_dt_b_product_details&_encoding=UTF8&tag=aph0dc-20&linkCode=ur2&linkId=49938883224aa721262057e366759275&camp=1789&creative=9325) and connect a mouse and keyboard to it directly
-- For each Immich backend: the server host and an account login (username/password) — see [Multiple media backends](#multiple-media-backends)
-- (optionally) the local uploads backend — no account needed, files uploaded via the frame's [LAN web server](docs/WEBSERVER.md)
-- (optionally) a web server hosting the APK for download onto the frames
+## What the frame can show
 
-#### Caveats
+The frame has no transcoder and resizes nothing — the file that arrives is the file that displays. So
+these limits are yours to hit, and they appear in no other document:
 
-EO1 has only one data port thus OTG and adb (via USB) can not be used at the same time. Unfortunatly the Android OS version 4.4.2 running on EO1 does not support wireless adb connection. That is the reason why the APK has to be sideloaded via the built-in browser.
+| | Accepted | Recognised and then refused |
+|---|---|---|
+| **Stills** | `jpg` `jpeg` `png` `gif` `webp` `bmp` `dng` | `heic` `heif` `avif` — named HEIF/AVIF stills, undecodable here |
+| **Video** | `mp4` `mov` `m4v` `mkv` `avi` `ts` `webm` `3gp` `mpg` `mpeg` | `h265` `hevc` `av1` — the extension names the codec itself |
 
-Additionally the old Android 4.4.2 version installed on EO1 supports a limited set of TLS encryption next to a swath of outdated SSL stuff for accessing resources via the web. That means that the immich instance hosting your albums needs to let their guard down at least a litte.
-Amongst other things, I had to disable PFS as well as enable TLSv1.2 in addition to modern TLSv1.3. If the app complains about SSL connection errors, it is likely that the immich host and the Android OS don't share at least one compatible cipher and protocol.
+A `.mov` or `.mp4` is a container, not a verdict: once it is on disk the sample description decides,
+which is what catches the everyday iPhone file. That is deliberate — a name that *could* hold a bad
+codec is never treated as proof that it does.
 
-### Setup for EO1
+**Encode targets.** JPEG or PNG for a still. For video: H.264 in `mp4`/`mov`/`m4v`, longest side
+**at most 1920 px**, and **1080p30 or below**. The decoder's real ceiling is sustained throughput,
+300 000 macroblocks a second: 1080p29.97 is 244 555 and plays at 1.00x, while 1080p59.94 is 489 343
+and runs at **0.13x** — slow motion, forever, with no error raised. 720p60 fits where 1080p60 does
+not. Files above 1 GiB are never fetched.
 
-- Upload some pictures to your Immich account
-- Connect the mouse & keyboard to your EO1 via the mentioned OTG method
-- Connect the EO1 to the power adapter and let it boot
-- When your EO1 finishes the boot animation and it hangs on the "Getting Art" dialog, hit **\[WINDOWS + B\]** on the keyboard to open a web browser
-- You need to tell your EO1 to allow side-loading.
-  1. Swipe down on the top right and go to **Settings > Security**
-  2. Make sure "Unknown Sources" is checked
-- Go back to the browser and go to the URL where you host the APK. All builds are local (there is no CI anymore) — [publish-update.sh](#self-update) builds and signs a release APK and writes a matching `update-manifest.json` to `./update-out`; serve that directory from any plain-HTTP server on your LAN. Example: <http://your-host/update-out/eo1-release-1.apk>
-- When it finished downloading, install the file by pulling down the notification bar on the top left and clicking it, then agreeing to the install prompts. That's the one-time bootstrap — every later self-update then runs fully headless (no further manual steps; see [How the install runs](#how-the-install-runs))
-- Restart/power cycle your EO1 by unplugging and plugging only the power cable
-  - At this point, the keyboard and mouse are still connected via OTG
-- Because this APK is designated as a "Home screen replacement", when EO1 boots, it will ask if you want to load the Electric Object app or the EO1 app. Select EO1 and choose "Always".
-- The first time the EO1 is run, the options dialog opens on the **Media** tab. Under **Media backends** click **"+ Add Immich backend"** and fill in the fields in the row that expands:
-  - Server: the same server URL you use to log in on the web-app or the native apps on iOS or Android
-    - If you connect to immich in your browser via `http://immich.local`, that is what you want to use here
-    - If you run immich on a different port than `80`, include it in the server string, like `http://immich.local:8080`
-  - Username: the same email address you would use to log in on the web-app or the native apps on iOS or Android
-    - Depending on how you set up your immich installation this is your own user or a shared user account dedicated for use with the frames
-  - Password: same as above
-    - Keep in mind that this password is stored in clear-text on the frame. Everyone with access to your device can recover the password!
-  - API version: leave blank for `auto` (the frame probes the server's version on first contact) or pin a version like `3.1.0` — see [Multiple media backends](#multiple-media-backends)
-  - Pointing the frame at more than one server? Click **"+ Add Immich backend"** again for each additional host. **"+ Add Local uploads"** enables the optional local uploads backend (no credentials needed).
-- Press **Save** at the bottom of the dialog. **To get back to the configuration screen later, press C on your connected keyboard**
-- You can now unplug your mouse and keyboard and hang your EO1 back on the wall!
+Three things people get wrong:
 
-### Setup for EO2
+- A still is **center-cropped to fill** a portrait 1080x1920 panel, never letterboxed. Compose for that.
+- A video holds the whole interval and loops inside it, **muted** — and an EO1 has no audio output at all.
+- An upload cap you exceed lands **zero** files, not a partial batch: 32 files, 512 MB each, 2 GB per
+  request. Everything is parsed into a staging area before any file is renamed.
 
-Your EO2 most likely has android debugging enabled - which (while insecure) makes it much easier to adjust settings remotely.
-This guide assumes your EO2 already has an IP address on your network that is known to you (likely a DHCP reservation). If your EO2 has been reset or isn't connected to your network, [this reddit post](https://www.reddit.com/r/electricobjects/comments/1amitpa/howto_video_for_resurrecting_eo2/) has instructions on getting it online.
+And the consequence of having no server behind you: an uploaded clip is never routed to a lighter
+copy, because there is no fallback source to route *to*. A file that is merely too heavy displays in
+slow motion and nothing marks it as incompatible. With Immich that same file would be re-fetched as a
+server transcode.
 
-- Upload some pictures to your Immich account
-- Connect the EO2 to the power adapter and let it boot. It should stop at "Connecting to the internet..."
-- Download and install [adb (Android Debug Bridge)](https://developer.android.com/tools/adb)
-  1. I was never succesful getting the adb command to work on my Win10 machine - the connection always failed. However it worked from both Windows Subsystem Linux on that machine and my Linux server, so my guess is there's an issue with Windows adb.
-- Connect to your EO2
-  1. `adb connect EO_IP_ADDRESS`
-- Disable the EO2 app
-  1. `adb shell pm disable com.electricobjects.app`
-- Disable the vendor firmware updater too, so the frame stops waking itself hourly to phone a dead host
-  1. `adb shell pm disable com.geniatech.upgrade`
-  2. The app asks the frame to do this itself at every launch, through its own loopback `adbd` — but that path is dead while a host `adb` client is attached (and on an EO1, always), so running it once here is what makes it stick. A package-level disable covers every entry point the package exports and survives a reboot; `/logs` says whether the frame still has work to do. See [docs/WEBSERVER.md](docs/WEBSERVER.md#vendor-ota-pollers)
-- Download the latest release apk from this repo and install it using this command:
-  1. `adb install -r PATH/TO/eo1-app-release.apk`
-- At this point, when you reboot your EO2, the configuration window should pop up. You can either attempt to connect a keyboard to the EO2 to edit the file directly, or follow these instructions to create the configuration.json file manually
-  1. open the configuration_example.json from the root of this repo (either clone the repo or copy-paste the contents to a new text file)
-  2. adjust the values for your setup — the file now carries a `backends` list (one entry per Immich host, plus an optional `local` entry); see [Multiple media backends](#multiple-media-backends) below. If you have multiple EO2s, see the section around managing multiple EO2s with immich
-  3. once the file is edited with your preferences, copy it to the EO2 with the following command:
-  4. `adb push PATH/TO/configuration.json /data/data/com.aphex3k.eo1/files/configuration.json`
-- Reboot your EO2 with the following command:
-  1. `adb reboot`
-- When your EO2 reboots, it should connect to the server and grab some art!
-- If you used the electricobjects website in the past to download and display art, please [share your cached art with the world!](https://www.reddit.com/r/electricobjects/comments/16umi1m/eo2_saving_your_art/)
+## When a photo doesn't show up
 
-### Managing multiple EO2s with immich
+1. In the page's Files table, look for **`<name>.incompat.txt`** beside the file that never appeared,
+   and open it. It carries the file's size and dimensions, the exact reason, a fix instruction, and a
+   JSON block naming the model, Android version and app build — everything needed to file a bug
+   report without going near the frame.
+2. Apply its fix (JPEG or PNG; H.264 in MP4, long side ≤ 1920 px) and re-upload.
+3. Or just **delete the `.txt`** — the frame re-checks the file on the next tick. Writing one by hand
+   is a supported way to bench a file or keep it out of the rotation.
 
-In a situation where you will want to manage multiple EO2s (or when you want to have granular control on what a single EO2 displays) you'll want to create an immich account for **each EO**. These accounts should be separate from your master (admin) account that manages the immich instance.
-In the immich Administration area, click the "Create User" button and name it for the EO2 (eg EO2-LivingRoom). _at the point of writing this, each account requires a separate email address, however in my testing this address is not used and does not need to be verifed. If this changes in future versions of immich, you'll have to provide unique emails for each EO._
-Use the created email/password combo for each EO2 as that device's `immich` backend entry in its `configuration.json` (one backend per device is the typical setup; extra backends can be added in the file or the options dialog)
-Create separate albums for your pictures - either organized as previously on the electricobjects website (each album is a playlist) or create albums specific for each device
-Choose the album you want to show on each device, click the Share icon in the up-right of the immich app, and choose the account associated with the device.
-The app will only be able to see content from your immich database that is shared with it.
+Two cases a report cannot cover, stated rather than papered over: a clip that is merely too heavy
+gets no report at all (see above), and a file that fails *while being displayed* — as opposed to
+being rejected when scanned — writes nothing and is retried every cycle. Marking it incompatible is a
+no-op for a local file, so there is no tag to look for; the `flagged … in backend 'local'` line that
+gets written anyway describes a tag that was never made, and it lands in logcat only — the ~13-minute
+buffer, not `/logs`.
 
-Then give each frame a name, so you can tell them apart without a DHCP lease: the options dialog's **About** tab has a *Device name* field, and so does the frame's own web page (`POST /devicename`, once *Trusted Network* is on). The label is stored on the device and never in `configuration.json`, so it cannot be copied to another frame by an import — it appears in the frame's debug overlay and in the web page header, which is what makes `http://192.168.1.87:8080` announce itself as the kitchen. An unnamed frame reads exactly as before: platform and IP address, nothing else.
+A report appears within a tick of the file's first scan, not the instant you upload. The minute after
+an upload is too early to conclude it is broken.
 
-### Multiple media backends
+## Which frame is this?
 
-The frame's configuration holds a list of **media backends**; the rotation pool merges the catalogs of all of them and picks randomly across the combined set. Any number of Immich hosts is allowed, plus one optional **local** backend for files uploaded through the frame's [LAN web server](docs/WEBSERVER.md) — it joins the rotation as an equal peer and needs no account — plus any number of **web** backends, each showing one web page.
+| | EO1 | EO2 | What it means |
+|---|---|---|---|
+| Soft-touch buttons | Two (top toggles the screen, BACK steps brightness; both within 250 ms checks for updates) | None | On an EO2 every one of those is a button on the web page |
+| Light sensor | Yes | No | EO1's brightness floor rides ambient lux; on EO2 the floor *is* the brightness |
+| TCP adb | Not configured — connecting gives `ECONNREFUSED` | Listens on 5555 from boot, unauthenticated | Silent updates work unattended on EO2; on EO1 only if you opt in twice. On EO2 that exposure is the shipped state |
+| Web page port | 80, else 8080 | 8080 | The page header and `/state` say which won |
+| Installing | Browser sideload over OTG | `adb install -r` | [Setup](docs/SETUP.md) |
+| Touchscreen | No | No | A pointer appears in exactly one step, ever |
+
+The board is detected from `Build.DEVICE`/`Build.MODEL`, and all of it sits behind
+`HardwareCapabilities` flags. Reachable but not in front of you? `GET /state`'s `capabilities` block
+answers `lightSensor`, `screenBrightness`, `brightnessButton` and `powerButton` without anyone
+walking to the wall. Evidence for the whole table is in
+[docs/EO2-CAPABILITIES.md](docs/EO2-CAPABILITIES.md).
+
+## Day to day
+
+**Rotation.** The merged pool is shuffled once and consumed **in order**, so every asset shows exactly
+once per cycle; at the end of a pass the catalogs are re-fetched and the pool re-shuffled. It is not
+random per tick — a photo cannot come up twice while the rest of the shelf waits, and that holds even
+for a library where the same picture is listed by two different queries. The `interval` is in
+**minutes**, defaults to
+**5**, and is clamped to at least 1. The next asset is prefetched right after each display, so a
+rotation is normally a cache hit and dwell time never waits on a download. Uploaded files **join** on
+the next tick, with no restart. **Deleting** is different: the tick that noticed deletions only ever
+*adds*, so the removed file stays a record in the current pass until the next pool rebuild, at the end
+of the cycle. When its turn comes the frame finds no bytes, logs the failure, and moves straight on to
+the next asset — a gap in the pass, never a blank panel.
+
+**Quiet hours.** `quietHours` is a list of 5-field cron expressions (`minute hour day month weekday`);
+the screen is off whenever **any** expression matches the current minute in `selectedTimeZoneId`, so
+overlapping windows simply OR. `* 22-23,0-6 * * *` = off every night 22:00–06:59; `0 13 * * 1-5` = off
+weekdays at 13:00. While the panel is off the rotation does not advance, so a frame wakes on the
+*next* asset in the pass — not the one that would have shown at 03:00.
+
+**Brightness.** Eight steps from 0.3 to 1.0, held as a per-device step index in the app's own
+preferences — never in `configuration.json`, never exported. On an EO1 that index is a **floor** the
+light sensor lifts toward 1.0 between 0.175 and 150 lux; on an EO2 the floor *is* the brightness, and
+the page's **Brightness** action is the only control that frame has. BACK steps it on EO1, and its
+wrap from the top back down to 0.3 is intentional — it is how a frame comes back down.
+
+| From a keyboard (EO1) | From the web page (either board) |
+|---|---|
+| `C` options · `SPACE` screen · `S` next · `U` check updates · `F2`/`F4` | **Next** · **Screen** · **Brightness** · **Check updates** · **Install on the frame** · **Update reset** |
+
+### The MQTT tab
+
+The options dialog's second tab is real, and is named in no other document. Pointing it at a broker
+makes the frame subscribe to `sonos/+` and paint a now-playing banner — track title, artist, group
+name — over the current picture for the track's duration, then fade it. It is a display overlay, not
+a control plane: no MQTT message rotates, installs, reconfigures or wakes anything, and nothing
+outside the banner reads the payload. It is inherited from a Sonos experiment the upstream project
+began, and it stays completely inert until you name a broker.
+
+## The frame's web page
+
+Every frame runs one, from the first launch, with no setting that turns it off. It listens on port
+**80** and falls back to **8080** when binding fails — which it does for a sideloaded install, where
+the low port answers `EACCES` — and both its own header and `/state`'s `app.webPort` report which one
+won. It is plain HTTP with no login, reachable by anything on the LAN: **treat the network as the
+perimeter.** Every file it hands out arrives as a download, because the frame's screen is the gallery
+and the page is the loading dock.
+
+| Needs | Routes |
+|---|---|
+| Nothing | upload, files, delete, control (next/screen/brightness/config), state, logs, crashes, reports, *Capture now*, health |
+| *Trusted Network* **+** the per-device token | `/config`, config download and import, `POST /update`, `POST /devicename` |
+| Debug builds only | `keyevent`, `watchdog`, `action=show` |
+
+Two seams worth knowing before you need the page: the configuration **token** is readable in exactly
+one place — the dialog's Media tab, and only while the flag is *already* on — and that flag has no
+browser route at all, since the options dialog is its only writer. So **adding a second source or
+changing the interval is the one thing that still needs hands.** Everything else, including deleting
+a photo, does not. And note the asymmetry: deleting a crash *report* enforces a same-origin check,
+while deleting a *photo* enforces nothing.
+
+The full route-by-route reference is [docs/WEBSERVER.md](docs/WEBSERVER.md).
+
+## Multiple media backends
+
+The frame's configuration holds a list of **media backends**; the rotation pool merges the catalogs of
+all of them into one shuffled pass. Any number of Immich hosts is allowed, plus one optional **local**
+backend for files uploaded through the frame's [LAN web server](docs/WEBSERVER.md) — it joins the
+rotation as an equal peer and needs no account — plus any number of **web** backends, each showing one
+web page.
 
 Template: [`configuration_example.json`](configuration_example.json).
 
@@ -115,31 +200,172 @@ Template: [`configuration_example.json`](configuration_example.json).
 {
   "selectedTimeZoneId": "America/Los_Angeles",
   "quietHours": ["* 22-23,0-6 * * *"],
-  "interval": 15,
+  "interval": 5,
   "backends": [
+    { "type": "local", "id": "local" },
     { "type": "immich", "id": "immich-1", "host": "http://immich.local/", "userid": "frame1@example.com", "password": "secret", "apiVersion": "auto" },
     { "type": "immich", "id": "immich-2", "host": "https://other.example.com:3001/", "userid": "frame2@example.com", "password": "secret", "apiVersion": "3.1.0" },
-    { "type": "local", "id": "local" },
     { "type": "web", "id": "web-1", "host": "http://192.168.1.20/dashboard/" }
   ]
 }
 ```
 
+- **Local backend** — optional, at most one (`"type": "local"`), and it is always valid with no host,
+  user or password. **Its existence is what turns uploads on**: files uploaded through the web server
+  appear in the rotation on the next interval tick, no restart — while a *deleted* file stays in the
+  current pass until the pool is rebuilt at the end of the cycle. Unlike
+  an Immich asset, an uploaded file that fails the compatibility check is *removed from the pool* by
+  its sidecar report rather than merely tagged for a human — the exclusion is stronger, and it is the
+  one door back in.
+- **Enabled** — every row carries an `enabled` flag, default true, and an absent key means true, so a
+  config written before the flag existed keeps its backends running. A backend switched off costs only
+  its own assets, and the entry stays in the document, so switching it back is a checkbox rather than
+  an edit. The page's config editor renders one for `immich` and `web` rows and **none** for the local
+  row — the entry's existence is that row's switch — though a hand-written `"enabled": false` on a
+  local entry is still honored.
 - **`apiVersion`** — per backend, so one frame can point at servers of different vintages. `"auto"` (the default) probes the server's version on first contact and uses the matching client; a pinned semver like `"3.1.0"` skips the probe and selects the client for that band (the current band is **all of 3.x**). A version newer than the band is served best effort by the newest client with a compatibility toast; only a version older than every band — or a backend that genuinely fails — disables just that backend, while the others keep rotating.
-- **Local backend** — optional, at most one (`"type": "local"`). Files uploaded through the web server appear in the rotation on the next interval tick, no restart; deleting a file drops it out.
-- **Website backend** — `"type": "web"`, **one entry per page**, and `host` is that page's address (`http://` or `https://`; nothing else is needed — no account, and the address is used exactly as written, so no trailing `/` is added). Each entry contributes one asset to the pool, so with 300 photos and 2 pages every page shows about once every 150 intervals. Nothing is downloaded or cached: the page is loaded fresh in a fullscreen, chrome-free browser view every time it comes up, and it holds the screen for the normal `interval`.
-- **Which pages work** — the frame renders with the browser built into Android 4.4 (a 2014 Chromium), so plan on LAN-hosted pages, static pages, or pages written for old engines. A modern JavaScript app will usually fail. `http://` works out of the box; `https://` depends on the certificates the frame's system trust store already has, and an untrusted one fails to load like any other dead page. Note that this is the one part of the app the shipped root bundle does **not** reach — the page is validated inside Chromium, which ignores any Java trust manager — so `docs/TRUST.md`'s app-local fix helps Immich and not a kiosk page.
-- **Quiet hours** — `quietHours` is a list of 5-field cron expressions (`minute hour day month weekday`); the screen is off whenever any entry matches the current minute in `selectedTimeZoneId`, so overlapping windows simply OR. `* 22-23,0-6 * * *` = off every night 22:00–06:59; `0 13 * * 1-5` = off weekdays at 13:00. Old `startQuietHour`/`endQuietHour` values are migrated to the equivalent expression on load; a single whole-hour window is mirrored back into those fields on save so older APKs keep working.
+- **Website backend** — `"type": "web"`, **one entry per page**, `host` holds that page's address used exactly as written (no trailing `/` is appended), and nothing else is needed — no account. What that engine can actually render, and how a dead page is abandoned, is [its own section](#show-a-web-page-limited).
+- **Quiet hours** — a list of 5-field cron expressions, evaluated in `selectedTimeZoneId`; the matching rules and examples are under [Day to day](#day-to-day). Old `startQuietHour`/`endQuietHour` values are migrated to the equivalent expression on load; a single whole-hour window is mirrored back into those fields on save so older APKs keep working.
 - **Legacy configs** — an old file with flat `host`/`userid`/`password` is migrated on load to a single `immich-1` backend and rewritten on disk; the flat fields are kept mirrored on save so older APK versions can still read the file.
-- **Editing** — the options dialog's Media tab (press **C** on a connected keyboard on EO1) manages the list: add/remove Immich backends, add/remove the local one, add/remove websites, and edit host/username/password/API version (or just the page address) per row. Or edit `configuration.json` directly and reboot (EO2).
+- **Editing** — three routes: the options dialog's Media tab, which opens by itself on a frame with no
+  valid backend (or on `C` on a connected keyboard); the **config** action on the page from any
+  browser, which raises that same dialog on the frame's screen — though operating it still needs a
+  pointer, and the page's own config editor needs *Trusted Network*, which has no browser route; or
+  editing `configuration.json` directly, which on an EO2 is a `adb push` and a reboot.
 - If a backend's server is unreachable or a credential is wrong, that backend is skipped for the cycle and the rest keep rotating. A web page that fails to load is abandoned the same way: the frame shows the next asset in the pool instead of a blank panel and retries the page on its next turn.
 
-### Local debug (emulator)
+## Add an Immich server (optional)
 
-Clone with Git LFS so the Amlogic TsPlayer native library is present:
+Uploads need nothing, so this section only exists because a server buys three things a frame holding
+its own files cannot: a phone app that pushes into a library you already maintain, one source feeding
+several frames at once, and a server that can transcode for you.
+
+- **Server** — Immich **3.x** — anything from **3.0.0** up to **4.0.0** (endpoints verified against the **3.3.3** OpenAPI spec). Immich's HTTP API does change between major releases: a server newer than anything this build knows is still tried, with a one-off compatibility toast, and the photos rotate if it works. A server older than 3.0.0 is skipped with a toast, since its API predates this app.
+- **Login** — the configured **email and password**, and nothing else: there is no API-key field
+  anywhere in the model, and an entry without both is invalid. Keep in mind that this password is
+  stored in clear-text on the frame. Everyone with access to your device can recover the password!
+  The pair is spent once at the login endpoint and the token it returns rides on everything after, so
+  rotating the password and typing the new one into the config takes effect on the next tick with no
+  reboot. A failed login cools down for 60 seconds rather than retrying.
+- **Scoping is a limit, not a setting.** No album, tag or favourite filter exists: the pool is every
+  asset in every album the account owns or is shared into, plus the whole visible timeline, minus
+  trash and archived/hidden. So **a per-frame account fed by shared albums is the only way to aim a
+  frame at particular pictures.**
+- **Many frames, many hosts.** `apiVersion` is per entry, one frame can mix server vintages, and a
+  dead backend costs only its own assets.
+
+### Managing multiple frames with Immich
+
+In a situation where you will want to manage multiple EO2s (or when you want to have granular control on what a single EO2 displays) you'll want to create an immich account for **each EO**. These accounts should be separate from your master (admin) account that manages the immich instance. In the immich Administration area, click the "Create User" button and name it for the EO2 (eg EO2-LivingRoom). _at the point of writing this, each account requires a separate email address, however in my testing this address is not used and does not need to be verified. If this changes in future versions of immich, you'll have to provide unique emails for each EO._ Use the created email/password combo for each EO2 as that device's `immich` backend entry in its `configuration.json` (one backend per device is the typical setup; extra backends can be added in the file or the options dialog). Create separate albums for your pictures — either organized as previously on the electricobjects website (each album is a playlist) or create albums specific for each device. Choose the album you want to show on each device, click the Share icon in the up-right of the immich app, and choose the account associated with the device. The app will only be able to see content from your immich database that is shared with it.
+
+<img src="_img/single_user.png" width=403/> <img src="_img/multi_user.png" width=403/>
+
+Then give each frame a name, so you can tell them apart without a DHCP lease: the options dialog's
+**About** tab has a *Device name* field, and so does the frame's own web page (`POST /devicename`,
+once *Trusted Network* is on). The label is stored on the device and never in `configuration.json`, so
+it cannot be copied to another frame by an import — it appears in the frame's debug overlay and in the
+web page header, which is what makes `http://192.168.1.87:8080` announce itself as the kitchen. A frame
+with no name still says where it is: the options dialog's first tab prints its Wi-Fi address on every
+build, so no router's DHCP table is needed to find one you have never configured.
+
+> **Why an album's pictures are not privileged.** Immich answers a catalog with the album listings
+> *and* the whole timeline, so a shared picture is named twice in one response. The rotation pool
+> dedupes by asset key, so each one still takes exactly **one** slot in the pass — being filed in an
+> album changes what the frame is allowed to see, never how often it shows. Two frames of the same
+> photo from two different *hosts* are two assets, and both stay.
+
+### When an Immich backend misbehaves
+
+| What you see | What it means |
+|---|---|
+| A compatibility toast naming a version | The server is newer than every band this build knows. It is served best effort by the newest client and keeps trying — this is a notice, not a failure |
+| A login failure in `/logs` | Bad credential or unreachable host; that backend is skipped and retries after a 60-second cooldown, while the others keep rotating |
+| An asset tagged `EO1_INCOMPATIBLE` in your library | The frame tried everything it had and could not display it. The tag is **write-only**: the app never reads it back as a filter and re-tags an already-tagged asset, so a fixed asset needs no app-side unfreezing — and a stale tag cannot retire one that works. For video, what usually fixed it is the server's transcoding settings, not the frame |
+
+HTTPS against that server is a separate problem with its own answer: the ROM's certificate store dates
+from about 2013, and the app adds current roots to it for its own connections — see
+[docs/TRUST.md](docs/TRUST.md). The server does **not** have to weaken itself: TLS 1.2 is enabled on
+the frame side, forward secrecy is kept, and what remains is a matter of which gate your host trips.
+
+## Show a web page (limited)
+
+The least first-class source there is, because a page needs a server by definition. One entry is one
+page is one asset in the pool — so with 300 photos and 2 pages, each page shows about once every 150
+intervals — and it holds the screen for a whole `interval`.
+
+A web asset has no bytes: it is never downloaded, cached, integrity-checked or codec-checked, and it
+is fetched fresh every time it comes up, which is the point. The engine is Android 4.4's Chromium 33,
+with JavaScript and DOM storage on, local-file and content access off, `alert`/`confirm`/`prompt`
+auto-cancelled so an unattended frame never waits on a dialog nobody can dismiss, and any
+`market:`/`tel:`/`intent:`/`mailto:` link swallowed rather than ejecting the frame from HOME. Plan on
+LAN dashboards and deliberately legacy pages, not modern SPAs.
+
+An `https://` page depends on the ROM's 2013 store: the shipped root bundle does **not** reach this
+browser, because Chromium validates inside its own engine and ignores any Java trust manager. No app
+update changes that.
+
+When a page errors, or paints nothing for 30 seconds, the photo underneath is revealed and the pool
+moves on — at most 3 dead pages are walked per cycle, so a server that is down cannot stall a frame.
+
+## Living with it
+
+**It recovers itself.** A watchdog runs on its own timer — off the main thread, because the main
+thread is one of the things it watches — and climbs one rung per wedge:
+
+1. force a rotation
+2. tear the player down and redraw
+3. repair Wi-Fi
+4. restart the app
+5. reboot the device — **only with your permission** (the `autoReboot` checkbox, off by default; the four rungs above are unaffected by it)
+
+It starts watching after the larger of 20 minutes and three intervals, and a reboot rung that reboots
+nothing still writes a report first.
+
+**It leaves evidence.** `/crashes`, `/reports`, and the page's **Capture now** button are deliberately
+ungated, because the frame you need a report from is the frame whose screen you cannot reach (one
+capture per 30 seconds; reports kept 30 days and 8 MB, crashes 14 days and 4 MB). `logcat` holds about
+13 minutes on these devices, so the app's own rolling log file and those two stores are what survives
+to the next morning.
+
+**TLS, in four sentences.** The ROM's certificate store dates from about 2013 — 156 anchors measured
+on a live EO2, 63 of them past their own expiry, and none of them Let's Encrypt's — so a modern
+certificate was once simply unvalidatable. The app enables TLS 1.2 itself and merges current public
+roots into its own connections, and merging may only ever *add*: a narrowed set would break hosts that
+work today. Four gates decide whether a connection succeeds — anchors, cipher suites, the server's own
+cipher policy, and a device clock this app never syncs — and a frame that cannot connect now says
+which one: its backend record and its update error string carry a `[TLS gate: …]` note, and carry no
+note at all when the failure was never about certificates. [docs/TRUST.md](docs/TRUST.md) explains the
+four. A frame whose only source is its own uploads consults no certificate at all.
+
+**Keeping it current.** The frame can update itself: manifest over plain HTTP, four verification gates,
+headless install, and a forward-only rule that never downgrades or uninstalls. That is a chapter of its
+own — [docs/UPDATING.md](docs/UPDATING.md).
+
+## What this will not do
+
+- **Android 4.4 / API 19 is a product constraint, not laziness.** Java only, no Kotlin, and the
+  dependency pins exist for that SDK. The browser inside it is Chromium 33.
+- **About 800 MB of usable storage, and nothing is transcoded or resized on the device.** There is no
+  on-device FFmpeg. The per-file ceiling is the smaller of 1 GiB and your free space.
+- **Video:** 1080p30 is the practical ceiling; HEVC, AV1, VVC, Dolby-Vision, and every HEIF or AVIF
+  still never decode. ExoPlayer and Media3 are forbidden here — they hang this SoC's media stack until
+  a power cycle, which is why playback runs on Amlogic's TsPlayer with a `MediaPlayer` fallback.
+- **Files you upload live inside the app.** A factory reset, an uninstall or *Clear data* erases them.
+  Every one can also be downloaded back off the frame through the files route, if you want a second copy.
+- **The LAN server is unsecured plain HTTP with no login, by design.** Anything about this frame is
+  visible to the whole subnet. Config routes, APK upload and the device name sit behind the flag and
+  token; file deletes are the one write route with no same-origin check. On an EO2, TCP adb is open on
+  port 5555 as root in the shipped ROM, and no setting in this app turns that off.
+- **An Immich password sits in cleartext in `configuration.json`.** There is no API-key alternative.
+- **No server is not the same as no network.** Rotation needs a connected link (API 19's `isConnected`
+  — there is no reachability probe), so a LAN-only Wi-Fi network is enough and a dead one is not.
+
+## Building
 
 ```bash
-git lfs pull
+git lfs pull          # the Amlogic TsPlayer native library
+./gradlew assembleDebug
+./gradlew test
 ```
 
 Modern Android Studio no longer supports the Gradle/SDK pins this project needs for IDE debugging. Use:
@@ -152,150 +378,26 @@ That builds the debug APK (armeabi-v7a carries the Amlogic TsPlayer `.so`; arm64
 
 On **Apple Silicon**, API 19 images generally cannot boot, and 32-bit ARM emulators are unsupported. After API 19 fails, the script falls back to AVD `EO1_API21` (`system-images;android-21;default;arm64-v8a`). The committed LFS TsPlayer `.so` is **armeabi-v7a** only (EO1 hardware); the arm64-v8a fallback has no native player, so the app falls back to `MediaPlayer` there. That path is an approximation for development, not EO1 fidelity. Debug APKs omit `maxSdk` so they can install on the fallback AVD; **release** builds still use `maxSdk 19` and armeabi-v7a only for real devices.
 
-## Self-update
+Releases are built and signed locally — there is no CI. See
+[Publishing a new version](docs/UPDATING.md#publishing-a-new-version-operator-side).
 
-The frame can check for, download, verify and install a new APK by itself — no adb, no OTG
-peripheral, no touch screen. Updates are forward-only (the manifest's `versionCode` must be
-strictly greater than the installed one) and nothing is installed before every verification
-gate passes.
+## History
 
-### Configuration
-
-Two fields in `configuration.json` (also in the options dialog, Media tab):
-
-- `updateManifestUrl` — plain-HTTP(S) URL of a small JSON manifest. Empty (the default)
-  disables self-update entirely.
-- `updateCheckIntervalMinutes` — poll interval in minutes (default 120, clamped to [5, 1440]).
-
-The manifest (exactly the fields `publish-update.sh` writes):
-
-```json
-{
-  "versionCode": 2,
-  "versionName": "1.3.1",
-  "apkUrl": "http://your-host/update-out/eo1-release-2.apk",
-  "sha256": "<64 hex chars>",
-  "sizeBytes": 12345678,
-  "notes": "EO1 1.3.1"
-}
-```
-
-### Verification chain
-
-1. **Manifest gate** — `apkUrl` must be http(s), `sha256` 64 hex chars, `sizeBytes` positive
-   and ≤ 100 MB, `versionCode` strictly greater than the installed one.
-2. **SHA-256** — the downloaded bytes are hashed in a 32 KB streaming loop and must match the
-   manifest before anything else is checked.
-3. **JAR signature** — `META-INF/MANIFEST.MF` + `.SF` + `.RSA` are verified in pure Java
-   (`com.aphex3k.update.ApkSignatureVerifier`): per-entry digests, the whole-manifest digest
-   and the PKCS#7 signer signature.
-4. **Signer-certificate match** — the leaf certificate extracted from the JAR signature must
-   byte-match the certificate of the *installed* APK, i.e. the update must be signed with the
-   same keystore as the current install. (An unsigned installed app has no certificate to
-   match against; updates then fail with `no-installed-cert`.)
-
-Only after all four gates does the APK get staged (private master in `filesDir/updates/` plus a
-world-readable copy at `/sdcard/Download/eo1-update.apk`, because the installer runs under a
-different uid) and then installed.
-
-### How the install runs
-
-Install is a ladder, and a frame walks down it only as far as it can do the work *alone*:
-
-- When the frame holds `INSTALL_PACKAGES`, the APK is installed headlessly via
-  `PackageManager.installPackage`. On this ROM the permission is `signature|system`, so
-  sideloaded frames never hold it — for them the app instead runs `pm install -r` as the
-  shell user through the device's own adbd on `127.0.0.1:5555` (`AdbdInstallClient` speaks
-  the minimal adb wire protocol; no confirmation UI).
-- **The EO1 ROM never configures that adbd** (`service.adb.tcp.port` is unset, so a connect gives
-  `ECONNREFUSED`), so on that board a silent install needs the frame to start adbd itself — and it
-  does that **one action at a time, and only if you say so twice**: *Trusted Network* **and** *Allow
-  loopback ADB for update installs* in the options dialog, both default off
-  (`SettingsManager.isLoopbackAdbEnabled()`). With the pair on, `AdbdInstallClient.ensureTcpAdbd()`
-  writes the property and restarts the service (at most once per 10 minutes); with either off the app
-  touches nothing and falls to the next rung.
-  ⚠️ Because there is no loopback-only mode, an armed frame answers `adb` from anywhere it can route
-  to, **as root** — a wider door than the frame's unsecured web server, which is why it is opt-in and
-  why the window is one action rather than one boot: `teardownTcpAdbd()` writes
-  `service.adb.tcp.port=-1` and restarts adbd in a `finally` the moment that action ends (and if an
-  install's own success kills the process first, the note left in the state file makes the next
-  launch close it). An adbd the ROM started on its own, as on EO2, is never touched — closing a
-  daemon you did not open would only interrupt it. Restarting adbd drops any host `adb` session
-  attached over USB.
-- **It is never started to be ready.** Two places may ask for it: an install while an update is
-  staged, and a watchdog rung the ladder has actually reached (Wi-Fi repair, `reboot`). Nothing is
-  opened at boot — the launch-time vendor-OTA `pm disable` only *probes*, and logs a skip when
-  nothing is listening, so flipping the flag does not silently widen what runs unattended.
-- If neither silent transport works, **an automatic cycle puts nothing on screen.** A frame is
-  mounted on a wall and dark through quiet hours; a confirmation dialog shown to nobody is not
-  an install, it just looks like one for days. The update stays `STAGED` and retryable with
-  `needsHumanConfirmation: true`, and the web page says so. Pressing **Install on the frame**
-  is the explicit opt-in that shows the dialog (waking the panel, and no longer interrupted by
-  a relaunch alarm), for a frame you can reach with an OTG keyboard or mouse.
-- Before firing a *silent* install, a +120 s `AlarmManager` relaunch alarm (the same one the
-  crash handler uses) is armed, so a fatal crash mid-install still gets the frame back to a
-  launchable state.
-- The installer kills this process on success, so success is detected by the *new* process on
-  startup: the persisted expected `versionCode` is compared against
-  `BuildConfig.VERSION_CODE` (`reconcileOnStartup`). A stuck or refused install rolls back to
-  the retryable `STAGED` state and is retried on the next timer tick — so the retry cadence is
-  your `interval` setting, and it pauses with the activity. `INSTALL_PENDING` carries the
-  persisted time it was fired, so a pending install can settle in a process that never started it.
-
-### Recovery (headless, via the LAN web server)
-
-| Symptom | Action |
-|---|---|
-| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode` (`headless`/`adbd`/`defer-to-human`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable`, `loopbackAdbAllowed`, `tcpAdbArmedByApp`, `needsHumanConfirmation`, `installFiredAtMs` |
-| Staged but not installed | `/logs` says which transport failed. If `needsHumanConfirmation` is set, no silent install is possible on that frame: `/control?action=install-staged` (turns the screen on and shows the confirmation dialog there) |
-| Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
-| Force a re-check now | `/control?action=check-updates` |
-
-The index page exposes **Check updates** / **Install on the frame** / **Update reset** buttons, and
-prints a standing notice there when an update is staged but waiting on a person.
-Recovery is forward-fix only: a failed update leaves the last good version running; the app
-never downgrades or uninstalls itself.
-
-### Publishing a new version (operator side)
-
-All builds are local — the old Jenkins/Gitea pipeline no longer exists. Signing uses the
-release keystore (alias `EO1`, the same one the old CI used) via the gitignored root
-`local.properties`:
-
-```properties
-eo1.signing.store.file=/path/to/eo1-release.keystore
-eo1.signing.store.password=...
-eo1.signing.key.alias=EO1
-eo1.signing.key.password=...
-```
-
-Then publish:
-
-```bash
-EO1_UPDATE_HOST=http://your-host/eo1 ./publish-update.sh 2 1.3.1
-```
-
-The script enforces a monotonic `versionCode` (strictly greater than the last published one),
-builds with `assembleRelease`, hashes with `shasum -a 256`, writes `update-manifest.json` and stages
-all three files in `./update-out` (optionally rsync'd to `EO1_UPDATE_REMOTE`): the APK, the manifest,
-and `mapping-<versionCode>.txt.gz` — the build's R8 mapping, archived so a crash report from that
-version can still be decoded years later ([docs/WEBSERVER.md](docs/WEBSERVER.md#crash-dumps)). Serve
-that directory from any plain-HTTP server the frames can reach and point `updateManifestUrl` at
-`…/update-manifest.json`.
-
-> The mapping is **not** listed in the manifest and no frame ever downloads it; it is only ever read
-> by a person holding a crash dump. Publishing fails if the build produced no mapping — if you
-> deliberately turned minification off, say so with `EO1_UPDATE_MAPPING_OPTIONAL=1`.
-
-> The update host is reached over plain HTTP, so keep it on a trusted LAN. The frames' own HTTPS is a
-> separate matter: the ROM's certificate store dates from about 2013 (156 anchors, 63 of them expired,
-> none of them Let's Encrypt's), and the app now adds current roots to it for its own connections —
-> see [docs/TRUST.md](docs/TRUST.md). Neither fact weakens the other. A LAN attacker who can rewrite
-> the manifest or APK is still stopped by the signer-certificate match — a new APK must be signed with
-> the release keystore.
+This repository began as a rewrite of [spalt/EO1](https://github.com/spalt/EO1), whose author started
+from the same premise that keeps this one alive: an Electric Objects frame stopped displaying because
+someone, somewhere, decided to stop the service behind it. Immich was the first source built, because
+it was the answer to "where do the pictures come from now" for the people who had already left the
+vendor cloud — and it stays a good one, especially for a library you already maintain on a phone. It is
+no longer the premise. The frame carrying its own files is.
 
 ## Further Reading
 
+1. [Installing the APK](docs/SETUP.md) — EO1 and EO2 bootstrap, and writing config by hand
+1. [Updating a frame](docs/UPDATING.md) — self-update, verification, recovery, publishing
+1. [The frame's web server](docs/WEBSERVER.md) — every route, and what gates it
+1. [TLS trust and the 2013 CA store](docs/TRUST.md) — why a modern certificate failed, and what fixed it
+1. [TsPlayer and Amlogic video](docs/TSPLAYER.md) — playback, the failure ladder, the watchdogs
+1. [EO2 capabilities investigation](docs/EO2-CAPABILITIES.md) — the evidence behind the parity table
 1. [EO1 Hardware specifications](EO1-specs.md)
 1. [AGENTS.md](AGENTS.md) — repository map for AI coding agents
 

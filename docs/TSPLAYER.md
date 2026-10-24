@@ -6,12 +6,23 @@ Amlogic/Geniatech **TsPlayer** (`libTsPlayer-jni.so`) is the original Electric O
 
 | In scope | Out of scope |
 |----------|----------------|
-| Immich **original** files via TsPlayer (no client re-encode) | Client video re-encode (removed 2026-09; EO CPU ~1 fps on libx264) |
+| **Original** files via TsPlayer — fetched from Immich or uploaded to the frame itself (no client re-encode) | Client video re-encode (removed 2026-09; EO CPU ~1 fps on libx264) |
 | `TsVideoView` (`SurfaceView`) → `TsPlayerNative` → `libTsPlayer-jni.so` | ExoPlayer / Media3 |
 | Automatic MediaPlayer fallback on load/play/surface failure | Non-Amlogic primary playback |
 | Native `.so` loop — create the player once per asset, no Java teardown loop | App-level video filters / ppmgr FX |
 
-There is no client-side transcoding or conversion — the downloaded Immich original is used as-is, and it is always *tried*: the original on TsPlayer, the original on MediaPlayer, then the backend's degraded source (Immich `/video/playback` for video, the preview thumbnail for images). Nothing is filtered out by file name. A video with a coded side above 1920px skips straight to the last rung, because that decoder garbles such video without raising an error. What the original and the fallback both fail on is tagged `EO1_INCOMPATIBLE` for the operator to fix in Immich — regenerate thumbnails, re-encode, or remove it from the frame's albums.
+There is no client-side transcoding or conversion — the original is used as-is, whether it was downloaded from Immich or uploaded to the frame's own web page. An upload is not a different playback path: it is simply an original that is already on disk (`MediaAsset.localPath`), and every rung, watchdog and routing rule below applies to it unchanged. Nothing is filtered out by file name.
+
+The ladder a display failure descends is per media type, not one shared sequence — the rungs are `DisplayStage` in `MainActivity.playbackFallback`:
+
+- **Still:** original → the backend's degraded source (`/thumbnail?size=preview`) → verdict.
+- **Video:** original → **the same original on the other engine** → the backend's degraded source (`/video/playback`) → verdict.
+
+That middle rung is a second *engine*, not a second fetch: the bytes are already cached, and it exists only while `preferTsPlayer` is true (`BuildConfig.USE_TSPLAYER` and `TsPlayerNative.isAvailable()`). Where the native library never loaded there is only one engine, so the rung is skipped and the cycle goes straight to the degraded source — and a clip whose display rotation is non-identity or whose aspect is opposite the frame's never reached TsPlayer in the first place, because routing decides the engine before the first play (see [Scaling & orientation](#scaling--orientation-routing)); replaying it would just re-select the engine that failed.
+
+A video with a coded side above 1920px skips straight to the last rung, because that decoder garbles such video without raising an error. So does one whose macroblock throughput exceeds the hardware ceiling — from its second appearance onward, since that verdict needs the `moov` and so the first appearance pays one original fetch before descending. Both gates are decided while choosing a *source*, so they apply to files fetched from a remote backend: an uploaded file is never routed at all and is displayed at whatever size and frame rate it arrived, because there is no degraded source to route it *to* (`MediaManager.originalUsable` returns true the moment `localPath` is set).
+
+What the original and the fallback both fail on is tagged `EO1_INCOMPATIBLE` — for the operator to fix in Immich: regenerate thumbnails, re-encode, or remove it from the frame's albums. That terminal verdict is **Immich-only**: the tag is written by `MediaBackend.markIncompatible`, which `LocalMediaBackend` does not implement, so the interface's default no-op runs — and the "no fallback for this backend" log line it follows is `Log.i`, which reaches logcat (≈13 minutes) but not `/logs` or `eo1-app.log`. An uploaded file that fails to display therefore leaves no durable trace and is retried on the next cycle. See AGENTS.md, "No client-side transcoding", for how a local failure is made durable (only at scan time, via the `<name>.incompat.txt` sidecar).
 
 ## Source map
 
@@ -32,18 +43,54 @@ Runtime still requires `TsPlayerNative.isAvailable()` (`System.loadLibrary("TsPl
 ## Playback flow
 
 ```
-download Immich original
-  → no client re-encode — the downloaded original is played directly
+obtain the original (download from Immich, or the uploaded file already in filesDir/uploaded)
+  → no client re-encode — the original is played as it arrived
   → displayVideo → TsVideoView (createPlayer → setSurface → start, once per asset)
   → loop: the .so loops the file natively (restarts at EOF; no Java intervention)
   → deletePlayer + createPlayer only on asset handoff / stop() / surface destroy
   → on Ts error/surface-timeout: same original → MediaPlayer
-  → on MediaPlayer failure: Immich /video/playback or thumbnail (not client re-encode)
+  → on MediaPlayer failure: the backend's degraded source (not client re-encode) —
+    Immich /video/playback, or the preview thumbnail; a local upload has neither
 ```
 
 Note: on-device `getStatus()` often stays `IDLE (0)` while frames play (OEM only logged status, never branched on it). Do not use status for loop control.
 
 `SurfaceView` does **not** create a surface while `INVISIBLE`/`GONE`. The layout keeps `ImageView` above `TsVideoView` so the wallpaper covers video until `onVideoPrepared` hides the image.
+
+## Watchdogs
+
+Two timers watch a video attempt, and they watch different failures. Both run on the UI handler, both
+are cancelled on asset handoff, and a failure confirmed by either moves the asset **one** rung down
+the ladder above — never two, never a dropped asset.
+
+**Paint deadline — `MainActivity.VIDEO_PAINT_TIMEOUT_MS` (12 000 ms), polled every
+`VIDEO_PAINT_POLL_MS` (500 ms).** Armed by `startVideoPaintWatchdog` *before* any callback fires, so an
+attempt whose `prepareAsync()` never returns is still watched; the position watchdog cannot cover that
+case, because it is armed *from* `onVideoPrepared`. It asks one question — has this engine composited a
+frame yet? — and the answer depends on `VideoPlayerController.supportsPaintSignal()`. The MediaPlayer
+path supplies a real signal (`TextureVideoView.onSurfaceTextureUpdated` stamps the last composited
+frame). **TsPlayer supplies none** — its `.so` offers nothing per-frame and reports wall-clock
+position — so on that engine the check is armed and at once satisfied rather than judging the clip, and
+the photo is stepped aside at prepare. On the MediaPlayer path the photo is stepped aside only once a
+frame is proven to exist (`revealVideoSurface`), never at prepare. No frame within 12 s means one rung
+down.
+
+While the panel is not ours to paint — quiet hours, `onPause`, the screen toggle — that poll **parks**
+(`pauseVideoPaintPoll`) instead of cancelling or spending its deadline, and `onResume` / `turnScreenOn`
+re-arm it with the parked time deducted from the budget (`resumeVideoPaintPollIfPending`). A
+`TextureView` that is `INVISIBLE` composites nothing, so an un-parked clock would sentence a healthy
+clip for the life of the process on the strength of the app's own visibility bookkeeping.
+
+**Position watchdog — `MainActivity.VIDEO_WATCHDOG_POLL_MS` (2000 ms) with
+`VIDEO_STALL_THRESHOLD_MS` (8000 ms) without headway.** Watches the timeline rather than the pixels.
+Each poll reads `getCurrentPosition()`; any movement resets the stall clock, so 8 s of a position frozen
+at one value buys one recovery `seekTo` (to 0 when the read sits within a second of the reported end,
+otherwise to where it stalled) and a fresh threshold. A second 8 s of nothing hands the same file to
+MediaPlayer if TsPlayer was serving it, and otherwise descends one rung. It also owns the loop seam: last frames
+past the duration the player reports are detected here (`parked`/`creeping`), because nothing raises
+`onCompletion`. It cannot see a decoder that advances and paints nothing — that is the whole reason the
+paint deadline exists. Unlike the paint poll it **cancels** rather than parks when the screen is off or
+the video view is not visible, and is re-armed by the next display attempt.
 
 ## Scaling & orientation (routing)
 
@@ -232,7 +279,7 @@ MediaPlayer — do **not** reintroduce a per-duration Java loop.
 
 ## Hard constraints (no client re-encode)
 
-Client-side FFmpeg **re-encode is not used at all** (removed 2026-09). The EO CPU manages ~1 fps on libx264 — minutes per second of source. TsPlayer plays Immich originals directly; if playback fails, the asset falls back to Immich `/video/playback` (or the preview thumbnail for images).
+Client-side FFmpeg **re-encode is not used at all** (removed 2026-09). The EO CPU manages ~1 fps on libx264 — minutes per second of source. TsPlayer plays originals directly, Immich or uploaded; if playback fails, the asset falls back to the backend's degraded source — Immich `/video/playback`, or the preview thumbnail for images.
 
 ## On-device validation checklist
 

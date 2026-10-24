@@ -53,8 +53,10 @@ public interface ImmichClient {
      * (paginated, 1000/page).
      *
      * <p>Raw, unfiltered DTOs — filtering and mapping to {@code MediaAsset} is the
-     * backend's job. Assets that live in an album also appear in the timeline result; this
-     * matches the legacy single-host behaviour and is left to the pipeline to consume as-is.
+     * backend's job. Assets that live in an album also appear in the timeline result, so this
+     * list can name one asset twice; the rotation pool dedupes by asset key and gives each
+     * picture one slot in the pass, which is why the duplication is harmless here and would not
+     * be anywhere that counted entries rather than keys.
      */
     List<ImmichApiAssetResponse> fetchCatalogAssets() throws IOException;
 

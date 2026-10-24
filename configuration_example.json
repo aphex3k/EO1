@@ -1,10 +1,14 @@
 {
     "selectedTimeZoneId": "America/Los_Angeles",
     "quietHours": ["* 22-23,0-6 * * *"],
-    "interval": 15,
+    "interval": 5,
     "updateManifestUrl": "",
     "updateCheckIntervalMinutes": 120,
     "backends": [
+        {
+            "type": "local",
+            "id": "local"
+        },
         {
             "type": "immich",
             "id": "immich-1",
@@ -22,10 +26,6 @@
             "password": "another-secret",
             "apiVersion": "3.1.0",
             "enabled": true
-        },
-        {
-            "type": "local",
-            "id": "local"
         },
         {
             "type": "web",
