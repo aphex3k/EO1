@@ -1478,7 +1478,7 @@ public class WebServer {
                 + "+'<td><input class=\"cfgPass\" type=\"password\" size=\"15\" value=\"'+escCfg(b.password)+'\"></td>'"
                 + "+'<td><input class=\"cfgApi\" size=\"10\" value=\"'+escCfg(b.apiVersion||'auto')+'\"></td>';"
                 + "}else{h+='<td colspan=\"3\"></td>';}"
-                + "}else{h+='<td colspan=\"5\">local uploads (always on)</td>';}"
+                + "}else{h+='<td colspan=\"5\">local uploads (files stored on this frame - no server, no login)</td>';}"
                 + "h+='<td><button onclick=\"removeCfgBackend('+i+')\">Remove</button></td>';"
                 + "tr.innerHTML=h;t.appendChild(tr);});}"
                 + "function nextBackendId(prefix){"
