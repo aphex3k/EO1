@@ -1,0 +1,211 @@
+# Dependabot configuration for EO1 (Android 4.4.2 / API 19 frame APK).
+#
+# THE ONE RULE THIS FILE EXISTS TO ENFORCE: nothing Dependabot opens may raise a
+# dependency above what installs on API 19. Dependabot has no concept of minSdk —
+# it never reads minSdk/targetSdk/maxSdk from any manifest. Every version number in
+# the ignore list below is a human measurement of the last published artifact whose
+# AAR declares a minSdk <= 19, recorded with its reason. The same table, plus the
+# accepted-risk register, lives in AGENTS.md next to the pins it encodes — keep the
+# two in sync; these yaml comments will not survive someone reformatting the file.
+#
+# AUTHORING TRAP, do not relearn this: a bare entry in `versions` is EQUALITY
+# (dependabot-core gradle/requirement.rb: `parse` returns [matches[1] || "="]).
+#   versions: ["1.6.1"]   # ignores ONE release — the whole ceiling silently vanishes.
+# Always write an operator. And prefer `> <last known good>` over `>= <first known
+# bad>`: the next line's alphas are already published (appcompat 1.7.0-alpha01…,
+# material 1.13.0-alpha01…, navigation 2.8.0-alpha01…, constraintlayout 2.2.0-alpha01…)
+# and `>= 1.13.0` does NOT match `1.13.0-alpha14`, while `> 1.12.0` does.
+#
+# `ignore` ALSO gates SECURITY updates for gradle — there is no `applies-to` key
+# under `ignore` (that exists only under `groups`). In dependabot-core,
+# gradle/update_checker/version_finder.rb calls filter_ignored_versions on BOTH the
+# latest-version path (l.74) and the security path (l.106, after the vulnerability
+# filter). So a ceiling here also suppresses the CVE PR for anything above it. That
+# is the price of "never exceed the ceiling" and it is paid deliberately — see the
+# accepted-risk rows below and in AGENTS.md.
+version: 2
+updates:
+  # ONE gradle entry, at the build root. Do NOT add a second `/app` block: root
+  # settings.gradle says `include ':app'`, so gradle's file_fetcher pulls
+  # app/build.gradle, root build.gradle (its buildscript `force` pins and the plugins
+  # block AGP versions) and gradle/wrapper/gradle-wrapper.properties into this single
+  # scope. Overlapping directories would open two PRs for the same coordinate.
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    # Default is 5, and this one entry now covers both build files + the wrapper + the
+    # toolchain `force` pins. Security PRs are not counted here — separate fixed cap of 10.
+    open-pull-requests-limit: 10
+    labels: ["dependencies", "java"]
+    commit-message:
+      prefix: "chore(deps-gradle)"
+    ignore:
+      # ==================== ANDROID PLATFORM CEILING (minSdk/targetSdk/maxSdk = 19) ===
+      # Each ceiling = the last version whose published AAR declares minSdk <= 19.
+      # Measured from the artifact's own AndroidManifest.xml, not from release notes.
+
+      # AndroidX moved its default floor 19 -> 21 in the cycle that opened 2024-05-01.
+      - dependency-name: "androidx.appcompat:appcompat"        # 1.6.1 = minSdk 14; 1.7.0/1.7.1 = 21; 1.8.0 = 23
+        versions: ["> 1.6.1"]
+      - dependency-name: "androidx.constraintlayout:constraintlayout"   # ceiling is 2.1.4, NOT 2.1.0
+        versions: ["> 2.1.4"]                                 # 2.1.4 = minSdk 14; 2.2.0/2.2.1/2.2.2 = 21.
+        # app/build.gradle's comment says "2.1.0 = last for minSdk 19" — that is false:
+        # 2.1.1, 2.1.2, 2.1.3 and 2.1.4 are all published and all still API-19. This is
+        # the one rule whose ceiling is NOT the current pin, so Dependabot may take 2.1.x
+        # patches up to 2.1.4; everything >= 2.2.0 is ignored.
+      - dependency-name: "androidx.navigation:*"              # fragment + ui, one lockstep release train
+        versions: ["> 2.7.7"]                                 # 2.7.7 = minSdk 14; 2.8.x = 21, 2.10.x = 23/24.
+        # Both artifacts publish at one version (2.8.0's POM pins every sibling at 2.8.0),
+        # so they share one rule or the pair splits and Gradle hits a resolution conflict.
+      - dependency-name: "com.google.android.material:material"
+        versions: ["> 1.12.0"]                                # 1.12.0 = minSdk 19 exactly; 1.13.0 = 21; 1.14.0 = 23.
+      - dependency-name: "androidx.multidex:multidex"         # frozen library: only 2.0.0/2.0.1 exist, nothing newer
+        versions: ["> 2.0.1"]                                 # insurance only — there is nothing above the ceiling today.
+
+      # okhttp 3.13.0+ requires Android 5.0 (vendor README); 3.12.13 is the tip of the 3.12.x line.
+      - dependency-name: "com.squareup.okhttp3:*"            # okhttp + logging-interceptor + mockwebserver, one train
+        versions: ["> 3.12.13"]                              # 4.x/5.x are Kotlin AND API 21.
+        # ACCEPTED RISK, written down so a red alert does not get this loosened:
+        # GHSA-3cqm-mf7h-prrj / CVE-2021-0341 (HIGH, "OkHttp can accept the wrong
+        # certificate") is first_patched at 4.9.2, which cannot install on KitKat — there
+        # is NO API-19 fix. This ceiling therefore parks a permanent alert with no PR path.
+        # The real mitigation is the trust path (MergedTrust / RootBundle, docs/TRUST.md).
+      - dependency-name: "com.squareup.retrofit2:*"          # retrofit + converter-gson
+        versions: ["> 2.6.4"]
+        # Retrofit 2.7.0 CHANGELOG, verbatim: "This release changes the minimum requirements
+        # to Java 8+ or Android 5+." 2.7.0 … 2.12.0 AND 3.0.0 are all published, so a ceiling
+        # at >= 3.0.0 (an earlier draft) would leave eight API-21-only stable releases flowing
+        # as ordinary minor updates. 2.6.0 -> 2.6.4 is a free, safe patch bump. WHY THE OKHTTP
+        # RULE CANNOT COVER THIS: ignore filters PRs for the okhttp COORDINATE, not resolution
+        # — retrofit 2.12.0's POM requires okhttp 3.14.9 and Gradle's highest-wins would ship
+        # that silently. Hence this explicit ceiling PLUS the okhttp `force` floor in
+        # app/build.gradle (belt-and-braces on the resolution, not just the PR).
+      - dependency-name: "com.squareup.okio:okio"
+        versions: ["> 1.17.6"]
+        # 1.17.6 is the tip of 1.x AND the CVE-2023-3635 patched version (GHSA-w33c-445m-f8w7),
+        # so the ceiling costs nothing. The reason is the COUPLING, NOT "no Kotlin in the APK":
+        # okhttp 3.12.13's parent POM pins okio 1.15.0, so okio must stay on the 1.x API surface
+        # okhttp 3.x speaks. (kotlin-stdlib already rides in via appcompat 1.6.1 — do not cite
+        # "no Kotlin" as the constraint here, it is false.) okio-jvm is a 2.x+ coordinate,
+        # unreachable from 1.x, so it needs no separate rule.
+      - dependency-name: "com.google.code.gson:gson"
+        versions: ["> 2.10.1"]
+        # Gson's own README table: "2.10.1 and older: API 19 / 2.11.0 and newer: API 21 /
+        # 2.15.0 and newer: API 24". 2.11.0 … 2.15.0 are all published, so without this rule
+        # the first run proposes an API-24 artifact. Worst failure mode in the file: gson is a
+        # plain jar with no manifest minSdk, so nothing rejects it — it builds, installs, and
+        # throws at RUNTIME on the frame. Only gson advisory (GHSA-4jrv-ppp4-jm57) is patched
+        # at 2.8.9, below the pin, so no security pressure exists.
+      - dependency-name: "com.github.bumptech.glide:*"       # glide + compiler, one repo/tag/version (lockstep)
+        versions: ["> 5.0.7"]
+        # 5.0.7 is the last API-19-capable release (minSdk 14, kotlin-free); the next PUBLISHED
+        # release, 5.0.9, declares minSdk 23 + kotlin-stdlib 2.2.10 + minCompileSdk 37 against
+        # this build's compileSdk 34. (Tag v5.0.8 carries the minSdk-23 note but was never
+        # published to Central: metadata is …5.0.5, 5.0.7, 5.0.9.) NOTE: from the current
+        # 4.16.0 this ceiling makes Dependabot propose 4.16.0 -> 5.0.7 on the first run — a
+        # Glide 4 -> 5 major that rewrites the AppGlideModule/annotation-processor contract
+        # this app's generated code (Eo1GlideModule) depends on. Give it one verified build
+        # before merging; it is allowed deliberately, not by accident. The `:*` selector and
+        # the `glide` group keep runtime and processor moving together.
+      - dependency-name: "com.android.tools:desugar_jdk_libs*"
+        versions: [">= 2.1.0"]
+        # NOT an API-19 ceiling — 2.1.x is documented API-19-safe (its only stated floor is
+        # "requires AGP 8.0+", and this build is on AGP 8.7.3) and 2.1.1-2.1.5 are mostly
+        # pre-21 device fixes. Frozen anyway: the desugaring jar's version decides which
+        # java.* methods D8 back-fills, a change invisible to compilation that surfaces as
+        # NoSuchMethodError on the frame. Move to 2.1.5 deliberately with one real-hardware
+        # build, not automatically. (java.time desugaring at minSdk <= 20 also needs
+        # multiDexEnabled — already true here.)
+      - dependency-name: "com.google.guava:guava"
+        versions: ["> 32.1.2"]
+        # No API-19 ceiling is documented (both current flavors still publish org.gradle.jvm
+        # .version=8, which D8 dexes fine). Frozen for two other reasons: 0 files in app/src
+        # import com.google.common (dead dex weight on an ~800MB device), and the -jre flavor
+        # is the one Guava's README says NOT to use on Android. Freezing costs no security
+        # coverage: every guava advisory is first_patched at or below the pin. Deleting the
+        # declaration would be the fix that needs no future re-verification (see AGENTS.md).
+      - dependency-name: "com.vdurmont:semver4j"             # tip of the coordinate
+        versions: ["> 3.1.0"]                                 # Maintenance moved to org.semver4j:semver4j, a
+        #                                                      different name Dependabot cannot reach as an
+        #                                                      update of this one — rule stops a future relocation.
+      - dependency-name: "org.eclipse.paho:*"                # 1.2.5 is the last release ever (project stopped
+        versions: ["> 1.2.5"]                                #   releasing). Not an API-19 bound. CVE-2019-11777 fixed at 1.2.1.
+
+      # ============ BUILD TOOLCHAIN CEILING — bound by AGP/Gradle mutual compatibility, =
+      # ============ NOT by API 19. Nothing here reaches the APK.                        =
+      # AGP and the Gradle wrapper must move TOGETHER (they are grouped in
+      # `android-toolchain` below): each AGP minor raises its minimum required Gradle above
+      # the pinned wrapper 8.9, and a wrapper-only jump against a frozen AGP breaks the same
+      # way. Patch releases inside the pinned minor stay open (that is where AGP's own CVE
+      # fixes land) — 8.7.3 is the tip of 8.7.x and 8.9 has no 8.9.x patch, so these two
+      # rules block nothing today and cost nothing to keep.
+      - dependency-name: "com.android.application"           # AGP 8.7.3. In the plugins DSL AGP is
+        versions: [">= 8.8.0"]                               #   named by BARE PLUGIN ID — no "plugins:"
+      - dependency-name: "com.android.library"               #   or group prefix; a rule written as
+        versions: [">= 8.8.0"]                               #   "com.android.tools.build:gradle" would
+        #                                                      match nothing and the ceiling would vanish.
+        #                                                      Stable runs to 8.13.2 and 9.x; >= 9.0.0 (an
+        #                                                      earlier draft) let AGP 8.13 in vs Gradle 8.9.
+      - dependency-name: "gradle-wrapper"                    # gradle/wrapper/gradle-wrapper.properties = 8.9
+        versions: [">= 8.10.0"]                              # Gradle 9.x breaks AGP 8.7.3 and this build's
+        #                                                      lazy buildConfigFields provenance path.
+      # The root build.gradle resolutionStrategy.force CVE pins ARE parsed by Dependabot (the
+      # g:a:v regex does not care that the line says `force`). They are deliberately NOT ignored
+      # en masse — these lines exist as mitigations and `ignore` gates security PRs, so an ignore
+      # here deletes the only automation that raises a stale pin after an advisory. They are
+      # grouped in `build-toolchain` instead — EXCEPT the two whose next line is a functional
+      # major that would break the AGP classpath:
+      - dependency-name: "io.netty:*"                        # 11 force lines at 4.1.137.Final. 4.2.x
+        versions: [">= 4.2.0"]                               #   (published through 4.2.19) is a
+        #                                                      functional major (transport/epoll, HTTP/2,
+        #                                                      split native artifacts) against an AGP
+        #                                                      classpath built on 4.1.x. 4.1.x is still a
+        #                                                      maintained security line, so this costs zero CVE coverage.
+      - dependency-name: "com.google.protobuf:*"
+        versions: [">= 4.0.0"]                               # 3.25.5 pinned; 4.x is wire-incompatible with AGP 8.7.
+      # Left UNBOUNDED on purpose (build-time only, never dexed, patch flow is the point):
+      #   org.bouncycastle:* (1.85 -> 1.86), org.apache.commons:commons-compress,
+      #   org.apache.commons:commons-lang3, commons-io:commons-io, org.bitbucket.b_c:jose4j,
+      #   org.jdom:jdom2.
+      #   Also unbounded, JVM-test-only and never in the APK (dependency-type is NOT supported
+      #   for gradle, so these cannot be split from shipping deps by type — they are in no group,
+      #   so they arrive as their own PRs): junit:junit (4.13.2 is the last JUnit 4) and
+      #   org.mockito:mockito-core (its Java 11 floor binds the test JVM, not the frame; this
+      #   build already compiles at Java 21).
+
+    groups:
+      # One PR per family that must never be seen half-updated. NOTE: values in
+      # groups.<id>.update-types are bare `minor`/`patch`/`major`, NOT the
+      # `version-update:semver-*` form that ignore/allow use. Omitted here so each
+      # group collects all applicable update kinds for its patterns.
+      androidx:
+        patterns: ["androidx.*:*", "com.google.android.material:*"]
+      glide:
+        patterns: ["com.github.bumptech.glide:*"]
+      networking:
+        patterns: ["com.squareup.okhttp3:*", "com.squareup.retrofit2:*", "com.squareup.okio:*"]
+      android-toolchain:
+        patterns: ["com.android.application", "com.android.library", "gradle-wrapper"]
+      build-toolchain:
+        patterns: ["io.netty:*", "org.bouncycastle:*", "org.apache.commons:*", "commons-io:*",
+                   "org.bitbucket.b_c:*", "org.jdom:*", "com.google.protobuf:*"]
+
+  # GitHub Actions runs on ubuntu-latest runners. Nothing an action installs reaches the
+  # frame or the APK, so the API-19 ceiling does not apply and no ignore block exists here.
+  # Majors are allowed to flow. Keep .github/workflows/dependency-submission.yml as-is and
+  # GitHub's managed "Automatic dependency submission" OFF (AGENTS.md "Don't") — the two
+  # coexist: that workflow feeds alerts/graph for transitive/force jars, this feeds the PRs.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "09:00"
+      timezone: "America/Los_Angeles"
+    labels: ["dependencies", "github_actions"]
+    commit-message:
+      prefix: "chore(deps-actions)"
