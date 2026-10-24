@@ -131,8 +131,19 @@ public final class KioskWatchdog {
         /** Restart our own process: relaunch scheduled first, then kill. */
         void selfRestart();
 
-        /** Reboot the whole device through the ROM's adbd. */
-        void rebootDevice();
+        /**
+         * Reboot the whole device through the ROM's adbd, carrying the reason the ladder escalated so
+         * the report written microseconds before the command can quote it.
+         */
+        void rebootDevice(String reason);
+
+        /**
+         * Write a diagnostics report describing the frame as it is right now, without blocking the
+         * caller. The ladder reaches this on the reboot rung's two exits that issue no reboot
+         * command; the third exit calls it from inside {@link #rebootDevice()}'s worker, so that a
+         * file is named {@code reboot} only when a reboot really is about to be dispatched.
+         */
+        void captureDiagnostics(String reason);
 
         /** Record a watchdog event in logcat and the file log. */
         void logWatchdogEvent(String message, boolean severe);
@@ -165,6 +176,30 @@ public final class KioskWatchdog {
     private long screenWokeAtMs = 0L;
     private int ticks = 0;
     private String lastAction = "none";
+
+    /** Entries in {@link #rungLevels}: long enough for the whole ladder several times over. */
+    static final int RUNG_HISTORY = 12;
+    /** Rung numbers taken, oldest first, for the current wedge. Cleared when the frame recovers. */
+    private final int[] rungLevels = new int[RUNG_HISTORY];
+    private final long[] rungAtMs = new long[RUNG_HISTORY];
+    private int rungCount = 0;
+    /** When this wedge's first rung was taken; the clock the history is rendered against. */
+    private long rungStartMs = 0L;
+
+    /**
+     * What the ladder last observed of network, pause and screen state, kept rather than re-read.
+     *
+     * <p>A diagnostics report runs on a thread of its own while the frame is wedged, and the honest
+     * way to ask "were you online" from there is not to make a binder call that may be the thing
+     * that hangs. These are the values {@link #evaluate} already obtained to make its own decision,
+     * so the report costs nothing extra and says plainly how stale each one is.
+     */
+    private volatile Boolean lastNetworkUp;
+    private volatile long lastNetworkObservedAtMs;
+    private volatile boolean lastPausedObserved;
+    private volatile long lastPausedObservedAtMs;
+    private volatile boolean lastScreenOnObserved = true;
+    private volatile long lastScreenOnObservedAtMs;
 
     public KioskWatchdog(Host host) {
         this.host = host;
@@ -269,6 +304,13 @@ public final class KioskWatchdog {
             screenWokeAtMs = now;
         }
         lastTickScreenShouldBeOn = screenOn;
+        lastScreenOnObserved = screenOn;
+        lastScreenOnObservedAtMs = now;
+        // Read once per tick, before anything may return early: the heartbeat line and the rung
+        // suppression below both want it, and a report wants the answer rather than a call.
+        boolean paused = host.isPaused();
+        lastPausedObserved = paused;
+        lastPausedObservedAtMs = now;
         long stale = staleMs(screenOn, now, Math.max(host.lastDisplayAtMs(), screenWokeAtMs),
                 host.downloadInFlightMs());
         // Progress, not promptness: a main thread that acks two minutes late has still emptied its
@@ -287,17 +329,18 @@ public final class KioskWatchdog {
             actedLevel = LEVEL_NONE;
             repairAttempts = 0;
             rebootBlocked = false;
+            rungCount = 0;
         }
 
         if (now - lastHeartbeatAtMs >= HEARTBEAT_MS) {
             lastHeartbeatAtMs = now;
-            host.logWatchdogEvent(heartbeatLine(stale, now, screenOn), false);
+            host.logWatchdogEvent(heartbeatLine(stale, now, screenOn, paused), false);
         }
 
         // Another activity is in front (settings dialog): the loop is legitimately idle, so no
         // rung may fire. The heartbeat above still reports it, so this state cannot be mistaken
         // for a healthy frame from the log alone.
-        if (host.isPaused()) {
+        if (paused) {
             return;
         }
 
@@ -309,7 +352,7 @@ public final class KioskWatchdog {
             return;
         }
 
-        if (wanted == LEVEL_REBOOT && !host.networkAvailable()
+        if (wanted == LEVEL_REBOOT && !networkUp(now)
                 && repairAttempts < MAX_REPAIR_ATTEMPTS) {
             // A reboot cannot fix an outage we have not finished trying to repair, and a frame that
             // comes back nightly during a long ISP outage is worse than one that waits it out.
@@ -318,7 +361,7 @@ public final class KioskWatchdog {
         }
 
         if (wanted <= actedLevel) {
-            if (actedLevel == LEVEL_REPAIR_NETWORK && !host.networkAvailable()) {
+            if (actedLevel == LEVEL_REPAIR_NETWORK && !networkUp(now)) {
                 retryRepairIfDue(now, stale);
             }
             if (actedLevel == LEVEL_REBOOT && rebootBlocked && host.autoRebootEnabled()) {
@@ -364,6 +407,7 @@ public final class KioskWatchdog {
     private void act(int level, long stale, long now) {
         actedLevel = Math.max(actedLevel, level);
         lastActionAtMs = now;
+        rememberRung(level, now);
         String reason = "stale " + (stale / 60_000L) + "m";
         switch (level) {
             case LEVEL_FORCE_ROTATION:
@@ -400,13 +444,22 @@ public final class KioskWatchdog {
                     lastAction = "reboot";
                     rebootBlocked = false;
                     host.logWatchdogEvent("(" + reason + "): rebooting device", true);
-                    host.rebootDevice();
+                    // The report is written by rebootDevice()'s worker, immediately before it
+                    // dispatches the command: a file named -reboot- must not be able to assert a
+                    // reboot that was never asked for, and adbd gives no reply to confirm one.
+                    host.rebootDevice("(" + reason + "): rebooting device");
                 } else {
                     lastAction = "reboot-disabled";
                     rebootBlocked = true;
                     host.logWatchdogEvent("(" + reason + "): ladder exhausted; automatic reboot is "
                             + "disabled — allow it (options dialog, or config.autoReboot over the LAN "
                             + "config editor) for the frame to self-heal from this", true);
+                    // The ladder ran out and nothing reboots, which on a frame that cannot
+                    // autoReboot is the ordinary end of a wedge — and therefore the case most in
+                    // need of a record. Asynchronous: this thread is the one Timer that paces the
+                    // whole ladder.
+                    host.captureDiagnostics("(" + reason + "): reboot rung reached, automatic "
+                            + "reboot disabled");
                 }
                 break;
             default:
@@ -414,14 +467,14 @@ public final class KioskWatchdog {
         }
     }
 
-    private String heartbeatLine(long stale, long now, boolean screenOn) {
+    private String heartbeatLine(long stale, long now, boolean screenOn, boolean paused) {
         StringBuilder sb = new StringBuilder();
         sb.append("heartbeat tick=").append(ticks)
                 .append(" stale=").append(stale / 1000L).append("s")
                 .append(" limit=").append(staleLimitMs(host.intervalMs()) / 1000L).append("s")
                 .append(" level=").append(actedLevel)
                 .append(" action=").append(lastAction)
-                .append(" network=").append(host.networkAvailable() ? "up" : "down");
+                .append(" network=").append(networkUp(now) ? "up" : "down");
         long offline = host.offlineMs();
         if (offline > 0L) {
             sb.append(" offlineFor=").append(offline / 60_000L).append("m");
@@ -430,7 +483,7 @@ public final class KioskWatchdog {
             sb.append(" UNACKED_PROBES=").append(probeMisses);
         }
         sb.append(" screen=").append(screenOn ? "on" : "off");
-        if (host.isPaused()) {
+        if (paused) {
             // Rungs are suppressed while another activity is in front; say so, so a long pause
             // cannot be mistaken for a healthy frame.
             sb.append(" PAUSED");
@@ -479,5 +532,104 @@ public final class KioskWatchdog {
 
     public int ticks() {
         return ticks;
+    }
+
+    /**
+     * Asks {@link Host#networkAvailable()} and remembers the answer. The call is already made on
+     * every path that needs it, so caching costs nothing and gives a report an answer it did not
+     * have to go and get from a framework that may be the thing that is stuck.
+     */
+    private boolean networkUp(long now) {
+        boolean up = host.networkAvailable();
+        lastNetworkUp = Boolean.valueOf(up);
+        lastNetworkObservedAtMs = now;
+        return up;
+    }
+
+    /** Last network answer the ladder acted on, or {@code null} if it never needed one. */
+    public Boolean cachedNetworkUp() {
+        return lastNetworkUp;
+    }
+
+    public long cachedNetworkAtMs() {
+        return lastNetworkObservedAtMs;
+    }
+
+    public boolean cachedPaused() {
+        return lastPausedObserved;
+    }
+
+    public long cachedPausedAtMs() {
+        return lastPausedObservedAtMs;
+    }
+
+    public boolean cachedScreenOn() {
+        return lastScreenOnObserved;
+    }
+
+    public long cachedScreenOnAtMs() {
+        return lastScreenOnObservedAtMs;
+    }
+
+    private synchronized void rememberRung(int level, long nowMs) {
+        if (rungCount == 0) {
+            // First rung of a new wedge: the ring's own clock starts here, so the rendered history
+            // reads as time-since-the-ladder-began rather than since boot.
+            rungStartMs = nowMs;
+        }
+        if (rungCount == RUNG_HISTORY) {
+            // Oldest-first shift: the climb's beginning is the part worth giving up.
+            for (int i = 1; i < RUNG_HISTORY; i++) {
+                rungLevels[i - 1] = rungLevels[i];
+                rungAtMs[i - 1] = rungAtMs[i];
+            }
+            rungCount = RUNG_HISTORY - 1;
+        }
+        rungLevels[rungCount] = level;
+        rungAtMs[rungCount] = nowMs;
+        rungCount++;
+    }
+
+    /**
+     * The rungs taken for the current wedge, oldest first, as {@code +7m level=2 recover-playback}.
+     *
+     * <p>The only account that survives the ladder's own bookkeeping: {@link #act} overwrites
+     * {@code lastAction} on every rung, so without this the record of a four-rung climb is one word
+     * long — and the reboot that ends it erases even that. It is pure memory, so neither a hung main
+     * thread nor a hung framework takes it away.
+     */
+    public synchronized String rungHistory() {
+        if (rungCount == 0) {
+            return "none (the ladder has not acted in the current wedge)";
+        }
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < rungCount; i++) {
+            if (i > 0) {
+                sb.append(" / ");
+            }
+            long ageMs = rungAtMs[i] - rungStartMs;
+            sb.append('+').append(ageMs / 60_000L).append('m')
+                    .append(" level=").append(rungLevels[i])
+                    .append(' ').append(actionNameFor(rungLevels[i]));
+        }
+        return sb.toString();
+    }
+
+    /** The name {@link #act} would have set for {@code level}. */
+    static String actionNameFor(int level) {
+        switch (level) {
+            case LEVEL_FORCE_ROTATION:
+                return "force-rotation";
+            case LEVEL_RECOVER_PLAYBACK:
+                return "recover-playback";
+            case LEVEL_REPAIR_NETWORK:
+                return "repair-network";
+            case LEVEL_SELF_RESTART:
+                return "self-restart";
+            case LEVEL_REBOOT:
+                return "reboot";
+            default:
+                return "none";
+        }
     }
 }

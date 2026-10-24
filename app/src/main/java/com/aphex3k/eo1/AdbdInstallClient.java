@@ -19,9 +19,22 @@ import java.util.Locale;
  * confirmation dialog — which a headless frame cannot confirm. The device's own
  * adbd on {@code 127.0.0.1:5555} runs {@code pm install} as the shell user
  * instead, and {@link #ensureTcpAdbd()} starts that daemon on a ROM (EO1) that
- * never configured it. This class speaks just enough of the classic adb wire
- * protocol (protocol 0, what Android 4.4.2 adbd speaks) to run one {@code pm
- * install} and read its output; nothing beyond {@code java.net} and reflection.
+ * never configured it.
+ *
+ * <p><b>The wire protocol, not the local service protocol.</b> adbd — over USB or TCP — exchanges
+ * 24-byte little-endian messages ({@code cmd, arg0, arg1, data_length, data_crc32, magic}) and the
+ * {@code CNXN → OPEN → WRTE/OKAY → CLSE} sequence built from them. The {@code %04x}-length +
+ * {@code "host:version"} framing that appears in adb documentation is what the <em>host's {@code adb
+ * server}</em> (port 5037, or its local socket) accepts, and this class emitted exactly that to port
+ * 5555: the daemon never recognised a request, so every {@link #install} and {@link #exec} spent its
+ * read timeout and reported {@code UNREACHABLE}. Verified on an EO2 (2026-10-23) by sending the same
+ * bytes to both endpoints — {@code 127.0.0.1:5037} answered {@code OKAY00040029}, the frame's adbd
+ * answered nothing — while {@code adb connect} to that same port reached {@code uid=0(root)}.
+ *
+ * <p>Only the four messages a single one-shot {@code shell:} service needs are implemented, and no
+ * {@code shell_v2} feature is advertised in the banner: advertising one invites the daemon to answer
+ * with packet types this class does not pump. Nothing beyond {@code java.net}, {@code java.util.zip}
+ * and reflection.
  */
 public final class AdbdInstallClient {
 
@@ -137,30 +150,70 @@ public final class AdbdInstallClient {
         }
     }
 
-    /** Performs the adb handshake, runs {@code command}, and returns everything it printed. */
-    private String openAndRun(String command, int readTimeoutMs) throws IOException {
+    /** Performs the adb handshake, opens {@code service} as a local service, returns what it printed. */
+    private String openAndRun(String service, int readTimeoutMs) throws IOException {
         Socket socket = null;
         try {
             socket = new Socket();
             socket.connect(new InetSocketAddress(host, port), CONNECT_TIMEOUT_MS);
+            socket.setTcpNoDelay(true); // one small message per step; Nagle would pace the handshake
             socket.setSoTimeout(readTimeoutMs);
-            OutputStream out = socket.getOutputStream();
             InputStream in = socket.getInputStream();
+            OutputStream out = socket.getOutputStream();
 
-            sendCommand(out, "host:version");
-            String status = readStatus(in);
-            if (!"OKAY".equals(status)) {
-                throw new IOException("handshake rejected: " + status + readFailReason(in, socket));
+            writeMsg(out, A_CNXN, A_VERSION, A_MAXDATA, "host::");
+            Msg hello = readMsg(in);
+            if (hello == null) {
+                throw new IOException("adbd closed before answering the handshake");
             }
-            readPayload(in); // protocol version; not needed further
-
-            sendCommand(out, command);
-            status = readStatus(in);
-            if (!"OKAY".equals(status)) {
-                throw new IOException("command rejected: " + status + readFailReason(in, socket));
+            if (hello.cmd == A_AUTH) {
+                // ro.adb.secure=1 means an RSA token handshake: no key exists on the frame, and none
+                // should. Named here so a locked ROM reads as "authorization required", not as a
+                // timeout — the failure mode this class mistook for an absent daemon for its whole
+                // existence.
+                throw new IOException("adbd requires authorization (A_AUTH); this frame has no key");
+            }
+            if (hello.cmd != A_CNXN) {
+                throw new IOException("expected CNXN, got " + op(hello.cmd));
             }
 
-            return readUntilEof(in);
+            writeMsg(out, A_OPEN, LOCAL_ID, 0, service + "\0");
+            Msg opened = readMsg(in);
+            if (opened == null) {
+                throw new IOException("adbd closed instead of answering OPEN " + service);
+            }
+            if (opened.cmd == A_CLSE) {
+                throw new IOException("adbd refused the service " + service);
+            }
+            if (opened.cmd != A_OKAY) {
+                throw new IOException("expected OKAY for OPEN, got " + op(opened.cmd));
+            }
+            long peer = opened.arg0; // the daemon's id for this channel; our writes must carry it
+
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            while (true) {
+                Msg msg = readMsg(in);
+                if (msg == null) {
+                    break; // daemon hung up; whatever arrived is the whole answer
+                }
+                if (msg.cmd == A_WRTE) {
+                    // Each WRTE must be acknowledged or adbd stops sending. Nothing here writes to
+                    // the service's stdin, so arg1 carries our id and arg0 the daemon's.
+                    writeMsg(out, A_OKAY, LOCAL_ID, peer, "");
+                    output.write(msg.payload, 0, msg.payload.length);
+                    if (output.size() >= MAX_OUTPUT_BYTES) {
+                        break;
+                    }
+                } else if (msg.cmd == A_CLSE) {
+                    break;
+                } else if (msg.cmd != A_OKAY) {
+                    // A stray OKAY acknowledges a write we never make; anything else is a protocol
+                    // this client does not implement, and guessing would lose output silently.
+                    throw new IOException("unexpected " + op(msg.cmd) + " while reading " + service);
+                }
+            }
+            writeMsg(out, A_CLSE, LOCAL_ID, peer, "");
+            return new String(output.toByteArray(), UTF_8);
         } finally {
             closeQuietly(socket);
         }
@@ -326,15 +379,36 @@ public final class AdbdInstallClient {
         }
     }
 
-    /** Encodes an adb command: 4-digit hex length (ASCII) + payload. */
-    static byte[] frame(String command) {
-        byte[] payload = command.getBytes(US_ASCII);
-        byte[] length = String.format(Locale.US, "%04x", payload.length).getBytes(US_ASCII);
-        byte[] framed = new byte[length.length + payload.length];
-        System.arraycopy(length, 0, framed, 0, length.length);
-        System.arraycopy(payload, 0, framed, length.length, payload.length);
-        return framed;
+    /**
+     * adb message tags. These are the fourcc spellings, not the {@code 0x0100000N} numbers in the
+     * 4.4-era {@code adb.h}: measured, not inferred — the EO2's adbd answered a {@code CNXN} tagged
+     * by its ASCII name with {@code CNXN + "device::ro.product.name=eo2;..."}, and gave a classic
+     * {@code 0x01000001}-tagged {@code CNXN} nothing at all (it never even closed the socket, which
+     * is why the failure reads as a timeout rather than a refusal). {@code A_SYNC} is unused here;
+     * {@code A_AUTH} is only ever recognised and reported, because answering it needs an RSA key
+     * this app does not and must not carry.
+     */
+    static final long A_CNXN = fourcc("CNXN");
+    static final long A_OPEN = fourcc("OPEN");
+    static final long A_OKAY = fourcc("OKAY");
+    static final long A_CLSE = fourcc("CLSE");
+    static final long A_WRTE = fourcc("WRTE");
+    static final long A_AUTH = fourcc("AUTH");
+
+    /** A message tag as the wire carries it: four ASCII letters, little-endian. */
+    static long fourcc(String tag) {
+        byte[] b = tag.getBytes(US_ASCII);
+        return (b[0] & 0xffL) | ((b[1] & 0xffL) << 8) | ((b[2] & 0xffL) << 16) | ((b[3] & 0xffL) << 24);
     }
+
+    /** {@code magic} is always the command's bit complement — the daemon's own header check. */
+    private static final long MAGIC_XOR = 0xffffffffL;
+    private static final int HEADER_BYTES = 24;
+    /** Offered version and max payload. adbd takes the minimum of the two sides for both. */
+    private static final long A_VERSION = 0x01000001L;
+    private static final long A_MAXDATA = 4096L;
+    /** This client has one channel per connection, so its local id never has to move. */
+    private static final long LOCAL_ID = 1L;
 
     /**
      * Classifies {@code pm install} output. 4.4's pm prints a {@code Success}
@@ -385,67 +459,123 @@ public final class AdbdInstallClient {
 
     // ------------------------------------------------------------------ wire I/O
 
-    private static void sendCommand(OutputStream out, String command) throws IOException {
-        out.write(frame(command));
+    /** One decoded adb message: the header's three interesting words plus its payload. */
+    static final class Msg {
+        final long cmd;
+        final long arg0;
+        final long arg1;
+        final byte[] payload;
+
+        Msg(long cmd, long arg0, long arg1, byte[] payload) {
+            this.cmd = cmd;
+            this.arg0 = arg0;
+            this.arg1 = arg1;
+            this.payload = payload;
+        }
+    }
+
+    /** Assembles a 24-byte little-endian header and its payload, exactly as adbd reads them. */
+    static byte[] message(long cmd, long arg0, long arg1, byte[] payload) {
+        byte[] wire = new byte[HEADER_BYTES + payload.length];
+        put32(wire, 0, cmd);
+        put32(wire, 4, arg0);
+        put32(wire, 8, arg1);
+        put32(wire, 12, payload.length);
+        put32(wire, 16, checksum(payload));
+        put32(wire, 20, cmd ^ MAGIC_XOR);
+        System.arraycopy(payload, 0, wire, HEADER_BYTES, payload.length);
+        return wire;
+    }
+
+    /**
+     * The header's checksum word: the sum of the payload's bytes, not a CRC32.
+     *
+     * <p>Named for what the daemon computes. Measured both directions on an EO2 — a 286-byte banner
+     * whose CRC32 is {@code 0x67a84469} travels as {@code 0x0000701d}, and adbd's own 72-byte reply
+     * carries {@code 0x000019fa} — and sending the CRC32 instead is answered by a closed socket, so
+     * this is not a field either side is tolerant about. A {@code data_crc32} name in older sources
+     * describes the same bytes, which is how a crc32 looked like the right thing to put there.
+     */
+    static long checksum(byte[] payload) {
+        long sum = 0L;
+        for (int i = 0; i < payload.length; i++) {
+            sum += payload[i] & 0xffL;
+        }
+        return sum & MAGIC_XOR;
+    }
+
+    private static void writeMsg(OutputStream out, long cmd, long arg0, long arg1, String payload)
+            throws IOException {
+        out.write(message(cmd, arg0, arg1, payload.getBytes(US_ASCII)));
         out.flush();
     }
 
-    /** Reads the 4-byte {@code OKAY}/{@code FAIL} status word. */
-    private static String readStatus(InputStream in) throws IOException {
-        byte[] status = new byte[4];
-        readFully(in, status);
-        return new String(status, US_ASCII);
+    private static void put32(byte[] b, int off, long v) {
+        b[off] = (byte) (v & 0xffL);
+        b[off + 1] = (byte) ((v >>> 8) & 0xffL);
+        b[off + 2] = (byte) ((v >>> 16) & 0xffL);
+        b[off + 3] = (byte) ((v >>> 24) & 0xffL);
     }
 
-    /** After a FAIL status adbd appends an unlength-prefixed reason (≤64 bytes). */
-    private static String readFailReason(InputStream in, Socket socket) {
-        try {
-            int previousTimeout = socket.getSoTimeout();
-            socket.setSoTimeout(250);
-            byte[] buf = new byte[64];
-            int n = in.read(buf);
-            String reason = n > 0 ? " " + new String(buf, 0, n, US_ASCII).trim() : "";
-            socket.setSoTimeout(previousTimeout);
-            return reason;
-        } catch (IOException e) {
-            // Reason is diagnostic only — a timeout or socket error just means we have
-            // no more detail than the FAIL status itself.
-            return "";
+    private static long get32(byte[] b, int off) {
+        return (b[off] & 0xffL) | ((b[off + 1] & 0xffL) << 8)
+                | ((b[off + 2] & 0xffL) << 16) | ((b[off + 3] & 0xffL) << 24);
+    }
+
+    /**
+     * Reads one message, or {@code null} at a clean end of stream — which is how a finished shell
+     * service says so, and why EOF mid-header stays an error rather than an answer.
+     */
+    private static Msg readMsg(InputStream in) throws IOException {
+        int first = in.read();
+        if (first < 0) {
+            return null;
         }
-    }
-
-    /** Reads a length-prefixed payload (4-digit hex count + bytes). */
-    private static String readPayload(InputStream in) throws IOException {
-        byte[] len = new byte[4];
-        readFully(in, len);
-        int n = Integer.parseInt(new String(len, US_ASCII), 16);
-        byte[] payload = new byte[n];
-        readFully(in, payload);
-        return new String(payload, US_ASCII);
-    }
-
-    /** Reads shell output until adbd closes the channel (command finished). */
-    private static String readUntilEof(InputStream in) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        byte[] buf = new byte[8192];
-        while (out.size() < MAX_OUTPUT_BYTES) {
-            int n = in.read(buf);
-            if (n < 0) {
-                break;
-            }
-            out.write(buf, 0, n);
+        byte[] head = new byte[HEADER_BYTES];
+        head[0] = (byte) first;
+        readFully(in, head, 1, HEADER_BYTES - 1);
+        long cmd = get32(head, 0);
+        long length = get32(head, 12);
+        long crc = get32(head, 16);
+        if (get32(head, 20) != (cmd ^ MAGIC_XOR)) {
+            throw new IOException("adbd sent a message whose header contradicts itself");
         }
-        return new String(out.toByteArray(), UTF_8);
+        if (length < 0L || length > MAX_OUTPUT_BYTES) {
+            throw new IOException("adbd announced an impossible payload length: " + length);
+        }
+        byte[] payload = new byte[(int) length];
+        if (length > 0L) {
+            readFully(in, payload, 0, payload.length);
+            if (checksum(payload) != crc && crc != 0L) {
+                // A non-zero checksum that does not match means we are not reading what the daemon
+                // wrote. Zero is tolerated because it is also what a peer that skips checksumming
+                // sends, and failing a working transport over that would be the same self-inflicted
+                // UNREACHABLE this class's framing error already was.
+                throw new IOException("adbd payload failed its checksum");
+            }
+        }
+        return new Msg(cmd, get32(head, 4), get32(head, 8), payload);
     }
 
-    private static void readFully(InputStream in, byte[] buf) throws IOException {
-        int off = 0;
-        while (off < buf.length) {
-            int n = in.read(buf, off, buf.length - off);
+    /** The opcode by name, so a protocol surprise in a log line identifies itself. */
+    static String op(long cmd) {
+        if (cmd == A_CNXN) return "CNXN";
+        if (cmd == A_OPEN) return "OPEN";
+        if (cmd == A_OKAY) return "OKAY";
+        if (cmd == A_CLSE) return "CLSE";
+        if (cmd == A_WRTE) return "WRTE";
+        if (cmd == A_AUTH) return "AUTH";
+        return String.format(Locale.US, "0x%08x", Long.valueOf(cmd));
+    }
+
+    private static void readFully(InputStream in, byte[] buf, int off, int len) throws IOException {
+        int done = 0;
+        while (done < len) {
+            int n = in.read(buf, off + done, len - done);
             if (n < 0) {
-                throw new IOException("unexpected EOF");
+                throw new IOException("adbd closed mid-message");
             }
-            off += n;
+            done += n;
         }
     }
 
