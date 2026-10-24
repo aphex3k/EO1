@@ -146,9 +146,9 @@ dependencies {
     def multidex_version = "2.0.1"
     implementation "androidx.multidex:multidex:$multidex_version"
 
-    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'com.google.android.material:material:1.12.0' // Last version to support minSdk 19 (1.13.0 raised it to 21); ceiling enforced in .github/dependabot.yml
     implementation 'androidx.appcompat:appcompat:1.6.1' // Last version to support minSDK 19
-    implementation 'androidx.constraintlayout:constraintlayout:2.1.0' // Last version to support minSDK 19
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.0' // API-19 ceiling is 2.1.4 (2.2.0 raised it to 21); Dependabot may take 2.1.x patches, >= 2.2.0 ignored. Enforced in .github/dependabot.yml
     implementation 'androidx.navigation:navigation-fragment:2.7.7' // Last version to support minSDK 19
     implementation 'androidx.navigation:navigation-ui:2.7.7' // Last version to support minSDK 19
     implementation 'com.squareup.retrofit2:retrofit:2.6.0'
@@ -177,6 +177,18 @@ dependencies {
     // Desugaring for Java 8+ APIs on API 19
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.0.4'
 
+}
+
+// API-19 resolution floor, enforced by the build rather than by a Dependabot ignore rule.
+// `ignore` filters the PRs Dependabot opens for the okhttp coordinate; it does not constrain
+// what Gradle RESOLVES. A transitive edge (e.g. retrofit 2.12's POM requiring okhttp 3.14.9,
+// which is API 21+) would otherwise outrun the declared 3.12.13 via highest-wins and ship an
+// okhttp that cannot install on KitKat, with nothing ever proposing an okhttp PR to notice.
+// `force` makes the ceiling a build fact. If okhttp ever legitimately moves, move it here too.
+configurations.all {
+    resolutionStrategy {
+        force 'com.squareup.okhttp3:okhttp:3.12.13'
+    }
 }
 
 // Emits a GitHub dependency-submission snapshot of this module's resolved

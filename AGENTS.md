@@ -114,6 +114,64 @@ The Gradle wrapper jar is deliberately a regular git object, not LFS: this repo 
 
 Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](README.md) — not required for most code changes.
 
+### Dependabot & the API-19 ceiling
+
+`.github/dependabot.yml` turns on Dependabot **version updates** (gradle + github-actions, weekly).
+Because this app is pinned to `minSdk`/`targetSdk`/`maxSdk` = 19, Dependabot must never open a PR that
+raises a dependency above the last release that installs on KitKat — Dependabot reads no manifest SDK
+field, so every ceiling is hand-authored in the file's `ignore` blocks. **`ignore` gates BOTH the
+version and the security path for gradle** (`gradle/update_checker/version_finder.rb` calls
+`filter_ignored_versions` on both), and there is no `applies-to` under `ignore` — so a ceiling is
+unconditional, which is exactly what satisfies "never suggest past the ceiling," and is why an
+advisory fixed only above a ceiling becomes a permanent alert with no PR (see the register).
+Authoring rules: a bare `versions: ["X"]` is **equality** (ignores one release, silently dissolving the
+ceiling — always use an operator), and prefer `> <last known good>` over `>= <first known bad>` so the
+next line's already-published alphas are caught. Keep this table and the yaml in sync.
+
+| coordinate | ceiling (last API-19 version) | why the wall is there |
+|---|---|---|
+| `androidx.appcompat:appcompat` | 1.6.1 | 1.7.0 AAR declares minSdk 21 (AndroidX-wide 19→21 move, 2024-05) |
+| `androidx.constraintlayout:constraintlayout` | **2.1.4** (not 2.1.0) | 2.2.0 → minSdk 21; 2.1.1–2.1.4 are free in-ceiling patches |
+| `androidx.navigation:*` (fragment+ui) | 2.7.7 | 2.8.0 → minSdk 21; lockstep train, ignore as a pair |
+| `com.google.android.material:material` | 1.12.0 | minSdk 19 exactly; 1.13.0 → 21, 1.14.0 → 23 |
+| `androidx.multidex:multidex` | 2.0.1 | frozen library (no release after 2.0.1) — insurance |
+| `com.squareup.okhttp3:*` | 3.12.13 | 3.13.0+ requires Android 5.0; 4.x/5.x are Kotlin (also violates no-Kotlin). Force-floored in `app/build.gradle` |
+| `com.squareup.retrofit2:*` | 2.6.4 | 2.7.0 "minimum requirements … Android 5+"; 2.12 pom drags okhttp 3.14.9 |
+| `com.squareup.okio:okio` | 1.17.6 | 2.x/3.x break the 1.x API surface okhttp 3.12 pins (okio 1.15.0) |
+| `com.google.code.gson:gson` | 2.10.1 | README table: 2.11.0+ = API 21, 2.15.0+ = API 24 (plain jar — fails at runtime, not compile) |
+| `com.github.bumptech.glide:*` (glide+compiler) | 5.0.7 | 5.0.9 → minSdk 23 + kotlin-stdlib + minCompileSdk 37; first run auto-proposes Glide 4→5, give it one verified build |
+| `com.android.tools:desugar_jdk_libs*` | 2.0.4 (frozen) | 2.1.x is API-19-safe but decides D8's java.* backfill → NoSuchMethodError at runtime; move by hand + hardware |
+| `com.google.guava:guava` | 32.1.2 (frozen) | no minSdk bound; frozen as ~3MB dead dex (0 imports) + wrong (`-jre`) flavor — delete rather than maintain |
+| `com.vdurmont:semver4j` | 3.1.0 | last release ever; maintenance moved to `org.semver4j` (unreachable coordinate) |
+| `org.eclipse.paho:*` | 1.2.5 | project stopped releasing; not an API-19 bound |
+| `com.android.application` / `com.android.library` (AGP) | 8.7.3 (>= 8.8.0 ignored) | not API-19 — AGP↔Gradle mutual compatibility; moves as a pair with the wrapper |
+| `gradle-wrapper` | 8.9 (>= 8.10.0 ignored) | Gradle 9.x breaks AGP 8.7.3 + the lazy-buildConfig provenance path |
+| `io.netty:*` (root `force` pins) | 4.1.137 (>= 4.2.0 ignored) | 4.2 is a functional major vs the AGP 4.1.x classpath; 4.1.x still a maintained security line (no lost CVEs) |
+| `com.google.protobuf:*` (root `force` pins) | 3.25.5 (>= 4.0.0 ignored) | 4.x wire-incompatible with AGP 8.7 |
+| `junit`, `mockito-core` | unbounded | JVM-test-only, never dexed — Mockito's Java 11 floor binds the test host, not the frame |
+| `org.bouncycastle:*`, `commons-*`, `jose4j`, `jdom2` (root `force` pins) | unbounded | build-time only; leaving them flowable is the point — `ignore` would delete their only CVE automation |
+| `github-actions` ecosystem | unbounded | runners are `ubuntu-latest`; nothing installs into the APK |
+
+**Accepted-risk register** — the exposures the ceilings knowingly park. A red alert on these is
+*expected* and must not be resolved by loosening a ceiling; the fix, if any, is elsewhere.
+
+- `com.squareup.okhttp3:okhttp` **CVE-2021-0341 / GHSA-3cqm-mf7h-prrj (HIGH)** — "OkHttp can accept
+  the wrong certificate", first_patched **4.9.2**, which cannot install on KitKat → **no API-19 fix
+  exists.** Real mitigation is the trust path (`MergedTrust` / `RootBundle`, [docs/TRUST.md](docs/TRUST.md))
+  and the operator's LAN policy. (CVE-2023-0849 *is* fixed at 3.12.13.)
+- `com.squareup.okio:okio` — CVE-2023-3635 is patched **at** 1.17.6 → clean at the pin.
+- `com.google.code.gson:gson`, `com.google.guava:guava`, `org.eclipse.paho`, `io.netty` 4.1.x,
+  `androidx.appcompat` (CVE-2023-2974 fixed at 1.6.1) — all patched at or below the pin, so the
+  ceilings cost no security coverage.
+
+**Ongoing duty this file creates:** on every new advisory touching a ceilinged coordinate, a human
+decides "fixable below the ceiling?" — that is now the only path, since the automation is forbidden
+from taking it. Two structural gaps the yaml cannot close, worth a follow-up: (1) no workflow runs
+`assembleRelease` on a PR (only `dependency-submission.yml`, on push to `main`, and it never
+compiles), so ceilings are the only defence against a bad toolchain PR; (2) `ignore` cannot assert a
+resolution floor — hence the `resolutionStrategy.force okhttp` in `app/build.gradle` so a future
+ceiling mistake cannot silently ship an API-21 okhttp.
+
 ## Do / don’t
 
 **Do**
