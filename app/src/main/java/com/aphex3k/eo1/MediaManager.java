@@ -5,6 +5,7 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 
+import com.aphex3k.eo1.trust.TrustCensus;
 import com.aphex3k.immichApi.ImmichType;
 import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaBackend;
@@ -528,7 +529,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 rebuildFailureCount++;
                 noteBackendFetch(backendId, "init-failed", 0,
                         rootCause(e).getClass().getName() + ": "
-                                + clampFetchDetail(String.valueOf(e.getMessage())));
+                                + clampFetchDetail(String.valueOf(e.getMessage()))
+                                + TrustCensus.gateNote(e));
                 continue;
             }
             // A backend that came up degraded still belongs in the rotation; tell the user
@@ -577,7 +579,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 postException(ui, new BackendUnavailableException(e));
                 rebuildFailureCount++;
                 noteBackendFetch(backendId, "failed", 0, e.getClass().getSimpleName() + ": "
-                        + clampFetchDetail(String.valueOf(e.getMessage())) + warnSuffix);
+                        + clampFetchDetail(String.valueOf(e.getMessage())) + warnSuffix
+                        + TrustCensus.gateNote(e));
             }
         }
 

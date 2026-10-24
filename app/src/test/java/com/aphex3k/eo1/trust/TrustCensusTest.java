@@ -135,6 +135,25 @@ public class TrustCensusTest {
         assertEquals("TRUST_ANCHOR_MISSING", TrustCensus.classifyFailure(wrapped));
     }
 
+    /**
+     * The note is what a backend record and an update's {@code lastError} carry, so both halves
+     * matter: a certificate failure must name its gate, and a network failure must stay silent.
+     * A timeout that arrives wearing a "[TLS gate: ...]" suffix sends an operator to reinstall
+     * roots against a dead radio.
+     */
+    @Test
+    public void notesOnlyTheFailuresThatAreAboutTrust() {
+        assertEquals(" [TLS gate: NO_SHARED_CIPHER]", TrustCensus.gateNote(
+                new java.io.IOException("SSL handshake aborted: no shared cipher")));
+        assertEquals(" [TLS gate: CERT_NOT_YET_VALID_CHECK_CLOCK]", TrustCensus.gateNote(
+                new javax.net.ssl.SSLException(new java.security.cert.CertificateException(
+                        "Certificate not yet valid"))));
+        assertEquals("a timeout is nobody's certificate", "",
+                TrustCensus.gateNote(new java.net.SocketTimeoutException("timeout")));
+        assertEquals("", TrustCensus.gateNote(new java.io.IOException("connection refused")));
+        assertEquals("", TrustCensus.gateNote(null));
+    }
+
     private static void write(File file, String text) throws Exception {
         java.io.FileOutputStream out = new java.io.FileOutputStream(file);
         out.write(text.getBytes("UTF-8"));

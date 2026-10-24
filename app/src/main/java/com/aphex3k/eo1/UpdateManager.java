@@ -12,6 +12,7 @@ import android.os.Process;
 import android.os.StatFs;
 import android.util.Log;
 
+import com.aphex3k.eo1.trust.TrustCensus;
 import com.aphex3k.update.ApkManifestInfo;
 import com.aphex3k.update.ApkSignatureVerifier;
 import com.aphex3k.update.ApkUploadResult;
@@ -815,7 +816,7 @@ public class UpdateManager {
             failState("manifest-http-" + e.statusCode);
             return;
         } catch (Exception e) {
-            failState("manifest-fetch: " + e);
+            failState("manifest-fetch: " + e + TrustCensus.gateNote(e));
             return;
         }
 
@@ -864,7 +865,7 @@ public class UpdateManager {
             }
         } catch (Exception e) {
             partFile.delete();
-            failState("download-failed: " + e);
+            failState("download-failed: " + e + TrustCensus.gateNote(e));
             return;
         }
 

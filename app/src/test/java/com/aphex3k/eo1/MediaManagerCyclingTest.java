@@ -590,6 +590,36 @@ public class MediaManagerCyclingTest {
     }
 
     /**
+     * A backend that cannot be reached is reported three different ways, and only one of them is
+     * about certificates. The record an operator reads must say which, because the fix for a TLS
+     * failure ("install roots") and the fix for a dead radio ("check the network") are not
+     * interchangeable and a frame is usually mounted too high to try both.
+     */
+    @Test
+    public void aTlsFailureNamesItsGateAndANetworkFailureNamesNothing() throws Exception {
+        FakeBackend untrusted = new FakeBackend("fakeTLS", "immich", remoteAsset("t0", "fakeTLS"));
+        untrusted.fetchError = new javax.net.ssl.SSLHandshakeException(
+                "unable to find valid certification path to requested target");
+        FakeListener l1 = new FakeListener();
+        MediaManager m1 = manager(Arrays.asList(untrusted), l1, 3L);
+        m1.showNextImageLocked(tmp.newFolder("cache-tls"), tmp.newFolder("up-tls"),
+                directPoster, false);
+        String tlsRecord = m1.backendFetchRecords().get("fakeTLS");
+        assertTrue("the backend record should name the gate: " + tlsRecord,
+                tlsRecord.contains("[TLS gate: TRUST_ANCHOR_MISSING]"));
+
+        FakeBackend offline = new FakeBackend("fakeNet", "immich", remoteAsset("n0", "fakeNet"));
+        offline.fetchError = new java.net.SocketTimeoutException("timeout");
+        FakeListener l2 = new FakeListener();
+        MediaManager m2 = manager(Arrays.asList(offline), l2, 3L);
+        m2.showNextImageLocked(tmp.newFolder("cache-net"), tmp.newFolder("up-net"),
+                directPoster, false);
+        String netRecord = m2.backendFetchRecords().get("fakeNet");
+        assertFalse("a timeout must not read as a certificate problem: " + netRecord,
+                netRecord.contains("TLS gate"));
+    }
+
+    /**
      * Two hosts holding the same asset id are two assets: keys carry the backend id, so nothing
      * is deduped across backends and a frame pointed at two servers keeps both copies.
      */
