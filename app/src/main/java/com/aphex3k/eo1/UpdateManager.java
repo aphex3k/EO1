@@ -1004,7 +1004,7 @@ public class UpdateManager {
                     .connectTimeout(25, TimeUnit.SECONDS)
                     .writeTimeout(25, TimeUnit.SECONDS)
                     .readTimeout(10, TimeUnit.MINUTES);
-            httpClient = ApiServiceGenerator.enableTls12OnPreLollipop(builder).build();
+            httpClient = ApiServiceGenerator.enableTls12OnPreLollipop(builder, context).build();
         }
         return httpClient;
     }

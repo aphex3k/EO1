@@ -2,6 +2,8 @@ package com.aphex3k.eo1.mqtt;
 
 import android.content.Context;
 
+import androidx.annotation.Nullable;
+
 import com.google.gson.FieldNamingStrategy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -114,10 +116,23 @@ public class MqttManager {
     private static final Gson gson = new GsonBuilder().create();
 
     private final PlaybackListener playbackListener;
+    /**
+     * Read only to answer one question at connect time: whether the root bundle is on. Paho builds its
+     * own TLS, so it cannot inherit the decision every {@code OkHttpClient} gets — and a broker
+     * connection that quietly kept trusting the 2013 store after the rest of the app moved on would
+     * make the setting mean two different things on one frame.
+     */
+    @Nullable
+    private final Context context;
+    private final String uri;
+
     /// uri = "tcp://broker.mqttdashboard.com:1883"
-    public MqttManager (String uri, PlaybackListener playbackListener) throws MqttException {
+    public MqttManager (String uri, PlaybackListener playbackListener, @Nullable Context context)
+            throws MqttException {
 
         this.playbackListener = playbackListener;
+        this.context = context;
+        this.uri = uri;
 
         // Use no-op logger to avoid MissingResourceException on API 19
         org.eclipse.paho.client.mqttv3.logging.LoggerFactory.setLogger(MqttManager.NoOpLogger.class.getName());
@@ -170,6 +185,19 @@ public class MqttManager {
         MqttConnectOptions options = new MqttConnectOptions();
         options.setUserName(username);
         options.setPassword(password.toCharArray());
+
+        if (uri != null && uri.startsWith("ssl")) {
+            try {
+                options.setSocketFactory(
+                        com.aphex3k.eo1.ApiServiceGenerator.trustAnchoredSocketFactory(context));
+            } catch (Exception e) {
+                // Paho would then fall back to the platform default, which is what happened before this
+                // line existed. Say so: a broker that authenticates against a 2013 store while the rest
+                // of the app does not is a difference an operator can only find by being surprised.
+                System.err.println("[MQTT] could not build the shared TLS context, using the device "
+                        + "default: " + e);
+            }
+        }
 
         client.connect(options);
         // https://www.hivemq.com/blog/mqtt-essentials-part-5-mqtt-topics-best-practices/#heading-mqtt-topics-wildcards-best-practices-mqtt-essentials-part-5
