@@ -40,9 +40,19 @@ report, work out which gate you are at. `/state`'s `trust` block answers three o
    as a **union** with `MODERN_TLS`'s list. Replacing rather than widening that list is a real
    regression: it deletes TLS 1.2 GCM for every newer platform this same code runs on, and the
    Immich live-tests fail with `handshake_failure`. No root install can open this gate.
+   Measured on a bench EO2, the entire supported list is 53 suites and **none of them is AEAD** — the
+   strongest digest anything in it uses is SHA-1 — and the ECDSA entries are exactly
+   `TLS_ECDHE_ECDSA_WITH_{AES_128,AES_256}_CBC_SHA`, `_3DES_EDE_CBC_SHA` and `_RC4_128_SHA`. That is
+   the hardware ceiling: a server that offers only GCM cannot be reached from this device in any
+   direction, and certificates are not the reason it fails. `/state`'s `trust.gates` reports
+   `anyEcdsa`, `anyAead` and the list, so the gate can be named on a frame that has no `openssl`.
 3. **Server policy.** A host configured AEAD-only or TLS-1.3-only cannot be reached by a 2013 client
    from any direction. The answer is a server-side cipher policy or plain `http://`, never a
-   certificate change.
+   certificate change. This is not hypothetical: `immich.nas.codingmerc.com` serves an ECDSA leaf and
+   accepts only `ECDHE-ECDSA-AES*-GCM-*` on TLS 1.2, rejecting every CBC option including 3DES, and
+   has no RSA chain — so a KitKat frame cannot complete a handshake with it whatever anchors it holds.
+   The symptom is `sslv3 alert handshake failure` raised at `SSL23_GET_SERVER_HELLO`, *before* the
+   certificate is read, which is how to tell gate 3 from gate 1 in a log.
 4. **The clock.** Let's Encrypt issues 90-day certificates and this app contains no time sync. On a
    frame powered off for a week, every certificate reads not-yet-valid or expired and a flawless
    anchor bundle buys nothing. Compare `/state`'s `nowMs` against your own clock before believing
@@ -68,6 +78,21 @@ be enumerated, or the merged set comes out smaller than the platform's, the mana
 at all and the frame trusts exactly what it trusted before. A narrowed trust set would break hosts
 that work today and report itself as a certificate problem. The same reasoning applies to the cipher
 list in gate 2 above, and the first draft of this change got that backwards.
+
+**Measured on a bench EO2** (`/state`'s `trust` block, app build with this change installed):
+`mode=merged`, `platformAnchors=156`, `trustedAnchors=164` — the ROM's own 156 anchors enumerated
+through its provider, plus the 8 shipped roots it was missing. The census reproduced the host-side
+measurements exactly (`readable=true`, `total=156`, `expired=63`, `unparseable=0`), which also proves
+the app uid can read `/system/etc/security/cacerts` under SELinux enforcing.
+
+Getting there caught a bug no unit test could: the first version asked for
+`TrustManagerFactory.getInstance("X.509")`. A workstation's JDK accepts that spelling as an alias, and
+this ROM's provider does not —
+`NoSuchAlgorithmException: TrustManagerFactory X.509 implementation not found`. The failure rule worked
+exactly as designed: it refused to install, fell back to `platform-only`, and said why in `detail`.
+Which is also the lesson — **23 green unit tests and an inert fix.** The algorithm name is now resolved
+through `getDefaultAlgorithm()` with the literals as fallbacks, and each enumeration route is tried
+independently so a refusal on one cannot skip past the other.
 
 What it does **not** reach: the kiosk `WebView`. Chromium-33 validates inside its own engine and
 ignores every Java trust manager, so an `https://` page still depends on the ROM store. (No

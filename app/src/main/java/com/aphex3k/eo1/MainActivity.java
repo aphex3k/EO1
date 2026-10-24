@@ -3643,6 +3643,32 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // week can trust every anchor in the world and still reject all of them.
             o.addProperty("nowMs", System.currentTimeMillis());
 
+            // Which of the four gates can be closed at all from this device. An ECDSA-certified host
+            // with no ECDSA suite here fails before its certificate is ever read, so no certificate
+            // work can help it — and that is the difference between "the fix failed" and "the fix
+            // does not apply to this server".
+            String[] suites = MergedTrust.platformCipherSuites();
+            boolean ecdsa = false;
+            boolean gcm = false;
+            for (int i = 0; i < suites.length; i++) {
+                if (suites[i].indexOf("ECDSA") >= 0) {
+                    ecdsa = true;
+                }
+                if (suites[i].indexOf("GCM") >= 0 || suites[i].indexOf("CCM") >= 0) {
+                    gcm = true;
+                }
+            }
+            JsonObject gates = new JsonObject();
+            gates.addProperty("suiteCount", suites.length);
+            gates.addProperty("anyEcdsa", ecdsa);
+            gates.addProperty("anyAead", gcm);
+            JsonArray names = new JsonArray();
+            for (int i = 0; i < suites.length; i++) {
+                names.add(suites[i]);
+            }
+            gates.add("supported", names);
+            o.add("gates", gates);
+
             Date now = new Date();
             JsonArray stores = new JsonArray();
             stores.add(storeJson(TrustCensus.SYSTEM_STORE,

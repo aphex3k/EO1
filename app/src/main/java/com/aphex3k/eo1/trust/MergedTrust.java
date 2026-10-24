@@ -61,6 +61,41 @@ public final class MergedTrust {
     private MergedTrust() {
     }
 
+    /**
+     * Candidate {@link TrustManagerFactory} algorithm names, tried in order.
+     *
+     * <p>"X.509" is the name the JDK's tests accept and Android 4.4 does not: this ROM's provider
+     * answers {@code NoSuchAlgorithmException: TrustManagerFactory X.509 implementation not found} for
+     * it, which a unit test on a workstation could never reveal. The platform's own default is asked
+     * for first because that is the only spelling guaranteed to exist on whatever device this runs on;
+     * the literals are fallbacks for a provider that reports a default this call path dislikes.
+     */
+    private static final String[] TMF_ALGORITHMS = {"X509", "PKIX", "SunX509", "X.509"};
+
+    /** A factory for some algorithm this provider actually has, or {@code null} if it has none. */
+    private static TrustManagerFactory factory() {
+        String preferred = null;
+        try {
+            preferred = TrustManagerFactory.getDefaultAlgorithm();
+        } catch (Throwable ignored) {
+            // No preferred algorithm: fall through to the literals.
+        }
+        String[] names = new String[1 + TMF_ALGORITHMS.length];
+        names[0] = preferred;
+        System.arraycopy(TMF_ALGORITHMS, 0, names, 1, TMF_ALGORITHMS.length);
+        for (int i = 0; i < names.length; i++) {
+            if (names[i] == null) {
+                continue;
+            }
+            try {
+                return TrustManagerFactory.getInstance(names[i]);
+            } catch (Throwable ignored) {
+                // Try the next spelling. Every one of them failing is reported by the caller.
+            }
+        }
+        return null;
+    }
+
     /** The outcome of a trust-manager build. Immutable, because it is read from another thread. */
     public static final class Result {
         public final String mode;
@@ -87,6 +122,29 @@ public final class MergedTrust {
 
     public static Result last() {
         return last;
+    }
+
+    /**
+     * The cipher suites this device's TLS provider is <em>capable</em> of, whether or not they are
+     * enabled.
+     *
+     * <p>A certificate chain is only ever examined after the server accepts the client's
+     * {@code ClientHello}, so on an ECDSA-certified host a frame with no ECDSA suite in this list
+     * fails with {@code handshake_failure} and never reaches the question the root bundle answers.
+     * Naming the list turns "installing the certificates did not work" into a statement about which
+     * of the four gates is the one that actually binds, and it is the only way to see it on a frame
+     * that has no shell and no {@code openssl}.
+     *
+     * @return suite names, or an empty array if the provider will not say
+     */
+    public static String[] platformCipherSuites() {
+        try {
+            String[] supported = javax.net.ssl.SSLContext.getDefault()
+                    .getSupportedSSLParameters().getCipherSuites();
+            return supported == null ? new String[0] : supported;
+        } catch (Throwable t) {
+            return new String[0];
+        }
     }
 
     /**
@@ -155,10 +213,14 @@ public final class MergedTrust {
             for (Map.Entry<String, X509Certificate> anchor : merged.entrySet()) {
                 keyStore.setCertificateEntry("anchor-" + index++, anchor.getValue());
             }
-            TrustManagerFactory factory = TrustManagerFactory.getInstance("X.509");
-            factory.init(keyStore);
+            TrustManagerFactory tmf = factory();
+            if (tmf == null) {
+                return new Result(MODE_PLATFORM_ONLY, platform.size(), -1,
+                        "no TrustManagerFactory algorithm this provider recognises", null);
+            }
+            tmf.init(keyStore);
             X509TrustManager manager = null;
-            TrustManager[] managers = factory.getTrustManagers();
+            TrustManager[] managers = tmf.getTrustManagers();
             for (int i = 0; i < managers.length; i++) {
                 if (managers[i] instanceof X509TrustManager) {
                     manager = (X509TrustManager) managers[i];
@@ -200,32 +262,46 @@ public final class MergedTrust {
     private static List<X509Certificate> platformAnchors() throws Exception {
         List<X509Certificate> anchors = new ArrayList<X509Certificate>();
 
-        TrustManagerFactory factory = TrustManagerFactory.getInstance("X.509");
-        factory.init((KeyStore) null);
-        TrustManager[] managers = factory.getTrustManagers();
-        for (int i = 0; i < managers.length; i++) {
-            if (managers[i] instanceof X509TrustManager) {
-                X509Certificate[] issuers = ((X509TrustManager) managers[i]).getAcceptedIssuers();
-                if (issuers != null) {
-                    for (int j = 0; j < issuers.length; j++) {
-                        anchors.add(issuers[j]);
+        // Route 1, and it must not be able to abort route 2: a provider that cannot build a default
+        // trust manager still usually serves the anchors through the keystore. The first cut of this
+        // method let a NoSuchAlgorithmException from route 1 escape, which turned into "platform-only"
+        // on a device that had a readable store all along.
+        TrustManagerFactory tmf = factory();
+        if (tmf != null) {
+            try {
+                tmf.init((KeyStore) null);
+                TrustManager[] managers = tmf.getTrustManagers();
+                for (int i = 0; i < managers.length; i++) {
+                    if (managers[i] instanceof X509TrustManager) {
+                        X509Certificate[] issuers = ((X509TrustManager) managers[i]).getAcceptedIssuers();
+                        if (issuers != null) {
+                            for (int j = 0; j < issuers.length; j++) {
+                                anchors.add(issuers[j]);
+                            }
+                        }
                     }
                 }
+            } catch (Throwable ignored) {
+                // Fall through to the direct keystore read.
             }
         }
         if (!anchors.isEmpty()) {
             return anchors;
         }
 
-        KeyStore keyStore = KeyStore.getInstance("AndroidCAStore");
-        keyStore.load(null, null);
-        Enumeration<String> aliases = keyStore.aliases();
-        while (aliases.hasMoreElements()) {
-            String alias = aliases.nextElement();
-            Certificate certificate = keyStore.getCertificate(alias);
-            if (certificate instanceof X509Certificate) {
-                anchors.add((X509Certificate) certificate);
+        try {
+            KeyStore keyStore = KeyStore.getInstance("AndroidCAStore");
+            keyStore.load(null, null);
+            Enumeration<String> aliases = keyStore.aliases();
+            while (aliases.hasMoreElements()) {
+                String alias = aliases.nextElement();
+                Certificate certificate = keyStore.getCertificate(alias);
+                if (certificate instanceof X509Certificate) {
+                    anchors.add((X509Certificate) certificate);
+                }
             }
+        } catch (Throwable ignored) {
+            // Neither route worked; the caller reports an empty enumeration as platform-only.
         }
         return anchors;
     }

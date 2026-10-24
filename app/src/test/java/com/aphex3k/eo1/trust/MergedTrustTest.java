@@ -1,6 +1,7 @@
 package com.aphex3k.eo1.trust;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
@@ -75,6 +76,31 @@ public class MergedTrustTest {
             rejected = true;
         }
         assertTrue("a trust manager that accepts an empty chain accepts anything", rejected);
+    }
+
+    /**
+     * A pin, not a demonstration: this passes trivially on a workstation, which is exactly how the bug
+     * it guards against survived to a device. Android 4.4's provider answers
+     * {@code NoSuchAlgorithmException: TrustManagerFactory X.509 implementation not found} for the
+     * algorithm name the JDK accepts as an alias, and the first version of this code hard-coded it —
+     * so the merge threw, fell back to "platform-only", and the shipped roots did nothing on the
+     * hardware they were written for while every unit test stayed green.
+     *
+     * <p>What is checkable here is the invariant the device violated: a build that ends up
+     * platform-only because the <em>provider refused a name</em> is a bug, not a degradation. The
+     * supported suite list is asserted alongside it because an empty one means the platform cannot say,
+     * which is the other way this feature can be inert and look healthy.
+     */
+    @Test
+    public void aProviderRefusalIsNeverMistakenForAFallback() {
+        MergedTrust.Result result = MergedTrust.create(true);
+        String detail = result.detail == null ? "" : result.detail;
+        assertFalse("the provider refused an algorithm name — the trust layer is inert: " + detail,
+                detail.indexOf("NoSuchAlgorithm") >= 0);
+        assertFalse("the provider refused a keystore type — the trust layer is inert: " + detail,
+                detail.indexOf("no X.509 trust manager") >= 0);
+        assertTrue("a platform with no enumerable cipher suites cannot be diagnosed from /state",
+                MergedTrust.platformCipherSuites().length > 0);
     }
 
     @Test
