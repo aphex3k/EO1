@@ -127,8 +127,9 @@ walking to the wall. Evidence for the whole table is in
 
 **Rotation.** The merged pool is shuffled once and consumed **in order**, so every asset shows exactly
 once per cycle; at the end of a pass the catalogs are re-fetched and the pool re-shuffled. It is not
-random per tick — a photo cannot come up twice while the rest of the shelf waits. (One exception: see
-[the Immich caveat](#add-an-immich-server-optional).) The `interval` is in **minutes**, defaults to
+random per tick — a photo cannot come up twice while the rest of the shelf waits, and that holds even
+for a library where the same picture is listed by two different queries. The `interval` is in
+**minutes**, defaults to
 **5**, and is clamped to at least 1. The next asset is prefetched right after each display, so a
 rotation is normally a cache hit and dwell time never waits on a download. Uploaded files **join** on
 the next tick, with no restart. **Deleting** is different: the tick that noticed deletions only ever
@@ -267,10 +268,11 @@ web page header. Note that a factory-fresh frame does **not** print its address 
 hides the Wi-Fi IP line until *Trusted Network* is on, so until then the DHCP lease really is the only
 way to find a frame at all.
 
-> **One caveat on coverage.** Immich returns an album's assets *and* the timeline, and both feed one
-> pool, so a picture that lives in an album currently occupies **two slots** and comes up about twice
-> as often as one that does not. That is a bug, not a design, and it is the one exception to
-> [every asset shows exactly once](#day-to-day).
+> **Why an album's pictures are not privileged.** Immich answers a catalog with the album listings
+> *and* the whole timeline, so a shared picture is named twice in one response. The rotation pool
+> dedupes by asset key, so each one still takes exactly **one** slot in the pass — being filed in an
+> album changes what the frame is allowed to see, never how often it shows. Two frames of the same
+> photo from two different *hosts* are two assets, and both stay.
 
 ### When an Immich backend misbehaves
 
