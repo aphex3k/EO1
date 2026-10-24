@@ -2,6 +2,7 @@ package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
 import com.aphex3k.media.MediaAsset;
@@ -556,6 +557,58 @@ public class MediaManagerCyclingTest {
         assertEquals(l1.displayedKeys.get(0), l2.displayedKeys.get(0));
         // 5 merged assets, one shown: 4 remain.
         assertEquals(4, m1.rotationListSize());
+    }
+
+    /**
+     * An Immich catalog names an album's assets and then the whole timeline, so a picture that
+     * lives in an album arrives twice. The pool is one shuffled pass consumed in order, so a
+     * second entry is not a second copy of the photo — it is that photo coming up twice while
+     * other pictures wait. Deduped by key, the way the per-tick local rescan already does.
+     */
+    @Test
+    public void assetListedTwiceByOneBackendTakesOneSlotPerPass() throws Exception {
+        MediaAsset plain = remoteAsset("a0", "fakeA");
+        MediaAsset inAlbum = remoteAsset("a1", "fakeA");
+        FakeBackend a = new FakeBackend("fakeA", "immich", plain, inAlbum, inAlbum);
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 42L);
+        mm.prefetchEnabled = false;
+        File cache = tmp.newFolder("cache-dup");
+        File uploads = tmp.newFolder("uploads-dup");
+
+        mm.showNextImageLocked(cache, uploads, directPoster, false);
+        mm.showNextImageLocked(cache, uploads, directPoster, false);
+
+        assertEquals(2, mm.poolKeyCount());
+        // Two distinct slots, two consumed: had the repeat been added, one asset would have
+        // been shown twice before the other was shown at all.
+        assertEquals(0, mm.rotationListSize());
+        assertEquals(2, listener.displayedKeys.size());
+        assertNotEquals(listener.displayedKeys.get(0), listener.displayedKeys.get(1));
+        assertTrue(listener.displayedKeys.contains("fakeA:a0"));
+        assertTrue(listener.displayedKeys.contains("fakeA:a1"));
+    }
+
+    /**
+     * Two hosts holding the same asset id are two assets: keys carry the backend id, so nothing
+     * is deduped across backends and a frame pointed at two servers keeps both copies.
+     */
+    @Test
+    public void sameAssetIdOnTwoBackendsKeepsBothSlots() throws Exception {
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(
+                        new FakeBackend("fakeA", "immich", remoteAsset("same", "fakeA")),
+                        new FakeBackend("fakeB", "immich", remoteAsset("same", "fakeB"))),
+                listener, 5L);
+        mm.prefetchEnabled = false;
+        File cache = tmp.newFolder("cache-two");
+        File uploads = tmp.newFolder("uploads-two");
+
+        mm.showNextImageLocked(cache, uploads, directPoster, false);
+        mm.showNextImageLocked(cache, uploads, directPoster, false);
+
+        assertEquals(2, mm.poolKeyCount());
+        assertEquals(0, mm.rotationListSize());
     }
 
     @Test

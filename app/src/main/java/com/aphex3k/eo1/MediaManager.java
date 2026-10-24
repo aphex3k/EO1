@@ -545,10 +545,22 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 List<MediaAsset> catalog = backend.fetchCatalog();
                 int count = 0;
                 if (catalog != null) {
-                    count = catalog.size();
+                    // An asset in an album is also in the timeline result, so one backend's catalog
+                    // can name the same picture twice. The pool is a pass consumed in order, so a
+                    // second entry is not a second copy of the photo — it is that photo coming up
+                    // twice while the rest of the library waits. Guarded the way the per-tick local
+                    // rescan already guards, and only within this backend: two hosts serving the same
+                    // asset id hold different keys, and both belong in the rotation.
                     for (MediaAsset asset : catalog) {
-                        pool.add(asset);
-                        poolKeys.add(asset.key());
+                        if (poolKeys.add(asset.key())) {
+                            pool.add(asset);
+                            count++;
+                        }
+                    }
+                    int repeated = catalog.size() - count;
+                    if (repeated > 0) {
+                        Log.d(TAG, "rebuildPool: backend '" + backendId + "' listed " + repeated
+                                + " asset(s) more than once; each takes one slot in the pass");
                     }
                     seedVideoDurations(catalog);
                 }
