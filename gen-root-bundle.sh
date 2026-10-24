@@ -7,7 +7,7 @@
 # second set of failure modes for no gain. This script is the only sanctioned way to change that
 # material, and it exists so the emitted Java cannot disagree with the bytes it was given.
 #
-# Per certificate, four things are checked and any failure aborts before a byte is written:
+# Per certificate, what is checked before a byte is written:
 #
 #   it parses as an X.509 certificate          so the bundle cannot carry junk
 #   subject_hash_old is eight hex digits       that is the platform's naming rule; see SubjectHashOld
@@ -16,6 +16,10 @@
 #                                              true one day without any build changing
 #   PEM -> DER -> PEM reproduces the fingerprint  otherwise the reviewed bytes and the shipped bytes
 #                                              are different certificates
+#
+# What is then emitted is the PEM re-encoded from that verified DER, and every line of it must be
+# base64 or one of the two fixed markers — never the input file's own text. See the note by the awk
+# step for why that distinction is load-bearing rather than tidy.
 #
 # The hash is emitted as a constant on purpose. Provisioning writes
 # /data/misc/keychain/cacerts-added/<hash>.<index>, and AGENTS.md requires every adbd command line to
@@ -71,8 +75,37 @@ for pem_file in "$CERT_DIR"/*.pem; do
 
     subject=$(openssl x509 -in "$pem_file" -noout -subject | sed 's/^subject=//' | sed 's/\\/\\\\/g; s/"/\\"/g')
 
-    # One Java string literal per certificate: the PEM verbatim, line by line, so the generated file
-    # stays readable and a reviewer can diff it against the input.
+    # The bytes that reach the Java literal are re-derived from the verified DER, never copied out of
+    # the input file. This is not tidiness: `openssl x509` parses the FIRST PEM block and ignores
+    # whatever text follows it, so before this line existed a .pem that was a valid certificate plus a
+    # trailing line of
+    #     x"; static { PWNED = "..."; } static String PWNED = "
+    # passed all four checks and had that Java pasted straight into RootBundle.java, which then
+    # compiles into every APK — and this script is the documented, only sanctioned path for trust
+    # material. Re-encoding the DER that already round-tripped to the reviewed fingerprint means the
+    # emitted text cannot be anything but the certificate.
+    canonical="$TMP/$name.canonical.pem"
+    openssl x509 -inform DER -in "$TMP/$name.der" -outform PEM > "$canonical" 2>/dev/null
+    fp_canonical=$(openssl x509 -in "$canonical" -noout -fingerprint -sha256 | sed 's/^.*Fingerprint=//' | tr -d ':')
+    [ "$fp_canonical" = "$fp_pem" ] || {
+        echo "$pem_file: canonical PEM disagrees with the reviewed certificate" >&2; exit 1; }
+
+    # And the whitelist, so the guarantee does not depend on that last check having run: a PEM body is
+    # base64 and two fixed marker lines. Anything else — a quote, a backslash, a semicolon, a line
+    # that is not one of those three shapes — aborts the generation instead of reaching the literal.
+    rejected=$(grep -v -e '^-----BEGIN CERTIFICATE-----$' -e '^-----END CERTIFICATE-----$' \
+        -e '^[A-Za-z0-9+/=]*$' "$canonical" || true)
+    if [ -n "$rejected" ]; then
+        echo "$pem_file: canonical PEM contains a line that is not base64 or a marker:" >&2
+        echo "$rejected" >&2
+        exit 1
+    fi
+
+    # Escape backslash then quote, in that order, before the line is placed inside a Java literal —
+    # belt and braces behind the whitelist, and the part that would otherwise still be wrong for any
+    # future change to what is emitted.
+    escaped="$TMP/$name.escaped.pem"
+    sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' "$canonical" > "$escaped"
     awk -v name="$literal_name" '
         { line[NR] = $0 }
         END {
@@ -80,7 +113,7 @@ for pem_file in "$CERT_DIR"/*.pem; do
             for (i = 1; i <= NR; i++) {
                 printf "            \"%s\\n\"%s\n", line[i], (i == NR ? ";" : "+")
             }
-        }' "$pem_file" >> "$TMP/constants"
+        }' "$escaped" >> "$TMP/constants"
 
     printf '        new Entry("%s", "%s", PEM_%s),\n' "$subject" "$hash" "$literal_name" >> "$TMP/entries"
     count=$((count + 1))
