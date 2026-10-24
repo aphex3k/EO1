@@ -561,7 +561,7 @@ body:
 
         Everything below is served by the frame's own LAN web server — plain HTTP, always on for the life of the app, and these read-only routes need no token and no Trusted Network flag. The server tries **port 80** and falls back to **8080**, so try `http://<frame-ip>/state` as well as `http://<frame-ip>:8080/state`; the bound port is printed in the page header. It never leaves your network: do not port-forward it in order to file a bug.
 
-        Finding the frame's IP without root: **Settings → Wi-Fi → the connected network** (press **S** on a USB keyboard at the frame to get to Android's settings), or your router's DHCP lease table. The options dialog's first tab also shows a Wi-Fi IP line, but only while Trusted Network is on. `/state` itself reports it as `network.wifi.ip`.
+        Finding the frame's IP without root: the options dialog's first tab shows a **Wi-Fi IP:** line on every build, whether or not Trusted Network is on. Otherwise: **Settings → Wi-Fi → the connected network** (press **S** on a USB keyboard at the frame to get to Android's settings), or your router's DHCP lease table. `/state` itself reports it as `network.wifi.ip`.
 
         | URL | What it is |
         |-----|------------|

@@ -38,10 +38,10 @@ Two minutes of this needs a browser; the first step needs the frame in your hand
    nothing usable configured, the options dialog opens on the **Media** tab by itself — nothing to
    press, nothing to type.
 3. **Press "+ Add Local uploads", then Save.** No server, no username, no password, no token.
-4. *Optional, and cheapest while that dialog is still open:* tick **Trusted Network**, and the same
-   screen prints the frame's Wi-Fi address and its configuration token. Write both down. Without it,
-   the address comes off your router's DHCP client list instead — a release build prints nothing on
-   screen.
+4. **Read the address off that screen.** The dialog shows a `Wi-Fi IP:` line on every build, with
+   nothing to enable. *Optional, and cheapest while you are there:* tick **Trusted Network**, which
+   additionally prints the configuration token under it — the one credential that turns the page's
+   reads into writes.
 5. **Open `http://<frame>/` from any device on the LAN** — if that is refused, `http://<frame>:8080/`.
    No token, no flag, no login. The page header then names the address and port that actually bound.
 6. **Select up to 32 photos and press Upload.** They appear in the Files table at once.
@@ -264,9 +264,9 @@ Then give each frame a name, so you can tell them apart without a DHCP lease: th
 **About** tab has a *Device name* field, and so does the frame's own web page (`POST /devicename`,
 once *Trusted Network* is on). The label is stored on the device and never in `configuration.json`, so
 it cannot be copied to another frame by an import — it appears in the frame's debug overlay and in the
-web page header. Note that a factory-fresh frame does **not** print its address anywhere: the dialog
-hides the Wi-Fi IP line until *Trusted Network* is on, so until then the DHCP lease really is the only
-way to find a frame at all.
+web page header, which is what makes `http://192.168.1.87:8080` announce itself as the kitchen. A frame
+with no name still says where it is: the options dialog's first tab prints its Wi-Fi address on every
+build, so no router's DHCP table is needed to find one you have never configured.
 
 > **Why an album's pictures are not privileged.** Immich answers a catalog with the album listings
 > *and* the whole timeline, so a shared picture is named twice in one response. The rotation pool
