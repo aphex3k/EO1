@@ -189,11 +189,15 @@ public class OptionsBasicFragment extends Fragment {
         boolean trusted = settingsManager.isTrustedNetwork();
         int trustedViews = trusted ? View.VISIBLE : View.GONE;
         trustedNetworkTokenView.setVisibility(trustedViews);
-        trustedNetworkIpView.setVisibility(trustedViews);
         if (trusted) {
             trustedNetworkTokenView.setText("Configuration token: " + settingsManager.trustedNetworkToken());
-            trustedNetworkIpView.setText("Wi-Fi IP: " + wifiIp());
         }
+        // The address is not the secret, and hiding it gained nothing: the page it points at listens
+        // on every frame with no setting to enable it and no login, so the only way a fresh frame
+        // could be found at all was its router's DHCP list. The token stays behind the flag, because
+        // the token is what turns reads into writes.
+        trustedNetworkIpView.setText("Wi-Fi IP: " + wifiIp());
+        trustedNetworkIpView.setVisibility(View.VISIBLE);
         if (loopbackAdbCheckBox != null) {
             loopbackAdbCheckBox.setVisibility(trustedViews);
         }
