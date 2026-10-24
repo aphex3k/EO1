@@ -1,29 +1,47 @@
-| `/` | GET | One-page UI: upload form, file table (download/delete), control buttons. The header leads with this frame's device name when one is set, and names the running build (version, variant, source commit, date, signing-key verdict) so a frame can be identified without touching it |
-| `/state` | GET | JSON: device/app info (incl. `app.trustedNetwork`; `app.version`/`versionName`/`buildNumber`/`variant`/`buildDate`/`gitSha`/`gitDirty` and an `app.signer` block (`signed`, `fingerprint` — SHA-256 of the installed certificate's DER, `subject`, `serial`, `validFrom`/`validTo`, `validity`, `algorithm`, `keyVerdict`) report which build is running and who signed it, the same facts the options dialog's **About** tab shows, and `app.createCount`/`app.processStartMs` — how many times the Activity has been built in this process and when the process started, which is how a report of "it reset itself" tells an Activity re-creation apart from a restart; device adds detected `platform`, plus `name` — the per-device label, present only when the frame has been named, so an unnamed frame's `device` block reads exactly as it did before the field existed; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`enabled`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `autoReboot` (the watchdog's reboot permission — a configuration field, so the config editor below can change it), `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, a `media` block (`rotationAssets`, `screenOn`, and — once an asset is on screen — `current` with `key`, `type` (`image`/`video`/`web`, plus `url` for a page), `backendId`, `width`, `height` (0 when unknown), `durationMs`, `local` (bool), plus `originalFileName`/`sizeBytes` when the backend reports them), a `brightness` block (`supported` — whether this panel accepts a brightness value at all, true on both frames; it is **not** a claim that a control exists to change it, which is what `capabilities.brightnessButton` says, and on an EO2 (no button, no sensor) the floor this block reports *is* the brightness, so a level set from the web page is the only input it has; `step` and `floor` — the backlight level the taps or the web `brightness` action put, as an index and as the brightness it means, `persistedStep` — the same number read back out of SharedPreferences, so a `step` that disagrees with `persistedStep` means the level was raised by something that never wrote it down, and **`null` when the store holds nothing or would not answer** — which is the difference between a frame nobody ever adjusted and a frame that lost its level, and both used to read as `0`; `storeState` — `value` / `absent` / `unreadable`, the store answering in its own words right now; `lastKnownGoodStep` (`null` until some read in this process has succeeded) — the fallback an unreadable store is answered with, never the floor; `stepSource` — where `step` came from (`prefs`, `button`, `web`, `lastKnownGood`, `default`), and `authoritative` — whether that was a read or a guess, which decides whether the next step re-reads the store rather than growing the guess; `lastChange` (`from`, `to`, `via`, `atMs`, `durable`) — the last step change this process made and who asked for it, `durable:false` meaning the panel moved and disk did not, so this level is gone at the next boot; `lastLightValue` — the last reading the light-sensor curve used, `applied` — what is on the panel right now (-1 before the first apply), and `screenOn`), an `input` block (`windowFocused` — whether this window holds input focus, the precondition for every keyboard binding; `activityPaused`; `focusedView` — simple class name of the view holding focus, or `none`, and it reads as a text editor if an editor ever keeps focus after the options dialog closes, which is what silences keys while everything else looks healthy; `lastKeyCode`/`lastKeyAtMs` — the last key the window was actually offered, so a keyboard delivering nothing shows as a timestamp that never moves), an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld` (bool — whether the frame holds `INSTALL_PACKAGES`), `installMode` (path the next install dispatch will take: `headless` when that permission is held, else `adbd` when the ROM's adbd is reachable, else `defer-to-human` — nothing on this frame can install by itself, so an automatic cycle shows nothing and waits), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent` — which path the most recent install dispatch used), `adbdReachable` (bool, on-demand probe of the ROM's adbd on 127.0.0.1:5555 — the headless-install precondition), `loopbackAdbAllowed` (bool — both *Trusted Network* and *Allow the frame to start its own adbd* are on, i.e. whether the app is permitted to open that port at all), `tcpAdbArmedByApp` (bool — adbd is listening because this frame started it; the teardown that closes it runs when the action ends, and a `true` that outlives an install means the next launch will close it), `needsHumanConfirmation` (bool — the staged update is retryable but every silent transport failed, so the index page carries a standing notice asking for a click at the frame), `installFiredAtMs` (when an install was last dispatched, 0 when nothing is pending — persisted precisely so a pending install can settle in a process that never fired it)), a `watchdog` block (`staleMs`/`staleLimitMs` — how long nothing has been on screen and when that counts as wedged; `level`/`lastAction`/`lastActionAtMs` — how far down the recovery ladder this wedge has already gone; `repairAttempts`, `probeMisses`, `ticks`; `paused`, `mainLoopAlive`/`mainLoopStallMs`, `downloadInFlightMs`, `offlineMs`, `autoReboot`), a `crash` block (`store`: `count`, `lastAtMs`, `lastVersionCode` — the build whose `mapping-<versionCode>.txt.gz` retraces the newest report — and `totalBytes`; `sources`: per-source startup-harvest outcomes, each `copied` / `empty` / `unchanged` / `budget-exhausted` / `unavailable`, plus `readLogs` `granted`/`denied`), a `diagnostics` block (`store`: `count`, `lastAtMs`, `lastTrigger`, `totalBytes`, `latestIsReboot`, and `lastDispatch` — `""` when the newest report is not a reboot request, the recorded refusal if adbd turned that request down, and `unknown` when nothing was recorded, which is not the same as it having worked; the report store below, and the only route that reads it without opening a body), battery/memory/uptime telemetry; and a `video` block on **every** build (it used to be debug-only, which meant a release frame showing a black panel could not say whether any pixel had ever reached it): `active` player and `preferTsPlayer`/`tsAvailable`, plus `tsLoadError` when the native library failed to load — the reason the frame lost its preferred engine, which logcat only ever held for ~13 minutes; `path` and `stage` (`ORIGINAL`/`ORIGINAL_REPLAY`/`FALLBACK`) for the attempt in progress, the only pair on the frame that tells an original apart from the server's encode of the same clip and therefore whether the ladder descended; `paintSignal`, and on an engine that has one (the MediaPlayer path) `painted` plus `lastFrameAgeMs` (−1 when no frame has composited since this data source was set) — which is what "accepted the bytes, rendered nothing" looks like from across a room, and why `painted` is omitted rather than asserted for TsPlayer, whose `.so` offers no per-frame proof; `renderSilent` for the current asset when it has been put in that category, and `codec` (the `stsd` fourcc the header probe read), `rotation`, `width`, `height`, `frameOrientation`, `fpsMilli`, `avgFrameBytes`/`peakFrameBytes`/`bitRateBps`, `macroblocksPerSecond`, `fileDurationMs`, `durationMs`/`positionMs`. Debug builds add the rate-window samples (`playbackRate*`), `tsFallbacks`, and the TsPlayer loop telemetry (generation, error count, surface/loop state, `loopPerf`) |
-| `/logs` | GET | HTML page that live-polls `/log.json` every 3 s |
-| `/log.json?lines=N` | GET | JSON array of in-memory log events (ring buffer, up to 500 retained) |
-| `/log/file?lines=N` | GET | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
-| `/crashes` | GET | HTML table of stored crash reports (below) — download and delete each one |
-| `/crash.json` | GET | JSON array of the same listing (`name`, `kind`, `epochMillis`, `versionCode`, `exception`, `size`, `lastModified`) |
-| `/crash/<name>` | GET | Streams one crash report as plain text |
-| `/crash/<name>/delete` | DELETE / POST | Deletes one crash report (retention pruning is separate and automatic) |
-| `/reports` | GET | HTML table of stored **diagnostics** reports (below) — what the frame wrote about its own state. Download and delete each one |
-| `/reports.json` | GET | JSON array of the same listing (`name`, `trigger`, `epochMillis`, `seq`, `versionCode`, `reason`, `size`, `lastModified`, `url`) — name fields plus each file's one-line `Reason` from its header, like `/crash.json`; nothing else of the body is read, and `/state`'s summary reads no file at all |
-| `/reports/capture` | POST | **Same origin.** Run one capture now (trigger `manual`) and answer with the file it wrote. Deliberately not token-gated — the flag that would carry the token can only be switched on at the dead frame's own screen, which is the situation the button exists for. Single-flighted and spaced by `CAPTURE_SPACING_MS` (30 s), so a page reload loop cannot mint reports |
-| `/report/<name>` | GET | Streams one diagnostics report (plain text; the store is name-guarded the same way `/crash/` is) |
-| `/report/<name>/delete` | DELETE / POST | Deletes one diagnostics report (retention is separate and automatic) |
-| `/files` | GET | JSON list of uploaded files (`name`, `size`, `lastModified`) |
-| `/files/<name>` | GET | Streams an uploaded file |
-| `/files/<name>/delete` | DELETE / POST | Deletes an uploaded file |
-| `/upload` | POST | `multipart/form-data` upload, 512 MB cap per file, 2 GB cap per request, max 32 parts; stored in `filesDir/uploaded/` |
-| `/update?token=<t>` | POST | **Trusted network + configuration token + same origin.** `multipart/form-data` upload of a single APK file (100 MB cap — `UpdateManifest.MAX_APK_BYTES`), staged as a self-update instead of added to the rotation pool. The APK is verified with the same gates as the self-update download path: SHA-256, JAR signature against the installed app's signing certificate (pure-Java `ApkSignatureVerifier`), and a strictly newer `versionCode` read from the APK's binary manifest. On success it lands in `filesDir/updates/` as the staged update (state `STAGED`) — **never auto-installed**. The JSON response carries the computed `sha256` so the user can check it against the published release before firing `install-staged`; the index page shows it and offers **Install staged** / **Discard staged** (a page reload re-shows it from `/state`) |
-| `/control?action=<a>[&code=<n>][&asset=<key>]` | GET / POST | Fires a hardware-key action (below); `keyevent` (debug builds only) and `watchdog` (debug builds only) additionally require POST and read the `code`/`level` param, `brightness` requires POST on every build, and `show` (debug builds only) reads `asset` |
-| `/config?token=<t>` | GET | **Trusted network + configuration token.** Full device configuration JSON, credentials included |
-| `/config?token=<t>` | POST | **Trusted network + configuration token + same origin.** Applies the request body (≤ 512 KB JSON) as the new device configuration: parsed, normalized, written to `filesDir/configuration.json`, live config replaced, time zone re-applied, rotation restarted. `{"ok":false,"msg":...}` on validation failure (config unchanged) |
-| `/config/download?token=<t>` | GET | **Trusted network + configuration token.** Streams the configuration as a `configuration.json` attachment (same document as `POST /config` writes, legacy mirror fields included) |
-| `/config/import?token=<t>` | POST | **Trusted network + configuration token + same origin.** Same as `POST /config`; the web UI's file-picker import path |
-| `/devicename?token=<t>` | POST | **Trusted network + configuration token + same origin.** Replaces this frame's **device name** — the operator's free-form label ("Kitchen") — from the raw request body, so the name never appears in a query string or a logged request line. Capped at 512 bytes, then sanitised (control characters dropped, trimmed, ≤ 64 chars / ≤ 128 UTF-8 bytes); an empty body clears it. The JSON response echoes the name actually stored, so a shortening is visible instead of silent. Stored in the app's default SharedPreferences under `device_name`, **not** in `configuration.json`: exporting, importing or hand-editing a configuration cannot relabel another frame, and this write leaves the running rotation and schedule alone. Surfaced in the page header and `<title>`, in the frame's debug overlay, and as `/state`'s `device.name` |
-| `/health` | GET | `ok` |
+# The frame's LAN web server
+
+This server *is* the frame's control plane — not a debug attachment and not an optional service.
+`MainActivity.onCreate` news a `WebServer` and calls `start()` before the configuration is even
+loaded, and nothing in a setting, a config field or a route turns it off; the only thing that stops
+it is `onDestroy`. It binds **port 80** and falls back to **8080** at bind time (`PORTS = {80, 8080}`,
+first successful bind wins), and it reports which one it won — in the index page's own `<h1>`
+("… frame @ *ip* (port *n*)") and as `/state`'s `app.webPort`. It is plain HTTP with **no login, no
+session, no TLS and no shared secret of any kind** on most of its surface: anyone who can route to
+the frame can read its state, logs, crash and diagnostics reports and uploaded files, and can upload
+and delete them. **The trusted LAN is the entire perimeter** — this document's job is to say exactly
+which doors that leaves open, and the two gates that exist (`Trusted Network` + the per-device
+configuration token, and the debug-build gate on the admin actions) are named per route below.
+
+## Routes
+
+| Route | Method | Gates | What it does |
+|---|---|---|---|
+| `/` — and `/index.html`, which is the same route, not a redirect (`route()`) | GET | ungated | One-page UI: upload form, file table (download/delete), control buttons. The header leads with this frame's device name when one is set, and names the running build (version, variant, source commit, date, signing-key verdict) so a frame can be identified without touching it |
+| `/state` | GET | ungated | JSON: device/app info (incl. `app.trustedNetwork`; `app.debug` (whether this is a debug build, which is what decides the admin actions below), `app.tsPlayer` (whether this build prefers TsPlayer over `MediaPlayer`) and `app.webPort` (the port this server actually bound, `-1` until the bind thread gets there); `app.version`/`versionName`/`buildNumber`/`variant`/`buildDate`/`gitSha`/`gitDirty` and an `app.signer` block (`signed`, `fingerprint` — SHA-256 of the installed certificate's DER, `subject`, `serial`, `validFrom`/`validTo`, `validity`, `algorithm`, `keyVerdict`) report which build is running and who signed it, the same facts the options dialog's **About** tab shows, and `app.createCount`/`app.processStartMs` — how many times the Activity has been built in this process and when the process started, which is how a report of "it reset itself" tells an Activity re-creation apart from a restart; device adds detected `platform`, plus `name` — the per-device label, present only when the frame has been named, so an unnamed frame's `device` block reads exactly as it did before the field existed; a top-level `capabilities` block reports `lightSensor`, `screenBrightness`, `brightnessButton`, `powerButton`, `screenToggleKeyCode`), config (`config.backends[]` with `id`/`type`/`host`/`apiVersion`/`enabled`/`valid` — no secrets — plus a deprecated `host` alias, `intervalMinutes`, `autoReboot` (the watchdog's reboot permission — a configuration field, so the config editor below can change it), `quietHours` (array of cron expressions, empty when unset), `timezone`), network/Wi-Fi, a `media` block (`rotationAssets`, `screenOn`, and — once an asset is on screen — `current` with `key`, `type` (`image`/`video`/`web`, plus `url` for a page), `backendId`, `width`, `height` (0 when unknown), `durationMs`, `local` (bool), plus `originalFileName`/`sizeBytes` when the backend reports them), a `brightness` block (`supported` — whether this panel accepts a brightness value at all, true on both frames; it is **not** a claim that a control exists to change it, which is what `capabilities.brightnessButton` says, and on an EO2 (no button, no sensor) the floor this block reports *is* the brightness, so a level set from the web page is the only input it has; `step` and `floor` — the backlight level the taps or the web `brightness` action put, as an index and as the brightness it means, `persistedStep` — the same number read back out of SharedPreferences, so a `step` that disagrees with `persistedStep` means the level was raised by something that never wrote it down, and **`null` when the store holds nothing or would not answer** — which is the difference between a frame nobody ever adjusted and a frame that lost its level, and both used to read as `0`; `storeState` — `value` / `absent` / `unreadable`, the store answering in its own words right now; `lastKnownGoodStep` (`null` until some read in this process has succeeded) — the fallback an unreadable store is answered with, never the floor; `stepSource` — where `step` came from (`prefs`, `button`, `web`, `lastKnownGood`, `default`), and `authoritative` — whether that was a read or a guess, which decides whether the next step re-reads the store rather than growing the guess; `lastChange` (`from`, `to`, `via`, `atMs`, `durable`) — the last step change this process made and who asked for it, `durable:false` meaning the panel moved and disk did not, so this level is gone at the next boot; `lastLightValue` — the last reading the light-sensor curve used, `applied` — what is on the panel right now (-1 before the first apply), and `screenOn`), an `input` block (`windowFocused` — whether this window holds input focus, the precondition for every keyboard binding; `activityPaused`; `focusedView` — simple class name of the view holding focus, or `none`, and it reads as a text editor if an editor ever keeps focus after the options dialog closes, which is what silences keys while everything else looks healthy; `lastKeyCode`/`lastKeyAtMs` — the last key the window was actually offered, so a keyboard delivering nothing shows as a timestamp that never moves), an `update` block (`state`, `installedVersionCode`, `expectedVersionCode`, `expectedVersionName`, `manifestUrl`, `lastCheckedMs`, `lastError`, `attempts`, `stagedSha256` (SHA-256 of the staged APK, empty when none), `stagedApk{present,bytes}`, `installPermissionHeld` (bool — whether the frame holds `INSTALL_PACKAGES`), `installMode` (path the next install dispatch will take: `headless` when that permission is held, else `adbd` when the ROM's adbd is reachable, else `defer-to-human` — nothing on this frame can install by itself, so an automatic cycle shows nothing and waits), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent` — which path the most recent install dispatch used), `adbdReachable` (bool, on-demand probe of the ROM's adbd on 127.0.0.1:5555 — the headless-install precondition), `loopbackAdbAllowed` (bool — both *Trusted Network* and *Allow the frame to start its own adbd* are on, i.e. whether the app is permitted to open that port at all), `tcpAdbArmedByApp` (bool — adbd is listening because this frame started it; the teardown that closes it runs when the action ends, and a `true` that outlives an install means the next launch will close it), `needsHumanConfirmation` (bool — the staged update is retryable but every silent transport failed, so the index page carries a standing notice asking for a click at the frame), `installFiredAtMs` (when an install was last dispatched, 0 when nothing is pending — persisted precisely so a pending install can settle in a process that never fired it)), a `watchdog` block (`staleMs`/`staleLimitMs` — how long nothing has been on screen and when that counts as wedged; `level`/`lastAction`/`lastActionAtMs` — how far down the recovery ladder this wedge has already gone; `repairAttempts`, `probeMisses`, `ticks`; `paused`, `mainLoopAlive`/`mainLoopStallMs`, `downloadInFlightMs`, `offlineMs`, `autoReboot`), a `crash` block (`store`: `count`, `lastAtMs`, `lastVersionCode` — the build whose `mapping-<versionCode>.txt.gz` retraces the newest report — and `totalBytes`; `sources`: per-source startup-harvest outcomes, each `copied` / `empty` / `unchanged` / `budget-exhausted` / `unavailable`, plus `readLogs` `granted`/`denied`), a `diagnostics` block (`store`: `count`, `lastAtMs`, `lastTrigger`, `totalBytes`, `latestIsReboot`, and `lastDispatch` — `""` when the newest report is not a reboot request, the recorded refusal if adbd turned that request down, and `unknown` when nothing was recorded, which is not the same as it having worked; the report store below, and the only route that reads it without opening a body), battery/memory/uptime telemetry; a top-level `trust` block (`mode`/`detail`/`enabled`/`bundleSize`/`platformAnchors`/`trustedAnchors`/`nowMs`, a `gates` inventory of the cipher suites this platform offers, and a census of each anchor store — see [docs/TRUST.md](TRUST.md)); and a `video` block on **every** build (it used to be debug-only, which meant a release frame showing a black panel could not say whether any pixel had ever reached it): `active` player and `preferTsPlayer`/`tsAvailable`, plus `tsLoadError` when the native library failed to load — the reason the frame lost its preferred engine, which logcat only ever held for ~13 minutes; `path` and `stage` (`ORIGINAL`/`ORIGINAL_REPLAY`/`FALLBACK`) for the attempt in progress, the only pair on the frame that tells an original apart from the server's encode of the same clip and therefore whether the ladder descended; `paintSignal`, and on an engine that has one (the MediaPlayer path) `painted` plus `lastFrameAgeMs` (−1 when no frame has composited since this data source was set) — which is what "accepted the bytes, rendered nothing" looks like from across a room, and why `painted` is omitted rather than asserted for TsPlayer, whose `.so` offers no per-frame proof; `renderSilent` for the current asset when it has been put in that category, and `codec` (the `stsd` fourcc the header probe read), `rotation`, `width`, `height`, `frameOrientation`, `fpsMilli`, `avgFrameBytes`/`peakFrameBytes`/`bitRateBps`, `macroblocksPerSecond`, `fileDurationMs`, `durationMs`/`positionMs`. Debug builds add the rate-window samples (`playbackRate*`), `tsFallbacks`, and the TsPlayer loop telemetry (generation, error count, surface/loop state, `loopPerf`) |
+| `/logs` | GET | ungated | HTML page that live-polls `/log.json` every 3 s |
+| `/log.json?lines=N` | GET | ungated | JSON array of in-memory log events (ring buffer, up to 500 retained) |
+| `/log/file?lines=N` | GET | ungated | Tail of the on-disk rolling log (`filesDir/eo1-app.log`, rotated at 256 KB) |
+| `/crashes` | GET | ungated | HTML table of stored crash reports (below) — download and delete each one |
+| `/crash.json` | GET | ungated | JSON array of the same listing (`name`, `kind`, `epochMillis`, `versionCode`, `exception`, `size`, `lastModified`) |
+| `/crash/<name>` | GET | ungated | Streams one crash report as plain text |
+| `/crash/<name>/delete` | DELETE / POST | **same origin** | Deletes one crash report (retention pruning is separate and automatic) |
+| `/reports` | GET | ungated | HTML table of stored **diagnostics** reports (below) — what the frame wrote about its own state. Download and delete each one |
+| `/reports.json` | GET | ungated | JSON array of the same listing (`name`, `trigger`, `epochMillis`, `seq`, `versionCode`, `reason`, `size`, `lastModified`, `url`) — name fields plus each file's one-line `Reason` from its header, like `/crash.json`; nothing else of the body is read, and `/state`'s summary reads no file at all |
+| `/reports/capture` | POST | **same origin** | Run one capture now (trigger `manual`) and answer with the file it wrote. Deliberately not token-gated — the flag that would carry the token can only be switched on at the dead frame's own screen, which is the situation the button exists for. Single-flighted and spaced by `CAPTURE_SPACING_MS` (30 s), so a page reload loop cannot mint reports |
+| `/report/<name>` | GET | ungated | Streams one diagnostics report (plain text; the store is name-guarded the same way `/crash/` is) |
+| `/report/<name>/delete` | DELETE / POST | **same origin** | Deletes one diagnostics report (retention is separate and automatic) |
+| `/files` | GET | ungated | JSON list of uploaded files (`name`, `size`, `lastModified`) — this lists what is **on disk**, not what is in the rotation; a frame with no `local` backend entry lists its uploads here normally while never showing one of them (see **Uploads and rotation**) |
+| `/files/<name>` | GET | ungated | Streams an uploaded file as a download |
+| `/files/<name>/delete` | DELETE / POST | **ungated — no same-origin check, unlike every other delete** | Deletes an uploaded file. Deleting a user's photo is therefore easier to trigger from someone else's page than deleting the crash report that documents a fault; see **Same-origin** below |
+| `/upload` | POST | ungated | `multipart/form-data` upload; stored in `filesDir/uploaded/`. Caps: 512 MB per file part (`MAX_UPLOAD_BYTES`), 2 GB per request (`MAX_UPLOAD_TOTAL_BYTES`), 32 parts (`MAX_UPLOAD_PARTS`) — and a request that breaches any of them lands **zero** files, not a partial batch (see **Uploads and rotation**). `multipart/form-data` is a CORS-simple content type and this route checks no header at all, so a form auto-submitted from any page the frame's own kiosk WebView ever renders can write files here |
+| `/update?token=<t>` | POST | **Trusted Network + token + same origin** | `multipart/form-data` upload of a single APK file (100 MB cap — `UpdateManifest.MAX_APK_BYTES`), staged as a self-update instead of added to the rotation pool. The APK is verified with the same gates as the self-update download path: SHA-256, JAR signature against the installed app's signing certificate (pure-Java `ApkSignatureVerifier`), and a strictly newer `versionCode` read from the APK's binary manifest. On success it lands in `filesDir/updates/` as the staged update (state `STAGED`) — **never auto-installed**. The JSON response carries the computed `sha256` so the user can check it against the published release before firing `install-staged`; the index page shows it and offers **Install staged** / **Discard staged** (a page reload re-shows it from `/state`) |
+| `/control?action=<a>[&code=<n>][&level=<n>][&asset=<key>]` | GET / POST | ungated (per-action method and build gates, below) | Fires a hardware-key action (below); `keyevent` (debug builds only) and `watchdog` (debug builds only) additionally require POST and read the `code`/`level` param, `brightness` requires POST on every build, and `show` (debug builds only) reads `asset` |
+| `/config?token=<t>` | GET | **Trusted Network + token** | Full device configuration JSON, credentials included |
+| `/config?token=<t>` | POST | **Trusted Network + token + same origin** | Applies the request body (≤ 512 KB JSON) as the new device configuration: parsed, normalized, written to `filesDir/configuration.json`, live config replaced, time zone re-applied, rotation restarted. `{"ok":false,"msg":...}` on validation failure (config unchanged) |
+| `/config/download?token=<t>` | GET | **Trusted Network + token** | Streams the configuration as a `configuration.json` attachment (same document as `POST /config` writes, legacy mirror fields included) |
+| `/config/import?token=<t>` | POST | **Trusted Network + token + same origin** | Same as `POST /config`; the web UI's file-picker import path |
+| `/devicename?token=<t>` | POST | **Trusted Network + token + same origin** | Replaces this frame's **device name** — the operator's free-form label ("Kitchen") — from the raw request body, so the name never appears in a query string or a logged request line. Capped at 512 bytes, then sanitised (control characters dropped, trimmed, ≤ 64 chars / ≤ 128 UTF-8 bytes); an empty body clears it. The JSON response echoes the name actually stored, so a shortening is visible instead of silent. Stored in the app's default SharedPreferences under `device_name`, **not** in `configuration.json`: exporting, importing or hand-editing a configuration cannot relabel another frame, and this write leaves the running rotation and schedule alone. Surfaced in the page header and `<title>`, in the frame's debug overlay, and as `/state`'s `device.name` |
+| `/health` | any | ungated | `ok`. Its handler is the one case in `dispatch()` with **no method check at all** (it falls straight through to the `case "health":` body), so unlike every other route — which answers 405 to a verb it does not implement — `/health` answers `ok` to GET, POST, PUT, DELETE or HEAD alike. HEAD gets a body it cannot use; that is what the code does |
 
 `/control` actions mirror the hardware buttons (`EventManager`):
 
@@ -40,7 +58,7 @@
 | `install-staged` | — | install a staged self-update. This is the only thing that puts the confirmation dialog on the frame's screen: it is an explicit request, so it turns the panel on first and no relaunch alarm is armed over it. With a working silent transport it just installs, dialog-free |
 | `update-reset` | — | drop the staged update files and reset the update state |
 | `keyevent?code=<n>` | — (admin/debug; **debug builds only**, POST only) | inject an arbitrary key press via `Instrumentation.sendKeyDownUpSync`; `code` must parse to an int in 0…65535. Lets you try keycodes (e.g. `26` POWER, `223` SLEEP, `132` F2) on a device without ADB. The index page shows a "Send key" form with quick-fill buttons in debug builds. |
-| `watchdog?level=<1..5>` | — (**debug builds only**, POST only) | run one rung of the kiosk watchdog ladder immediately, as if its threshold had been reached: 1 force a rotation, 2 redraw the current asset, 3 Wi-Fi repair through adbd, 4 restart the app process, 5 reboot the device (rung 5 still respects the *Reboot the frame* option and only reboots when it is on). The way to prove a rung works without waiting for a wedge. |
+| `watchdog?level=<1..5>` | — (**debug builds only**, POST only) | run one rung of the kiosk watchdog ladder immediately, as if its threshold had been reached: 1 force a rotation, 2 redraw the current asset, 3 Wi-Fi repair through adbd, 4 restart the app process, 5 reboot the device (rung 5 still respects the *Reboot the frame* option and only reboots when it is on). The way to prove a rung works without waiting for a wedge. **A missing or unparseable `level` is not an error: it silently runs rung 1 and reports success** — see below. |
 
 All actions are posted to the UI thread — except `keyevent`, which is injected directly on the
 web worker thread (`sendKeyDownUpSync` posts to the UI looper and would deadlock if posted
@@ -57,7 +75,7 @@ permanently. POST-only is **not** CSRF protection by itself — `/control` reads
 from the URL query string, so a page the user visits could still auto-submit a plain `POST`
 form and reach the action; real CSRF resistance would need additional
 checks (an `Origin`/`Referer` validation, a non-simple content type, or a per-session
-token). The server deliberately has none of those — it remains credential-free plain HTTP
+token). `/control` deliberately has none of those — it remains credential-free plain HTTP
 by design (trusted LAN only) — so the security boundary is the trusted-LAN assumption plus
 the debug-build gate on the admin actions, not hardening against hostile pages; the method gate on
 `brightness` only removes the drive-by, it does not restrict who may act. `show` is
@@ -66,8 +84,16 @@ stays `GET`-able, because naming which of its own rotation assets a frame displa
 drive-by `?action=next` does not already have. `keyevent`/`watchdog` on a release
 build or via GET, `brightness` via GET, `show` on a release build or with a key the current pool
 does not hold, an
-unknown action, or a malformed `code`/`level` returns
+unknown action, or a `keyevent` whose `code` does not parse or falls outside 0…65535 returns
 `{"ok":false,"fired":false}`.
+
+**`watchdog` is the exception, and it fails silently rather than honestly.** `MainActivity.control`
+catches the `NumberFormatException` from parsing `level` and falls back to
+`KioskWatchdog.LEVEL_FORCE_ROTATION`, so `POST /control?action=watchdog` with **no** `level`
+parameter, an empty one, or a non-numeric one runs rung 1 — force a rotation — and answers
+`{"ok":true,"fired":true}`. Only a level that *parses* and
+lands outside 1…5 is refused. There is no response field that distinguishes the rung you asked for
+from the rung you got, so always send `level` explicitly.
 
 ## Trusted network
 
@@ -90,15 +116,31 @@ assumption:
    part of the configuration document or its export, of `/state`, or of the app logs (the
    logs are themselves readable via `/log.json`).
 
-**Same-origin (CSRF) check.** `POST /config`, `POST /config/import`, `POST /update` and
-`POST /devicename` additionally reject
-requests whose `Origin` header (falling back to `Referer`) does not match the request's
-`Host` header, so a cross-origin page can no longer drive-by-write the configuration, stage an
-update, or rename the frame. The
+**Same-origin (CSRF) check.** `configWriteAllowed()` is enforced on **seven** routes, not only the four
+that carry a token (`POST /config`, `POST /config/import`,
+`POST /update`, `POST /devicename`) plus `DELETE|POST /crash/<name>/delete`,
+`DELETE|POST /report/<name>/delete` and `POST /reports/capture`. Each rejects a request whose
+`Origin` header (falling back to `Referer`) does not match the request's `Host` header, so a
+cross-origin page can no longer drive-by-write the configuration, stage an update, rename the frame —
+or erase the evidence of a fault, which is why the two deletes and the manual capture are in the list
+at all: a delete needs no secret, and this frame renders arbitrary LAN pages into its own kiosk
+WebView, where one auto-submitted form is enough to reach it. The
 expected port is taken from the `Host` header when it carries one, otherwise from the bound
 port; a URL port defaults to 80 when omitted; the host comparison is case-insensitive; and the
 check fails closed on any unparseable piece. Clients that send no provenance header at all
-(curl, scripts) pass this check — they remain fully token-gated.
+(curl, scripts) pass this check — on the config routes they remain fully token-gated, and on the
+three evidence routes a headerless client is simply not stopped, because nothing else is checking.
+
+**The one destructive route with neither gate is `/files/<name>/delete`.** It is not in that list:
+`dispatch()` asks only that the method be `DELETE` or `POST` and then deletes the file. A plain
+cross-origin `<form method="post">` from any page the frame ever renders therefore removes a user's
+photograph, while the same request against `/crash/<name>/delete` is refused. That is an asymmetry in
+the code, not a ranking of what matters — the comment at `crashDelete` giving the reason for the
+guard applies just as strongly to a photo, and the file it protects is the one the owner put there.
+`POST /upload` sits on the same exposed side: `multipart/form-data` is a CORS-*simple* content type,
+so a form POST to it needs no preflight and raises no header this server inspects — an outside page
+cannot read the answer, but it can write files onto the frame, and they then list in the Files table
+exactly like the operator's own.
 
 While the flag is off, the four config endpoints answer `403`, and `POST /update` and
 `POST /devicename` are refused the same way; the index page then shows a note instead of the
@@ -133,16 +175,53 @@ component; colliding names get a `_N` suffix. Uploads stream to disk in 8 KB chu
 (`MultipartParser`) into a per-request `incoming_<nanoTime>` temp dir, then are renamed into
 the persistent dir — parallel uploads cannot collide.
 
-Each rotation tick, `MediaManager` re-scans that directory through the **`local` media
-backend** (`LocalMediaBackend`): newly appeared files are appended to the tail of the merged
-rotation pool and the unshown tail is reshuffled, so a web upload joins the rotation on the
+**An over-cap request lands zero files, not a partial batch.** Every part is parsed into that temp
+dir *before* any file is renamed into `uploaded/`, so breaching a limit aborts the whole request:
+`MultipartParser.parse` throws `MultipartException` at 512 MB in one part (`MAX_UPLOAD_BYTES`), at
+2 GB across the request (`MAX_UPLOAD_TOTAL_BYTES`), at a 33rd part (`MAX_UPLOAD_PARTS`) or at 1 MB in
+a *text* part (`MultipartParser.MAX_TEXT_BYTES`, small because text parts are held in memory no
+matter how large the file caps are); `handle()` answers `413`, the `finally` deletes the temp dir,
+and nothing on disk changed. Two smaller facts from the same code: a body whose `Content-Length` is
+≤ 16 MB (`MAX_IN_MEMORY_UPLOAD_BYTES`) is drained off the socket in one bulk read and parsed from
+memory rather than streamed, and the only way a batch can come back partial is a `renameTo` that
+fails on the destination — that one part is deleted, the rest land, `ok` is still `true`, and the
+`files` array simply leaves the name out.
+
+### The `local` entry is a precondition, and its absence is silent
+
+`MediaManager` re-scans that directory **through the running generation's `local` backend**
+(`LocalMediaBackend`), and the rescan (`MediaManager.refreshLocalUploads`) walks `generation` and
+`continue`s past every backend whose type is not `local`. **With no `{"type":"local"}` entry in
+`configuration.json`, nothing ever scans `filesDir/uploaded`.** An upload to such a frame lands
+safely on disk, lists normally in the Files table, downloads correctly, and **never reaches the
+screen** — with no error, no log line, no toast and nothing in `/state`'s pool, because the web
+server writes files and the media pipeline reads only the directories it was configured to read.
+Nothing creates that entry on the upload's behalf: `LocalMediaBackend` is instantiated in exactly one
+place, `MediaManager.buildGeneration`, once per config entry of type `local`; and
+`Configuration.normalize` adds nothing of its own except the legacy flat `host`/`userid`/`password`
+triple migrated into one **immich** entry — for the list it is handed it only fills in missing ids,
+defaults `apiVersion` and de-duplicates (keeping at most one local). Exactly two things can add the
+entry: the **+ Add local uploads** button, which lives inside the config editor and so is unreachable
+until *Trusted Network* is on *and* the token load succeeded, and `addLocalBackend()` in the on-device
+options dialog. The way to tell which frame you have is one read: `/state`'s `config.backends[]` must
+contain a row with `type: "local"` whose `enabled` is not `false`. A local row's `enabled` is written
+by neither the editor's UI (no checkbox is rendered for it) nor its `collectCfg()` (which serializes
+the field only for immich and web rows), so saving through the editor restores it to `true` whatever a
+hand-edited document said.
+
+On such a frame every rotation tick appends newly appeared files to the tail of the merged
+rotation pool and reshuffles the unshown tail, so a web upload joins the rotation on the
 next interval tick — no restart, no pool rebuild, and no reference from the web server to the
 media pipeline. Local assets are **fully interleaved** with Immich assets from any number of
 hosts: they are peers in the same merged pool and are **played/displayed directly from
 `filesDir/uploaded`** — no cache copy and no client-side FFmpeg pipeline. The originals in
 `filesDir/uploaded` live outside the cache directory and are never touched by eviction (which
-only touches its UUID-named cache-file pattern). Files deleted through `/files/<name>/delete`
-or on disk drop out of the pool on the next tick. When an Immich backend is unreachable or
+only touches its UUID-named cache-file pattern). A file deleted through `/files/<name>/delete` or on
+disk does **not** leave the pool on the next tick — `refreshLocalUploads` only ever adds records. Its
+record stays and is simply never displayable again (`LocalMediaBackend.resolveOriginal` answers `null`
+for a path that is gone, and the sweep moves to the next asset without counting a failure); it
+disappears at the next real pool rebuild, which is what a backend-list change
+(`invalidatePoolIfStale`), a restart, or a sweep that finds nothing left displayable triggers. When an Immich backend is unreachable or
 its credentials are wrong, that backend is skipped with a toast and the remaining backends
 (including local uploads) keep rotating. A backend running against a server newer than any
 client this build knows is a different case: it stays in the rotation and raises a one-shot
@@ -152,7 +231,7 @@ disabled. A backend can also be turned off entirely with the
 `configuration.json`, but `MediaManager` skips it when building the rotation pool — the pool
 is rebuilt on the next tick whenever an `enabled` flag changes.
 
-#### Compatibility sidecar reports
+### Compatibility sidecar reports
 
 When a local upload fails a device compatibility check on its first scan (HEIF/AV1 still,
 h265/hevc/av1 video — `MediaCompatibility`), `LocalMediaBackend` writes a plaintext report
@@ -176,6 +255,38 @@ model/Android/app version).
 APK uploads via `POST /update` are the one exception: they land in `filesDir/updates/`
 (the self-update staging area), are verified before anything touches them, and never
 join the rotation pool.
+
+**A display-time failure writes nothing at all.** A sidecar records a verdict the *scan* reached from
+bytes `MediaCompatibility` could read before anything was displayed. A failure that happens *while*
+displaying is a different event and leaves no trace on an upload: a `local` asset has no degraded
+source behind it (`LocalMediaBackend` does not implement `resolveThumbnailFallback`, so the interface
+default answers `null`), and the ladder's terminal rung asks the backend to flag the asset — which is
+`MediaBackend.markIncompatible`'s empty default for `local`. Nothing is tagged, no report is written,
+and the asset is remembered by nothing — not across a restart either — so every tick attempts the
+same file again. The two cases are told apart by one row of the Files table: the scan-time one has a
+`<name>.incompat.txt` beside it and is out of the rotation; the display-time one has nothing beside
+it, is retried forever, and shows whatever its decoder managed that cycle. And do not go looking in
+`/logs` for the difference: nothing on this path posts to the curated log. The only line that reads
+like a verdict — `tagAssetAsIncompatible: flagged <key> in backend 'local'` — is a `Log.i` on logcat's
+side (so ~13 minutes of it), it is written because the *call* returned, and the backend it called
+does nothing.
+
+### From a phone
+
+The page works from a phone browser, with four facts to know:
+
+- **Three worker threads.** `WebServer.WORKERS` is 3 in a fixed pool behind one daemon accept thread,
+  with a 10 s header timeout and a 60 s body timeout per connection. A page that fires several
+  requests at once queues behind itself, and one stalled phone upload occupies a worker for a minute.
+- **Everything is a download.** `streamFile()` sends `Content-Disposition: attachment` with the file's
+  own name, so `GET /files/<name>` hands a phone the bytes rather than previewing them. To look at a
+  photo before deciding whether to delete it, download it.
+- **No viewport meta** appears anywhere in the emitted HTML, so a phone renders the page at desktop
+  width and pinches to read the tables.
+- **The page's JavaScript is newer than the frame serving it.** The index page uses arrow functions
+  and the logs page `async`/`await` and `fetch` — none of which Android 4.4's Chromium 33 can parse.
+  A frame can serve its own control page but can never run it, which is why operating one means a
+  second device.
 
 ## Self-recovery (kiosk watchdog)
 
@@ -215,7 +326,9 @@ The 2026-10-13 incident is the reason rungs 3 and 5 exist: a `SurfaceFlinger` ha
 framework, and the ROM never started `wpa_supplicant` afterwards — so the frame sat "waiting for
 network" for 13 hours while every part of the app was correctly reporting the situation.
 
-Force any rung on a debug build with `POST /control?action=watchdog&level=<1..5>`.
+Force any rung on a debug build with `POST /control?action=watchdog&level=<1..5>` — and name the
+level: a missing or unparseable one is not rejected, it silently forces rung 1 and answers
+`"fired":true`.
 
 ### Vendor OTA pollers
 

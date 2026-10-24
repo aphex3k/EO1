@@ -30,8 +30,14 @@ removes an anchor as part of installing one.
 ## Four gates, not one
 
 A frame can have a perfect anchor set and still fail to connect. Before spending an install on a
-report, work out which gate you are at. `/state`'s `trust` block answers three of them, and
-`TrustCensus.classifyFailure` names the fourth.
+report, work out which gate you are at. `/state`'s `trust` block answers gates 1, 2 and 4 — the
+anchor counts and `missingBundleAnchors`, `gates` (`anyEcdsa`, `anyAead`, `suiteCount`, the suite
+list), and `nowMs` read against your own clock. Gate 3 is answered by no route: it shows up only in
+the text of the failure itself, which is why the symptom is spelled out under it.
+`TrustCensus.classifyFailure` sorts an exception into all four, but **it has no production caller**
+— only its unit test runs it — so it is the taxonomy this document uses, not something a frame
+reports. Wiring it into the fetch path would make gate 3 nameable on the device rather than
+inferred from a log line.
 
 1. **Anchors.** The subject must be in the store. Fixed by `RootBundle` (below).
 2. **Cipher suites.** OkHttp 3.12's ECDSA suites are all AEAD, and this platform's OpenSSL has no
@@ -58,6 +64,10 @@ report, work out which gate you are at. `/state`'s `trust` block answers three o
    anchor bundle buys nothing. Compare `/state`'s `nowMs` against your own clock before believing
    any other diagnosis. (Measured EO2 clock: correct.)
 
+All four are properties of an outbound HTTPS connection. A frame configured only to show the files
+uploaded to itself — one `{"type":"local"}` backend, no `https://` address anywhere in its
+configuration — makes no TLS connection to fetch media and so consults no certificate at all.
+
 ## How this app now trusts
 
 Two mechanisms, at two ranges. Both read the same generated file, so there is one bundle to keep
@@ -81,9 +91,11 @@ list in gate 2 above, and the first draft of this change got that backwards.
 
 **Measured on a bench EO2** (`/state`'s `trust` block, app build with this change installed):
 `mode=merged`, `platformAnchors=156`, `trustedAnchors=164` — the ROM's own 156 anchors enumerated
-through its provider, plus the 8 shipped roots it was missing. The census reproduced the host-side
-measurements exactly (`readable=true`, `total=156`, `expired=63`, `unparseable=0`), which also proves
-the app uid can read `/system/etc/security/cacerts` under SELinux enforcing.
+through its provider, plus the 8 shipped roots that particular device was missing. That 8 is one
+frame's gap, not the size of the bundle, which is **10** — see "Where the roots come from". The
+census reproduced the host-side measurements exactly (`readable=true`, `total=156`, `expired=63`,
+`unparseable=0`), which also proves the app uid can read `/system/etc/security/cacerts` under
+SELinux enforcing.
 
 Getting there caught a bug no unit test could: the first version asked for
 `TrustManagerFactory.getInstance("X.509")`. A workstation's JDK accepts that spelling as an alias, and
@@ -130,13 +142,14 @@ guess dressed as a plan.
 
 ## Where the roots come from
 
-`certs/roots/*.pem`, one pure PEM each, with provenance and SHA-256 fingerprints in
-[`certs/roots/README.md`](../certs/roots/README.md). They are compiled into the APK rather than
-downloaded because the APK is already authenticated by signature (`com.aphex3k.update`), and a second
-fetch path for trust material would mean a second verifier and a second set of failure modes for no
-gain. `res/raw` and `assets/` are avoided on purpose: release builds run `shrinkResources = true`, and
-a trust anchor that a resource-shrinking step can decide is unreferenced is the wrong thing to
-discover on a frame behind glass.
+**Ten** roots: `certs/roots/*.pem`, one pure PEM each, with provenance and SHA-256 fingerprints in
+[`certs/roots/README.md`](../certs/roots/README.md). `RootBundle.ENTRIES` carries the same ten — it is
+generated from that directory — and `/state`'s `trust.bundleSize` reports the number on the device.
+They are compiled into the APK rather than downloaded because the APK is already authenticated by
+signature (`com.aphex3k.update`), and a second fetch path for trust material would mean a second
+verifier and a second set of failure modes for no gain. `res/raw` and `assets/` are avoided on
+purpose: release builds run `shrinkResources = true`, and a trust anchor that a resource-shrinking
+step can decide is unreferenced is the wrong thing to discover on a frame behind glass.
 
 Regenerate with:
 
@@ -149,8 +162,13 @@ or disagrees with its own DER encoding, and `RootBundleTest` re-proves all of it
 file on every test run — including that each entry is genuinely self-signed, because an intermediate
 is not an anchor.
 
-The switch is `trust_bundle` in the app's default SharedPreferences, **on by default** and never
-exported. That is the opposite of `trusted_network` and `loopback_adb`, and deliberately so: those
+The switch is the `trust_bundle` key in the app's **default SharedPreferences** —
+`/data/data/com.aphex3k.eo1/shared_prefs/com.aphex3k.eo1_preferences.xml`, read as
+`SettingsManager.PREF_TRUST_BUNDLE` by `SettingsManager.isTrustBundleEnabled()` and
+`ApiServiceGenerator`, **on by default** (the key is usually absent, because absence is the default)
+and never exported. There is **no UI for it**: the options dialog has no checkbox and no web route
+writes it, so switching it off means editing that file from a root or `adb` shell. That is the
+opposite of `trusted_network` and `loopback_adb`, and deliberately so: those
 grant a privilege, so nothing happens until an operator asks; this one trusts a set of public roots
 that arrived inside an APK the frame already verified. The failure it protects against is the quiet
 one. Off restores exactly the pre-feature behaviour, which is why the escape hatch does not need to be
