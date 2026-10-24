@@ -30,14 +30,25 @@ removes an anchor as part of installing one.
 ## Four gates, not one
 
 A frame can have a perfect anchor set and still fail to connect. Before spending an install on a
-report, work out which gate you are at. `/state`'s `trust` block answers gates 1, 2 and 4 — the
-anchor counts and `missingBundleAnchors`, `gates` (`anyEcdsa`, `anyAead`, `suiteCount`, the suite
-list), and `nowMs` read against your own clock. Gate 3 is answered by no route: it shows up only in
-the text of the failure itself, which is why the symptom is spelled out under it.
-`TrustCensus.classifyFailure` sorts an exception into all four, but **it has no production caller**
-— only its unit test runs it — so it is the taxonomy this document uses, not something a frame
-reports. Wiring it into the fetch path would make gate 3 nameable on the device rather than
-inferred from a log line.
+report, work out which gate you are at. `/state`'s `trust` block answers gates 1, 2 and 4 on a frame
+that is talking to its server — the anchor counts and `missingBundleAnchors`, `gates` (`anyEcdsa`,
+`anyAead`, `suiteCount`, the suite list), and `nowMs` read against your own clock. Gate 3 is invisible
+until something fails, because it is the server's decision rather than the device's.
+
+`TrustCensus.classifyFailure` sorts a failure into the four, and the frame reports that verdict
+instead of leaving you to infer it from exception text. `TrustCensus.gateNote` appends
+`[TLS gate: NAME]` to a backend's last-fetch record — which is what the state dump and a **Capture
+now** report print on their `backends:` lines — and to an update's `lastError`, which `/state` shows
+in its `update` block and the page shows beside the version. The names map onto the gates below:
+`TRUST_ANCHOR_MISSING` is gate 1, `TLS_PROTOCOL` gates 2 or 3, `NO_SHARED_CIPHER` gate 3, and
+`CERT_EXPIRED` / `CERT_NOT_YET_VALID_CHECK_CLOCK` gate 4.
+
+It appends **nothing** when the failure was never about trust. A timeout, a refused connection or a
+DNS failure keeps its bare message, because the classification's whole purpose is to stop an operator
+reinstalling roots against a dead radio — so the absence of a `TLS gate` note is itself a finding,
+and the more common one. The note lives on the record rather than in a remembered global: a later
+healthy connection must not have to know to clear it, and `/logs` still shows the raw
+`SSLHandshakeException`, which carries the detail this one summarises.
 
 1. **Anchors.** The subject must be in the store. Fixed by `RootBundle` (below).
 2. **Cipher suites.** OkHttp 3.12's ECDSA suites are all AEAD, and this platform's OpenSSL has no

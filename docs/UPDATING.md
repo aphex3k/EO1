@@ -122,6 +122,7 @@ the only install mode in which a frame truly updates itself unattended.
 | Staged but not installed | `/logs` says which transport failed. If `needsHumanConfirmation` is set, no silent install is possible on that frame: `/control?action=install-staged` (turns the screen on and shows the confirmation dialog there) |
 | Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
 | Force a re-check now | `/control?action=check-updates` |
+| Nothing ever arrives, and `lastError` says `manifest-fetch` or `download-failed` with an `SSLHandshakeException` | If the update host is HTTPS, this is a TLS gate, not a missing release: `lastError` carries a `[TLS gate: NAME]` note naming it. An empty note means the failure was never about certificates — the host is unreachable, not untrusted. See [docs/TRUST.md](TRUST.md) |
 
 The index page exposes **Check updates** / **Install on the frame** / **Update reset** buttons, and
 prints a standing notice there when an update is staged but waiting on a person.

@@ -332,8 +332,10 @@ on a live EO2, 63 of them past their own expiry, and none of them Let's Encrypt'
 certificate was once simply unvalidatable. The app enables TLS 1.2 itself and merges current public
 roots into its own connections, and merging may only ever *add*: a narrowed set would break hosts that
 work today. Four gates decide whether a connection succeeds — anchors, cipher suites, the server's own
-cipher policy, and a device clock this app never syncs — and [docs/TRUST.md](docs/TRUST.md) names
-which one you hit. A frame whose only source is its own uploads consults no certificate at all.
+cipher policy, and a device clock this app never syncs — and a frame that cannot connect now says
+which one: its backend record and its update error string carry a `[TLS gate: …]` note, and carry no
+note at all when the failure was never about certificates. [docs/TRUST.md](docs/TRUST.md) explains the
+four. A frame whose only source is its own uploads consults no certificate at all.
 
 **Keeping it current.** The frame can update itself: manifest over plain HTTP, four verification gates,
 headless install, and a forward-only rule that never downgrades or uninstalls. That is a chapter of its
