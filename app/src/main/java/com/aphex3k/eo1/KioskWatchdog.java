@@ -65,6 +65,12 @@ public final class KioskWatchdog {
     public static final int MAX_REPAIR_ATTEMPTS = 3;
     /** Minimum spacing between self-restarts of our own process. */
     public static final long SELF_RESTART_COOLDOWN_MS = 10 * 60_000L;
+    /**
+     * Minimum spacing between re-assertions of a display hold the frame should already have held.
+     * Deliberately far shorter than the ladder's pacing: an unheld panel is a frame showing a photo
+     * nobody can read, and the fix is one flag, not an escalation.
+     */
+    public static final long CLAIM_REPAIR_COOLDOWN_MS = 5 * 60_000L;
 
     public static final int LEVEL_NONE = 0;
     public static final int LEVEL_FORCE_ROTATION = 1;
@@ -93,6 +99,20 @@ public final class KioskWatchdog {
         boolean isPaused();
 
         boolean screenShouldBeOn();
+
+        /**
+         * Whether the window is actually holding the panel up right now — the {@code KEEP_SCREEN_ON}
+         * flag read back from the live attributes, not {@link #screenShouldBeOn()}, which is only the
+         * app's belief. A frame can believe and display differently, and when it does the panel falls
+         * to the ROM's standby dim: below the user's floor, unmoved by {@code screenBrightness}.
+         */
+        boolean screenHoldClaimed();
+
+        /**
+         * Re-assert the display hold on the UI thread. Asynchronous and idempotent: the caller is a
+         * watchdog timer, and the activity that owns the window is the only thing allowed to touch it.
+         */
+        void reassertScreenHold();
 
         /** Configured rotation interval in ms. */
         long intervalMs();
@@ -158,6 +178,8 @@ public final class KioskWatchdog {
     private long lastHeartbeatAtMs = 0L;
     private long lastSelfRestartAtMs = 0L;
     private long lastRepairAtMs = 0L;
+    /** When an unasserted display hold was last re-asserted; see {@link #CLAIM_REPAIR_COOLDOWN_MS}. */
+    private long lastClaimRepairAtMs = 0L;
     private int repairAttempts = 0;
     /** True when the ladder ended at a reboot rung the user has not permitted. */
     private boolean rebootBlocked = false;
@@ -350,6 +372,20 @@ public final class KioskWatchdog {
             lastSelfRestartAtMs = now;
             act(LEVEL_SELF_RESTART, stale, now);
             return;
+        }
+
+        // The claim, not the clock. A panel nobody is holding up is invisible to every age-driven
+        // signal in this method — the frame is rotating, the main loop is turning over, the network is
+        // up — and only the backlight is wrong, sitting at the ROM's standby dim while {@code /state}
+        // reports a correct level. So it is asserted here rather than climbed toward as a rung: there
+        // is nothing above it that would do a better job, and a reboot would certainly not. It cannot
+        // escalate on its own, and a frame whose rotation is genuinely wedged still takes the ladder.
+        if (screenOn && !host.screenHoldClaimed()
+                && now - lastClaimRepairAtMs >= CLAIM_REPAIR_COOLDOWN_MS) {
+            lastClaimRepairAtMs = now;
+            host.reassertScreenHold();
+            host.logWatchdogEvent("display hold not asserted while the screen should be on"
+                    + " — re-asserted (stale " + (stale / 60_000L) + "m, rotation healthy)", true);
         }
 
         if (wanted == LEVEL_REBOOT && !networkUp(now)

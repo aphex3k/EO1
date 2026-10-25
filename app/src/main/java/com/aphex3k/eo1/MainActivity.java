@@ -216,6 +216,26 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * dim itself below the user's level. -1 means nothing has been applied yet.
      */
     private volatile float lastAppliedBrightness = -1.0f;
+    /**
+     * When this process last asserted the panel hold — see {@link #claimDisplayHold()}. 0 before the
+     * first assert. {@code /state} pairs it with a live read of the window flag rather than this
+     * timestamp, because the question this field exists to answer is "when did we ask for this", and
+     * the question that gets a frame fixed is "is it still being held".
+     */
+    private volatile long screenHoldAtMs = 0L;
+    /**
+     * How many times the hold had to be ADDED to a window this process already believed it held. A
+     * first assert is ordinary startup; a repair means the panel went unheld while the app was busy
+     * showing it a picture, which is the event {@code /state}'s {@code hold.repairs} reports.
+     */
+    private volatile int screenHoldRepairs = 0;
+    /**
+     * True between a legitimate release and the next assert — quiet hours ending, or an Activity
+     * re-creation handing its window over. Adding the flag back after one of those is the ordinary
+     * wake, not a repair, and counting it as one would write a false "it went dark by itself" line
+     * every morning at the end of the quiet window.
+     */
+    private volatile boolean screenHoldReleased = false;
     private ConnectionManager connectionManager;
     private AppLogger appLogger;
     private WebServer webServer;
@@ -229,7 +249,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static volatile int sActivityCreateCount = 0;
     /** Process start, for the same reason: uptime with a low create count means neither happened. */
     private static final long PROCESS_START_MS = System.currentTimeMillis();
-    private PowerManager.WakeLock screenOffWakeLock;
+    /** Volatile because {@code /state} reads {@code isHeld()} off the web server's thread. */
+    private volatile PowerManager.WakeLock screenOffWakeLock;
     /**
      * Reconciles shouldTheScreenBeOn with the real panel. On the EO2 the physical button is a
      * KEY_POWER intercepted by the OS (PhoneWindowManager), so the app's key handlers never fire
@@ -842,6 +863,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // that no longer exists.
             this.brightnessManager.shutdown();
         }
+        // And the same for the display: this instance's window is going away with whatever flags it
+        // holds, while the instance replacing it builds a fresh PhoneWindow that carries none. Held
+        // dimly and claimed nowhere is precisely the state that reads as a frame dimming itself, so
+        // the outgoing instance lets go of its lock here — the new one asserts its own in onCreate.
+        releaseDisplayHold();
         if (webView != null) {
             WebView view = webView;
             webView = null;
@@ -876,9 +902,140 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastAppliedBrightness = brightness;
     }
 
-    /** Asks the brightness manager what the panel should be showing and puts that on the hardware. */
+    /**
+     * Asks the brightness manager what the panel should be showing and puts that on the hardware —
+     * and holds the panel up to show it, whenever the app believes the screen should be on.
+     *
+     * <p>The two belong together because they answer to the same belief. Written alone, a level is a
+     * request the display may ignore: on a device that has drifted into its standby dim state the
+     * {@code screenBrightness} override does not drive the backlight at all, which is how a frame
+     * came to report {@code applied: 0.80} while showing a near-black picture. Asking twice is free,
+     * so no caller has to remember to hold anything.
+     */
     private void applyCurrentBrightness() {
+        if (brightnessManager.getShouldTheScreenBeOn()) {
+            claimDisplayHold();
+        }
         writeScreenBrightness(brightnessManager.currentBrightness());
+    }
+
+    /**
+     * Claims the display for as long as this process believes the screen should be on: the window flag
+     * that makes the window manager keep a bright wake lock on our behalf, plus the dim lock that
+     * wakes a sleeping panel on the way. Idempotent — repeat calls add no flags, no lock references
+     * and no log lines — which is the entire point: a claim is a LEVEL this app must go on holding,
+     * not an edge it gets to act on once.
+     *
+     * <p>Asserting it only from the screen-on transitions is what let a frame that restarts inside
+     * on-hours run the rest of its life unheld. {@code shouldTheScreenBeOn} starts true, the
+     * quiet-hours scheduler seeds its edge memory from the wall clock, so a process born in a
+     * non-quiet minute sees no transition, never runs the wake path, and leaves the panel to the
+     * ROM's own standby: dim — far below the user's floor, and immune to {@code screenBrightness} —
+     * and then off. Every rung the watchdog had for that frame read as healthy, because rotation,
+     * the main loop and the network all were.
+     */
+    private void claimDisplayHold() {
+        final boolean wasFlagged = screenHoldFlagPresent();
+        // Nothing to repair on a first assert, and nothing to repair after this process put the panel
+        // down on purpose. A flag that went missing with no release in between is the report.
+        final boolean expectedToBeAbsent = screenHoldAtMs == 0L || screenHoldReleased;
+
+        Window window = getWindow();
+        window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        acquireDisplayWakeLock();
+
+        screenHoldAtMs = System.currentTimeMillis();
+        screenHoldReleased = false;
+
+        if (!wasFlagged && !expectedToBeAbsent) {
+            screenHoldRepairs++;
+            // Said out loud, and in the log that survives: this is the frame that went dark by
+            // itself, not the one that never came up. logcat holds ~13 minutes.
+            String line = "display hold was NOT asserted although the screen should be on"
+                    + " — re-asserted (repair #" + screenHoldRepairs + ")";
+            if (appLogger != null) {
+                appLogger.info(TAG, line);
+            }
+            debugInformationProvided(new DebugInformation("screenHold", line));
+        }
+    }
+
+    /**
+     * Drops the claim. The only counterpart to {@link #claimDisplayHold()}: quiet hours and the
+     * screen-off paths release the panel so the device can do what its own power policy wants.
+     */
+    private void releaseDisplayHold() {
+        Window window = this.getWindow();
+        window.clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        screenHoldReleased = true;
+
+        PowerManager.WakeLock lock = this.screenOffWakeLock;
+        if (lock != null) {
+            try {
+                if (lock.isHeld()) {
+                    lock.release();
+                    debugInformationProvided(new DebugInformation("screenOffWakeLock", "released"));
+                }
+            }
+            catch (Exception e) {
+                handleException(e);
+            }
+        }
+    }
+
+    /**
+     * The wake lock behind the claim, made once per process instead of once per call. Reference
+     * counted by default, so an {@code acquire()} from every Activity instance leaves a held lock no
+     * later instance can name — and a {@code SCREEN_DIM} lock left held is itself the dimming this
+     * claim exists to outrank. Non-reference-counted plus {@code isHeld()} makes assert and release
+     * strictly paired, however many times the on-path runs.
+     */
+    @SuppressLint("WakelockTimeout")
+    private void acquireDisplayWakeLock() {
+        try {
+            PowerManager.WakeLock lock = this.screenOffWakeLock;
+            if (lock == null) {
+                PowerManager powerManager = (PowerManager) this.getSystemService(POWER_SERVICE);
+                if (powerManager == null) {
+                    return;
+                }
+                lock = powerManager.newWakeLock(
+                        ACQUIRE_CAUSES_WAKEUP | SCREEN_DIM_WAKE_LOCK, "com.aphex3k.eo1:WAKE_LOCK");
+                if (lock == null) {
+                    return;
+                }
+                lock.setReferenceCounted(false);
+                this.screenOffWakeLock = lock;
+            }
+            if (!lock.isHeld()) {
+                lock.acquire();
+                debugInformationProvided(new DebugInformation("screenOffWakeLock", "acquired"));
+            }
+        } catch (Exception e) {
+            handleException(e);
+        }
+    }
+
+    /**
+     * Whether the window this activity shows actually carries {@code FLAG_KEEP_SCREEN_ON} right now —
+     * a read of the live attributes, not a remembered intention, and safe from any thread: it is a
+     * field read on the layout params, and it exists so {@code /state} can tell "we asked for 0.8"
+     * apart from "we asked for 0.8 into a panel nobody was holding up".
+     */
+    private boolean screenHoldFlagPresent() {
+        try {
+            Window window = getWindow();
+            if (window == null) {
+                return false;
+            }
+            WindowManager.LayoutParams attributes = window.getAttributes();
+            return attributes != null
+                    && (attributes.flags & WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON) != 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Override
@@ -925,14 +1082,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private void turnScreenOff() {
         cancelVideoWatchdog();
-        Window window = this.getWindow();
-        window.clearFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
-        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
-        if (screenOffWakeLock != null) {
-            screenOffWakeLock.release();
-            debugInformationProvided(new DebugInformation("screenOffWakeLock", "released"));
-        }
+        releaseDisplayHold();
 
         videoPlayer.setVisibility(View.INVISIBLE);
         imageView.setVisibility(View.INVISIBLE);
@@ -943,24 +1093,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /**
      * Turn on the screen and gain control over screen brightness
      */
-    @SuppressLint("WakelockTimeout")
     private void turnScreenOn() {
-        Window window = this.getWindow();
-        window.addFlags(WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON);
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-
-        try {
-            PowerManager powerManager = (PowerManager) this.getSystemService(POWER_SERVICE);
-            if (powerManager != null) {
-                screenOffWakeLock = powerManager.newWakeLock(ACQUIRE_CAUSES_WAKEUP | SCREEN_DIM_WAKE_LOCK, "com.aphex3k.eo1:WAKE_LOCK");
-                if (screenOffWakeLock != null) {
-                    screenOffWakeLock.acquire();
-                    debugInformationProvided(new DebugInformation("screenOffWakeLock", "acquired"));
-                }
-            }
-        } catch (Exception e) {
-            handleException(e);
-        }
+        // The claim is asserted here and from applyCurrentBrightness, which covers the paths that
+        // never reach a transition at all. Overlapping on purpose: this reveals what turnScreenOff
+        // hid, and the reveal has to land on a panel that is being held up.
+        claimDisplayHold();
 
         if (lastVisibleView != null) {
             lastVisibleView.setVisibility(View.VISIBLE);
@@ -1008,6 +1145,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // A tap is also "wake up" — quiet hours may have the panel dark on a level the user
         // already chose. Everything after that is the manager's: it steps, persists, and applies.
         this.brightnessManager.setShouldTheScreenBeOn(true);
+        // Woken, not just believed. setShouldTheScreenBeOn no-ops when the belief already says "on",
+        // which is the common case, and the case where it matters most: on a frame whose panel was
+        // never claimed the tap would otherwise move a number and leave the wall exactly as dark as
+        // it was — which is what a web "Brightness+" report of "fired, nothing changed" really is.
+        // Revealing comes from here too: a press during quiet hours sets a level on views that
+        // turnScreenOff left INVISIBLE, and only this path shows them again.
+        turnScreenOn();
         if (!this.brightnessManager.raiseMinimumBrightnessStep(via) && appLogger != null) {
             // The panel moved and the store did not: this level is gone at the next boot, and that
             // is the report this code path exists to answer. logcat alone would not survive it.
@@ -1063,13 +1207,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 + " inQuiet=" + inQuietHours
                 + " screenOn=" + shouldBeOn);
 
-        if (brightnessManager.getShouldTheScreenBeOn() != shouldBeOn) {
+        final boolean changed = brightnessManager.getShouldTheScreenBeOn() != shouldBeOn;
+        if (changed) {
             brightnessManager.setShouldTheScreenBeOn(shouldBeOn);
-            if (shouldBeOn) {
-                turnScreenOn();
-            } else {
-                turnScreenOff();
-            }
+        }
+
+        if (shouldBeOn) {
+            // Asserted whenever the schedule speaks, not only on the edge into it. A process born
+            // inside a non-quiet minute has no edge to act on — the scheduler seeds its memory of the
+            // last state from the clock, and the belief already says "on" — so an edge-only wake
+            // leaves it running for days on a panel it never asked to be awake. turnScreenOn is
+            // idempotent, so re-running it costs a flag check and nothing else.
+            turnScreenOn();
+        } else if (changed) {
+            // The off path stays edge-triggered on purpose: it hides the views, cancels an armed
+            // video paint watchdog and freezes the kiosk page, none of which is safe to re-run every
+            // time the loop restarts.
+            turnScreenOff();
         }
         logScreenAndTimerState();
     }
@@ -2016,6 +2170,26 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public boolean screenShouldBeOn() {
         return brightnessManager.getShouldTheScreenBeOn();
+    }
+
+    @Override
+    public boolean screenHoldClaimed() {
+        // The live window flag, not the belief above — a watchdog that asked the belief could never
+        // see the frame it is here to catch. Reads attributes cross-thread on purpose: this is a
+        // diagnostic of a window the main thread may be busy not-serving.
+        return screenHoldFlagPresent();
+    }
+
+    @Override
+    public void reassertScreenHold() {
+        // The window belongs to the UI thread. The claim re-reads the flags and counts a repair only
+        // when they were genuinely missing, so a queued repair that lands after an ordinary assert
+        // costs nothing and says nothing.
+        runOnUiThread(() -> {
+            if (brightnessManager != null && brightnessManager.getShouldTheScreenBeOn()) {
+                claimDisplayHold();
+            }
+        });
     }
 
     @Override
@@ -3348,6 +3522,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         brightness.addProperty("applied", lastAppliedBrightness);
         brightness.addProperty("lastLightValue", brightnessManager.lastLightValue());
         brightness.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
+
+        // The display hold, READ rather than remembered. `applied` above and `screenOn` here are both
+        // intent — what this process asked the window for — and on the frame that started inside a
+        // non-quiet minute both were true of a panel that had gone dark without being asked to stay
+        // up. `keepScreenOn` is the live window flag and `wakeLockHeld` the lock behind it, so
+        // "applied 0.8, keepScreenOn false" is this whole report in two fields.
+        JsonObject hold = new JsonObject();
+        hold.addProperty("keepScreenOn", screenHoldFlagPresent());
+        PowerManager.WakeLock displayLock = screenOffWakeLock;
+        hold.addProperty("wakeLockHeld", displayLock != null && displayLock.isHeld());
+        hold.addProperty("assertedAtMs", screenHoldAtMs);
+        hold.addProperty("repairs", screenHoldRepairs);
+        brightness.add("hold", hold);
 
         JsonObject lastChange = new JsonObject();
         lastChange.addProperty("from", brightnessManager.changedFromStep());
