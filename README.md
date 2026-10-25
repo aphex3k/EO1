@@ -8,7 +8,10 @@ Where the pictures come from is your choice: files you upload straight to the fr
 LAN, an [immich.app](https://immich.app/) server you host, or web pages. All three merge into one
 rotation. Nothing in this app contacts a host you did not put into its configuration.
 
-![photo of eo1 custom app development](_img/IMG_1451.jpg) ![photo of eo1 running custom app](_img/IMG_1452.jpg)
+There is a short front page for all of this at <https://aphex3k.github.io/EO1/> — it is a card, not a
+manual, and everything it says is expanded in the documents linked at the end of this one.
+
+![photo of eo1 custom app development](docs/assets/IMG_1451.jpg) ![photo of eo1 running custom app](docs/assets/IMG_1452.jpg)
 
 This concept guarantees that you control all aspects of the images displayed on your EO1 and/or EO2 and they will never go offline or stop displaying art ever again, because someone else decided to do so!
 
