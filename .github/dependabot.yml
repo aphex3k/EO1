@@ -79,7 +79,10 @@ updates:
         # Retrofit 2.7.0 CHANGELOG, verbatim: "This release changes the minimum requirements
         # to Java 8+ or Android 5+." 2.7.0 … 2.12.0 AND 3.0.0 are all published, so a ceiling
         # at >= 3.0.0 (an earlier draft) would leave eight API-21-only stable releases flowing
-        # as ordinary minor updates. 2.6.0 -> 2.6.4 is a free, safe patch bump. WHY THE OKHTTP
+        # as ordinary minor updates. The pin is 2.6.4, taken by PR #85; 2.6.0 -> 2.6.4 was a free
+        # patch bump, and the raw().close() finding in docs/EO2-CAPABILITIES.md was re-read
+        # against the 2.6.4 jar rather than merely renumbered — parseResponse still swaps in a
+        # NoContentResponseBody and retrofit2.Response still has no close(). WHY THE OKHTTP
         # RULE CANNOT COVER THIS: ignore filters PRs for the okhttp COORDINATE, not resolution
         # — retrofit 2.12.0's POM requires okhttp 3.14.9 and Gradle's highest-wins would ship
         # that silently. Hence this explicit ceiling PLUS the okhttp `force` floor in
@@ -102,15 +105,21 @@ updates:
         # at 2.8.9, below the pin, so no security pressure exists.
       - dependency-name: "com.github.bumptech.glide:*"       # glide + compiler, one repo/tag/version (lockstep)
         versions: ["> 5.0.7"]
-        # 5.0.7 is the last API-19-capable release (minSdk 14, kotlin-free); the next PUBLISHED
-        # release, 5.0.9, declares minSdk 23 + kotlin-stdlib 2.2.10 + minCompileSdk 37 against
-        # this build's compileSdk 34. (Tag v5.0.8 carries the minSdk-23 note but was never
-        # published to Central: metadata is …5.0.5, 5.0.7, 5.0.9.) NOTE: from the current
-        # 4.16.0 this ceiling makes Dependabot propose 4.16.0 -> 5.0.7 on the first run — a
-        # Glide 4 -> 5 major that rewrites the AppGlideModule/annotation-processor contract
-        # this app's generated code (Eo1GlideModule) depends on. Give it one verified build
-        # before merging; it is allowed deliberately, not by accident. The `:*` selector and
-        # the `glide` group keep runtime and processor moving together.
+        # 5.0.7 is the last API-19-capable release: its AAR manifest declares minSdkVersion="14"
+        # and its Gradle module metadata carries no kotlin-stdlib — both read from the artifacts,
+        # not from release notes. The next PUBLISHED release, 5.0.9, declares minSdk 23 +
+        # kotlin-stdlib 2.2.10 + minCompileSdk 37 against this build's compileSdk 34. (Tag v5.0.8
+        # carries the minSdk-23 note but was never published to Central: metadata is
+        # …5.0.5, 5.0.7, 5.0.9.) Merged by PR #84. The warning this block used to carry was
+        # wrong: it said 4 -> 5 "rewrites the AppGlideModule / annotation-processor contract"
+        # this app depends on, and it does not. AppGlideModule is still abstract with no abstract
+        # methods, @GlideModule is still published, the java annotation processor still emits
+        # GeneratedAppGlideModule (KSP was added alongside it, for Kotlin), and RequestListener's
+        # two signatures are unchanged — so Eo1GlideModule needed no edit. What a build cannot
+        # show is that Glide 5 still paints a photo or a looping GIF on a KitKat panel, because no
+        # unit test reaches the display path; that half of the verification is a rotation on
+        # hardware. The `:*` selector and the `glide` group keep runtime and processor moving
+        # together.
       - dependency-name: "com.android.tools:desugar_jdk_libs*"
         versions: [">= 2.1.0"]
         # NOT an API-19 ceiling — 2.1.x is documented API-19-safe (its only stated floor is
@@ -159,23 +168,31 @@ updates:
       # here deletes the only automation that raises a stale pin after an advisory. They are
       # grouped in `build-toolchain` instead — EXCEPT the two whose next line is a functional
       # major that would break the AGP classpath:
-      - dependency-name: "io.netty:*"                        # 11 force lines at 4.1.137.Final. 4.2.x
+      - dependency-name: "io.netty:*"                        # 11 force lines at 4.1.139.Final. 4.2.x
         versions: [">= 4.2.0"]                               #   (published through 4.2.19) is a
         #                                                      functional major (transport/epoll, HTTP/2,
         #                                                      split native artifacts) against an AGP
         #                                                      classpath built on 4.1.x. 4.1.x is still a
         #                                                      maintained security line, so this costs zero CVE coverage.
       - dependency-name: "com.google.protobuf:*"
-        versions: [">= 4.0.0"]                               # 3.25.5 pinned; 4.x is wire-incompatible with AGP 8.7.
+        versions: [">= 4.0.0"]                               # 3.25.9 pinned; 4.x is wire-incompatible with AGP 8.7.
       # Left UNBOUNDED on purpose (build-time only, never dexed, patch flow is the point):
-      #   org.bouncycastle:* (1.85 -> 1.86), org.apache.commons:commons-compress,
+      #   org.bouncycastle:* (1.86), org.apache.commons:commons-compress,
       #   org.apache.commons:commons-lang3, commons-io:commons-io, org.bitbucket.b_c:jose4j,
       #   org.jdom:jdom2.
       #   Also unbounded, JVM-test-only and never in the APK (dependency-type is NOT supported
       #   for gradle, so these cannot be split from shipping deps by type — they are in no group,
       #   so they arrive as their own PRs): junit:junit (4.13.2 is the last JUnit 4) and
       #   org.mockito:mockito-core (its Java 11 floor binds the test JVM, not the frame; this
-      #   build already compiles at Java 21).
+      #   build already compiles at Java 21). UNBOUNDED BUT NOT FREE: mockito 5.24.0 brought
+      #   byte-buddy 1.17.7, whose jar carries class files at major version 68, and AGP's
+      #   JetifyTransform reads them with an ASM older than that — so a test-only bump failed
+      #   :app:compileDebugUnitTestJavaWithJavac, with nothing in the APK changed either way.
+      #   The fix is the android.jetifier.ignorelist=byte-buddy line in gradle.properties, not a
+      #   ceiling: byte-buddy is a pure-JVM mock-maker dependency with no com.android.support
+      #   references for jetify to rewrite, so exempting it is removing work rather than lowering
+      #   a guard. If a future mockito PR fails in JetifyTransform again, look for a second
+      #   pure-JVM jar its version newly drags in and add that name here — do not cap mockito.
 
     groups:
       # One PR per family that must never be seen half-updated. NOTE: values in

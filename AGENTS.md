@@ -141,16 +141,16 @@ next line's already-published alphas are caught. Keep this table and the yaml in
 | `com.squareup.retrofit2:*` | 2.6.4 | 2.7.0 "minimum requirements … Android 5+"; 2.12 pom drags okhttp 3.14.9 |
 | `com.squareup.okio:okio` | 1.17.6 | 2.x/3.x break the 1.x API surface okhttp 3.12 pins (okio 1.15.0) |
 | `com.google.code.gson:gson` | 2.10.1 | README table: 2.11.0+ = API 21, 2.15.0+ = API 24 (plain jar — fails at runtime, not compile) |
-| `com.github.bumptech.glide:*` (glide+compiler) | 5.0.7 | 5.0.9 → minSdk 23 + kotlin-stdlib + minCompileSdk 37; first run auto-proposes Glide 4→5, give it one verified build |
+| `com.github.bumptech.glide:*` (glide+compiler) | 5.0.7 | 5.0.9 → minSdk 23 + kotlin-stdlib + minCompileSdk 37. Merged 4.16.0 → 5.0.7 in #84: its AAR manifest says minSdk 14 with no kotlin-stdlib, and `AppGlideModule`/`@GlideModule`/the annotation processor/`RequestListener` are unchanged across the major — the older note here claiming 4→5 rewrote that contract was false |
 | `com.android.tools:desugar_jdk_libs*` | 2.0.4 (frozen) | 2.1.x is API-19-safe but decides D8's java.* backfill → NoSuchMethodError at runtime; move by hand + hardware |
 | `com.google.guava:guava` | 32.1.2 (frozen) | no minSdk bound; frozen as ~3MB dead dex (0 imports) + wrong (`-jre`) flavor — delete rather than maintain |
 | `com.vdurmont:semver4j` | 3.1.0 | last release ever; maintenance moved to `org.semver4j` (unreachable coordinate) |
 | `org.eclipse.paho:*` | 1.2.5 | project stopped releasing; not an API-19 bound |
 | `com.android.application` / `com.android.library` (AGP) | 8.7.3 (>= 8.8.0 ignored) | not API-19 — AGP↔Gradle mutual compatibility; moves as a pair with the wrapper |
 | `gradle-wrapper` | 8.9 (>= 8.10.0 ignored) | Gradle 9.x breaks AGP 8.7.3 + the lazy-buildConfig provenance path |
-| `io.netty:*` (root `force` pins) | 4.1.137 (>= 4.2.0 ignored) | 4.2 is a functional major vs the AGP 4.1.x classpath; 4.1.x still a maintained security line (no lost CVEs) |
-| `com.google.protobuf:*` (root `force` pins) | 3.25.5 (>= 4.0.0 ignored) | 4.x wire-incompatible with AGP 8.7 |
-| `junit`, `mockito-core` | unbounded | JVM-test-only, never dexed — Mockito's Java 11 floor binds the test host, not the frame |
+| `io.netty:*` (root `force` pins) | 4.1.139 (>= 4.2.0 ignored) | 4.2 is a functional major vs the AGP 4.1.x classpath; 4.1.x still a maintained security line (no lost CVEs) |
+| `com.google.protobuf:*` (root `force` pins) | 3.25.9 (>= 4.0.0 ignored) | 4.x wire-incompatible with AGP 8.7 |
+| `junit`, `mockito-core` | unbounded | JVM-test-only, never dexed — Mockito's Java 11 floor binds the test host, not the frame. Unbounded *because* `gradle.properties` carries `android.jetifier.ignorelist=byte-buddy`: mockito 5.24.0 drags byte-buddy 1.17.7 (class files at major 68) and AGP's JetifyTransform cannot read them, which failed `:app:compileDebugUnitTestJavaWithJavac` until #87 exempted that one jar |
 | `org.bouncycastle:*`, `commons-*`, `jose4j`, `jdom2` (root `force` pins) | unbounded | build-time only; leaving them flowable is the point — `ignore` would delete their only CVE automation |
 | `github-actions` ecosystem | unbounded | runners are `ubuntu-latest`; nothing installs into the APK |
 
