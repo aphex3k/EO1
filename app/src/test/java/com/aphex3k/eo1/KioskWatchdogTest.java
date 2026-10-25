@@ -24,6 +24,10 @@ public class KioskWatchdogTest {
         long now = 1_000_000L;
         boolean paused;
         boolean screenShouldBeOn = true;
+        /** True by default: a held panel is the ordinary case, and most cases here are about age. */
+        boolean screenHoldClaimed = true;
+        /** Kept out of {@link #actions} for the same reason as {@link #captures}. */
+        int holdReasserts;
         long intervalMs = 15 * MINUTE;
         long lastDisplayAtMs = now;
         long downloadInFlightMs;
@@ -51,6 +55,19 @@ public class KioskWatchdogTest {
         @Override
         public boolean screenShouldBeOn() {
             return screenShouldBeOn;
+        }
+
+        @Override
+        public boolean screenHoldClaimed() {
+            return screenHoldClaimed;
+        }
+
+        @Override
+        public void reassertScreenHold() {
+            holdReasserts++;
+            // Like the real activity, the repair lands on the UI thread and succeeds: a test that
+            // wants to see the same wedge fail can leave this false and count the repeats.
+            screenHoldClaimed = true;
         }
 
         @Override
@@ -254,6 +271,57 @@ public class KioskWatchdogTest {
         host.advance(2 * HOUR);
         tickTogether(MINUTE, 10);
         assertEquals(10, host.actions.size());
+    }
+
+    /**
+     * A frame that keeps showing pictures on a panel nobody is holding up. Every age-driven signal in
+     * the ladder is healthy for it — that is the whole problem — so the repair must happen without a
+     * rung being earned and without the log going quiet.
+     */
+    @Test
+    public void aPanelNobodyHeldUpIsReassertedWithoutTouchingTheLadder() {
+        host.screenHoldClaimed = false;
+        host.advance(MINUTE);
+        watchdog.tick();
+        assertEquals("one repair, on the UI-thread path, not as a rung", 1, host.holdReasserts);
+        assertEquals("the repair must not be counted as ladder action", 1, host.actions.size());
+        assertEquals(KioskWatchdog.LEVEL_NONE, watchdog.actedLevel());
+        assertTrue("the repair must reach the log", containsEvent("display hold"));
+    }
+
+    @Test
+    public void aHeldPanelIsNeverRepaired() {
+        tickTogether(MINUTE, 20);
+        assertEquals(0, host.holdReasserts);
+    }
+
+    @Test
+    public void quietHoursDoNotAskForAPanelTheScheduleWantsDark() {
+        host.screenShouldBeOn = false;
+        host.screenHoldClaimed = false;
+        tickTogether(MINUTE, 10);
+        assertEquals("an off screen is not an unheld screen", 0, host.holdReasserts);
+    }
+
+    @Test
+    public void aPanelThatKeepsLosingItsHoldIsPacedRatherThanSpammed() {
+        for (int i = 0; i < 30; i++) {
+            host.screenHoldClaimed = false;
+            host.advance(MINUTE);
+            watchdog.tick();
+        }
+        // Thirty minutes unheld, one repair per CLAIM_REPAIR_COOLDOWN_MS.
+        assertTrue("repairs were not paced: " + host.holdReasserts,
+                host.holdReasserts >= 4 && host.holdReasserts <= 8);
+    }
+
+    @Test
+    public void anUnheldPanelDoesNotExcuseAFrameThatAlsoStoppedRotating() {
+        host.screenHoldClaimed = false;
+        silentFor(KioskWatchdog.staleLimitMs(15 * MINUTE) + MINUTE);
+        tickTogether(MINUTE, 6);
+        assertTrue("the ladder still has to climb for a frame that is both stale and unheld",
+                watchdog.actedLevel() >= KioskWatchdog.LEVEL_FORCE_ROTATION);
     }
 
     /**
@@ -536,6 +604,15 @@ public class KioskWatchdogTest {
     }
 
     private boolean loggedContains(String needle) {
+        for (String event : host.events) {
+            if (event.contains(needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean containsEvent(String needle) {
         for (String event : host.events) {
             if (event.contains(needle)) {
                 return true;
