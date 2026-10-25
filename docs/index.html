@@ -1,0 +1,510 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>EO1 &amp; EO2 — the picture frame that outlived its own service</title>
+<meta name="description" content="Replacement Android software for the Electric Objects EO1 and EO2 wall displays. Pictures come from files you upload to the frame, a self-hosted Immich server, or a web page — never from a vendor cloud.">
+<meta property="og:title" content="EO1 &amp; EO2 — replacement software for a dead cloud's picture frames">
+<meta property="og:description" content="Nothing in this app contacts a host you did not put into its configuration.">
+<meta property="og:image" content="https://aphex3k.github.io/EO1/assets/IMG_1452.jpg">
+<meta property="og:type" content="website">
+<style>
+/*
+  Hand-written static card for the repository. It is deliberately not a product
+  site: no build step, no dependencies, no JavaScript, no remote fonts, and no
+  duplicated documentation — every fact that would rot lives in a markdown file
+  linked below, not on this page.
+
+  Two rules to keep when editing:
+  1. Nothing here carries a version number, a commit count or a line count.
+     There is no CI to regenerate them, so a stated number starts lying the week
+     it ships. Link to Releases instead of naming one.
+  2. The published site root is this directory. `../_img/` is outside it and
+     resolves to nothing here — images live in `assets/`.
+*/
+
+:root {
+  color-scheme: light dark;
+  --paper: #f3efe6;
+  --case: #fffdf8;
+  --ink: #1a1815;
+  --muted: #6a6357;
+  --rule: #d9d2c2;
+  --accent: #96391c;
+  --serif: ui-serif, "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --gutter: clamp(1.25rem, 5vw, 5rem);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #141312;
+    --case: #1d1b19;
+    --ink: #e8e3d9;
+    --muted: #9c9486;
+    --rule: #2e2b27;
+    --accent: #de8362;
+  }
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-text-size-adjust: 100%; }
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--serif);
+  font-size: clamp(1.0625rem, 0.4vw + 1rem, 1.1875rem);
+  line-height: 1.62;
+  text-wrap: pretty;
+}
+
+p { margin: 0 0 1.1em; max-width: 66ch; }
+
+a {
+  color: var(--accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+}
+a:hover { text-decoration-thickness: 2px; }
+a:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+.eyebrow, .band-cap, figcaption, .plate-no, dl.meta dt, .credit {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--muted);
+  font-weight: 400;
+}
+
+section, header.wall, footer { padding-inline: var(--gutter); }
+.wrap { max-width: 1180px; margin: 0 auto; }
+
+/* ── the wall ─────────────────────────────────────────────────────────── */
+
+header.wall { padding-block: clamp(3.5rem, 11vh, 7.5rem) clamp(2.5rem, 7vh, 5rem); }
+
+/* The hero photograph is 403px wide; these columns hold it at roughly 1:1 in its mat. */
+.case {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 0.8fr);
+  gap: clamp(2rem, 6vw, 5.5rem);
+  align-items: center;
+}
+
+h1 {
+  font-size: clamp(2.15rem, 5.6vw, 3.7rem);
+  line-height: 1.06;
+  letter-spacing: -0.018em;
+  font-weight: 400;
+  margin: 0.5rem 0 1.35rem;
+  max-width: 17ch;
+  text-wrap: balance;
+}
+
+.lede { font-size: 1.06em; color: var(--ink); }
+.lede em { font-style: normal; border-bottom: 1px solid var(--rule); }
+
+.assure {
+  margin-top: 2.2rem;
+  padding-left: 1.15rem;
+  border-left: 2px solid var(--accent);
+  font-size: clamp(1.15rem, 1.6vw, 1.4rem);
+  line-height: 1.42;
+  font-style: italic;
+  max-width: 44ch;
+}
+
+figure { margin: 0; }
+
+figure.plate {
+  background: var(--case);
+  border: 1px solid var(--rule);
+  padding: clamp(0.6rem, 1.4vw, 1.1rem);
+  box-shadow: 0 18px 44px -28px rgba(0 0 0 / 0.5);
+}
+figure.plate img { display: block; width: 100%; height: auto; }
+figure.plate figcaption { padding: 0.75rem 0.15rem 0.1rem; text-transform: none; letter-spacing: 0.04em; }
+
+/* ── the accession label ──────────────────────────────────────────────── */
+
+.band {
+  border-block: 1px solid var(--rule);
+  background: var(--case);
+}
+.band .wrap { padding-block: clamp(1.75rem, 4vh, 2.75rem); }
+.band img { display: block; width: 100%; max-width: 1000px; height: auto; margin-inline: auto; }
+.band .band-cap { max-width: 70ch; margin: 1.1rem auto 0; text-transform: none; letter-spacing: 0.05em; }
+
+/* ── the placard ──────────────────────────────────────────────────────── */
+
+.placard { padding-block: clamp(3rem, 8vh, 5.5rem); }
+.placard h2, .sources h2, .cost h2, .plates h2, .skin h2 {
+  font-weight: 400;
+  font-size: clamp(1.5rem, 2.6vw, 2.05rem);
+  letter-spacing: -0.01em;
+  line-height: 1.2;
+  margin: 0 0 2.1rem;
+  max-width: 24ch;
+  text-wrap: balance;
+}
+
+dl.meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 21rem), 1fr));
+  gap: 0 clamp(2rem, 6vw, 5rem);
+  margin: 0;
+}
+dl.meta > div {
+  display: grid;
+  grid-template-columns: 8.5rem minmax(0, 1fr);
+  gap: 1rem;
+  padding: 0.72rem 0;
+  border-bottom: 1px solid var(--rule);
+  align-items: baseline;
+}
+dl.meta dt { white-space: nowrap; }
+dl.meta dd {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.86rem;
+  line-height: 1.55;
+  letter-spacing: -0.005em;
+}
+
+/* ── three sources ────────────────────────────────────────────────────── */
+
+.sources { padding-block: clamp(3rem, 8vh, 5.5rem); border-top: 1px solid var(--rule); }
+.row {
+  display: grid;
+  grid-template-columns: 3.2rem minmax(0, 11rem) minmax(0, 1fr);
+  gap: clamp(0.75rem, 2vw, 2rem);
+  padding: 1.5rem 0;
+  border-top: 1px solid var(--rule);
+  align-items: start;
+}
+.row:first-of-type { border-top: 0; }
+.row .plate-no { color: var(--accent); padding-top: 0.45rem; }
+.row h3 { margin: 0; font-weight: 400; font-size: 1.2em; line-height: 1.3; }
+.row p { margin: 0; font-size: 0.94em; }
+.row .needs { display: block; font-family: var(--mono); font-size: 0.68rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 0.5em; }
+
+/* ── cost / honesty ───────────────────────────────────────────────────── */
+
+.cost { padding-block: clamp(3rem, 8vh, 5.5rem); border-top: 1px solid var(--rule); }
+.cost .case { grid-template-columns: minmax(0, 1fr) minmax(0, 21rem); align-items: start; }
+.cost ul { margin: 0; padding: 0; list-style: none; }
+.cost li {
+  padding: 0.95rem 0 0.95rem 1.6rem;
+  border-bottom: 1px solid var(--rule);
+  position: relative;
+  font-size: 0.97em;
+}
+.cost li::before {
+  content: "—";
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+}
+.cost li:first-child { border-top: 1px solid var(--rule); }
+.cost figure.plate { margin-top: 0.4rem; }
+
+/* ── under the skin ───────────────────────────────────────────────────── */
+
+.skin { padding-block: clamp(3rem, 8vh, 5rem); border-top: 1px solid var(--rule); }
+.skin .grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: clamp(1.25rem, 3vw, 2.5rem);
+  align-items: end;
+}
+.skin figure.plate img { aspect-ratio: 3 / 2; object-fit: cover; }
+
+/* ── plates (the documentation) ───────────────────────────────────────── */
+
+.plates { padding-block: clamp(3.5rem, 9vh, 6rem); border-top: 1px solid var(--rule); }
+ol.index { list-style: none; margin: 0; padding: 0; }
+ol.index li { border-bottom: 1px solid var(--rule); }
+ol.index li:first-child { border-top: 1px solid var(--rule); }
+ol.index a {
+  display: grid;
+  grid-template-columns: 4.4rem minmax(0, 1fr) minmax(0, 1.15fr) 1.8rem;
+  gap: clamp(0.75rem, 2vw, 2rem);
+  align-items: baseline;
+  padding: 1.4rem 0;
+  color: inherit;
+  text-decoration: none;
+  transition: padding-left 160ms ease;
+}
+ol.index a:hover, ol.index a:focus-visible { padding-left: 0.6rem; }
+ol.index .plate-no { color: var(--accent); }
+ol.index .doc { font-size: 1.13em; }
+ol.index .answers { font-size: 0.92em; color: var(--muted); }
+ol.index .arrow { font-family: var(--mono); text-align: right; color: var(--accent); }
+ol.index .file {
+  display: block;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-top: 0.35em;
+}
+
+/* ── footer ───────────────────────────────────────────────────────────── */
+
+footer {
+  border-top: 1px solid var(--rule);
+  padding-block: clamp(2.75rem, 7vh, 4.5rem);
+}
+footer .links { display: flex; flex-wrap: wrap; gap: clamp(1rem, 3vw, 2.5rem); margin-bottom: 2rem; }
+footer .links a { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 0.13em; text-transform: uppercase; }
+.credit { max-width: 62ch; line-height: 1.8; font-size: 0.78rem; text-transform: none; letter-spacing: 0.03em; }
+
+/* ── small screens ────────────────────────────────────────────────────── */
+
+@media (max-width: 740px) {
+  .case, .cost .case, .skin .grid { grid-template-columns: minmax(0, 1fr); }
+  .case { gap: 2.5rem; }
+  figure.plate { max-width: 26rem; }
+  dl.meta > div { grid-template-columns: minmax(0, 1fr); gap: 0.2rem; }
+  .row { grid-template-columns: 2.6rem minmax(0, 1fr); }
+  .row p { grid-column: 2; }
+  ol.index a { grid-template-columns: 3rem minmax(0, 1fr); }
+  ol.index .answers, ol.index .arrow { grid-column: 2; }
+  ol.index .answers { margin-top: 0.4em; }
+  ol.index .arrow { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  ol.index a { transition: none; }
+}
+
+/* A card should still be a card on paper. */
+@media print {
+  :root { --paper: #fff; --case: #fff; --ink: #000; --rule: #999; --accent: #000; }
+  body { font-size: 10.5pt; line-height: 1.45; }
+  header.wall { padding-block: 1.5rem; }
+  .band, .skin, img { display: none; }
+  a { text-decoration: none; color: #000; }
+  ol.index .file { color: #333; }
+}
+</style>
+</head>
+<body>
+
+<header class="wall">
+  <div class="wrap case">
+    <div>
+      <p class="eyebrow">Electric Objects &middot; EO1 &amp; EO2</p>
+      <h1>The frame didn&rsquo;t fail. The service behind it did.</h1>
+      <p class="lede">
+        These are wall displays that spent their working lives showing whatever a server told them
+        to. That server is gone. This is replacement Android software for the board inside
+        the glass, so the pictures come from you now: files you drop onto the frame over your own
+        network, a library you host yourself, or a web page you point it at &mdash; <em>merged into
+        one rotation</em>, on a schedule you set.
+      </p>
+      <p class="assure">Nothing in this app contacts a host you did not put into its configuration.</p>
+    </div>
+    <figure class="plate">
+      <img src="assets/IMG_1452.jpg" width="403" height="302"
+           alt="Two Electric Objects frames mounted side by side on a warm plaster wall, each showing a family photograph.">
+      <figcaption>Two frames, running. One LAN, no account.</figcaption>
+    </figure>
+  </div>
+</header>
+
+<div class="band">
+  <div class="wrap">
+    <img src="assets/eo1-display-model-fullwidth.jpg" width="1000" height="333" loading="lazy"
+         alt="Close-up of the label inside the frame: two barcodes and the panel part number LTM230HL07.">
+    <p class="band-cap">
+      LTM230HL07 &mdash; the sticker on the back of the panel. A 1920&times;1080 LCD mounted
+      sideways, which is why an EO1 shows <strong>1080&times;1920</strong> and why a landscape video
+      arrives cropped rather than letterboxed.
+    </p>
+  </div>
+</div>
+
+<section class="placard">
+  <div class="wrap">
+    <h2>What is on the label</h2>
+    <dl class="meta">
+      <div><dt>Object</dt><dd>Electric Objects EO1 / EO2, Geniatech hardware, Android 4.4.2 inside</dd></div>
+      <div><dt>Software</dt><dd>replaced end to end. Java only, API 19, no Kotlin, no ExoPlayer</dd></div>
+      <div><dt>Sources</dt><dd>local uploads &middot; Immich 3.x &middot; web pages, in one shuffled pass</dd></div>
+      <div><dt>Playback</dt><dd>Amlogic TsPlayer, platform MediaPlayer as the fallback</dd></div>
+      <div><dt>Still limits</dt><dd>jpg png gif webp bmp dng &mdash; not HEIF, not AVIF</dd></div>
+      <div><dt>Video limits</dt><dd>H.264, longest side 1920, 1080p30, under 15&nbsp;Mbit/s, muted</dd></div>
+      <div><dt>Storage</dt><dd>about 800&nbsp;MB usable, 1&nbsp;GiB per file, nothing transcoded on device</dd></div>
+      <div><dt>Trust</dt><dd>the ROM&rsquo;s roots date from 2013, so current ones ship in the APK</dd></div>
+      <div><dt>Controls</dt><dd>two soft keys on EO1, and a web page the frame serves itself on port 80, else 8080</dd></div>
+      <div><dt>Schedule</dt><dd>an interval in minutes, and quiet hours written as cron expressions</dd></div>
+      <div><dt>Recovery</dt><dd>re-rotate, redraw, repair Wi-Fi, restart the app, reboot &mdash; the last one only if you allow it</dd></div>
+      <div><dt>Builds</dt><dd>made and signed locally, published at <a href="https://github.com/aphex3k/EO1/releases" rel="noopener">Releases</a></dd></div>
+    </dl>
+  </div>
+</section>
+
+<section class="sources">
+  <div class="wrap">
+    <h2>Three ways a picture gets there</h2>
+
+    <div class="row">
+      <span class="plate-no">01</span>
+      <h3>Files you upload<br>to the frame</h3>
+      <p>
+        <span class="needs">Needs nothing</span>
+        No server, no account, no password, no certificate &mdash; the frame holds the files and
+        serves its own web page to receive them. This is the source that keeps working when
+        everything else is switched off.
+      </p>
+    </div>
+
+    <div class="row">
+      <span class="plate-no">02</span>
+      <h3>An Immich<br>server you host</h3>
+      <p>
+        <span class="needs">Needs Immich 3.x</span>
+        Login is an account&rsquo;s email and password; there is no API key. The frame rotates
+        everything that account can see, and it can carry several frames from several servers at
+        once. A server you do not run is a source you do not control.
+      </p>
+    </div>
+
+    <div class="row">
+      <span class="plate-no">03</span>
+      <h3>A web page,<br>rendered fresh</h3>
+      <p>
+        <span class="needs">Needs a URL</span>
+        One entry is one page, fetched again each time it comes up, in the browser that shipped with
+        Android 4.4. Plan on a LAN dashboard or a deliberately legacy page, not a modern SPA.
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="cost">
+  <div class="wrap case">
+    <div>
+      <h2>What it asks of you</h2>
+      <ul>
+        <li>An EO1 or an EO2 with a living panel. They surface secondhand, and the one you already
+          own is the cheapest one there is.</li>
+        <li>One install that needs hands: a keyboard and mouse through an EO1&rsquo;s OTG port and the
+          ROM&rsquo;s own browser, or <code>adb</code> on the network for an EO2. After that it is
+          browser-only.</li>
+        <li>Neither frame has a touchscreen. Never did. A pointer appears in exactly one step, ever.</li>
+        <li>Immich is optional, and it is something you run. A frame fed by its own uploads needs
+          nothing but the frame.</li>
+        <li>The LAN page is open plain HTTP with no login, by design: treat your network as the
+          perimeter.</li>
+      </ul>
+    </div>
+    <figure class="plate">
+      <img src="assets/IMG_1451.jpg" width="403" height="302" loading="lazy"
+           alt="A lit EO1 lying flat on a table showing a child's birthday photo, beside an open laptop, a keyboard and a mouse.">
+      <figcaption>The install, once.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section class="skin">
+  <div class="wrap">
+    <h2>Under the skin</h2>
+    <div class="grid">
+      <figure class="plate">
+        <img src="assets/eo1-motherboard-bottom-fullwidth.jpg" width="1000" height="667" loading="lazy"
+             alt="The frame's logic board photographed from below, shielding removed, connectors and flash storage visible.">
+        <figcaption>A board from 2015 that still has a future.</figcaption>
+      </figure>
+      <figure class="plate">
+        <img src="assets/eo1-light-sensor-halfwidth.jpg" width="500" height="333" loading="lazy"
+             alt="Macro of the small red ambient-light sensor board screwed to brushed metal, with four thin wires leaving frame.">
+        <figcaption>The light sensor EO1 has and EO2 does not.</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
+
+<section class="plates">
+  <div class="wrap">
+    <h2>The documentation</h2>
+    <p>
+      This page is a card, not the manual. The repository&rsquo;s markdown files are the authority
+      and are kept current; read them where they live.
+    </p>
+    <ol class="index">
+      <li><a href="https://github.com/aphex3k/EO1/blob/main/docs/SETUP.md" rel="noopener">
+        <span class="plate-no">01</span>
+        <span class="doc">Installing the APK<span class="file">docs/SETUP.md</span></span>
+        <span class="answers">Getting it onto the board once &mdash; two frames, two quite different routes, and the single step that needs a keyboard.</span>
+        <span class="arrow">&rarr;</span></a></li>
+
+      <li><a href="https://github.com/aphex3k/EO1/blob/main/docs/WEBSERVER.md" rel="noopener">
+        <span class="plate-no">02</span>
+        <span class="doc">The frame&rsquo;s LAN web server<span class="file">docs/WEBSERVER.md</span></span>
+        <span class="answers">Every route on the page the frame serves itself, and exactly what gates each one.</span>
+        <span class="arrow">&rarr;</span></a></li>
+
+      <li><a href="https://github.com/aphex3k/EO1/blob/main/docs/UPDATING.md" rel="noopener">
+        <span class="plate-no">03</span>
+        <span class="doc">Updating a frame<span class="file">docs/UPDATING.md</span></span>
+        <span class="answers">Self-update over plain HTTP, the four verification gates, headless install, and publishing a build.</span>
+        <span class="arrow">&rarr;</span></a></li>
+
+      <li><a href="https://github.com/aphex3k/EO1/blob/main/docs/TRUST.md" rel="noopener">
+        <span class="plate-no">04</span>
+        <span class="doc">TLS trust on a 2013 store<span class="file">docs/TRUST.md</span></span>
+        <span class="answers">Why a current certificate fails on this hardware, the four gates that decide it, and which one you tripped.</span>
+        <span class="arrow">&rarr;</span></a></li>
+
+      <li><a href="https://github.com/aphex3k/EO1/blob/main/docs/TSPLAYER.md" rel="noopener">
+        <span class="plate-no">05</span>
+        <span class="doc">TsPlayer playback<span class="file">docs/TSPLAYER.md</span></span>
+        <span class="answers">Amlogic video, why ExoPlayer is forbidden on this SoC, the failure ladder, and a watchdog that counts painted frames.</span>
+        <span class="arrow">&rarr;</span></a></li>
+
+      <li><a href="https://github.com/aphex3k/EO1/blob/main/docs/EO2-CAPABILITIES.md" rel="noopener">
+        <span class="plate-no">06</span>
+        <span class="doc">EO2 capabilities<span class="file">docs/EO2-CAPABILITIES.md</span></span>
+        <span class="answers">The measured evidence behind the EO1/EO2 parity table &mdash; sensors, buttons, ports, what each board actually has.</span>
+        <span class="arrow">&rarr;</span></a></li>
+
+      <li><a href="https://github.com/aphex3k/EO1/blob/main/EO1-specs.md" rel="noopener">
+        <span class="plate-no">07</span>
+        <span class="doc">EO1 hardware specifications<span class="file">EO1-specs.md</span></span>
+        <span class="answers">Dimensions, panel, lifetime, and the teardown the photographs here came from.</span>
+        <span class="arrow">&rarr;</span></a></li>
+    </ol>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="links">
+      <a href="https://github.com/aphex3k/EO1" rel="noopener">Repository</a>
+      <a href="https://github.com/aphex3k/EO1/releases/latest" rel="noopener">Latest release</a>
+      <a href="https://github.com/aphex3k/EO1/issues" rel="noopener">Issues</a>
+      <a href="https://github.com/aphex3k/EO1/blob/main/README.md" rel="noopener">The full guide</a>
+    </div>
+    <p class="credit">
+      A rewrite of <a href="https://github.com/spalt/EO1" rel="noopener">spalt/EO1</a>, whose author
+      started from the same premise that keeps this one alive: a frame stopped displaying because
+      someone, somewhere, decided to stop the service behind it. This page is
+      <code>docs/index.html</code> in that repository; it is a card, and the documentation above is
+      the thing to trust.
+    </p>
+  </div>
+</footer>
+
+</body>
+</html>

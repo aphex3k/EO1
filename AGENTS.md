@@ -11,6 +11,7 @@ Android home-screen replacement APK for Electric Objects **EO1** and **EO2** dig
 - TsPlayer / Amlogic video: [docs/TSPLAYER.md](docs/TSPLAYER.md)
 - LAN web server (upload / control / diagnostics): [docs/WEBSERVER.md](docs/WEBSERVER.md)
 - TLS trust and the 2013 CA store: [docs/TRUST.md](docs/TRUST.md)
+- GitHub Pages front page: [docs/index.html](docs/index.html) — a card that states the premise and links to the markdown, never a copy of it
 
 ## Source map
 
@@ -21,7 +22,18 @@ Android home-screen replacement APK for Electric Objects **EO1** and **EO2** dig
 | `docs/TSPLAYER.md` | Amlogic TsPlayer playback + MediaPlayer fallback |
 | `configuration_example.json` | Config template (may drift; see below) |
 | `EO2/`, `ffmpeg/`, `.electric-objects/` | Local dumps / vendor reference — not app logic |
-| `_img/` | README assets only |
+| `_img/` | Images referenced by the markdown docs |
+| `docs/index.html`, `docs/.nojekyll`, `docs/assets/` | The GitHub Pages site — see the **Pages** note below |
+
+**Pages.** GitHub Pages for this repository builds from the branch `main`, **directory `/docs`** — so the
+site root *is* `docs/` and the only page is `docs/index.html`, published at
+`https://aphex3k.github.io/EO1/`. Two consequences an agent gets wrong without being told: any path
+outside `docs/` (including all of `_img/`) is **not** on the site, so a page image must live in
+`docs/assets/`; and `docs/.nojekyll` makes the deploy a raw copy rather than a Jekyll build, which is why
+the docs in that directory are never rendered into HTML and no `_config.yml` is wanted. The page is
+deliberately a card, not a manual — it links to the markdown instead of restating it, and it carries **no
+version numbers, commit counts, line counts or LOC**, because there is no CI here to regenerate one and a
+stated figure starts lying the week it ships. Link `Releases/latest` instead of naming a version.
 
 Gitignored (do not commit): `configuration.json`, `ffmpeg/`, large parts of `EO2/`.
 
