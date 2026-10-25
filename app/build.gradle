@@ -151,8 +151,8 @@ dependencies {
     implementation 'androidx.constraintlayout:constraintlayout:2.1.0' // API-19 ceiling is 2.1.4 (2.2.0 raised it to 21); Dependabot may take 2.1.x patches, >= 2.2.0 ignored. Enforced in .github/dependabot.yml
     implementation 'androidx.navigation:navigation-fragment:2.7.7' // Last version to support minSDK 19
     implementation 'androidx.navigation:navigation-ui:2.7.7' // Last version to support minSDK 19
-    implementation 'com.squareup.retrofit2:retrofit:2.6.0'
-    implementation 'com.squareup.retrofit2:converter-gson:2.6.0'
+    implementation 'com.squareup.retrofit2:retrofit:2.6.4'
+    implementation 'com.squareup.retrofit2:converter-gson:2.6.4'
     implementation 'com.squareup.okhttp3:okhttp:3.12.13'
     // OkHttp 3.x transitively pulls okio 1.15.0 (CVE-2023-3635); 1.17.6 is the last 1.x
     // release and is API-compatible with both okhttp 3.x and this app's direct okio usage.
@@ -160,7 +160,7 @@ dependencies {
     // https://mvnrepository.com/artifact/com.google.guava/guava
     implementation 'com.google.guava:guava:32.1.2-jre'
     // https://howtodoinjava.com/retrofit2/logging-with-retrofit2/
-    implementation("com.squareup.okhttp3:logging-interceptor:3.9.0")
+    implementation("com.squareup.okhttp3:logging-interceptor:3.12.13")
     // https://github.com/vdurmont/semver4j
     implementation 'com.vdurmont:semver4j:3.1.0'
     // Support GIF Playback
