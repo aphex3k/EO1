@@ -120,7 +120,10 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private final Set<String> knownIncompatibleKeys =
             Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     /**
-     * Asset keys whose video asks for more sustained macroblock throughput than this device has.
+     * Asset keys whose video asks for more sustained decode load than this device can keep up with —
+     * either macroblock throughput ({@link MediaCompatibility#MAX_VIDEO_MACROBLOCKS_PER_SECOND}) or
+     * bitrate ({@link MediaCompatibility#MAX_VIDEO_BIT_RATE_BPS}); both share this one set because both
+     * mean "decodable, just slow" and both get the identical routing treatment.
      *
      * <p>Kept apart from {@link #knownIncompatibleKeys} on purpose, and it must stay that way: these
      * files are decodable, they are only decoded too slowly, so nothing here may be discarded and
@@ -940,7 +943,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return true;
         }
         if (tooDemandingVideoKeys.contains(key) && !noTranscodeVideoKeys.contains(key)) {
-            Log.i(TAG, "acquireAsset: " + key + " exceeds this device's decode throughput;"
+            Log.i(TAG, "acquireAsset: " + key + " exceeds this device's decode budget;"
                     + " starting at the fallback source");
             return false;
         }
@@ -961,8 +964,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
-     * Notes that an asset's original is decodable but asks for more sustained decode throughput than
-     * this device has, so every later acquisition of it starts at the backend's fallback source.
+     * Notes that an asset's original is decodable but asks for more sustained decode load (throughput
+     * or bitrate) than this device can keep up with, so every later acquisition of it starts at the
+     * backend's fallback source.
      *
      * <p>Returning true only means "descend now". {@link #acquireAsset} already falls through to the
      * fallback when obtaining an original yields null, so a verdict taken on bytes already in hand
@@ -981,14 +985,25 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (asset.type != MediaType.VIDEO || probe == null || noTranscodeVideoKeys.contains(asset.key())) {
             return false;
         }
-        String reason = MediaCompatibility.incompatibleVideoThroughput(
+        String throughput = MediaCompatibility.incompatibleVideoThroughput(
                 asset.type, probe.codedWidth, probe.codedHeight, probe.stats.fpsMilli);
-        if (reason == null) {
+        String bitrate = MediaCompatibility.incompatibleVideoBitrate(
+                asset.type, probe.stats.bitRateBps);
+        if (throughput == null && bitrate == null) {
             return false;
         }
+        // Both budgets mean the same thing here: decodable, just too slow, so route and keep the
+        // original. Join the reasons so a clip over both (a 1080p60 high-bitrate encode) says so once.
+        String reason = throughput != null
+                ? (bitrate != null ? throughput + "; " + bitrate : throughput)
+                : bitrate;
         tooDemandingVideoKeys.add(asset.key());
         Log.w(TAG, "acquireRemoteFile: " + asset.key() + " - " + reason
                 + "; starting it at the fallback source, original kept cached");
+        // Durable record: Log.w above is logcat-only (~13 min on the device), and once this asset
+        // routes, /state's video.bitRateBps reflects the *displayed* fallback, not these bytes. So the
+        // exact numbers that triggered the verdict live only in this report.
+        postDebugInformation("videoBudget", asset.key() + " - " + reason);
         return true;
     }
 
@@ -1677,8 +1692,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * The four verdict sets, as counts. Keys are deliberately withheld: a library of 40 000 assets
      * would otherwise spend half a report's budget listing uuids, and the number is what answers
      * "has this frame quietly given up on a slice of the library". Counts only is also what keeps a
-     * throughput verdict — which is a statement about this decoder, not about the user's files — from
-     * reading like one.
+     * throughput or bitrate verdict — which is a statement about this decoder, not about the user's
+     * files — from reading like one.
      */
     public String verdictCounts() {
         return "incompatible=" + knownIncompatibleKeys.size()

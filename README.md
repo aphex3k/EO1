@@ -69,10 +69,18 @@ which is what catches the everyday iPhone file. That is deliberate — a name th
 codec is never treated as proof that it does.
 
 **Encode targets.** JPEG or PNG for a still. For video: H.264 in `mp4`/`mov`/`m4v`, longest side
-**at most 1920 px**, and **1080p30 or below**. The decoder's real ceiling is sustained throughput,
-300 000 macroblocks a second: 1080p29.97 is 244 555 and plays at 1.00x, while 1080p59.94 is 489 343
-and runs at **0.13x** — slow motion, forever, with no error raised. 720p60 fits where 1080p60 does
-not. Files above 1 GiB are never fetched.
+**at most 1920 px**, **1080p30 or below**, and **under 15 Mbit/s**. There are two independent decoder
+ceilings, and a clip has to clear both:
+- **Sustained throughput** — 300 000 macroblocks a second: 1080p29.97 is 244 555 and plays at 1.00x,
+  while 1080p59.97 is 489 355 and runs at **0.13x** — slow motion, forever, with no error raised. 720p60
+  fits where 1080p60 does not.
+- **Sustained bitrate** — 15 Mbit/s (the average the video track carries): 14.4 measured buttery, 15.6
+  measured choppy on the same hardware. This one catches files that pass every size and frame-rate rule —
+  a 1080p30 encode at 20 Mbit/s is fine on throughput and still rerouted.
+
+A clip over either ceiling is not refused, it is shown from the server's lower-bitrate playback stream —
+but only where such a stream exists; if the server has nothing transcoded, the clip plays as it arrived.
+Files above 1 GiB are never fetched.
 
 Three things people get wrong:
 

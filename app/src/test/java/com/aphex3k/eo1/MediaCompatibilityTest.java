@@ -1,6 +1,7 @@
 package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -164,21 +165,81 @@ public class MediaCompatibilityTest {
     }
 
     @Test
-    public void fileTierNeverReportsAThroughputVerdict() throws Exception {
+    public void fileTierNeverReportsABudgetVerdict() throws Exception {
         // The trap this guards is specific: LocalMediaBackend.fetchCatalog feeds this method's result
-        // straight into CompatibilitySidecar, which excludes the file from rotation. A throughput
-        // verdict belongs in none of that — the clip is playable, merely slow — so the check is
-        // asserted absent here even for bytes that would fail it on their numbers.
+        // straight into CompatibilitySidecar, which excludes the file from rotation. A throughput or
+        // bitrate verdict belongs in none of that — the clip is playable, merely slow — so both checks are
+        // asserted absent here even for bytes that would fail them on their numbers.
         File file = writeBytes("slow.mov", new byte[]{0, 0, 0, 0});
         // IMG_1566.MOV's real numbers: 1920x1080 at 59.97 fps, 54,266 B/frame, 26.0 Mbps, 50.8 s.
         VideoHeaderProbe.Probe overBudget = new VideoHeaderProbe.Probe(
                 270, 1920, 1080, "avc1",
                 new VideoHeaderProbe.StreamStats(
                         59970, 54266, 309364, 26034165L, 50793));
+        // The file tier stays silent on both budgets...
         assertNull(MediaCompatibility.incompatibleReasonForFile(
                 MediaType.VIDEO, file, overBudget));
-        assertTrue(MediaCompatibility.incompatibleVideoThroughput(
-                MediaType.VIDEO, 1920, 1080, 59970) != null);
+        // ...while each standalone gate does fire on these same numbers, which is the point: they route,
+        // they never reach this method. The fixture's 26.0 Mbps already exceeds the bitrate budget.
+        assertNotNull(MediaCompatibility.incompatibleVideoThroughput(
+                MediaType.VIDEO, 1920, 1080, 59970));
+        assertNotNull(MediaCompatibility.incompatibleVideoBitrate(
+                MediaType.VIDEO, overBudget.stats.bitRateBps));
+    }
+
+    @Test
+    public void bitrateGateAcceptsWhatTheDecoderKeepsUpWith() {
+        // 14.4 Mbit/s measured buttery on an EO2. The exact-limit row pins the comparison to <=, so a
+        // rewrite to < fails here rather than silently rerouting every clip at the ceiling.
+        assertBitrateAccepted(14_400_000L);
+        assertBitrateAccepted(15_000_000L);
+        assertBitrateAccepted(2_500_000L);
+        assertBitrateAccepted(8_000_000L);
+        assertBitrateAccepted(12_000_000L);
+    }
+
+    @Test
+    public void bitrateGateRejectsWhatTheDecoderStrugglesWith() {
+        // 15_600_000 is the load-bearing row: it exceeds a decimal 15,000,000 but is BELOW a binary
+        // 15*1048576 = 15,728,640. If the constant is ever made binary, the file the operator measured
+        // as choppy starts passing and the gate does nothing on the device that motivated it.
+        assertBitrateRejected(15_000_001L);
+        assertBitrateRejected(15_600_000L);
+        assertBitrateRejected(26_034_165L);  // IMG_1566.MOV's real video-track average
+        assertBitrateRejected(45_000_000L);
+    }
+
+    @Test
+    public void unknownBitrateInputsPass() {
+        // -1 is the StreamStats.UNKNOWN sentinel (a truncated stsz, or a non-ISOBMFF container); a
+        // missing bitrate is never evidence of a slow clip.
+        assertNull(MediaCompatibility.incompatibleVideoBitrate(MediaType.VIDEO, -1L));
+        assertNull(MediaCompatibility.incompatibleVideoBitrate(MediaType.VIDEO, 0L));
+    }
+
+    @Test
+    public void bitrateGateAppliesToVideoOnly() {
+        assertNull(MediaCompatibility.incompatibleVideoBitrate(MediaType.IMAGE, 45_000_000L));
+        assertNull(MediaCompatibility.incompatibleVideoBitrate(MediaType.WEB, 45_000_000L));
+        assertNull(MediaCompatibility.incompatibleVideoBitrate(null, 45_000_000L));
+    }
+
+    @Test
+    public void aLargeKeyframeIsNotAPeakBitrate() {
+        // The trap in "peak": an ordinary I-frame (peakFrameBytes) is one sample, not a rate. A clip
+        // whose sustained average fits the budget must pass on its average no matter how large its
+        // biggest frame is — the gate reads bitRateBps, never peakFrameBytes.
+        assertBitrateAccepted(12_000_000L);
+    }
+
+    private static void assertBitrateAccepted(long bitRateBps) {
+        assertNull(bitRateBps + " bps should fit the budget",
+                MediaCompatibility.incompatibleVideoBitrate(MediaType.VIDEO, bitRateBps));
+    }
+
+    private static void assertBitrateRejected(long bitRateBps) {
+        assertTrue("expected " + bitRateBps + " bps to exceed the budget",
+                MediaCompatibility.incompatibleVideoBitrate(MediaType.VIDEO, bitRateBps) != null);
     }
 
     private static void assertThroughputAccepted(int width, int height, int fpsMilli) {
