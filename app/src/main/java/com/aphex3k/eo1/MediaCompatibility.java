@@ -109,7 +109,7 @@ public final class MediaCompatibility {
      * still decodes — it just decodes <em>slowly</em>, which is not a condition any player reports.
      *
      * <p>Measured on an EO2 with one file at two frame rates: 1920x1080 at 29.97 fps is 244,555
-     * macroblocks/s and plays at 1.00x; the same size at 59.97 fps is 489,343 and runs at 0.13x.
+     * macroblocks/s and plays at 1.00x; the same size at 59.97 fps is 489,355 and runs at 0.13x.
      * This budget sits 23% above the first and 39% below the second, so 1080p30 and 720p60 both
      * pass and only genuinely over-specified video is rerouted.
      *
@@ -118,6 +118,33 @@ public final class MediaCompatibility {
      * 1080p60 does not. Only the product of the two says the right thing.
      */
     public static final long MAX_VIDEO_MACROBLOCKS_PER_SECOND = 300_000L;
+
+    /**
+     * Sustained video-track bitrate this device's pipeline keeps up with, in SI bits/s (so 15 Mbit/s is
+     * 15,000,000 — a binary 15*1048576 would let the motivating file pass). Past it a clip still decodes
+     * correctly, it just runs slow, exactly like the macroblock budget above — which is why this too
+     * routes to the fallback rather than tagging anything.
+     *
+     * <p>Measured on an EO2 with one clip at two bitrates: 14.4 Mbit/s plays buttery, 15.6 Mbit/s
+     * stutters. The failing file (IMG_6518.MOV, 15,586,890 bps) is <em>within</em>
+     * {@link #MAX_VIDEO_MACROBLOCKS_PER_SECOND} at ~244,571 macroblocks/s, so this is an orthogonal
+     * limit, not a restatement of the throughput one: two clips at the same macroblock rate can ask very
+     * different bandwidth of the decoder.
+     *
+     * <p>The quantity is the first video track's <em>average payload</em> bits/s (the {@code stsz} byte
+     * total over its {@code mdhd} duration, as {@link VideoHeaderProbe.StreamStats#bitRateBps} computes
+     * it) — not the container figure MediaInfo prints, which also counts audio and mux overhead and runs
+     * higher. So a file advertised at 15.0-15.4 Mbit/s can pass this gate. It is deliberately the
+     * <em>average</em>: no windowed peak bitrate is measured, and the only "peak" derivable from the
+     * probe (the largest single frame, {@code peakFrameBytes}) is one I-frame's worth of bytes, not a
+     * rate — turning it into one overstates a real clip by ~5-6x and would reroute healthy video.
+     *
+     * <p>Caveat, so this is not over-claimed: like the throughput gate, it only helps where the backend
+     * actually has a lower-bitrate encode to route to. A server that answers {@code /video/playback} with
+     * the original bytes has nothing to degrade to, and the routing path records that and keeps playing
+     * the same slow clip.
+     */
+    public static final long MAX_VIDEO_BIT_RATE_BPS = 15_000_000L;
 
     private MediaCompatibility() {
     }
@@ -240,6 +267,37 @@ public final class MediaCompatibility {
         return "video " + codedWidth + "x" + codedHeight + " at " + (fpsMilli / 1000.0)
                 + " fps needs " + perSecond + " macroblocks/s, above this device's "
                 + MAX_VIDEO_MACROBLOCKS_PER_SECOND + " decode throughput limit";
+    }
+
+    /**
+     * Sustained-bitrate check for a video whose average bits/s are known (read from the file by
+     * {@link VideoHeaderProbe}, never from catalog metadata — no backend reports a bitrate up front).
+     *
+     * <p>Same routing-only contract as {@link #incompatibleVideoThroughput}, for the same reason: the
+     * clip it fires on <em>does</em> play, merely too slowly, so nothing downstream will conclude it is
+     * broken and this must never reach {@code tagAssetAsIncompatible} or {@code knownIncompatibleKeys}.
+     *
+     * <p>Conservative like the other throughput-style checks: an unknown bitrate ({@code <= 0}, e.g. the
+     * {@link VideoHeaderProbe.StreamStats#UNKNOWN} sentinel or a truncated {@code stsz}) yields
+     * {@code null}, because rerouting healthy video on missing data is worse than the slow playback being
+     * avoided. This means the bitrate gate fires on strictly fewer files than the macroblock gate — the
+     * correct direction, but it is coverage, not certainty.
+     *
+     * @param type media type of the asset
+     * @param bitRateBps sustained video-track average bits/s, or {@code <= 0} when unknown
+     * @return a human-readable reason when the clip asks more bandwidth than this device has, or
+     *         {@code null} when it fits or cannot be judged
+     */
+    @Nullable
+    public static String incompatibleVideoBitrate(@Nullable MediaType type, long bitRateBps) {
+        if (type != MediaType.VIDEO || bitRateBps <= 0) {
+            return null;
+        }
+        if (bitRateBps <= MAX_VIDEO_BIT_RATE_BPS) {
+            return null;
+        }
+        return "video bitrate " + bitRateBps + " bps is above this device's "
+                + MAX_VIDEO_BIT_RATE_BPS + " bps decode bandwidth limit";
     }
 
     /**

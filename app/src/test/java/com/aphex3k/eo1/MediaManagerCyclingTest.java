@@ -331,6 +331,80 @@ public class MediaManagerCyclingTest {
     }
 
     /**
+     * The bitrate gate, end to end, on a clip the <em>throughput</em> gate passes. This is the case the
+     * second gate exists for: 1920x1080 at 30 fps is 244,800 macroblocks/s — comfortably under the
+     * 300,000 budget — yet at 65,000 bytes/frame it carries 15,600,000 bps, over the 15 Mbit/s one. So
+     * only the bitrate dimension can fire here; if it were folded into the throughput check by mistake
+     * (or the constant made binary), the original would be kept and displayed and this test would fail.
+     * Same routing contract as the throughput gate: descend to the fallback, keep the original, tag
+     * nothing.
+     */
+    @Test
+    public void overBitrateVideoIsRoutedToPlaybackFallbackWithoutBeingTagged() throws Exception {
+        String videoId = "01234567-89ab-cdef-0123-456789abcdfe";
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, null, null, 1920, 1080);
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        final AtomicInteger marked = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        // 1 s of a 1000 timescale at 30 fps, 65,000 B/frame: 244,800 macroblocks/s
+                        // (throughput passes) but 15,600,000 bps (bitrate fails).
+                        return new ByteArrayInputStream(isoVideoBytes(1920, 1080, 30, 65000));
+                    }
+                }, null, null);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(
+                                "transcoded-720p".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+
+            @Override
+            public void markIncompatible(MediaAsset asset) {
+                marked.incrementAndGet();
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals("the fast-enough-res clip is still shown", 1, listener.displayedKeys.size());
+        assertEquals("fakeA:" + videoId, listener.displayedKeys.get(0));
+        assertEquals("over bitrate is not undecodable, so nothing is tagged", 0, marked.get());
+        assertEquals("the original must be fetched once to learn its bitrate", 1, originalOpens.get());
+        assertEquals(1, fallbackOpens.get());
+        assertTrue(new File(cacheDir, videoId + "_fb.mp4").isFile());
+        assertTrue("the original is kept, not discarded: the fallback may be those same bytes",
+                new File(cacheDir, videoId + ".mov").isFile());
+        assertTrue(listener.exceptions.isEmpty());
+
+        // Second cycle: the verdict is remembered, so the original is never opened again.
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals(1, originalOpens.get());
+        assertEquals(1, fallbackOpens.get());
+        assertEquals(2, listener.displayedKeys.size());
+        assertEquals(0, marked.get());
+    }
+
+    /**
      * The gate's own failure mode: routing to a degraded source that is not degraded. When
      * {@code /video/playback} answers with the original file, the "fallback" is a second copy of the
      * bytes already on disk, so the asset ends up fetched twice and cached twice — measured on an
@@ -473,13 +547,21 @@ public class MediaManagerCyclingTest {
      * {@code stats.fpsMilli}; nothing else in the file is read.
      */
     private static byte[] isoVideoBytes(int width, int height, int framesPerSecond) {
+        // 1024 B/frame at these frame rates is ~0.5 Mbit/s, far under the 15 Mbit/s bitrate gate, so
+        // every existing caller exercises only the resolution/throughput dimensions.
+        return isoVideoBytes(width, height, framesPerSecond, 1024);
+    }
+
+    private static byte[] isoVideoBytes(int width, int height, int framesPerSecond,
+                                        int bytesPerFrame) {
         byte[] mdhd = box("mdhd", cat(new byte[]{0, 0, 0, 0}, u32(0), u32(0),
                 u32(1000), u32(1000)));
         byte[] entry = cat(new byte[6], u16(1), new byte[16], u16(width), u16(height),
                 u32(0x00480000), u32(0), new byte[4], u16(1), new byte[4]);
         byte[] stsd = box("stsd", cat(new byte[]{0, 0, 0, 0}, u32(1),
                 cat(u32(8 + entry.length), "avc1".getBytes(StandardCharsets.US_ASCII), entry)));
-        byte[] stsz = box("stsz", cat(new byte[]{0, 0, 0, 0}, u32(1024), u32(framesPerSecond)));
+        byte[] stsz = box("stsz", cat(new byte[]{0, 0, 0, 0}, u32(bytesPerFrame),
+                u32(framesPerSecond)));
         byte[] stbl = box("stbl", stsd, stsz);
         byte[] minf = box("minf", stbl);
         byte[] mdia = box("mdia", mdhd, minf);
