@@ -455,6 +455,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.eventManager = new EventManager(this, capabilities);
         this.updateManager = new UpdateManager(this, this, this.settingsManager);
         this.mediaManager = new MediaManager(this, this.settingsManager, this);
+        // Before the first pool build, so the orientation gate is armed for the asset this frame
+        // displays first rather than dark until the next tick.
+        publishFrameOrientation();
         this.connectionManager = new ConnectionManager(this);
 
         // Always-on LAN web server (debug / control / media upload).
@@ -682,6 +685,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             View focus = getCurrentFocus();
             this.focusedView = focus == null ? "none" : focus.getClass().getSimpleName();
         }
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // The manifest claims `orientation` in configChanges, so a panel that is turned does not
+        // recreate this activity — which means the orientation MediaManager judges 1080p video
+        // against would otherwise be the one this process booted with, forever.
+        publishFrameOrientation();
     }
 
     @Override
@@ -2891,6 +2903,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * the video's display aspect is the opposite of the frame's current orientation (a landscape
      * video on a portrait frame would letterbox instead of fill). Square or unknown aspect and
      * unknown rotation keep today's TsPlayer default.
+     *
+     * <p>This chooses an engine for a file already in hand. The aspect clause it shares with
+     * {@link MediaCompatibility#videoAspectOppositeFrame} is what
+     * {@link MediaCompatibility#incompatibleVideoUpscale} asks of the same numbers <em>before</em>
+     * the download, because the upscale this path hands to MediaPlayer for a 1080p clip runs below
+     * realtime — so such a clip never reaches here as an original.
      */
     private boolean routingAllowsTsPlayer(File file) {
         VideoHeaderProbe.Probe probe = VideoHeaderProbe.probe(file);
@@ -2907,25 +2925,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 height = asset.height;
             }
         }
-        int effWidth = width;
-        int effHeight = height;
-        if (rotation == 90 || rotation == 270) {
-            int t = effWidth;
-            effWidth = effHeight;
-            effHeight = t;
-        }
-        boolean framePortrait = getResources().getConfiguration().orientation
-                == android.content.res.Configuration.ORIENTATION_PORTRAIT;
+        Boolean framePortrait = frameIsPortrait();
+        // The rotation term stays here and out of the shared helper: a turned clip needs a player
+        // that can turn it, which is an engine question. Whether it needs an upscale is a source
+        // question, and MediaCompatibility asks it the same way for both paths. A panel the platform
+        // cannot classify (ORIENTATION_UNDEFINED) keeps today's landscape reading here, because that
+        // is what the old inline comparison did; only the source gate treats it as unknown.
         boolean forceFallback = rotation > 0
-                || (width > 0 && height > 0 && effWidth > effHeight && framePortrait)
-                || (width > 0 && height > 0 && effHeight > effWidth && !framePortrait);
+                || (framePortrait != null && MediaCompatibility.videoAspectOppositeFrame(
+                        width, height, rotation, framePortrait));
         lastVideoRotation = rotation;
         lastVideoWidth = width;
         lastVideoHeight = height;
         lastVideoCodec = codec;
         lastVideoStats = probe.stats;
         lastVideoDurationMs = probe.stats.durationMs;
-        lastFrameOrientation = framePortrait ? "portrait" : "landscape";
+        lastFrameOrientation = frameOrientationWord(framePortrait);
         Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
                 + " coded=" + width + "x" + height
                 + " frame=" + lastFrameOrientation + " player="
@@ -2937,6 +2952,46 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         + (forceFallback ? "MediaPlayer" : "TsPlayer") + "; "
                         + describeStream(probe)));
         return !forceFallback;
+    }
+
+    /**
+     * Which way this frame's panel is hung, read one way, in one place. {@code MediaManager} has no
+     * {@code Context}, so the answer reaches the rotation pipeline only through here — which is the
+     * reason it is worth having a single reader rather than a second convention for what "portrait"
+     * means somewhere downstream.
+     *
+     * @return {@code null} when the platform reports {@code ORIENTATION_UNDEFINED}, which the source
+     *         gate reads as "cannot judge" and shows the original
+     */
+    @Nullable
+    private Boolean frameIsPortrait() {
+        int orientation = getResources().getConfiguration().orientation;
+        if (orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
+            return Boolean.TRUE;
+        }
+        if (orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+            return Boolean.FALSE;
+        }
+        return null;
+    }
+
+    /** The word {@code /state} and the routing log use for a published panel orientation. */
+    private static String frameOrientationWord(@Nullable Boolean portrait) {
+        return portrait == null ? "undefined" : (portrait ? "portrait" : "landscape");
+    }
+
+    /**
+     * Hands {@link #frameIsPortrait()} to the rotation pipeline's orientation gate, and records it for
+     * {@code /state} even when no video has been displayed to record it — an operator checking whether
+     * the gate is deciding against the right wall needs the value the gate actually holds, not the one
+     * the last {@code displayVideo} happened to see.
+     */
+    private void publishFrameOrientation() {
+        Boolean portrait = frameIsPortrait();
+        lastFrameOrientation = frameOrientationWord(portrait);
+        if (mediaManager != null) {
+            mediaManager.setFramePortrait(portrait);
+        }
     }
 
     /** Sample-table facts in one line, each part omitted when the file did not give it. */
