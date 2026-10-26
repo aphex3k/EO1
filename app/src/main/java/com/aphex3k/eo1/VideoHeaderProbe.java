@@ -19,7 +19,10 @@ import java.util.Set;
  *       place in the app where a file's actual codec is readable, since the container extension
  *       is a claim rather than a fact ({@code .mov} carries H.264 or HEVC equally well);</li>
  *   <li>the display-matrix rotation in degrees clockwise (0/90/180/270, or -1 when unknown)
- *       — read from the {@code tkhd} 16.16 matrix, overridden by an ISO 23001-8 {@code rot }
+ *       — read from the {@code tkhd} 16.16 matrix of the trak that carries the video sample
+ *       entry (an audio tkhd's matrix is identity, and QuickTime puts the audio trak first often
+ *       enough that taking the first readable matrix anywhere in the {@code moov} would report a
+ *       turned video as unturned), overridden by an ISO 23001-8 {@code rot }
  *       box when one is present (that rare path returns the box's counter-clockwise value
  *       unchanged; every consumer here is direction-agnostic). The platform MediaPlayer
  *       applies the rotation itself when decoding, so callers use the value for player
@@ -293,6 +296,7 @@ public final class VideoHeaderProbe {
     private static Probe parseMoov(byte[] moov) {
         int rotBox = -1;
         int rotTkhd = -1;
+        int rotVideoTkhd = -1;
         SampleEntry video = new SampleEntry();
         int n = moov.length;
         int off = 8; // past the moov box's own size/type header
@@ -309,14 +313,26 @@ public final class VideoHeaderProbe {
                     rotBox = r;
                 }
             } else if (type == FOURCC_TRAK) {
+                boolean hadVideoEntry = video.codec != null;
                 int r = parseTrak(moov, off, end, video);
                 if (rotTkhd < 0 && r >= 0) {
                     rotTkhd = r;
                 }
+                // A display matrix orients the pixels of the track it is attached to, so the angle of
+                // the trak that actually carried the video sample entry wins over the first readable
+                // matrix in the moov. QuickTime routinely muxes the audio trak first
+                // (VideoHeaderProbeTest.audioTrackFirstStillReportsTheVideoCodec), and an audio tkhd's
+                // matrix is identity — adopting it would report a phone clip turned 90 degrees as
+                // unturned, which for the player only used to pick an engine, but for
+                // MediaCompatibility.incompatibleVideoUpscale now skips the original altogether.
+                if (!hadVideoEntry && video.codec != null) {
+                    rotVideoTkhd = r;
+                }
             }
             off = end;
         }
-        int rotation = rotBox >= 0 ? rotBox : rotTkhd;
+        int rotation = rotBox >= 0 ? rotBox
+                : (rotVideoTkhd >= 0 ? rotVideoTkhd : rotTkhd);
         return new Probe(rotation, video.width, video.height, video.codec, StreamStats.of(video.stats));
     }
 

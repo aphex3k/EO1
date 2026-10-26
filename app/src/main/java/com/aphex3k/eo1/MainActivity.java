@@ -2925,19 +2925,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 height = asset.height;
             }
         }
-        boolean framePortrait = frameIsPortrait();
+        Boolean framePortrait = frameIsPortrait();
         // The rotation term stays here and out of the shared helper: a turned clip needs a player
         // that can turn it, which is an engine question. Whether it needs an upscale is a source
-        // question, and MediaCompatibility asks it the same way for both paths.
+        // question, and MediaCompatibility asks it the same way for both paths. A panel the platform
+        // cannot classify (ORIENTATION_UNDEFINED) keeps today's landscape reading here, because that
+        // is what the old inline comparison did; only the source gate treats it as unknown.
         boolean forceFallback = rotation > 0
-                || MediaCompatibility.videoAspectOppositeFrame(width, height, rotation, framePortrait);
+                || (framePortrait != null && MediaCompatibility.videoAspectOppositeFrame(
+                        width, height, rotation, framePortrait));
         lastVideoRotation = rotation;
         lastVideoWidth = width;
         lastVideoHeight = height;
         lastVideoCodec = codec;
         lastVideoStats = probe.stats;
         lastVideoDurationMs = probe.stats.durationMs;
-        lastFrameOrientation = framePortrait ? "portrait" : "landscape";
+        lastFrameOrientation = frameOrientationWord(framePortrait);
         Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
                 + " coded=" + width + "x" + height
                 + " frame=" + lastFrameOrientation + " player="
@@ -2952,20 +2955,42 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
-     * Which way this frame's panel is hung, read one way, in one place. This activity is the app's
-     * only holder of a {@code Resources} object — {@code MediaManager} has no {@code Context} — so
-     * everything downstream that needs the answer gets it from here rather than inventing a second
-     * convention for what "portrait" means.
+     * Which way this frame's panel is hung, read one way, in one place. {@code MediaManager} has no
+     * {@code Context}, so the answer reaches the rotation pipeline only through here — which is the
+     * reason it is worth having a single reader rather than a second convention for what "portrait"
+     * means somewhere downstream.
+     *
+     * @return {@code null} when the platform reports {@code ORIENTATION_UNDEFINED}, which the source
+     *         gate reads as "cannot judge" and shows the original
      */
-    private boolean frameIsPortrait() {
-        return getResources().getConfiguration().orientation
-                == android.content.res.Configuration.ORIENTATION_PORTRAIT;
+    @Nullable
+    private Boolean frameIsPortrait() {
+        int orientation = getResources().getConfiguration().orientation;
+        if (orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
+            return Boolean.TRUE;
+        }
+        if (orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
+            return Boolean.FALSE;
+        }
+        return null;
     }
 
-    /** Hands {@link #frameIsPortrait()} to the rotation pipeline's orientation gate. */
+    /** The word {@code /state} and the routing log use for a published panel orientation. */
+    private static String frameOrientationWord(@Nullable Boolean portrait) {
+        return portrait == null ? "undefined" : (portrait ? "portrait" : "landscape");
+    }
+
+    /**
+     * Hands {@link #frameIsPortrait()} to the rotation pipeline's orientation gate, and records it for
+     * {@code /state} even when no video has been displayed to record it — an operator checking whether
+     * the gate is deciding against the right wall needs the value the gate actually holds, not the one
+     * the last {@code displayVideo} happened to see.
+     */
     private void publishFrameOrientation() {
+        Boolean portrait = frameIsPortrait();
+        lastFrameOrientation = frameOrientationWord(portrait);
         if (mediaManager != null) {
-            mediaManager.setFramePortrait(frameIsPortrait());
+            mediaManager.setFramePortrait(portrait);
         }
     }
 

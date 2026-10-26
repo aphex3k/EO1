@@ -473,11 +473,22 @@ public class MediaManagerCyclingTest {
                 new File(cacheDir, videoId + ".mov").isFile());
         assertTrue(listener.exceptions.isEmpty());
 
+        // Cycle 2 on its own proves nothing about the remembered verdict: the original is a cache hit,
+        // so it would not be re-opened even with the verdict set deleted entirely. Drop the cached
+        // original first — if the mark is missing, originalUsable says "worth a download" and this is
+        // where the pipeline would prove it.
+        new File(cacheDir, videoId + ".mov").delete();
+        new File(cacheDir, videoId + ".mov.sha1").delete();
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
-        assertEquals("the verdict is remembered, so the original is never opened again",
+        assertEquals("the verdict is remembered, so the original is never fetched again",
                 1, originalOpens.get());
         assertEquals(1, fallbackOpens.get());
         assertEquals(0, marked.get());
+        assertTrue("the verdict lives in its own set, never in the undecodable one: "
+                        + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=1"));
+        assertTrue("and it is not counted as incompatible: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("incompatible=0"));
     }
 
     @Test
@@ -572,6 +583,8 @@ public class MediaManagerCyclingTest {
 
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
         assertTrue(listener.displayedFiles.get(0).getName().endsWith("_fb.mp4"));
+        assertTrue("the verdict is in its own set: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=1"));
 
         mm.setFramePortrait(false);
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
@@ -580,6 +593,17 @@ public class MediaManagerCyclingTest {
                 listener.displayedFiles.get(1).getName().endsWith(".mov"));
         assertEquals("and the fallback is never fetched again afterwards",
                 1, fallbackOpens.get());
+        assertTrue("turning the frame retired the verdict outright: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=0"));
+
+        // And turning it back re-derives it. This is the property the stamped verdict exists to keep: a
+        // frame moved to the wall and moved again must neither keep an old verdict nor lose the ability
+        // to grow a new one.
+        mm.setFramePortrait(true);
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertTrue("a portrait panel routes this clip again",
+                listener.displayedFiles.get(2).getName().endsWith("_fb.mp4"));
+        assertTrue(mm.verdictCounts().contains("needsUpscale=1"));
     }
 
     /**

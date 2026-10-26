@@ -353,21 +353,28 @@ public final class MediaCompatibility {
     /**
      * Upscale check for 1080p video that will have to be magnified to fill this panel.
      *
-     * <p>Everything this device knows about filling a panel with the wrong-shaped picture says it is
-     * the expensive thing it does. {@code TextureVideoView.cropScaleFactors} records that a 1.7778
-     * fill term draws "at 1.78x scale: 3.2x the pixels … on hardware whose entire margin went into
-     * compositing that", and notes that what that cost on screen "looked like a framerate problem,
-     * not a zoom one" — which is the symptom, arriving through the scaler rather than through the
-     * decoder's macroblock budget. A 1080p clip whose displayed aspect is opposite the panel's hits
-     * that magnification by construction: 1920/1080 is the ratio, and it is the platform MediaPlayer
-     * that draws it, because {@code routingAllowsTsPlayer} hands exactly these clips over (TsPlayer's
-     * {@code .so} has no scale or rotation control at all).
+     * <p>Two of this device's known slow paths meet on exactly this clip. It is always drawn by the
+     * platform MediaPlayer, because {@code routingAllowsTsPlayer} hands every aspect-opposite clip over
+     * (TsPlayer's {@code .so} has no scale or rotation control at all), and it is always drawn with a
+     * center-crop fill term above 1 — and {@code TextureVideoView.cropScaleFactors} records what that
+     * magnification costs here: reached through a double axis-swap rather than through a mismatched
+     * aspect, it "looked like a framerate problem, not a zoom one".
      *
-     * <p>Scope is 1080p alone, deliberately. Below it the same mismatch costs proportionally fewer
-     * source pixels and stays inside the margin; above it the coded-side gate has already routed the
-     * asset. Within 1080p the fill ratio is pinned near 1.78, so the predicate is a size pair rather
-     * than a scale factor — widening it to "any clip whose fill exceeds 1.x" is the follow-up if
-     * sub-1080p clips start reporting the same symptom.
+     * <p>What routing away from the original buys is the smaller <em>stream</em>, not a smaller
+     * composite. {@code cropScaleFactors} is a function of the clip's aspect and the viewport alone —
+     * {@code (1080, 1920, 1920, 1080)} and {@code (1080, 1920, 1280, 720)} both come out at
+     * {@code (3.16, 1.0)} — so the fallback is composited over the same region and merely asks less of
+     * the decoder and of the source read. That is the honest boundary of this gate's claim: a clip that
+     * still runs slow once routed is paying for the composite, and the lever from there is
+     * fill-versus-letterbox in {@code TextureVideoView}, not the source.
+     *
+     * <p>Scope is 1080p alone because that is where the datapoint is, not because the arithmetic stops
+     * there. By the model above a 720p clip of the same aspect costs the same composite and passes here,
+     * and a wider-than-16:9 one (1920x800, or a 2048x858 letterbox) costs <em>more</em> and passes too;
+     * below 1080p there are fewer source pixels and fewer macroblocks, which is the only reason to
+     * believe it stays inside the margin. Expressing the predicate as a fill term instead of as a size
+     * pair would make the boundary match the mechanism, and is the follow-up this note exists to
+     * propose; above 1080p the coded-side gate has already routed the asset.
      *
      * <p>Routing only, like {@link #incompatibleVideoThroughput} and {@link #incompatibleVideoBitrate}
      * — the clip plays, merely too slowly, so this must never reach
@@ -375,17 +382,24 @@ public final class MediaCompatibility {
      * from {@link #incompatibleReasonForFile}, whose callers read a non-null answer as "undecodable".
      *
      * <p>Conservative on every unknown: unknown dimensions, an unknown display matrix
-     * ({@code rotationDeg < 0}) and a panel orientation the app has not published yet all yield
-     * {@code null}. The last one is why this gate is dark until {@code MediaManager.setFramePortrait}
-     * is called — a frame that cannot say which way it is hung shows originals, as it does today.
+     * ({@code rotationDeg < 0}, which includes every non-ISOBMFF container — an {@code .mkv} keeps its
+     * angle in a Matroska element this probe does not read), and a panel orientation the app has not
+     * published yet all yield {@code null}. The last one is why this gate is dark until
+     * {@code MediaManager.setFramePortrait} is called — a frame that cannot say which way it is hung
+     * shows originals, as it does today.
+     *
+     * <p>Like its two byte-budget siblings it helps only where a smaller encode exists to route to, and
+     * on a server that answers {@code /video/playback} with the original bytes it does nothing at all:
+     * {@code MediaManager} marks the asset as having no transcode and takes the original, so on such a
+     * deployment {@code needsUpscale} counts verdicts that never changed what was fetched.
      *
      * @param type media type of the asset
      * @param codedWidth {@code stsd} width in pixels, or {@code <= 0} when unknown
      * @param codedHeight {@code stsd} height in pixels, or {@code <= 0} when unknown
      * @param rotationDeg display-matrix angle from the file, or a negative value when unknown
      * @param framePortrait the panel's orientation, or {@code null} when unpublished
-     * @return a human-readable reason when filling the panel with this clip needs an upscale beyond
-     *         this device, or {@code null} when it does not or cannot be judged
+     * @return a human-readable reason when this is 1080p video hung the wrong way round for this panel,
+     *         or {@code null} when it is not or cannot be judged
      */
     @Nullable
     public static String incompatibleVideoUpscale(@Nullable MediaType type, int codedWidth,
@@ -408,13 +422,16 @@ public final class MediaCompatibility {
                 || shortSide > VIDEO_1080P_SHORT_SIDE_PX + VIDEO_1080P_SHORT_SIDE_SLACK_PX) {
             return null;
         }
-        double fillScale = (double) longSide / (double) shortSide;
+        // The clip's own display aspect, deliberately not a fill factor: what a center-crop multiplies
+        // by depends on the panel's shape too, which this class does not read, and printing the clip's
+        // ratio under the name "upscale" would claim a number this predicate never measured.
+        double displayAspect = (double) longSide / (double) shortSide;
         return "1080p video coded " + codedWidth + "x" + codedHeight
                 + (rotationDeg > 0 ? " (matrix " + rotationDeg + " degrees)" : "")
-                + " displays " + displayWidth + "x" + displayHeight + " on a "
-                + (framePortrait ? "portrait" : "landscape") + " panel, needing a "
-                + String.format(Locale.ROOT, "%.2fx", fillScale)
-                + " upscale that plays below realtime on this device";
+                + " displays " + displayWidth + "x" + displayHeight + " ("
+                + String.format(Locale.ROOT, "%.2f:1", displayAspect) + ") on a "
+                + (framePortrait ? "portrait" : "landscape")
+                + " panel, which only MediaPlayer draws, and below realtime";
     }
 
     /**

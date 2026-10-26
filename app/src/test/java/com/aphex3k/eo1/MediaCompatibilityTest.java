@@ -282,8 +282,11 @@ public class MediaCompatibilityTest {
 
     @Test
     public void upscaleGateIsScopedTo1080p() {
-        // Below 1080p the same mismatch costs proportionally fewer source pixels; the throughput gate
-        // and the panel's own margin cover it. Pinned so widening this gate is a decision, not a drift.
+        // Below 1080p the same mismatch decodes and samples fewer pixels — but crops the identical
+        // composited region, since cropScaleFactors reads the aspect and the viewport alone. So this is
+        // a scope line drawn at the measurement, not at the end of the mechanism, and rows like
+        // 1920x800 (a 2.4:1 letterbox, which needs a bigger crop than anything rejected here) pass on
+        // purpose. Pinned so widening the predicate to the fill term is a decision, not a drift.
         assertUpscaleAccepted(1280, 720, 0, true);
         assertUpscaleAccepted(854, 480, 0, true);
         assertUpscaleAccepted(1440, 1080, 0, true);

@@ -80,10 +80,13 @@ be portrait itself. There are three independent ceilings, and a clip has to clea
 - **Sustained bitrate** — 15 Mbit/s (the average the video track carries): 14.4 measured buttery, 15.6
   measured choppy on the same hardware. This one catches files that pass every size and frame-rate rule —
   a 1080p30 encode at 20 Mbit/s is fine on throughput and still rerouted.
-- **Orientation** — a 1080p clip whose *displayed* aspect is opposite the panel's needs a 1.78x upscale to
-  fill it, and this hardware composites that below realtime. A 1920x1080 file turned to 1080x1920 by its
-  own display matrix is fine on a portrait frame; the same file unturned is served from the lighter stream
-  instead. Below 1080p the same mismatch costs proportionally fewer pixels and plays.
+- **Orientation** — a 1080p clip whose *displayed* aspect is opposite the panel's can only be drawn by the
+  platform MediaPlayer (TsPlayer cannot turn or scale anything), and that pairing runs below realtime here,
+  so the clip is shown from the server's smaller stream instead. A 1920x1080 file that its own display matrix
+  turns to 1080x1920 is already aligned on a portrait frame and is untouched. The crop's cost follows the
+  clip's *shape*, not its size, so this ceiling is drawn where the measurement is rather than where the
+  arithmetic ends — if a 720p landscape clip starts stuttering on a portrait frame, the rule is too narrow
+  rather than wrong.
 
 A clip over any of these is not refused, it is shown from the server's lower-bitrate playback stream —
 but only where such a stream exists; if the server has nothing transcoded, the clip plays as it arrived.
