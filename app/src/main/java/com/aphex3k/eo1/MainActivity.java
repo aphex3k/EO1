@@ -455,6 +455,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.eventManager = new EventManager(this, capabilities);
         this.updateManager = new UpdateManager(this, this, this.settingsManager);
         this.mediaManager = new MediaManager(this, this.settingsManager, this);
+        // Before the first pool build, so the orientation gate is armed for the asset this frame
+        // displays first rather than dark until the next tick.
+        publishFrameOrientation();
         this.connectionManager = new ConnectionManager(this);
 
         // Always-on LAN web server (debug / control / media upload).
@@ -682,6 +685,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             View focus = getCurrentFocus();
             this.focusedView = focus == null ? "none" : focus.getClass().getSimpleName();
         }
+    }
+
+    @Override
+    public void onConfigurationChanged(android.content.res.Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        // The manifest claims `orientation` in configChanges, so a panel that is turned does not
+        // recreate this activity — which means the orientation MediaManager judges 1080p video
+        // against would otherwise be the one this process booted with, forever.
+        publishFrameOrientation();
     }
 
     @Override
@@ -2891,6 +2903,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * the video's display aspect is the opposite of the frame's current orientation (a landscape
      * video on a portrait frame would letterbox instead of fill). Square or unknown aspect and
      * unknown rotation keep today's TsPlayer default.
+     *
+     * <p>This chooses an engine for a file already in hand. The aspect clause it shares with
+     * {@link MediaCompatibility#videoAspectOppositeFrame} is what
+     * {@link MediaCompatibility#incompatibleVideoUpscale} asks of the same numbers <em>before</em>
+     * the download, because the upscale this path hands to MediaPlayer for a 1080p clip runs below
+     * realtime — so such a clip never reaches here as an original.
      */
     private boolean routingAllowsTsPlayer(File file) {
         VideoHeaderProbe.Probe probe = VideoHeaderProbe.probe(file);
@@ -2907,18 +2925,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 height = asset.height;
             }
         }
-        int effWidth = width;
-        int effHeight = height;
-        if (rotation == 90 || rotation == 270) {
-            int t = effWidth;
-            effWidth = effHeight;
-            effHeight = t;
-        }
-        boolean framePortrait = getResources().getConfiguration().orientation
-                == android.content.res.Configuration.ORIENTATION_PORTRAIT;
+        boolean framePortrait = frameIsPortrait();
+        // The rotation term stays here and out of the shared helper: a turned clip needs a player
+        // that can turn it, which is an engine question. Whether it needs an upscale is a source
+        // question, and MediaCompatibility asks it the same way for both paths.
         boolean forceFallback = rotation > 0
-                || (width > 0 && height > 0 && effWidth > effHeight && framePortrait)
-                || (width > 0 && height > 0 && effHeight > effWidth && !framePortrait);
+                || MediaCompatibility.videoAspectOppositeFrame(width, height, rotation, framePortrait);
         lastVideoRotation = rotation;
         lastVideoWidth = width;
         lastVideoHeight = height;
@@ -2937,6 +2949,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         + (forceFallback ? "MediaPlayer" : "TsPlayer") + "; "
                         + describeStream(probe)));
         return !forceFallback;
+    }
+
+    /**
+     * Which way this frame's panel is hung, read one way, in one place. This activity is the app's
+     * only holder of a {@code Resources} object — {@code MediaManager} has no {@code Context} — so
+     * everything downstream that needs the answer gets it from here rather than inventing a second
+     * convention for what "portrait" means.
+     */
+    private boolean frameIsPortrait() {
+        return getResources().getConfiguration().orientation
+                == android.content.res.Configuration.ORIENTATION_PORTRAIT;
+    }
+
+    /** Hands {@link #frameIsPortrait()} to the rotation pipeline's orientation gate. */
+    private void publishFrameOrientation() {
+        if (mediaManager != null) {
+            mediaManager.setFramePortrait(frameIsPortrait());
+        }
     }
 
     /** Sample-table facts in one line, each part omitted when the file did not give it. */

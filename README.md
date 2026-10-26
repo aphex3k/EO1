@@ -72,16 +72,20 @@ which is what catches the everyday iPhone file. That is deliberate — a name th
 codec is never treated as proof that it does.
 
 **Encode targets.** JPEG or PNG for a still. For video: H.264 in `mp4`/`mov`/`m4v`, longest side
-**at most 1920 px**, **1080p30 or below**, and **under 15 Mbit/s**. There are two independent decoder
-ceilings, and a clip has to clear both:
+**at most 1920 px**, **1080p30 or below**, and **under 15 Mbit/s** — and, if the frame is hung portrait,
+be portrait itself. There are three independent ceilings, and a clip has to clear all three:
 - **Sustained throughput** — 300 000 macroblocks a second: 1080p29.97 is 244 555 and plays at 1.00x,
   while 1080p59.97 is 489 355 and runs at **0.13x** — slow motion, forever, with no error raised. 720p60
   fits where 1080p60 does not.
 - **Sustained bitrate** — 15 Mbit/s (the average the video track carries): 14.4 measured buttery, 15.6
   measured choppy on the same hardware. This one catches files that pass every size and frame-rate rule —
   a 1080p30 encode at 20 Mbit/s is fine on throughput and still rerouted.
+- **Orientation** — a 1080p clip whose *displayed* aspect is opposite the panel's needs a 1.78x upscale to
+  fill it, and this hardware composites that below realtime. A 1920x1080 file turned to 1080x1920 by its
+  own display matrix is fine on a portrait frame; the same file unturned is served from the lighter stream
+  instead. Below 1080p the same mismatch costs proportionally fewer pixels and plays.
 
-A clip over either ceiling is not refused, it is shown from the server's lower-bitrate playback stream —
+A clip over any of these is not refused, it is shown from the server's lower-bitrate playback stream —
 but only where such a stream exists; if the server has nothing transcoded, the clip plays as it arrived.
 Files above 1 GiB are never fetched.
 
@@ -358,7 +362,8 @@ own — [docs/UPDATING.md](docs/UPDATING.md).
   dependency pins exist for that SDK. The browser inside it is Chromium 33.
 - **About 800 MB of usable storage, and nothing is transcoded or resized on the device.** There is no
   on-device FFmpeg. The per-file ceiling is the smaller of 1 GiB and your free space.
-- **Video:** 1080p30 is the practical ceiling; HEVC, AV1, VVC, Dolby-Vision, and every HEIF or AVIF
+- **Video:** 1080p30 is the practical ceiling, and on a portrait frame 1080p video has to actually *be*
+  portrait — or carry a display matrix that says so; HEVC, AV1, VVC, Dolby-Vision, and every HEIF or AVIF
   still never decode. ExoPlayer and Media3 are forbidden here — they hang this SoC's media stack until
   a power cycle, which is why playback runs on Amlogic's TsPlayer with a `MediaPlayer` fallback.
 - **Files you upload live inside the app.** A factory reset, an uninstall or *Clear data* erases them.

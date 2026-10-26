@@ -133,6 +133,27 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private final Set<String> tooDemandingVideoKeys =
             Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
     /**
+     * Asset keys whose 1080p video would have to be magnified to fill this frame's panel, because it
+     * displays with the aspect opposite the panel's — see
+     * {@link MediaCompatibility#incompatibleVideoUpscale}. Routed rather than tagged, for the reason
+     * every budget has: the clip is decodable, it only runs slow.
+     *
+     * <p>Kept apart from {@link #tooDemandingVideoKeys} because it is a different kind of fact. A
+     * byte budget is a property of the file, and holds however the frame is hung; this is a property
+     * of the file <em>and</em> the panel, so {@link #setFramePortrait} forgets it the moment the panel
+     * turns. Merging the two sets would mean a frame could never correct an orientation verdict
+     * without also re-earning a throughput one it had no reason to doubt.
+     */
+    private final Set<String> upscaledVideoKeys =
+            Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
+    /**
+     * Which way this frame's panel is hung: true portrait, false landscape, {@code null} when the
+     * activity has not published one yet. Read by {@link #noteVideoNeedsUpscale} only; a
+     * {@code null} keeps that gate dark, which is the conservative direction — an unpublished panel
+     * shows originals, exactly as every build before this gate did.
+     */
+    private volatile Boolean framePortrait;
+    /**
      * Video assets whose degraded source turns out to be the original file itself, because the
      * server has nothing transcoded for them. Remembered so the two verdicts cannot chase each other:
      * the throughput check wants to route away from the original, and this says there is nowhere to
@@ -947,6 +968,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     + " starting at the fallback source");
             return false;
         }
+        if (upscaledVideoKeys.contains(key) && !noTranscodeVideoKeys.contains(key)) {
+            Log.i(TAG, "acquireAsset: " + key + " is 1080p against a panel turned the other way;"
+                    + " starting at the fallback source");
+            return false;
+        }
         if (asset.sizeBytes != null && asset.sizeBytes > MAX_ASSET_BYTES) {
             Log.w(TAG, "acquireAsset: " + key + " original is " + asset.sizeBytes
                     + " bytes, beyond this device's " + MAX_ASSET_BYTES
@@ -964,9 +990,10 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
-     * Notes that an asset's original is decodable but asks for more sustained decode load (throughput
-     * or bitrate) than this device can keep up with, so every later acquisition of it starts at the
-     * backend's fallback source.
+     * Notes that an asset's original is decodable but asks more sustained decode load — macroblock
+     * throughput or bitrate — than this device can keep up with, so every later acquisition of it
+     * starts at the backend's fallback source. What a clip costs the <em>compositor</em> because of
+     * how it is hung on this panel is a separate verdict, in {@link #upscaledVideoKeys}.
      *
      * <p>Returning true only means "descend now". {@link #acquireAsset} already falls through to the
      * fallback when obtaining an original yields null, so a verdict taken on bytes already in hand
@@ -980,8 +1007,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * @param probe the probe already run on the file for the codec check, reused here so a video's
      *              {@code moov} is read once per acquisition rather than twice
      */
-    private boolean noteVideoOverThroughputBudget(MediaAsset asset,
-                                                  @Nullable VideoHeaderProbe.Probe probe) {
+    private boolean noteVideoOverDecodeBudget(MediaAsset asset,
+                                              @Nullable VideoHeaderProbe.Probe probe) {
         if (asset.type != MediaType.VIDEO || probe == null || noTranscodeVideoKeys.contains(asset.key())) {
             return false;
         }
@@ -1005,6 +1032,66 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         // exact numbers that triggered the verdict live only in this report.
         postDebugInformation("videoBudget", asset.key() + " - " + reason);
         return true;
+    }
+
+    /**
+     * Notes that an asset's 1080p video would have to be magnified to fill <em>this</em> frame's panel
+     * — it displays with the aspect opposite the panel's, which the platform MediaPlayer (the only
+     * engine {@code routingAllowsTsPlayer} will use for such a clip) composites below realtime. Same
+     * treatment as {@link #noteVideoOverDecodeBudget}: descend to the fallback now, remember the key so
+     * every later acquisition starts there, keep the original cached.
+     *
+     * <p>Decided from the file rather than the catalog for the same reason the frame rate is: no
+     * backend reports a display matrix, and without it a portrait-coded clip cannot be told apart from
+     * a landscape-coded one carrying a 90-degree turn — which is precisely the pair this gate splits.
+     * So an asset's first appearance pays one original fetch and already plays the fallback.
+     *
+     * @param probe the probe already run on the file for the codec check, reused here so a video's
+     *              {@code moov} is read once per acquisition rather than twice
+     */
+    private boolean noteVideoNeedsUpscale(MediaAsset asset,
+                                          @Nullable VideoHeaderProbe.Probe probe) {
+        if (asset.type != MediaType.VIDEO || probe == null || noTranscodeVideoKeys.contains(asset.key())) {
+            return false;
+        }
+        String reason = MediaCompatibility.incompatibleVideoUpscale(
+                asset.type, probe.codedWidth, probe.codedHeight, probe.rotationDeg, framePortrait);
+        if (reason == null) {
+            return false;
+        }
+        upscaledVideoKeys.add(asset.key());
+        Log.w(TAG, "acquireRemoteFile: " + asset.key() + " - " + reason
+                + "; starting it at the fallback source, original kept cached");
+        // Durable record, as above: /state's video block will describe the fallback this verdict put
+        // on screen, so the coded size, matrix and panel orientation that decided it exist nowhere
+        // else once logcat has rolled over.
+        postDebugInformation("videoBudget", asset.key() + " - " + reason);
+        return true;
+    }
+
+    /**
+     * Publishes which way this frame's panel is hung, so {@link #noteVideoNeedsUpscale} can judge a
+     * clip against it. {@code MainActivity} is the only holder of a {@code Resources} object; this
+     * class has no {@code Context}, so the value is handed over rather than read.
+     *
+     * <p>Clearing {@link #upscaledVideoKeys} when the value <em>changes</em> is what keeps the verdict
+     * correctable: a frame physically turned from portrait to landscape must not stay retired on the
+     * strength of a panel it no longer has. It costs a cache hit plus a {@code moov} read on the next
+     * appearance of each such asset, never a download. The byte budgets need no clearing because
+     * nothing about how a frame is hung changes what a file asks of its decoder.
+     *
+     * @param portrait true for a portrait panel, false for landscape, {@code null} to leave the
+     *                 orientation gate dark
+     */
+    void setFramePortrait(@Nullable Boolean portrait) {
+        Boolean previous = framePortrait;
+        framePortrait = portrait;
+        if (previous != null && !previous.equals(portrait) && !upscaledVideoKeys.isEmpty()) {
+            Log.i(TAG, "setFramePortrait: panel is now " + (portrait != null && portrait
+                    ? "portrait" : "landscape") + ", forgetting " + upscaledVideoKeys.size()
+                    + " orientation verdict(s)");
+            upscaledVideoKeys.clear();
+        }
     }
 
     /**
@@ -1207,7 +1294,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 String reason = MediaCompatibility.incompatibleReasonForFile(
                         asset.type, cacheFile, probe);
                 if (reason == null) {
-                    if (noteVideoOverThroughputBudget(asset, probe)) {
+                    // Two statements, not one || : a clip over a byte budget *and* the orientation
+                    // gate should leave both records behind, not just the first one checked.
+                    boolean descend = noteVideoOverDecodeBudget(asset, probe);
+                    descend |= noteVideoNeedsUpscale(asset, probe);
+                    if (descend) {
                         return null;
                     }
                     return cacheFile;
@@ -1296,7 +1387,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                             knownIncompatibleKeys.add(asset.key());
                             return null;
                         }
-                        if (noteVideoOverThroughputBudget(asset, probe)) {
+                        boolean descend = noteVideoOverDecodeBudget(asset, probe);
+                        descend |= noteVideoNeedsUpscale(asset, probe);
+                        if (descend) {
                             return null;
                         }
                     }
@@ -1689,15 +1782,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
-     * The four verdict sets, as counts. Keys are deliberately withheld: a library of 40 000 assets
+     * The five verdict sets, as counts. Keys are deliberately withheld: a library of 40 000 assets
      * would otherwise spend half a report's budget listing uuids, and the number is what answers
      * "has this frame quietly given up on a slice of the library". Counts only is also what keeps a
-     * throughput or bitrate verdict — which is a statement about this decoder, not about the user's
-     * files — from reading like one.
+     * throughput, bitrate or orientation verdict — a statement about this decoder, or about this
+     * panel, never about the user's files — from reading like one.
      */
     public String verdictCounts() {
         return "incompatible=" + knownIncompatibleKeys.size()
                 + " tooDemanding=" + tooDemandingVideoKeys.size()
+                + " needsUpscale=" + upscaledVideoKeys.size()
                 + " noTranscode=" + noTranscodeVideoKeys.size()
                 + " renderSilent=" + renderSilentVideoKeys.size();
     }
