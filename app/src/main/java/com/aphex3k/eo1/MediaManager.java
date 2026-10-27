@@ -11,6 +11,7 @@ import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaBackend;
 import com.aphex3k.media.MediaSource;
 import com.aphex3k.media.MediaType;
+import com.aphex3k.media.flickr.FlickrMediaBackend;
 import com.aphex3k.media.immich.ImmichMediaBackend;
 import com.aphex3k.media.local.LocalMediaBackend;
 import com.aphex3k.media.web.WebsiteBackend;
@@ -647,6 +648,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 backend = new ImmichMediaBackend(entry, this);
             } else if (entry.isWeb()) {
                 backend = new WebsiteBackend(entry);
+            } else if (entry.isFlickr()) {
+                backend = new FlickrMediaBackend(entry);
             }
             if (backend == null) {
                 Log.w(TAG, "rebuildPool: unknown backend type '" + entry.type + "' for '"
@@ -834,7 +837,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     .append(e.host).append('|')
                     .append(e.userid).append('|')
                     .append(e.apiVersion).append('|')
-                    .append(e.password).append('\n');
+                    .append(e.password).append('|')
+                    // A Flickr entry's identity is its key and the stream it names, and neither is
+                    // covered by host/userid/password. Left out, editing one would keep the old pool
+                    // rotating until the frame restarted, and two flickr entries would share a
+                    // fingerprint and look unchanged.
+                    .append(e.apiKey).append('|')
+                    .append(e.source).append('\n');
         }
         try {
             byte[] d = MessageDigest.getInstance("SHA-1")

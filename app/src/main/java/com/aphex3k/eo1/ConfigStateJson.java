@@ -31,6 +31,11 @@ public final class ConfigStateJson {
                 // For a web entry "host" is the page address — not a secret, and the only way to
                 // see from the LAN what the frame is displaying.
                 backend.addProperty("host", entry.host);
+            } else if (entry.isFlickr()) {
+                // Which stream a frame is reading is diagnostic information, and the key that reads it
+                // is not: apiKey is deliberately never named here, the same omission that keeps
+                // "no password, no userid" true for every type this method does not know about.
+                backend.addProperty("source", entry.source);
             }
             backend.addProperty("enabled", entry.enabled);
             backend.addProperty("valid", entry.isValid());
