@@ -541,6 +541,80 @@ public class MediaManagerCyclingTest {
     }
 
     /**
+     * A source that reports no size must not reserve the per-file ceiling. This hardware has less free
+     * space than {@link MediaManager#MAX_ASSET_BYTES}, so asking for ceiling+margin can never be
+     * satisfied: {@code ensureSpace} evicts the whole shared cache — including other backends' originals
+     * that were fine — and then fails with an error that carries no cause, which the ladder reads as
+     * "this asset is broken" and ends in an incompatibility verdict about a healthy file.
+     *
+     * <p>The free-space figure is what {@code df /data} reported on a live EO2 on 2026-10-26.
+     */
+    @Test
+    public void unknownSourceSizeReservesWhatFitsAndEvictsNothing() throws Exception {
+        final long free = 900L * 1024L * 1024L;
+        String assetId = "01234567-89ab-cdef-0123-456789abcdef";
+        MediaAsset asset = remoteAsset(assetId, "fakeA");
+        FakeBackend a = new FakeBackend("fakeA", "immich", asset) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset ignored) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        return new ByteArrayInputStream("unsized-bytes".getBytes(StandardCharsets.UTF_8));
+                    }
+                }, null, null);
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = new MediaManager(listener, Arrays.asList(a), new Configuration(),
+                new Random(11L), new MediaCacheManager(dir -> free));
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File neighbour = new File(cacheDir, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jpg");
+        Files.write(neighbour.toPath(), "another backend's original".getBytes(StandardCharsets.UTF_8));
+
+        mm.showNextImageLocked(cacheDir, tmp.newFolder("uploads"), directPoster, false);
+
+        assertEquals("the unsized asset still displays", 1, listener.displayedKeys.size());
+        assertTrue("and a healthy neighbour is not collateral damage", neighbour.isFile());
+    }
+
+    /**
+     * The other half: when the disk genuinely cannot hold the margin, evicting is still right. This is
+     * the one case where an unknown size must not quietly become "keep everything as it is".
+     */
+    @Test
+    public void fullDiskStillEvictsForAnUnknownSize() throws Exception {
+        final long free = 20L * 1024L * 1024L;
+        String assetId = "01234567-89ab-cdef-0123-456789abcdef";
+        MediaAsset asset = remoteAsset(assetId, "fakeA");
+        FakeBackend a = new FakeBackend("fakeA", "immich", asset) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset ignored) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        return new ByteArrayInputStream("unsized-bytes".getBytes(StandardCharsets.UTF_8));
+                    }
+                }, null, null);
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = new MediaManager(listener, Arrays.asList(a), new Configuration(),
+                new Random(12L), new MediaCacheManager(dir -> free));
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("tight-cache");
+        File neighbour = new File(cacheDir, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jpg");
+        Files.write(neighbour.toPath(), "another backend's original".getBytes(StandardCharsets.UTF_8));
+
+        mm.showNextImageLocked(cacheDir, tmp.newFolder("uploads"), directPoster, false);
+
+        assertEquals("a disk below the safety margin cannot take the asset", 0,
+                listener.displayedKeys.size());
+        assertFalse("and making room for it is what eviction is for", neighbour.isFile());
+    }
+
+    /**
      * Minimal ISOBMFF: {@code ftyp} + one {@code trak} carrying {@code mdhd} (1000 timescale, 1 s),
      * an {@code avc1} sample entry at the given coded size, and one {@code stsz} entry per frame.
      * Enough for {@link VideoHeaderProbe} to report {@code codedWidth/codedHeight} and
