@@ -23,7 +23,7 @@ your LAN. Example: <http://your-host/update-out/eo1-release-1.apk>
 - A keyboard, once, on one board — for the step that turns on local uploads. It is a one-time
   bootstrap on the frame's own screen, not a requirement of using the frame; see
   [the seam, stated plainly](#the-one-step-that-needs-hands).
-- (optionally) an Immich server — only if you want that source. Nothing here needs one.
+- (optionally) an Immich server, and/or a Flickr **application key** — only if you want those sources. Nothing here needs either, and the app ships no credential of its own for any source, so a key is always yours to supply.
 - (optionally) a web server hosting the APK for download onto the frames.
 
 ### The one step that needs hands
