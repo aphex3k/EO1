@@ -42,6 +42,7 @@ public class OptionsBasicFragment extends Fragment {
     private Button addImmichButton;
     private Button addLocalButton;
     private Button addWebButton;
+    private Button addFlickrButton;
     private EditText intervalField;
     private LinearLayout quietCronContainer;
     private Button addQuietWindowButton;
@@ -84,6 +85,7 @@ public class OptionsBasicFragment extends Fragment {
         addImmichButton = view.findViewById(R.id.btnAddImmich);
         addLocalButton = view.findViewById(R.id.btnAddLocal);
         addWebButton = view.findViewById(R.id.btnAddWeb);
+        addFlickrButton = view.findViewById(R.id.btnAddFlickr);
         intervalField = view.findViewById(R.id.editTextInterval);
         quietCronContainer = view.findViewById(R.id.quietCronContainer);
         addQuietWindowButton = view.findViewById(R.id.btnAddQuietWindow);
@@ -105,6 +107,7 @@ public class OptionsBasicFragment extends Fragment {
         addImmichButton.setOnClickListener(v -> addImmichBackend());
         addLocalButton.setOnClickListener(v -> addLocalBackend());
         addWebButton.setOnClickListener(v -> addWebBackend());
+        addFlickrButton.setOnClickListener(v -> addFlickrBackend());
         addQuietWindowButton.setOnClickListener(v -> addQuietWindow());
 
         if (settingsManager != null) {
@@ -147,6 +150,11 @@ public class OptionsBasicFragment extends Fragment {
         copy.password = e.password;
         copy.apiVersion = e.apiVersion;
         copy.enabled = e.enabled;
+        // Every field the working copy is allowed to lose is a field that disappears from
+        // configuration.json the moment this dialog is opened and saved — the list is rebuilt from these
+        // copies, not from the parsed document.
+        copy.apiKey = e.apiKey;
+        copy.source = e.source;
         return copy;
     }
 
@@ -271,6 +279,19 @@ public class OptionsBasicFragment extends Fragment {
     }
 
     /** One website per entry: {@code host} holds the page address. */
+    private void addFlickrBackend() {
+        ConfigurationBackendEntry entry = new ConfigurationBackendEntry();
+        entry.type = ConfigurationBackendEntry.TYPE_FLICKR;
+        entry.id = "flickr-" + nextBackendNumber(ConfigurationBackendEntry.TYPE_FLICKR);
+        entry.apiKey = "";
+        entry.source = "";
+        backends.add(entry);
+        renderBackendList();
+        // Straight into the editor: a Flickr entry is unusable until two strings are typed, and this
+        // dialog is the only place on the device that can take them without a browser on the LAN.
+        rows.get(rows.size() - 1).openEditor();
+    }
+
     private void addWebBackend() {
         ConfigurationBackendEntry entry = new ConfigurationBackendEntry();
         entry.type = ConfigurationBackendEntry.TYPE_WEB;
@@ -330,6 +351,8 @@ public class OptionsBasicFragment extends Fragment {
                 problem = invalidImmichEntry(entry);
             } else if (entry.isWeb()) {
                 problem = invalidWebEntry(entry);
+            } else if (entry.isFlickr()) {
+                problem = invalidFlickrEntry(entry);
             } else if (entry.isLocal()) {
                 problem = null;
             } else {
@@ -387,6 +410,22 @@ public class OptionsBasicFragment extends Fragment {
      * @return null when the entry names a usable page, otherwise a short description of the
      *         problem. The address is trimmed in place, so a saved URL never carries stray spaces.
      */
+    /**
+     * Both halves are required. A key with no stream lists nothing, and a stream with no key is answered
+     * by Flickr with error code 100 on every call — and the app ships no key of its own to fall back to,
+     * for any backend, ever.
+     */
+    private static String invalidFlickrEntry(ConfigurationBackendEntry entry) {
+        if (entry.apiKey == null || entry.apiKey.trim().isEmpty()) {
+            return "no Flickr application key - apply for a free non-commercial key at "
+                    + "flickr.com/services/api/keys/ and paste it in";
+        }
+        if (entry.source == null || entry.source.trim().isEmpty()) {
+            return "no photostream or album to show";
+        }
+        return null;
+    }
+
     private static String invalidWebEntry(ConfigurationBackendEntry entry) {
         entry.host = entry.host == null ? "" : entry.host.trim();
         if (entry.host.isEmpty()) {
@@ -477,6 +516,8 @@ public class OptionsBasicFragment extends Fragment {
         EditText userIdField;
         EditText passwordField;
         EditText apiVersionField;
+        EditText sourceField;
+        EditText apiKeyField;
         boolean editorOpen;
 
         BackendRow(ConfigurationBackendEntry entry) {
@@ -501,7 +542,7 @@ public class OptionsBasicFragment extends Fragment {
             summary.setLayoutParams(summaryParams);
             header.addView(summary);
 
-            if (entry.isImmich() || entry.isWeb()) {
+            if (entry.isImmich() || entry.isWeb() || entry.isFlickr()) {
                 Button editButton = new Button(context);
                 editButton.setText("Edit");
                 editButton.setOnClickListener(v -> openEditor());
@@ -525,6 +566,19 @@ public class OptionsBasicFragment extends Fragment {
         private void buildEditor(Context context) {
             this.editor = new LinearLayout(context);
             editor.setOrientation(LinearLayout.VERTICAL);
+
+            if (entry.isFlickr()) {
+                // Two fields, and no server: a Flickr entry's endpoint is a constant, so there is no
+                // base URL to mistype. apiKeyField is masked because it is a credential.
+                sourceField = new EditText(context);
+                sourceField.setHint("https://www.flickr.com/photos/you/");
+                editor.addView(fieldRow(context, "Stream or username", sourceField));
+                apiKeyField = new EditText(context);
+                apiKeyField.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+                editor.addView(fieldRow(context, "Application key", apiKeyField));
+                addEditorButtons(context);
+                return;
+            }
 
             hostField = new EditText(context);
             if (entry.isWeb()) {
@@ -577,6 +631,13 @@ public class OptionsBasicFragment extends Fragment {
             if (editor == null) {
                 return;
             }
+            if (entry.isFlickr()) {
+                sourceField.setText(safe(entry.source));
+                apiKeyField.setText(safe(entry.apiKey));
+                editor.setVisibility(View.VISIBLE);
+                editorOpen = true;
+                return;
+            }
             hostField.setText(safe(entry.host));
             if (!entry.isWeb()) {
                 userIdField.setText(safe(entry.userid));
@@ -595,6 +656,14 @@ public class OptionsBasicFragment extends Fragment {
         }
 
         void applyEditor() {
+            if (entry.isFlickr()) {
+                // No host is written: a Flickr entry has none, and putting a value in the field
+                // normalize() treats as an immich base URL would be inventing configuration.
+                entry.source = sourceField.getText().toString().trim();
+                entry.apiKey = apiKeyField.getText().toString().trim();
+                updateSummary();
+                return;
+            }
             entry.host = hostField.getText().toString().trim();
             if (entry.isWeb()) {
                 // No credentials on a web entry: leave userid/password/apiVersion untouched
@@ -617,6 +686,13 @@ public class OptionsBasicFragment extends Fragment {
             if (entry.isWeb()) {
                 String url = entry.host == null ? "" : entry.host.trim();
                 summary.setText(url.isEmpty() ? "Website (no URL set)" : "Website — " + url);
+                return;
+            }
+            if (entry.isFlickr()) {
+                String src = entry.source == null ? "" : entry.source.trim();
+                boolean keyed = entry.apiKey != null && !entry.apiKey.trim().isEmpty();
+                summary.setText(src.isEmpty() ? "Flickr (no stream set)" : "Flickr — " + src
+                        + (keyed ? "" : " (no key)"));
                 return;
             }
             String host = entry.host == null ? "" : entry.host.trim();

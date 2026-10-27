@@ -238,5 +238,12 @@
             android:textSize="22sp"
             android:textStyle="bold" />
 
+        <TextView
+            android:id="@+id/textViewAboutServiceTerms"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16sp"
+            android:textSize="18sp" />
+
     </LinearLayout>
 </ScrollView>

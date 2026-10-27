@@ -31,6 +31,20 @@ public interface WebController {
     String deviceName();
 
     /**
+     * The attribution line a configured service requires, or "" when none does. Rendered in the index
+     * page header: the notice has to appear somewhere a person looking at the frame or the LAN page can
+     * read it, and a chrome-less kiosk has no other surface.
+     */
+    String serviceTermsNotice();
+
+    /**
+     * Honours a service's removal request by telling the named backend to stop showing and stop holding
+     * one asset (or everything it has ever listed, when {@code assetKey} is null). Reported back as a
+     * count so an operator can tell "done" from "this backend has no such obligation".
+     */
+    int forgetMedia(String backendId, String assetKey);
+
+    /**
      * Replaces this frame's device name. Sanitised and persisted by the implementor, which also
      * refreshes the on-screen copy; nothing else about the running app changes.
      *

@@ -95,6 +95,24 @@ parameter, an empty one, or a non-numeric one runs rung 1 — force a rotation �
 lands outside 1…5 is refused. There is no response field that distinguishes the rung you asked for
 from the rung you got, so always send `level` explicitly.
 
+### Removal requests, and why a delete is not one
+
+A Flickr photo the owner asks to have removed must be gone **within 24 hours**, and this frame has no
+inbound channel to receive such a request. `POST /forget?token=…&backend=flickr-1[&asset=<key>]` is the
+channel: it tells that backend to stop showing the asset and stop holding its bytes, and the mark is
+durable — persisted under `filesDir/backends/flickr/`, never expired, and honoured by the catalog build,
+so the photo does not come back on the next rotation. Deleting the cached file alone would be worse than
+nothing: the listing still describes the photo, so the next tick downloads it again and the clause is
+violated a day after it appeared to be satisfied. Omit `asset` to forget everything that backend has ever
+listed. It is POST-only, token-gated and same-origin checked like the other writes, and it answers with
+how many assets the backend stopped holding, because "0" from a backend with no such obligation and "0"
+because nothing matched are different answers to a person acting on a request.
+
+The rest of Flickr's terms obligations are automatic and need no route: cached photos that are no longer
+listed (deleted, or made private) are freed at the next pool rebuild, and a photo idle for 30 days loses
+its cached copy — the window restarts on each display, so a photo in active rotation is never churned.
+See the **Flickr** bullet in [AGENTS.md](../AGENTS.md).
+
 ## Trusted network
 
 The configuration endpoints (`/config*`), the APK update upload (`POST /update`) and the device-name

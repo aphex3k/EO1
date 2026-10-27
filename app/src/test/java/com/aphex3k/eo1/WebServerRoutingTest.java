@@ -289,4 +289,17 @@ public class WebServerRoutingTest {
         }
         return m;
     }
+
+    /**
+     * A removal request is destructive and changes what the frame displays, so it is reachable only by
+     * POST. The routing table deliberately maps the path for every method and the handler enforces the
+     * verb — pinning both halves, because a route that silently answers GET would let any page the
+     * operator visits delete the library through an {@code <img>} tag.
+     */
+    @org.junit.Test
+    public void forgetIsRoutedForBothMethodsAndEnforcedInHandler() {
+        assertEquals("forgetMedia", WebServer.route("POST", "/forget"));
+        assertEquals("forgetMedia", WebServer.route("GET", "/forget"));
+    }
+
 }

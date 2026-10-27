@@ -3491,6 +3491,32 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         return settingsManager != null ? settingsManager.deviceName() : "";
     }
 
+    /**
+     * Called from a web server worker thread; the manager owns which generation is current.
+     */
+    @Override
+    public int forgetMedia(String backendId, String assetKey) {
+        MediaManager manager = mediaManager;
+        if (manager == null) {
+            return 0;
+        }
+        return manager.forgetAssets(backendId, assetKey);
+    }
+
+    /**
+     * Called from the web server's worker threads, so it may not throw: an exception escaping here would
+     * reach the process-wide handler that exits the app.
+     */
+    @Override
+    public String serviceTermsNotice() {
+        try {
+            Configuration c = settingsManager == null ? null : settingsManager.getConfiguration();
+            return Configuration.requiredServiceNotices(c);
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
     /** Called from the web server's worker threads; {@code SettingsManager} does the refresh. */
     @Override
     public String setDeviceName(String requested) {

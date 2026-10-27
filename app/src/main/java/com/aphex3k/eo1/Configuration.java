@@ -385,6 +385,27 @@ public class Configuration {
         return !before.equals(join(e));
     }
 
+    /**
+     * The attribution a configured set of services legally requires, or "" when none of them asks for
+     * one.
+     *
+     * <p>Kept here because two surfaces must say the same thing word for word — the options dialog's
+     * About tab and the LAN page header — and a notice that exists to satisfy a service's terms must not
+     * be paraphrased differently by whoever added the second call site. Worded as Flickr specifies it,
+     * as text: its terms forbid using the Flickr logo without written permission.
+     */
+    public static String requiredServiceNotices(Configuration c) {
+        if (c == null) {
+            return "";
+        }
+        for (ConfigurationBackendEntry entry : c.backendsOrEmpty()) {
+            if (entry.isFlickr() && entry.enabled) {
+                return "This product uses the Flickr API but is not endorsed or certified by SmugMug, Inc.";
+            }
+        }
+        return "";
+    }
+
     private static String join(ConfigurationBackendEntry e) {
         return e.type + "\u0000" + (e.id == null ? "" : e.id)
                 + "\u0000" + (e.host == null ? "" : e.host)

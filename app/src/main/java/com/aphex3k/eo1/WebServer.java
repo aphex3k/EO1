@@ -328,6 +328,9 @@ public class WebServer {
         if (path.equals("/devicename")) {
             return "deviceName";
         }
+        if (path.equals("/forget")) {
+            return "forgetMedia";
+        }
         if (path.equals("/health")) {
             return "health";
         }
@@ -829,6 +832,27 @@ public class WebServer {
                 break;
             }
 
+            case "forgetMedia": {
+                // The honoured form of a service's removal request. POST-only and same-origin like the
+                // other writes, and behind the configuration token: it deletes media this frame fetched
+                // and marks it never to fetch again, which is a change to what the frame displays.
+                if (!method.equals("POST")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                String forgetGate = configGateError(params);
+                if (forgetGate != null) {
+                    sendJson(os, 403, errorJson(forgetGate));
+                    return;
+                }
+                if (!configWriteAllowed(headers, boundPort)) {
+                    sendJson(os, 403, errorJson("cross-origin request rejected"));
+                    return;
+                }
+                handleForgetPost(params, os);
+                break;
+            }
+
             case "health":
                 send(os, 200, "text/plain", "ok");
                 break;
@@ -1115,6 +1139,18 @@ public class WebServer {
                 + "table{border-collapse:collapse}td,th{padding:4px 8px;text-align:left}"
                 + "button{margin:2px}a{color:#8cf}</style>");
         sb.append(indexHeadingHtml(platform, deviceName, safeIp(), boundPort));
+        // Attribution a configured service requires, rendered as text and never as a logo: Flickr's
+        // terms forbid its mark without written permission, and permit it only less prominently than the
+        // application's own name.
+        String termsNotice;
+        try {
+            termsNotice = controller.serviceTermsNotice();
+        } catch (Exception e) {
+            termsNotice = "";
+        }
+        if (termsNotice != null && !termsNotice.isEmpty()) {
+            sb.append("<p><small>").append(escapeHtml(termsNotice)).append("</small></p>");
+        }
         sb.append("<p>").append(escapeHtml(controller.appBuildSummary())).append("</p>");
         sb.append("<p><a href=\"/state\">state</a> · <a href=\"/logs\">logs</a> · ")
                 .append("<a href=\"/crashes\">crashes</a> · ")
@@ -1331,6 +1367,39 @@ public class WebServer {
                 + deviceNamePrefixHtml(deviceName) + escapeHtml(platform) + "</title>";
     }
 
+    /**
+     * Forgets one asset ({@code asset} param) or a whole backend's worth ({@code backend} alone).
+     * Reports how many the backend stopped holding, because "0" from a backend that has no such
+     * obligation and "0" because nothing matched are different answers to give a person acting on a
+     * removal request.
+     */
+    private void handleForgetPost(java.util.Map<String, String> params, java.io.OutputStream os)
+            throws IOException {
+        String backendId = params.get("backend");
+        if (backendId == null || backendId.trim().isEmpty()) {
+            sendJson(os, 400, errorJson("a backend id is required"));
+            return;
+        }
+        int count;
+        try {
+            count = controller.forgetMedia(backendId.trim(), trimToNull(params.get("asset")));
+        } catch (Exception e) {
+            sendJson(os, 500, errorJson("forget failed: " + e.getClass().getSimpleName()));
+            return;
+        }
+        JsonObject out = new JsonObject();
+        out.addProperty("forgotten", count);
+        sendJson(os, 200, out);
+    }
+
+    private static String trimToNull(String value) {
+        if (value == null) {
+            return null;
+        }
+        String trimmed = value.trim();
+        return trimmed.isEmpty() ? null : trimmed;
+    }
+
     /** The index page's {@code <h1>}. */
     static String indexHeadingHtml(String platform, String deviceName, String ip, int port) {
         return "<h1>" + deviceNamePrefixHtml(deviceName) + escapeHtml(platform)
@@ -1420,10 +1489,17 @@ public class WebServer {
                 + "<button onclick=\"loadConfig()\">Load</button></p>");
         sb.append("<div id=\"cfgEditor\" style=\"display:none\">");
         sb.append("<table id=\"cfgBackends\"></table>");
+        // A removal request has no inbound channel on a LAN-only kiosk, so the honest answer is this
+        // control: paste the asset key — /state's media.current.key names the photo on screen — and the
+        // frame stops showing it and stops fetching it, durably. Leaving the field empty and choosing a
+        // backend forgets everything that backend has ever listed.
+        sb.append("<p>Removal request — asset key (leave empty to forget a whole Flickr backend): "
+                + "<input id=\"forgetAsset\" size=\"48\" placeholder=\"flickr-1:...\"></p>");
         sb.append("<p><button onclick=\"addCfgBackend('immich')\">+ Add Immich backend</button> ")
             .append("<button onclick=\"addCfgBackend('flickr')\">+ Add Flickr backend</button> ")
                 .append("<button onclick=\"addCfgBackend('local')\">+ Add local uploads</button> ")
                 .append("<button onclick=\"addCfgBackend('web')\">+ Add website</button> ")
+                .append("<button onclick=\"forgetMediaForRow()\">Forget this Flickr asset</button> ")
                 .append("<button onclick=\"exportConfig()\">Export configuration</button> ")
                 .append("<button onclick=\"document.getElementById('cfgImportFile').click()\">Import configuration</button></p>");
         sb.append("<input type=\"file\" id=\"cfgImportFile\" accept=\".json,application/json\" "
@@ -1504,6 +1580,24 @@ public class WebServer {
                 + "else{CONFIG.backends.push({type:'local',id:'local'});}"
                 + "renderCfgBackends();}"
                 + "function removeCfgBackend(i){if(!CONFIG.backends)return;CONFIG.backends.splice(i,1);renderCfgBackends();}"
+                + "function forgetMediaForRow(){"
+                + "var f=cfgBackends().filter(function(b){return b.type==='flickr';});"
+                + "if(!f.length){alert('No Flickr backend configured on this frame.');return;}"
+                + "if(f.length>1){forgetFlickrChooser(f);return;}"
+                + "forgetMedia(f[0].id);}"
+                + "function forgetFlickrChooser(list){"
+                + "var names=list.map(function(b){return b.id;}).join(', ');"
+                + "var pick=prompt('Which Flickr backend? One of: '+names);"
+                + "if(pick&&list.some(function(b){return b.id===pick.trim();}))forgetMedia(pick.trim());}"
+                + "function forgetMedia(backendId){"
+                + "var t=cfgTokenValue();"
+                + "if(!t){alert('Enter the configuration token first (options dialog on the frame).');return;}"
+                + "var q='/forget?token='+encodeURIComponent(t)+'&backend='+encodeURIComponent(backendId);"
+                + "var a=document.getElementById('forgetAsset');"
+                + "if(a&&a.value.trim())q+='&asset='+encodeURIComponent(a.value.trim());"
+                + "fetch(q,{method:'POST'}).then(function(r){return r.json();})"
+                + ".then(function(j){alert(j.forgotten===undefined?(j.error||'failed'):('stopped holding '+j.forgotten+' asset(s)'));})"
+                + ".catch(function(e){alert('Forget failed: '+e);});}"
                 + "function renderCfgQuiet(){"
                 + "var c=document.getElementById('cfgQuiet');c.innerHTML='';"
                 + "(Array.isArray(CONFIG.quietHours)?CONFIG.quietHours:[]).forEach(function(w,i){"

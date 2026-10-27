@@ -56,6 +56,12 @@ public class OptionsAboutFragment extends Fragment {
         text(view, R.id.textViewAboutAlgorithm, signer.algorithm);
         text(view, R.id.textViewAboutVerdict, "Signing key: " + signer.keyVerdict);
 
+        // A service's required notice belongs on a surface a person can actually see. On a chrome-less
+        // kiosk that is this tab and the LAN page header, not the README: the API terms ask for this
+        // sentence whenever the product uses the service, so it appears exactly when a backend that
+        // needs it is configured and not otherwise.
+        text(view, R.id.textViewAboutServiceTerms, serviceTermsNotice());
+
         deviceNameField = view.findViewById(R.id.editTextDeviceName);
         if (deviceNameField != null) {
             // Seeded from the store, never from restored view state (the field is saveEnabled=false):
@@ -84,6 +90,16 @@ public class OptionsAboutFragment extends Fragment {
         field.setSelection(stored.length());
         Toast.makeText(context, stored.isEmpty() ? "Device name cleared"
                 : "Device name set: " + stored, Toast.LENGTH_SHORT).show();
+    }
+
+    String serviceTermsNotice() {
+        try {
+            return Configuration.requiredServiceNotices(
+                    settingsManager == null ? null : settingsManager.getConfiguration());
+        } catch (Exception ignored) {
+            // An unreadable configuration must not blank the rest of this tab.
+            return "";
+        }
     }
 
     private static void text(View root, int id, String value) {
