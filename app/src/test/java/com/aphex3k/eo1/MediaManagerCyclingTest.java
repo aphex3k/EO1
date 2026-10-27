@@ -405,6 +405,208 @@ public class MediaManagerCyclingTest {
     }
 
     /**
+     * The orientation gate, end to end. A 1920x1080 clip at 30 fps and 1,024 B/frame is inside the
+     * throughput budget (244,800 macroblocks/s) and far inside the bitrate one (245,760 bps), and its
+     * coded long side is exactly the panel's — so nothing but the fact that this frame hangs its panel
+     * portrait can route it. That is the whole claim: on such a frame the clip can only reach the screen
+     * through MediaPlayer's 1.78x fill, and this device composites that below realtime.
+     */
+    @Test
+    public void mismatchedOrientationVideoIsRoutedToPlaybackFallbackWithoutBeingTagged()
+            throws Exception {
+        String videoId = "01234567-89ab-cdef-0123-456789abcdff";
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, null, null, 1920, 1080);
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        final AtomicInteger marked = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        // Identity matrix: displays 1920x1080, i.e. landscape.
+                        return new ByteArrayInputStream(
+                                isoVideoBytes(1920, 1080, 30, 1024, 0));
+                    }
+                }, null, null);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(
+                                "transcoded-720p".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+
+            @Override
+            public void markIncompatible(MediaAsset asset) {
+                marked.incrementAndGet();
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.setFramePortrait(true);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals(1, listener.displayedKeys.size());
+        assertTrue("the degraded source, not the original, reaches the screen",
+                listener.displayedFiles.get(0).getName().endsWith("_fb.mp4"));
+        assertEquals("a clip that plays slowly is not undecodable, so nothing is tagged",
+                0, marked.get());
+        assertEquals("the original must be fetched once to read its display matrix",
+                1, originalOpens.get());
+        assertEquals(1, fallbackOpens.get());
+        assertTrue(new File(cacheDir, videoId + "_fb.mp4").isFile());
+        assertTrue("the original stays cached: this is a routing verdict, not a bad file",
+                new File(cacheDir, videoId + ".mov").isFile());
+        assertTrue(listener.exceptions.isEmpty());
+
+        // Cycle 2 on its own proves nothing about the remembered verdict: the original is a cache hit,
+        // so it would not be re-opened even with the verdict set deleted entirely. Drop the cached
+        // original first — if the mark is missing, originalUsable says "worth a download" and this is
+        // where the pipeline would prove it.
+        new File(cacheDir, videoId + ".mov").delete();
+        new File(cacheDir, videoId + ".mov.sha1").delete();
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals("the verdict is remembered, so the original is never fetched again",
+                1, originalOpens.get());
+        assertEquals(1, fallbackOpens.get());
+        assertEquals(0, marked.get());
+        assertTrue("the verdict lives in its own set, never in the undecodable one: "
+                        + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=1"));
+        assertTrue("and it is not counted as incompatible: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("incompatible=0"));
+    }
+
+    @Test
+    public void orientationGateStaysDarkUntilThePanelIsPublished() throws Exception {
+        // MediaManager has no Context, so it cannot ask which way the frame is hung; showing an
+        // original on an unpublished panel is the conservative answer and must be the only answer.
+        String videoId = "01234567-89ab-cdef-0123-456789ae0000";
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, null, null, 1920, 1080);
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        return new ByteArrayInputStream(isoVideoBytes(1920, 1080, 30, 1024, 0));
+                    }
+                }, null, null);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(
+                                "transcoded-720p".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        // One open, not two: cycle 2 is the cached original, which is the point — the gate stayed out
+        // of the way and the frame shows the file it would have shown before the gate existed.
+        assertEquals(1, originalOpens.get());
+        assertEquals(0, fallbackOpens.get());
+        assertTrue(listener.displayedFiles.get(0).getName().endsWith(".mov"));
+        assertTrue(listener.displayedFiles.get(1).getName().endsWith(".mov"));
+    }
+
+    @Test
+    public void flippingThePanelForgetsTheOrientationVerdict() throws Exception {
+        // The reason this verdict has its own set instead of joining tooDemandingVideoKeys: it is a
+        // claim about the file *and* the panel, so turning the frame must retire it. A verdict that
+        // outlived the orientation that produced it would quietly retire half a correctly-hung library
+        // on a frame that had merely been moved.
+        String videoId = "01234567-89ab-cdef-0123-456789ae0001";
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, null, null, 1920, 1080);
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        return new ByteArrayInputStream(isoVideoBytes(1920, 1080, 30, 1024, 0));
+                    }
+                }, null, null);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(
+                                "transcoded-720p".getBytes(StandardCharsets.UTF_8));
+                    }
+                });
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.setFramePortrait(true);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertTrue(listener.displayedFiles.get(0).getName().endsWith("_fb.mp4"));
+        assertTrue("the verdict is in its own set: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=1"));
+
+        mm.setFramePortrait(false);
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertTrue("on a landscape panel this clip needs no upscale, so its cached original is shown",
+                listener.displayedFiles.get(1).getName().endsWith(".mov"));
+        assertEquals("and the fallback is never fetched again afterwards",
+                1, fallbackOpens.get());
+        assertTrue("turning the frame retired the verdict outright: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=0"));
+
+        // And turning it back re-derives it. This is the property the stamped verdict exists to keep: a
+        // frame moved to the wall and moved again must neither keep an old verdict nor lose the ability
+        // to grow a new one.
+        mm.setFramePortrait(true);
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertTrue("a portrait panel routes this clip again",
+                listener.displayedFiles.get(2).getName().endsWith("_fb.mp4"));
+        assertTrue(mm.verdictCounts().contains("needsUpscale=1"));
+    }
+
+    /**
      * The gate's own failure mode: routing to a degraded source that is not degraded. When
      * {@code /video/playback} answers with the original file, the "fallback" is a second copy of the
      * bytes already on disk, so the asset ends up fetched twice and cached twice — measured on an
@@ -628,6 +830,18 @@ public class MediaManagerCyclingTest {
 
     private static byte[] isoVideoBytes(int width, int height, int framesPerSecond,
                                         int bytesPerFrame) {
+        // The zero-filled tkhd below is 80 body bytes, short by four, so its matrix reads as all-zero
+        // and VideoHeaderProbe reports rotationDeg -1 — "unknown", which keeps the orientation gate
+        // dark. That is why no existing caller of this fixture changes behaviour when the gate lands.
+        return isoVideoBytes(width, height, framesPerSecond, bytesPerFrame, -1);
+    }
+
+    /**
+     * @param rotationDeg the display matrix to write, or any negative value for the legacy
+     *                    matrix-less {@code tkhd} (which probes as "unknown")
+     */
+    private static byte[] isoVideoBytes(int width, int height, int framesPerSecond,
+                                        int bytesPerFrame, int rotationDeg) {
         byte[] mdhd = box("mdhd", cat(new byte[]{0, 0, 0, 0}, u32(0), u32(0),
                 u32(1000), u32(1000)));
         byte[] entry = cat(new byte[6], u16(1), new byte[16], u16(width), u16(height),
@@ -639,11 +853,39 @@ public class MediaManagerCyclingTest {
         byte[] stbl = box("stbl", stsd, stsz);
         byte[] minf = box("minf", stbl);
         byte[] mdia = box("mdia", mdhd, minf);
-        byte[] tkhd = box("tkhd", cat(new byte[]{0, 0, 0, 0}, new byte[76]));
+        byte[] tkhd = box("tkhd", rotationDeg < 0
+                ? cat(new byte[]{0, 0, 0, 0}, new byte[76])
+                : tkhdMatrix(rotationDeg));
         byte[] trak = box("trak", tkhd, mdia);
         byte[] moov = box("moov", trak);
         return cat(box("ftyp", cat(u32(0x20202020), "isom".getBytes(StandardCharsets.US_ASCII))),
                 moov);
+    }
+
+    /**
+     * A version-0 {@code tkhd} body whose 16.16 display matrix says {@code rotationDeg} — the layout
+     * {@code VideoHeaderProbe.parseTkhdRotation} reads the matrix at (box offset 48). Same field
+     * order as {@code VideoHeaderProbeTest.tkhdV0}; the track's own width/height are left zero, since
+     * the probe takes coded size from {@code stsd}.
+     */
+    private static byte[] tkhdMatrix(int rotationDeg) {
+        int a;
+        int b;
+        int d;
+        int e;
+        if (rotationDeg == 90) {
+            a = 0; b = 0xFFFF0000; d = 0x00010000; e = 0;
+        } else if (rotationDeg == 180) {
+            a = 0xFFFF0000; b = 0; d = 0; e = 0xFFFF0000;
+        } else if (rotationDeg == 270) {
+            a = 0; b = 0x00010000; d = 0xFFFF0000; e = 0;
+        } else {
+            a = 0x00010000; b = 0; d = 0; e = 0x00010000;
+        }
+        return cat(new byte[]{0, 0, 0, 0}, new byte[20], new byte[8], new byte[8],
+                cat(u32(a), u32(b), u32(0), u32(d), u32(e), u32(0),
+                        u32(0), u32(0), u32(0x40000000)),
+                new byte[8]);
     }
 
     private static byte[] u32(int v) {

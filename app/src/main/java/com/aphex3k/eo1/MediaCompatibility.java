@@ -11,6 +11,7 @@ import java.nio.charset.Charset;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Locale;
 import java.util.Set;
 
 /**
@@ -145,6 +146,24 @@ public final class MediaCompatibility {
      * the same slow clip.
      */
     public static final long MAX_VIDEO_BIT_RATE_BPS = 15_000_000L;
+
+    /**
+     * Displayed long side that makes a clip "1080p" for {@link #incompatibleVideoUpscale}. It is
+     * {@link #MAX_VIDEO_SIDE_PX} by reference, not by repetition, so the resolution gate and the
+     * orientation gate cannot disagree about where 1080p ends.
+     */
+    public static final int VIDEO_1080P_LONG_SIDE_PX = MAX_VIDEO_SIDE_PX;
+
+    /** Displayed short side that, beside {@link #VIDEO_1080P_LONG_SIDE_PX}, is "1080p". */
+    public static final int VIDEO_1080P_SHORT_SIDE_PX = 1080;
+
+    /**
+     * How far above {@link #VIDEO_1080P_SHORT_SIDE_PX} a short side may read and still be 1080p.
+     * H.264 codes in 16-pixel macroblock rows, so a 1080-line file can report a padded height of
+     * 1088 in {@code stsd}. Tested for equality alone, {@link #incompatibleVideoUpscale} would
+     * silently never fire on exactly the padded encodes it exists for.
+     */
+    public static final int VIDEO_1080P_SHORT_SIDE_SLACK_PX = 8;
 
     private MediaCompatibility() {
     }
@@ -298,6 +317,121 @@ public final class MediaCompatibility {
         }
         return "video bitrate " + bitRateBps + " bps is above this device's "
                 + MAX_VIDEO_BIT_RATE_BPS + " bps decode bandwidth limit";
+    }
+
+    /**
+     * True when the clip <em>displays</em> with the aspect opposite the panel it will be shown on —
+     * a landscape video on a portrait frame or the reverse. The one place this arithmetic lives:
+     * {@code MainActivity.routingAllowsTsPlayer} uses it to pick the engine, and
+     * {@link #incompatibleVideoUpscale} uses it to pick the source, so the two can never disagree
+     * about what "opposite" means.
+     *
+     * <p>The display matrix is applied before the comparison, which is what makes a turned clip
+     * pass: a 1920x1080 file carrying a 90-degree {@code tkhd} matrix shows 1080x1920, so it is
+     * portrait material and needs no magnification on a portrait frame. A square clip is never
+     * opposite. Unknown dimensions yield {@code false} — the conservative direction, because a
+     * wrong {@code true} here would reroute healthy video to a lower-quality source.
+     *
+     * @param codedWidth {@code stsd} width in pixels, or {@code <= 0} when unknown
+     * @param codedHeight {@code stsd} height in pixels, or {@code <= 0} when unknown
+     * @param rotationDeg display-matrix angle, 0/90/180/270, or any negative value for unknown
+     *                    (only 90 and 270 turn the aspect; 180 leaves it as it is)
+     * @param framePortrait the panel's own orientation, true for portrait
+     */
+    public static boolean videoAspectOppositeFrame(int codedWidth, int codedHeight,
+                                                   int rotationDeg, boolean framePortrait) {
+        if (codedWidth <= 0 || codedHeight <= 0) {
+            return false;
+        }
+        boolean turned = rotationDeg == 90 || rotationDeg == 270;
+        int displayWidth = turned ? codedHeight : codedWidth;
+        int displayHeight = turned ? codedWidth : codedHeight;
+        return (displayWidth > displayHeight && framePortrait)
+                || (displayHeight > displayWidth && !framePortrait);
+    }
+
+    /**
+     * Upscale check for 1080p video that will have to be magnified to fill this panel.
+     *
+     * <p>Two of this device's known slow paths meet on exactly this clip. It is always drawn by the
+     * platform MediaPlayer, because {@code routingAllowsTsPlayer} hands every aspect-opposite clip over
+     * (TsPlayer's {@code .so} has no scale or rotation control at all), and it is always drawn with a
+     * center-crop fill term above 1 — and {@code TextureVideoView.cropScaleFactors} records what that
+     * magnification costs here: reached through a double axis-swap rather than through a mismatched
+     * aspect, it "looked like a framerate problem, not a zoom one".
+     *
+     * <p>What routing away from the original buys is the smaller <em>stream</em>, not a smaller
+     * composite. {@code cropScaleFactors} is a function of the clip's aspect and the viewport alone —
+     * {@code (1080, 1920, 1920, 1080)} and {@code (1080, 1920, 1280, 720)} both come out at
+     * {@code (3.16, 1.0)} — so the fallback is composited over the same region and merely asks less of
+     * the decoder and of the source read. That is the honest boundary of this gate's claim: a clip that
+     * still runs slow once routed is paying for the composite, and the lever from there is
+     * fill-versus-letterbox in {@code TextureVideoView}, not the source.
+     *
+     * <p>Scope is 1080p alone because that is where the datapoint is, not because the arithmetic stops
+     * there. By the model above a 720p clip of the same aspect costs the same composite and passes here,
+     * and a wider-than-16:9 one (1920x800, or a 2048x858 letterbox) costs <em>more</em> and passes too;
+     * below 1080p there are fewer source pixels and fewer macroblocks, which is the only reason to
+     * believe it stays inside the margin. Expressing the predicate as a fill term instead of as a size
+     * pair would make the boundary match the mechanism, and is the follow-up this note exists to
+     * propose; above 1080p the coded-side gate has already routed the asset.
+     *
+     * <p>Routing only, like {@link #incompatibleVideoThroughput} and {@link #incompatibleVideoBitrate}
+     * — the clip plays, merely too slowly, so this must never reach
+     * {@code tagAssetAsIncompatible} or {@code knownIncompatibleKeys}, and it is deliberately absent
+     * from {@link #incompatibleReasonForFile}, whose callers read a non-null answer as "undecodable".
+     *
+     * <p>Conservative on every unknown: unknown dimensions, an unknown display matrix
+     * ({@code rotationDeg < 0}, which includes every non-ISOBMFF container — an {@code .mkv} keeps its
+     * angle in a Matroska element this probe does not read), and a panel orientation the app has not
+     * published yet all yield {@code null}. The last one is why this gate is dark until
+     * {@code MediaManager.setFramePortrait} is called — a frame that cannot say which way it is hung
+     * shows originals, as it does today.
+     *
+     * <p>Like its two byte-budget siblings it helps only where a smaller encode exists to route to, and
+     * on a server that answers {@code /video/playback} with the original bytes it does nothing at all:
+     * {@code MediaManager} marks the asset as having no transcode and takes the original, so on such a
+     * deployment {@code needsUpscale} counts verdicts that never changed what was fetched.
+     *
+     * @param type media type of the asset
+     * @param codedWidth {@code stsd} width in pixels, or {@code <= 0} when unknown
+     * @param codedHeight {@code stsd} height in pixels, or {@code <= 0} when unknown
+     * @param rotationDeg display-matrix angle from the file, or a negative value when unknown
+     * @param framePortrait the panel's orientation, or {@code null} when unpublished
+     * @return a human-readable reason when this is 1080p video hung the wrong way round for this panel,
+     *         or {@code null} when it is not or cannot be judged
+     */
+    @Nullable
+    public static String incompatibleVideoUpscale(@Nullable MediaType type, int codedWidth,
+                                                  int codedHeight, int rotationDeg,
+                                                  @Nullable Boolean framePortrait) {
+        if (type != MediaType.VIDEO || framePortrait == null || codedWidth <= 0 || codedHeight <= 0
+                || rotationDeg < 0) {
+            return null;
+        }
+        if (!videoAspectOppositeFrame(codedWidth, codedHeight, rotationDeg, framePortrait)) {
+            return null;
+        }
+        boolean turned = rotationDeg == 90 || rotationDeg == 270;
+        int displayWidth = turned ? codedHeight : codedWidth;
+        int displayHeight = turned ? codedWidth : codedHeight;
+        int longSide = Math.max(displayWidth, displayHeight);
+        int shortSide = Math.min(displayWidth, displayHeight);
+        if (longSide != VIDEO_1080P_LONG_SIDE_PX
+                || shortSide < VIDEO_1080P_SHORT_SIDE_PX
+                || shortSide > VIDEO_1080P_SHORT_SIDE_PX + VIDEO_1080P_SHORT_SIDE_SLACK_PX) {
+            return null;
+        }
+        // The clip's own display aspect, deliberately not a fill factor: what a center-crop multiplies
+        // by depends on the panel's shape too, which this class does not read, and printing the clip's
+        // ratio under the name "upscale" would claim a number this predicate never measured.
+        double displayAspect = (double) longSide / (double) shortSide;
+        return "1080p video coded " + codedWidth + "x" + codedHeight
+                + (rotationDeg > 0 ? " (matrix " + rotationDeg + " degrees)" : "")
+                + " displays " + displayWidth + "x" + displayHeight + " ("
+                + String.format(Locale.ROOT, "%.2f:1", displayAspect) + ") on a "
+                + (framePortrait ? "portrait" : "landscape")
+                + " panel, which only MediaPlayer draws, and below realtime";
     }
 
     /**

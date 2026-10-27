@@ -207,6 +207,32 @@ public class VideoHeaderProbeTest {
     }
 
     @Test
+    public void videoTraksMatrixBeatsAnAudioTraksIdentity() throws Exception {
+        // The case the test above cannot see: it gives both traks an identity matrix. A display matrix
+        // orients the pixels of the track it is attached to, and an audio tkhd's is identity, so taking
+        // the first readable matrix in the moov would report this turned phone clip as unturned. That
+        // used to only mis-pick a player; MediaCompatibility.incompatibleVideoUpscale now skips the
+        // original on the strength of it, which is the wrong direction to be wrong in.
+        byte[] moov = box("moov",
+                trak(tkhdV0(1, 0, 0, 1), "mp4a", 0, 0),
+                trak(tkhdV0(0, -1, 1, 0), "avc1", 1920, 1080));
+        VideoHeaderProbe.Probe p = VideoHeaderProbe.probe(writeFile("rotated-first-audio.mov", moov));
+        assertEquals("avc1", p.codec);
+        assertEquals(1920, p.codedWidth);
+        assertEquals(90, p.rotationDeg);
+    }
+
+    @Test
+    public void aRotBoxStillOverridesEveryTrak() throws Exception {
+        // The ISO 23001-8 path is moov-level, so the video-trak preference must not displace it.
+        byte[] moov = box("moov", rotBox(270),
+                trak(tkhdV0(1, 0, 0, 1), "mp4a", 0, 0),
+                trak(tkhdV0(0, -1, 1, 0), "avc1", 1920, 1080));
+        assertEquals(270, VideoHeaderProbe.probe(
+                writeFile("rotbox.mov", moov)).rotationDeg);
+    }
+
+    @Test
     public void unrecognisedSampleEntryReportsNoCodec() throws Exception {
         byte[] moov = box("moov", trak(tkhdV0(1, 0, 0, 1), "tmcd", 0, 0));
         VideoHeaderProbe.Probe p = VideoHeaderProbe.probe(writeFile("timecode.mov", moov));
