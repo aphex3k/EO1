@@ -10,12 +10,25 @@ needed — every entry is compiled into the APK and trusted by the app's own TLS
 ## Provenance
 
 Extracted 2026-10-23 from the machine-local `ca-certificates` bundle
-(`/opt/homebrew/etc/ca-certificates/cert.pem`, the Mozilla store). The SHA-256 fingerprints below are
+(`/opt/homebrew/etc/ca-certificates/cert.pem`, the Mozilla store); the four `amazon-root-ca-*.pem`
+entries were taken from the same file on 2026-10-26. The SHA-256 fingerprints below are
 the check: re-fetch a root from its publisher and confirm the fingerprint matches before committing a
 replacement; Let's Encrypt publishes its own root fingerprints on its certificate documentation page.
 
+All four Amazon Trust Services roots ship rather than the one Flickr's leaf names (`Amazon RSA 2048 M01`
+on `flickr.com`, `M04` on `static.flickr.com`), because the served chain could not be dumped from the
+machine that made this change — raw TLS is blocked there, so only the leaf's issuer is observed, not
+which root closes it, and ATS moves intermediates between roots. Shipping the family costs four small
+public anchors from the same CA and avoids a frame behind glass failing on a chain nobody saw. Note what
+this does *not* settle: whether KitKat's verifier accepts an RSASSA-PSS signature, which is the failure
+these anchors can still produce, and which only `TrustCensus` on a real frame answers.
+
 | file | subject | store name (`subject_hash_old`) | SHA-256 fingerprint | expires |
 |---|---|---|---|---|
+| `amazon-root-ca-1.pem` | C=US, O=Amazon, CN=Amazon Root CA 1 | `fd08c599.0` | `8E:CD:E6:88:4F:3D:87:B1:12:5B:A3:1A:C3:FC:B1:3D:70:16:DE:7F:57:CC:90:4F:E1:CB:97:C6:AE:98:19:6E` | Jan 17 00:00:00 2038 GMT |
+| `amazon-root-ca-2.pem` | C=US, O=Amazon, CN=Amazon Root CA 2 | `fb5fa911.0` | `1B:A5:B2:AA:8C:65:40:1A:82:96:01:18:F8:0B:EC:4F:62:30:4D:83:CE:C4:71:3A:19:C3:9C:01:1E:A4:6D:B4` | May 26 00:00:00 2040 GMT |
+| `amazon-root-ca-3.pem` | C=US, O=Amazon, CN=Amazon Root CA 3 | `7a7c655d.0` | `18:CE:6C:FE:7B:F1:4E:60:B2:E3:47:B8:DF:E8:68:CB:31:D0:2E:BB:3A:DA:27:15:69:F5:03:43:B4:6D:B3:A4` | May 26 00:00:00 2040 GMT |
+| `amazon-root-ca-4.pem` | C=US, O=Amazon, CN=Amazon Root CA 4 | `d41b5e2a.0` | `E3:5D:28:41:9E:D0:20:25:CF:A6:90:38:CD:62:39:62:45:8D:A5:C6:95:FB:DE:A3:C2:2B:0B:FB:25:89:70:92` | May 26 00:00:00 2040 GMT |
 | `certum-trusted-root.pem` | C=PL, O=Asseco Data Systems S.A., OU=Certum Certification Authority, CN=Certum Trusted Root CA | `f8fc53da.0` | `FE:76:96:57:38:55:77:3E:37:A9:5E:7A:D4:D9:CC:96:C3:01:57:C1:5D:31:76:5B:A9:B1:57:04:E1:AE:78:FD` | Mar 16 12:10:13 2043 GMT |
 | `digicert-global-root-g2.pem` | C=US, O=DigiCert Inc, OU=www.digicert.com, CN=DigiCert Global Root G2 | `c90bc37d.0` | `CB:3C:CB:B7:60:31:E5:E0:13:8F:8D:D3:9A:23:F9:DE:47:FF:C3:5E:43:C1:14:4C:EA:27:D4:6A:5A:B1:CB:5F` | Jan 15 12:00:00 2038 GMT |
 | `entrust-root-ca-g2.pem` | C=US, O=Entrust, Inc., OU=See www.entrust.net/legal-terms, OU=(c) 2009 Entrust, Inc. - for authorized use only, CN=Entrust Root Certification Authority - G2 | `455f1b52.0` | `43:DF:57:74:B0:3E:7F:EF:5F:E4:0D:93:1A:7B:ED:F1:BB:2E:6B:42:73:8C:4E:6D:38:41:10:3D:3A:A7:F3:39` | Dec  7 17:55:54 2030 GMT |
