@@ -1383,6 +1383,11 @@ public class WebServer {
         int count;
         try {
             count = controller.forgetMedia(backendId.trim(), trimToNull(params.get("asset")));
+        } catch (IllegalArgumentException e) {
+            // The caller named one backend and pasted another's asset key. Refusing is the answer;
+            // marking the wrong ledger would report a success that freed nothing.
+            sendJson(os, 400, errorJson(e.getMessage()));
+            return;
         } catch (Exception e) {
             sendJson(os, 500, errorJson("forget failed: " + e.getClass().getSimpleName()));
             return;

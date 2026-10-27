@@ -101,7 +101,9 @@ from the rung you got, so always send `level` explicitly.
 A Flickr photo the owner asks to have removed must be gone **within 24 hours**, and this frame has no
 inbound channel to receive such a request. `POST /forget?token=…&backend=flickr-1[&asset=<key>]` is the
 channel: it tells that backend to stop showing the asset and stop holding its bytes, and the mark is
-durable — persisted under `filesDir/backends/flickr/`, never expired, and honoured by the catalog build,
+durable — persisted under `filesDir/backends/flickr/<hex-of-backend-id>.json` (the id is hex-encoded
+because it is configuration text, and a name like `../../configuration` would otherwise be a write into the
+frame's own settings), never expired, and honoured by the catalog build,
 so the photo does not come back on the next rotation. Deleting the cached file alone would be worse than
 nothing: the listing still describes the photo, so the next tick downloads it again and the clause is
 violated a day after it appeared to be satisfied. Omit `asset` to forget everything that backend has ever

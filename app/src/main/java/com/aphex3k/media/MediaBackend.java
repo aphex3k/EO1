@@ -115,7 +115,7 @@ public interface MediaBackend {
      * @param assetId one asset's raw id, or {@code null} for everything this backend can reach
      * @return how many assets it stopped holding
      */
-    default int forget(@Nullable String assetId) {
+    default int forget(@Nullable String assetId) throws Exception {
         return 0;
     }
 

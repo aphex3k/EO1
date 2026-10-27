@@ -546,7 +546,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         backendById.clear();
         final String generationFingerprint = fingerprint(configuration);
 
-        for (MediaBackend backend : buildGeneration(configuration, uploadsDir, filesDir)) {
+        List<MediaBackend> next;
+        synchronized (generationLock) {
+            next = buildGeneration(configuration, uploadsDir, filesDir);
+        }
+        for (MediaBackend backend : next) {
             String backendId = backend.getId();
             if (backendById.containsKey(backendId)) {
                 Log.w(TAG, "rebuildPool: duplicate backend id '" + backendId + "', skipping later entry");
@@ -631,6 +635,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
     }
 
+    /**
+     * Swaps in a new generation under {@link #generationLock}, so a removal in flight cannot be applied
+     * to a backend that is on its way out — the point of a durable mark is that the next generation
+     * honours it too.
+     */
     private List<MediaBackend> buildGeneration(Configuration configuration,
                                                @Nullable File uploadsDir,
                                                @Nullable File filesDir) {
@@ -672,14 +681,17 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     private void closeGeneration() {
-        for (MediaBackend backend : generation) {
-            try {
-                backend.close();
-            } catch (Exception e) {
-                Log.w(TAG, "rebuildPool: closing backend '" + backend.getId() + "' failed", e);
+        // Same lock as a removal, so closing a generation and marking an asset cannot interleave.
+        synchronized (generationLock) {
+            for (MediaBackend backend : generation) {
+                try {
+                    backend.close();
+                } catch (Exception e) {
+                    Log.w(TAG, "rebuildPool: closing backend '" + backend.getId() + "' failed", e);
+                }
             }
+            generation.clear();
         }
-        generation.clear();
     }
 
     /**
@@ -1525,27 +1537,47 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     @Override
     public int forgetAssets(String backendId, @Nullable String assetKey) {
-        MediaBackend backend = backendId == null ? null : backendById.get(backendId);
-        if (backend == null) {
-            Log.w(TAG, "forgetAssets: backend '" + backendId + "' is not in the current generation");
-            return 0;
-        }
         String rawId = null;
         if (assetKey != null) {
             int colon = assetKey.indexOf(':');
-            // Accept a bare raw id too: the caller on the LAN page knows which backend it is asking.
-            rawId = colon > 0 ? assetKey.substring(colon + 1) : assetKey;
+            if (colon > 0) {
+                String owner = assetKey.substring(0, colon);
+                if (!owner.equals(backendId)) {
+                    // A key is only meaningful with its own backend. Pasting a key from another source
+                    // and reporting success would mark the wrong ledger and free the wrong bytes.
+                    throw new IllegalArgumentException("asset key belongs to backend '" + owner
+                            + "', not '" + backendId + "'");
+                }
+                rawId = assetKey.substring(colon + 1);
+            } else {
+                rawId = assetKey;
+            }
         }
-        try {
-            int forgotten = backend.forget(rawId);
-            Log.i(TAG, "forgetAssets: backend '" + backendId + "' stopped holding " + forgotten
-                    + " asset(s)");
-            return forgotten;
-        } catch (Exception e) {
-            Log.w(TAG, "forgetAssets: backend '" + backendId + "' refused", e);
-            return 0;
+        int forgotten;
+        // Held for the whole call: a removal that lands while a pool rebuild is swapping generations can
+        // otherwise reach the backend being retired, whose ledger it then rewrites — and the replacement
+        // never sees the mark.
+        synchronized (generationLock) {
+            MediaBackend backend = backendId == null ? null : backendById.get(backendId);
+            if (backend == null) {
+                Log.w(TAG, "forgetAssets: backend '" + backendId + "' is not in the current generation");
+                return 0;
+            }
+            try {
+                forgotten = backend.forget(rawId);
+            } catch (Exception e) {
+                Log.w(TAG, "forgetAssets: backend '" + backendId + "' failed", e);
+                throw new IllegalStateException("backend '" + backendId + "' could not honour the request",
+                        e);
+            }
         }
+        Log.i(TAG, "forgetAssets: backend '" + backendId + "' stopped holding " + forgotten
+                + " asset(s)");
+        return forgotten;
     }
+
+    /** Guards the generation list and its id map against a swap racing a removal. */
+    private final Object generationLock = new Object();
 
     /**
      * Deletes every cached file this backend's asset id accounts for — the original and its

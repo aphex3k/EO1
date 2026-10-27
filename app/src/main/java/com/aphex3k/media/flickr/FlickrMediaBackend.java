@@ -7,6 +7,7 @@ import androidx.annotation.Nullable;
 import android.util.Log;
 
 import com.aphex3k.eo1.ConfigurationBackendEntry;
+import com.aphex3k.eo1.MediaDownloadFailedException;
 import com.aphex3k.eo1.MediaManagerInterface;
 import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaBackend;
@@ -69,8 +70,10 @@ public class FlickrMediaBackend implements MediaBackend {
     private final String cdnBase;
     @Nullable private final MediaManagerInterface manager;
     private final FlickrRetention retention;
+    @Nullable private final File stateRoot;
     private int lastForgottenCount;
-    private int lastCapDrops;
+    private int lastLedgerOverflow;
+    private long lastMaintenanceMs;
     private TimeSource time = SYSTEM_CLOCK;
 
     /** Non-null after a successful {@link #initialize()}. */
@@ -115,8 +118,10 @@ public class FlickrMediaBackend implements MediaBackend {
         this.cdnBase = cdnOrigin;
         this.manager = manager;
         this.client = new FlickrClient(entry.apiKey, restOrigin);
-        this.retention = new FlickrRetention(stateRoot == null ? null
-                : new File(new File(stateRoot, "flickr"), entry.id + ".json"));
+        this.stateRoot = stateRoot;
+        // Null stays null: a relative path would write the ledger wherever the process happens to be,
+        // and isDurable() would then claim persistence the device never got.
+        this.retention = new FlickrRetention(stateRoot == null ? null : ledgerFile(stateRoot, entry.id));
     }
 
     /** Test seam for the idle window. */
@@ -137,6 +142,11 @@ public class FlickrMediaBackend implements MediaBackend {
     @Override
     public void initialize() throws Exception {
         retention.load();
+        // An operator who removed a Flickr source has not thereby forgiven the photos it cached: the
+        // idle window and the privacy record have to be honoured by whoever is running now, not only by
+        // the backend that wrote the ledger. So the first thing a Flickr backend does is sweep every
+        // ledger in the directory, including its own.
+        sweepOtherLedgers();
         target = client.resolve(entry.source);
         // Everything this says is true before any request is made, which is the only time the method is
         // read: MediaManager calls compatibilityWarning() one step before fetchCatalog(), so a warning
@@ -226,7 +236,7 @@ public class FlickrMediaBackend implements MediaBackend {
             retention.forgetBytes(stale);
         }
         lastForgottenCount = forgotten;
-        lastCapDrops = retention.trimToCap();
+        lastLedgerOverflow = retention.trimToCap();
         retention.save();
         lastPhotoCount = photos;
         lastVideoCount = videos;
@@ -255,8 +265,10 @@ public class FlickrMediaBackend implements MediaBackend {
         // Asking for the source is as close as this layer comes to "this photo was shown", and the
         // idle window is meant to track exactly that. Renewal is deliberately not done for a photo the
         // last completed catalog no longer lists; that case is handled by vanishedFrom above.
-        retention.noteHeld(asset.id, time.nowMs());
-        return MediaSource.remoteOriginal(openerFor(url), null, null);
+        long nowMs = time.nowMs();
+        retention.noteHeld(asset.id, nowMs);
+        runMaintenance(nowMs);
+        return MediaSource.remoteOriginal(openerFor(url, asset.id), null, null);
     }
 
     /**
@@ -284,7 +296,15 @@ public class FlickrMediaBackend implements MediaBackend {
         if (url == null) {
             return null;
         }
-        return MediaSource.remoteThumbnail(openerFor(url));
+        if (retention.isForgotten(asset.id)) {
+            // The display-error path reaches this rung directly, through displayFallbackSource, and it
+            // can be reached for a photo that was on screen when the removal arrived. Honouring the mark
+            // only in resolveOriginal would therefore let the degraded rung re-download exactly the
+            // photo an owner asked to have removed.
+            Log.w(TAG, "Flickr '" + entry.id + "': fallback requested for a forgotten photo, skipping");
+            return null;
+        }
+        return MediaSource.remoteThumbnail(openerFor(url, asset.id));
     }
 
     /**
@@ -292,10 +312,16 @@ public class FlickrMediaBackend implements MediaBackend {
      * between an asset and its own cached bytes, because the pipeline asks for the source before it
      * looks in the cache.
      */
-    private MediaSource.Opener openerFor(final String url) {
+    private MediaSource.Opener openerFor(final String url, final String assetId) {
         return new MediaSource.Opener() {
             @Override
             public InputStream open() throws Exception {
+                // Checked at open, not only when the source was resolved: a removal can land between the
+                // two, and a fetch already in flight would otherwise put the bytes back after the delete.
+                if (retention.isForgotten(assetId)) {
+                    throw new MediaDownloadFailedException("Flickr asset was forgotten at "
+                            + "the operator's request");
+                }
                 return client.openBytes(url);
             }
         };
@@ -326,27 +352,118 @@ public class FlickrMediaBackend implements MediaBackend {
                 sb.append(", ").append(lastUnbuildableCount).append(" unlistable");
             }
             if (lastForgottenCount > 0) {
-                sb.append(", ").append(lastForgottenCount).append(" forgotten");
+                sb.append(", ").append(lastForgottenCount).append(" withheld on request");
             }
-            if (lastCapDrops > 0) {
-                // Said out loud: these are cached files the ledger can no longer account for. An
-                // unaccounted file must never be quietly assumed deleted.
-                sb.append(", ledger capped (").append(lastCapDrops).append(")");
-            }
+        }
+        // Everything below is a caveat, and each is reported whether or not the one above it fired.
+        if (lastBuildTruncated) {
+            sb.append(", capped at ").append(FlickrClient.MAX_ASSETS);
+        }
+        if (lastLedgerOverflow > 0) {
+            // Said out loud: these are cached files the ledger had to stop accounting for, and an
+            // unaccounted file must never be quietly assumed deleted.
+            sb.append(", ").append(lastLedgerOverflow).append(" beyond ledger cap");
         }
         if (!retention.isDurable()) {
             sb.append(", retention in-process only");
-            if (lastBuildTruncated) {
-                sb.append(", capped at ").append(FlickrClient.MAX_ASSETS);
-            }
         }
         return sb.toString();
     }
 
-    /** Nothing here holds a socket, a session or a file beyond the ledger, which saves itself. */
+    /**
+     * The ledger path for one backend id, with the id hex-encoded.
+     *
+     * <p>An id is configuration text, and {@code Configuration.normalize} only trims it — a document
+     * that names this backend {@code ../../configuration} would otherwise be joined straight into a
+     * path, and the ledger's save would then be writing somewhere the frame does not expect, including
+     * over its own settings. Hex keeps the name inside the directory by construction and stays
+     * recognizable in a log line.
+     */
+    static java.io.File ledgerFile(java.io.File stateRoot, String backendId) {
+        return new java.io.File(new java.io.File(stateRoot, "flickr"),
+                FlickrUrls.hex(backendId == null ? "" : backendId) + ".json");
+    }
+
+    /**
+     * Sweeps every ledger in this install's Flickr state directory, not just this backend's.
+     *
+     * <p>Removing or disabling a source does not withdraw the promises its cached photos carry. Whoever
+     * is running now has to honour them, or the bytes of a stream nobody reads any more sit on the device
+     * past every window that was supposed to bound them.
+     */
+    private void sweepOtherLedgers() {
+        java.io.File root = stateRoot;
+        if (root == null) {
+            return;
+        }
+        java.io.File dir = new java.io.File(root, "flickr");
+        java.io.File[] ledgers = dir.isDirectory() ? dir.listFiles() : null;
+        if (ledgers == null) {
+            return;
+        }
+        long nowMs = time.nowMs();
+        for (java.io.File ledger : ledgers) {
+            if (ledger.equals(retention.fileForSweep())) {
+                continue;
+            }
+            FlickrRetention other = new FlickrRetention(ledger);
+            other.load();
+            for (String stale : other.expired(nowMs)) {
+                MediaManagerInterface sink = manager;
+                if (sink != null) {
+                    sink.dropCachedAsset("flickr", stale);
+                }
+                other.forgetBytes(stale);
+            }
+            try {
+                other.save();
+            } catch (Exception e) {
+                Log.w(TAG, "Flickr: could not persist sweep of " + ledger.getName() + ": " + e);
+            }
+        }
+    }
+
+    /**
+     * Applies the idle window where time is actually passing, rather than only when a catalog is built.
+     *
+     * <p>{@code MediaManager} rebuilds a healthy pool only once it has been consumed, so on a 20,000-photo
+     * stream at the default five-minute interval a rebuild is roughly 69 days away — and a sweep tied to
+     * the rebuild would let a photo idle far past its window. Paced so it costs nothing on a busy frame.
+     */
+    private void runMaintenance(long nowMs) {
+        if (nowMs - lastMaintenanceMs < MAINTENANCE_INTERVAL_MS) {
+            return;
+        }
+        lastMaintenanceMs = nowMs;
+        boolean changed = false;
+        for (String stale : retention.expired(nowMs)) {
+            dropCached(stale);
+            retention.forgetBytes(stale);
+            changed = true;
+        }
+        if (changed) {
+            try {
+                retention.save();
+            } catch (Exception e) {
+                Log.w(TAG, "Flickr retention sweep could not be persisted: " + e);
+            }
+        }
+    }
+
+    private static final long MAINTENANCE_INTERVAL_MS = 60L * 60L * 1000L;
+
+    /**
+     * Flushes the ledger one last time. A failure here is logged rather than thrown — the interface's
+     * {@code close} reports nothing, and by the time a generation is retired every removal mark was
+     * already persisted by the call that made it. What is lost is bookkeeping, not a promise.
+     */
     @Override
     public void close() {
-        retention.save();
+        try {
+            retention.save();
+        } catch (Exception e) {
+            Log.w(TAG, "Flickr '" + entry.id + "': final ledger flush failed", e);
+        }
     }
 
     /**
@@ -355,7 +472,7 @@ public class FlickrMediaBackend implements MediaBackend {
      * row that aged out of the file would let the photo come back.
      */
     @Override
-    public int forget(@Nullable String assetId) {
+    public int forget(@Nullable String assetId) throws java.io.IOException {
         if (assetId == null) {
             int count = 0;
             for (String known : retention.knownIds()) {
@@ -368,6 +485,8 @@ public class FlickrMediaBackend implements MediaBackend {
         }
         retention.markForgotten(assetId);
         dropCached(assetId);
+        // Throws if the mark could not be persisted. Reporting success on an unpersisted mark would mean
+        // the removal lapses at the next restart, which is the one clause this path exists to satisfy.
         retention.save();
         return 1;
     }

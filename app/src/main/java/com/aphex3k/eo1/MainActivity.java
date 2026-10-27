@@ -3500,7 +3500,43 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (manager == null) {
             return 0;
         }
-        return manager.forgetAssets(backendId, assetKey);
+        int forgotten = manager.forgetAssets(backendId, assetKey);
+        if (forgotten > 0) {
+            stepAwayFrom(backendId, assetKey);
+        }
+        return forgotten;
+    }
+
+    /**
+     * Takes a removed photo off the panel. Freeing its bytes and recording the exclusion is not enough:
+     * if that photo is what is on screen now, and it was the only asset, the pool rebuilds empty, a
+     * "no media" toast appears, and the removed photo stays on the wall indefinitely — a removal that is
+     * invisible from the sofa is not a removal.
+     */
+    private void stepAwayFrom(final String backendId, @Nullable final String assetKey) {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                MediaAsset current = mediaManager != null ? mediaManager.getCurrentAsset() : null;
+                boolean displayed = current != null
+                        && (assetKey == null ? backendId.equals(current.backendId)
+                                : assetKey.equals(current.key()));
+                if (displayed) {
+                    // Cleared rather than left: every other recovery path reveals the photo by making the
+                    // view visible again, so an emptied view here is undone by the next display.
+                    lastVisibleAsset = "";
+                    try {
+                        Glide.with(MainActivity.this).clear(imageView);
+                    } catch (Exception ignored) {
+                        // A destroyed activity cannot clear a view; the next display replaces it.
+                    }
+                    imageView.setImageDrawable(null);
+                }
+                if (mediaManager != null) {
+                    mediaManager.showNextImage(MainActivity.this);
+                }
+            }
+        });
     }
 
     /**
