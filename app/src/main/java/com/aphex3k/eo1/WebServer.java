@@ -1421,6 +1421,7 @@ public class WebServer {
         sb.append("<div id=\"cfgEditor\" style=\"display:none\">");
         sb.append("<table id=\"cfgBackends\"></table>");
         sb.append("<p><button onclick=\"addCfgBackend('immich')\">+ Add Immich backend</button> ")
+            .append("<button onclick=\"addCfgBackend('flickr')\">+ Add Flickr backend</button> ")
                 .append("<button onclick=\"addCfgBackend('local')\">+ Add local uploads</button> ")
                 .append("<button onclick=\"addCfgBackend('web')\">+ Add website</button> ")
                 .append("<button onclick=\"exportConfig()\">Export configuration</button> ")
@@ -1478,6 +1479,15 @@ public class WebServer {
                 + "+'<td><input class=\"cfgPass\" type=\"password\" size=\"15\" value=\"'+escCfg(b.password)+'\"></td>'"
                 + "+'<td><input class=\"cfgApi\" size=\"10\" value=\"'+escCfg(b.apiVersion||'auto')+'\"></td>';"
                 + "}else{h+='<td colspan=\"3\"></td>';}"
+                + "}else if(b.type==='flickr'){"
+                // Three columns' worth of cells, so the row still sums to the eight-column header: a
+                // Flickr entry has no server and no username. Both fields it does have must still be
+                // rendered, because collectCfg() replaces cfg.backends wholesale and a field no row
+                // draws is a field that silently disappears on save.
+                + "h+='<td><input type=\"checkbox\" class=\"cfgEnabled\" '+(b.enabled!==false?'checked':'')+'></td>'"
+                + "+'<td colspan=\"3\">stream <input class=\"cfgSource\" size=\"30\" value=\"'+escCfg(b.source)+'\" placeholder=\"https://www.flickr.com/photos/you/\"> '"
+                + "+'key <input class=\"cfgKey\" type=\"password\" size=\"30\" value=\"'+escCfg(b.apiKey)+'\" placeholder=\"application key\"></td>'"
+                + "+'<td></td>';"
                 + "}else{h+='<td colspan=\"5\">local uploads (files stored on this frame - no server, no login)</td>';}"
                 + "h+='<td><button onclick=\"removeCfgBackend('+i+')\">Remove</button></td>';"
                 + "tr.innerHTML=h;t.appendChild(tr);});}"
@@ -1490,6 +1500,7 @@ public class WebServer {
                 + "if(!CONFIG.backends)CONFIG.backends=[];"
                 + "if(type==='immich'){CONFIG.backends.push({type:'immich',id:nextBackendId('immich'),host:'',userid:'',password:'',apiVersion:'auto',enabled:true});}"
                 + "else if(type==='web'){CONFIG.backends.push({type:'web',id:nextBackendId('web'),host:'',enabled:true});}"
+                + "else if(type==='flickr'){CONFIG.backends.push({type:'flickr',id:nextBackendId('flickr'),apiKey:'',source:'',enabled:true});}"
                 + "else{CONFIG.backends.push({type:'local',id:'local'});}"
                 + "renderCfgBackends();}"
                 + "function removeCfgBackend(i){if(!CONFIG.backends)return;CONFIG.backends.splice(i,1);renderCfgBackends();}"
@@ -1513,6 +1524,11 @@ public class WebServer {
                 + "if(b.type==='immich'||b.type==='web'){"
                 + "b.enabled=!!tr.querySelector('.cfgEnabled').checked;"
                 + "b.host=(tr.querySelector('.cfgHost').value||'').trim();}"
+                + "if(b.type==='flickr'){"
+                + "b.enabled=!!tr.querySelector('.cfgEnabled').checked;"
+                + "b.source=(tr.querySelector('.cfgSource').value||'').trim();"
+                + "b.apiKey=tr.querySelector('.cfgKey').value||'';"
+                + "return b;}"
                 + "if(b.type==='immich'){"
                 + "b.userid=(tr.querySelector('.cfgUser').value||'').trim();"
                 + "b.password=tr.querySelector('.cfgPass').value||'';"
