@@ -11,6 +11,34 @@ import java.io.File;
  */
 public interface MediaManagerInterface {
     void removeFromCache(File file);
+
+    /**
+     * Deletes the cached bytes of one asset of one backend, by id rather than by path: only the manager
+     * knows which cache directory is current, and a backend must never reconstruct that name. The same
+     * guards {@link #removeFromCache(File)} applies — inside the current cache dir, and an owned cache
+     * file name — so a retention sweep cannot reach anything it was not given.
+     *
+     * <p>Matching is a prefix on an id this backend surfaced, not a directory glob. A Flickr asset id is
+     * deliberately hex-and-dash, the same alphabet as an Immich UUID, and a pattern that could not tell
+     * them apart would let one backend's privacy eviction delete another's originals.
+     *
+     * @return how many files were found for that id; zero means nothing was cached, which is a normal
+     *         answer and not a failure
+     */
+    int dropCachedAsset(String backendId, String rawId);
+
+    /**
+     * Tells a backend to stop showing and holding one asset, or everything it can reach, for as long as
+     * this install exists. This is the honoured form of a service's removal request: a delete that the
+     * next catalog build undoes would violate the clause rather than satisfy it.
+     *
+     * @param assetKey the {@code "backendId:rawId"} key of one asset, or {@code null} for the whole
+     *        backend
+     * @return how many assets the backend stopped holding; zero means it has no such obligation, or the
+     *         backend is not in the current generation
+     */
+    int forgetAssets(String backendId, String assetKey);
+
     void showNextImage(Activity activity);
 
     /**

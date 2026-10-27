@@ -4,15 +4,21 @@ import android.util.Log;
 
 import androidx.annotation.Nullable;
 
+import android.util.Log;
+
 import com.aphex3k.eo1.ConfigurationBackendEntry;
+import com.aphex3k.eo1.MediaManagerInterface;
 import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaBackend;
 import com.aphex3k.media.MediaSource;
 import com.aphex3k.media.MediaType;
 
+import java.io.File;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 /**
  * A Flickr photostream or album as a rotation source, read with an application key and nothing else.
@@ -46,9 +52,26 @@ public class FlickrMediaBackend implements MediaBackend {
 
     private static final String TAG = "EO1";
 
+    /** A wall clock, swappable in tests: the TTL is measured in days and must survive a restart. */
+    interface TimeSource {
+        long nowMs();
+    }
+
+    private static final TimeSource SYSTEM_CLOCK = new TimeSource() {
+        @Override
+        public long nowMs() {
+            return System.currentTimeMillis();
+        }
+    };
+
     private final ConfigurationBackendEntry entry;
     private final FlickrClient client;
     private final String cdnBase;
+    @Nullable private final MediaManagerInterface manager;
+    private final FlickrRetention retention;
+    private int lastForgottenCount;
+    private int lastCapDrops;
+    private TimeSource time = SYSTEM_CLOCK;
 
     /** Non-null after a successful {@link #initialize()}. */
     @Nullable private FlickrClient.Target target;
@@ -61,7 +84,19 @@ public class FlickrMediaBackend implements MediaBackend {
     private boolean lastBuildTruncated;
 
     public FlickrMediaBackend(ConfigurationBackendEntry entry) {
-        this(entry, FlickrClient.REST_ORIGIN, FlickrUrls.DEFAULT_CDN_BASE);
+        this(entry, FlickrClient.REST_ORIGIN, FlickrUrls.DEFAULT_CDN_BASE, null, null);
+    }
+
+    /**
+     * @param stateRoot per-install directory from which this backend derives its own state store, or
+     *        {@code null} when the caller has none to offer. A backend with no state root cannot keep
+     *        the promises {@link FlickrRetention} exists for across a restart, so it says so in
+     *        {@link #describeVersion()} rather than looking healthy while retaining nothing.
+     * @param manager   how cached bytes get deleted; only the manager knows the current cache dir.
+     */
+    public FlickrMediaBackend(ConfigurationBackendEntry entry, @Nullable File stateRoot,
+                              @Nullable MediaManagerInterface manager) {
+        this(entry, FlickrClient.REST_ORIGIN, FlickrUrls.DEFAULT_CDN_BASE, stateRoot, manager);
     }
 
     /**
@@ -71,9 +106,22 @@ public class FlickrMediaBackend implements MediaBackend {
      *        pattern, so neither could hold a mock address.
      */
     public FlickrMediaBackend(ConfigurationBackendEntry entry, String restOrigin, String cdnOrigin) {
+        this(entry, restOrigin, cdnOrigin, null, null);
+    }
+
+    FlickrMediaBackend(ConfigurationBackendEntry entry, String restOrigin, String cdnOrigin,
+                       @Nullable File stateRoot, @Nullable MediaManagerInterface manager) {
         this.entry = entry;
         this.cdnBase = cdnOrigin;
+        this.manager = manager;
         this.client = new FlickrClient(entry.apiKey, restOrigin);
+        this.retention = new FlickrRetention(stateRoot == null ? null
+                : new File(new File(stateRoot, "flickr"), entry.id + ".json"));
+    }
+
+    /** Test seam for the idle window. */
+    void setTimeSource(TimeSource timeSource) {
+        this.time = timeSource;
     }
 
     @Override
@@ -88,6 +136,7 @@ public class FlickrMediaBackend implements MediaBackend {
 
     @Override
     public void initialize() throws Exception {
+        retention.load();
         target = client.resolve(entry.source);
         // Everything this says is true before any request is made, which is the only time the method is
         // read: MediaManager calls compatibilityWarning() one step before fetchCatalog(), so a warning
@@ -112,9 +161,11 @@ public class FlickrMediaBackend implements MediaBackend {
             throw new IllegalStateException("Flickr backend '" + entry.id + "' used before initialize");
         }
         List<MediaAsset> assets = new ArrayList<>();
+        Set<String> listed = new HashSet<>();
         int photos = 0;
         int videos = 0;
         int unbuildable = 0;
+        int forgotten = 0;
         boolean truncated = false;
 
         int page = 1;
@@ -132,6 +183,15 @@ public class FlickrMediaBackend implements MediaBackend {
                     unbuildable++;
                     continue;
                 }
+                if (retention.isForgotten(assetId)) {
+                    // An owner asked for this one to stop being shown. Filtering it here, rather than
+                    // deleting its bytes and letting the next tick download it again, is what makes a
+                    // removal request hold past the day it was made.
+                    forgotten++;
+                    continue;
+                }
+                listed.add(assetId);
+                retention.noteListed(assetId);
                 if ("video".equalsIgnoreCase(photo.media)) {
                     videos++;
                 } else {
@@ -153,6 +213,21 @@ public class FlickrMediaBackend implements MediaBackend {
             page++;
         } while (page <= pages);
 
+        // Privacy first: bytes for photos this listing no longer describes are gone. getPublicPhotos is
+        // the authority on visibility, so an entry vanishing from a completed build means deleted or
+        // made private, and the terms want that reflected as soon as reasonably possible.
+        for (String gone : retention.vanishedFrom(listed, !truncated)) {
+            dropCached(gone);
+        }
+        // Then age: a photo idle past the retention window loses its cached copy, and displaying it
+        // again re-fetches it — which is also how a tier the account has since lost gets rediscovered.
+        for (String stale : retention.expired(time.nowMs())) {
+            dropCached(stale);
+            retention.forgetBytes(stale);
+        }
+        lastForgottenCount = forgotten;
+        lastCapDrops = retention.trimToCap();
+        retention.save();
         lastPhotoCount = photos;
         lastVideoCount = videos;
         lastUnbuildableCount = unbuildable;
@@ -171,7 +246,29 @@ public class FlickrMediaBackend implements MediaBackend {
         if (url == null) {
             return null;
         }
+        if (retention.isForgotten(asset.id)) {
+            // Unreachable in normal use — the catalog filters these first — but a rung that could be
+            // reached for a forgotten photo must not put its bytes back on the device.
+            Log.w(TAG, "Flickr '" + entry.id + "': asked to display a forgotten photo, skipping");
+            return null;
+        }
+        // Asking for the source is as close as this layer comes to "this photo was shown", and the
+        // idle window is meant to track exactly that. Renewal is deliberately not done for a photo the
+        // last completed catalog no longer lists; that case is handled by vanishedFrom above.
+        retention.noteHeld(asset.id, time.nowMs());
         return MediaSource.remoteOriginal(openerFor(url), null, null);
+    }
+
+    /**
+     * Frees one asset's bytes through the manager, which is the only thing that knows the current cache
+     * directory and applies the ownership guards. No path is ever assembled here.
+     */
+    private void dropCached(String assetId) {
+        MediaManagerInterface sink = manager;
+        if (sink == null) {
+            return;
+        }
+        sink.dropCachedAsset(entry.id, assetId);
     }
 
     /**
@@ -228,6 +325,17 @@ public class FlickrMediaBackend implements MediaBackend {
             if (lastUnbuildableCount > 0) {
                 sb.append(", ").append(lastUnbuildableCount).append(" unlistable");
             }
+            if (lastForgottenCount > 0) {
+                sb.append(", ").append(lastForgottenCount).append(" forgotten");
+            }
+            if (lastCapDrops > 0) {
+                // Said out loud: these are cached files the ledger can no longer account for. An
+                // unaccounted file must never be quietly assumed deleted.
+                sb.append(", ledger capped (").append(lastCapDrops).append(")");
+            }
+        }
+        if (!retention.isDurable()) {
+            sb.append(", retention in-process only");
             if (lastBuildTruncated) {
                 sb.append(", capped at ").append(FlickrClient.MAX_ASSETS);
             }
@@ -235,8 +343,32 @@ public class FlickrMediaBackend implements MediaBackend {
         return sb.toString();
     }
 
-    /** Nothing here holds a socket, a session or a file, so there is nothing to close. */
+    /** Nothing here holds a socket, a session or a file beyond the ledger, which saves itself. */
     @Override
     public void close() {
+        retention.save();
+    }
+
+    /**
+     * Honours a removal request: {@code assetId} stops being shown and its bytes go, or {@code null}
+     * means the whole stream. The mark is durable and exempt from the ledger's cap, because a forgotten
+     * row that aged out of the file would let the photo come back.
+     */
+    @Override
+    public int forget(@Nullable String assetId) {
+        if (assetId == null) {
+            int count = 0;
+            for (String known : retention.knownIds()) {
+                retention.markForgotten(known);
+                dropCached(known);
+                count++;
+            }
+            retention.save();
+            return count;
+        }
+        retention.markForgotten(assetId);
+        dropCached(assetId);
+        retention.save();
+        return 1;
     }
 }
