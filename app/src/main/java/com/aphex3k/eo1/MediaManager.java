@@ -1336,9 +1336,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             deleteCachedFile(cacheFile);
         }
 
+        // An unknown size is not a licence to reserve the ceiling: on this hardware free space is
+        // smaller than MAX_ASSET_BYTES, so asking ensureSpace for ceiling+margin can never be
+        // satisfied — it evicts the whole shared cache, including other backends' originals, and then
+        // fails with a cause-less error the ladder reads as "this asset is broken". Asking for
+        // everything that fits instead triggers no eviction at all, and a genuinely full disk still
+        // surfaces as the IOException the write below already turns it into.
         long bytesNeeded = source.expectedBytes != null && source.expectedBytes > 0
                 ? source.expectedBytes
-                : MAX_ASSET_BYTES;
+                : Math.max(0L,
+                        mediaCacheManager.usableSpace(cacheDir) - MediaCacheManager.SAFETY_MARGIN_BYTES);
         if (!mediaCacheManager.ensureSpace(cacheDir, bytesNeeded, protectedCachePaths(null))) {
             throw new MediaDownloadFailedException("Insufficient cache space for asset download");
         }

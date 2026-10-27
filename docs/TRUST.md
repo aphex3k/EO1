@@ -103,7 +103,8 @@ list in gate 2 above, and the first draft of this change got that backwards.
 **Measured on a bench EO2** (`/state`'s `trust` block, app build with this change installed):
 `mode=merged`, `platformAnchors=156`, `trustedAnchors=164` — the ROM's own 156 anchors enumerated
 through its provider, plus the 8 shipped roots that particular device was missing. That 8 is one
-frame's gap, not the size of the bundle, which is **10** — see "Where the roots come from". The
+frame's gap, not the size of the bundle, which was **10** at that measurement and is **11** since
+`amazon-root-ca-1` was added on 2026-10-26 — see "Where the roots come from". The
 census reproduced the host-side measurements exactly (`readable=true`, `total=156`, `expired=63`,
 `unparseable=0`), which also proves the app uid can read `/system/etc/security/cacerts` under
 SELinux enforcing.
@@ -153,8 +154,9 @@ guess dressed as a plan.
 
 ## Where the roots come from
 
-**Ten** roots: `certs/roots/*.pem`, one pure PEM each, with provenance and SHA-256 fingerprints in
-[`certs/roots/README.md`](../certs/roots/README.md). `RootBundle.ENTRIES` carries the same ten — it is
+**Eleven** roots: `certs/roots/*.pem`, one pure PEM each, with provenance and SHA-256 fingerprints in
+[`certs/roots/README.md`](../certs/roots/README.md) — including why exactly one Amazon Trust Services
+anchor is among them. `RootBundle.ENTRIES` carries the same eleven — it is
 generated from that directory — and `/state`'s `trust.bundleSize` reports the number on the device.
 They are compiled into the APK rather than downloaded because the APK is already authenticated by
 signature (`com.aphex3k.update`), and a second fetch path for trust material would mean a second
