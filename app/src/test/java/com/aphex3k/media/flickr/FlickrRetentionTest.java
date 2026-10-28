@@ -236,7 +236,7 @@ public class FlickrRetentionTest {
         assertEquals(pool.get(0).id, after.get(0).id);
         assertNull("and its source will not resolve even if asked",
                 backend.resolveOriginal(pool.get(1)));
-        assertTrue(backend.describeVersion(), backend.describeVersion().contains("forgotten"));
+        assertTrue(backend.describeVersion(), backend.describeVersion().contains("withheld on request"));
     }
 
     /** A forget has to survive a restart, or the 24-hour clause fails on the next boot. */
@@ -299,6 +299,102 @@ public class FlickrRetentionTest {
         backend.fetchCatalog();
         assertTrue(backend.describeVersion(),
                 backend.describeVersion().contains("in-process only"));
+    }
+
+    /**
+     * A backend id is configuration text, only trimmed by {@code normalize}. A ledger named from it
+     * verbatim turns {@code ../../configuration} into a write outside the state directory — into the
+     * frame's own settings file, once the parent directories exist.
+     */
+    @Test
+    public void aHostileBackendIdCannotEscapeTheLedgerDirectory() throws Exception {
+        File root = tmp.newFolder("root");
+        File stateDir = new File(root, "backends");
+        File ledger = FlickrMediaBackend.ledgerFile(stateDir, "../../configuration");
+        assertTrue(ledger.getCanonicalPath(),
+                ledger.getCanonicalPath().startsWith(new File(stateDir, "flickr")
+                        .getCanonicalPath()));
+        assertFalse("the id must not survive as a path", ledger.getName().contains(".."));
+    }
+
+    /** Comment 6's hole: the display-error path reaches the degraded rung directly, after the delete. */
+    @Test
+    public void theDegradedRungHonoursTheRemovalMark() throws Exception {
+        FlickrMediaBackend backend = backend();
+        enqueueUser();
+        enqueueStream("111", "222");
+        backend.initialize();
+        List<MediaAsset> pool = backend.fetchCatalog();
+        String removed = pool.get(1).id;
+        backend.forget(removed);
+        dropped.clear();
+        cdn.enqueue(json("bytes"));
+
+        assertNull("a removed photo must not be re-fetched by the fallback rung",
+                backend.resolveThumbnailFallback(pool.get(1)));
+        assertEquals(0, cdn.getRequestCount());
+        assertEquals("and its bytes stay freed", 0, dropped.size());
+    }
+
+    /** An interrupted save must not be able to leave a half-written ledger in place of a whole one. */
+    @Test
+    public void aSaveReplacesTheLedgerAtomically() throws Exception {
+        File stateRoot = tmp.newFolder("atomic");
+        ConfigurationBackendEntry entry = new ConfigurationBackendEntry();
+        entry.type = ConfigurationBackendEntry.TYPE_FLICKR;
+        entry.id = "flickr-9";
+        entry.apiKey = "k";
+        entry.source = "mhenke";
+        FlickrMediaBackend backend = new FlickrMediaBackend(entry, rest.url("/").toString(),
+                cdn.url("/").toString(), stateRoot, sink);
+        backend.setTimeSource(clock());
+        enqueueUser();
+        enqueueStream("111");
+        backend.initialize();
+        backend.fetchCatalog();
+
+        File dir = new File(stateRoot, "flickr");
+        File[] files = dir.listFiles();
+        assertNotNull(files);
+        assertEquals("one ledger, no leftovers", 1, files.length);
+        assertFalse(files[0].getName().endsWith(".tmp"));
+    }
+
+    /**
+     * The cap exists to bound the file, not to lose track of bytes. Dropping a row that owns a cached
+     * photo would hand that photo to nobody: neither the privacy sweep nor "forget everything" could
+     * reach it again.
+     */
+    @Test
+    public void capTrimmingKeepsTheRowsThatOwnBytes() throws Exception {
+        FlickrRetention retention = new FlickrRetention(null);
+        for (int i = 0; i < 3; i++) {
+            retention.noteHeld("held" + i, 1000L + i);
+        }
+        for (int i = 0; i < 9000; i++) {
+            retention.noteListed("listed" + i);
+        }
+        int overflow = retention.trimToCap();
+        assertEquals("only never-held rows are droppable", 0, overflow);
+        for (int i = 0; i < 3; i++) {
+            assertTrue(retention.knownIds().contains("held" + i));
+        }
+        assertTrue("the ledger is back inside its bound",
+                retention.knownIds().size() <= 6000);
+    }
+
+    /** Every photo a stream ever listed, not merely the ones that happened to come up. */
+    @Test
+    public void forgettingAStreamCoversPhotosNeverDisplayed() throws Exception {
+        FlickrMediaBackend backend = backend();
+        enqueueUser();
+        enqueueStream("111", "222", "333", "444");
+        backend.initialize();
+        backend.fetchCatalog();
+        dropped.clear();
+
+        assertEquals("no photo had to be shown first", 4, backend.forget(null));
+        assertEquals(4, dropped.size());
     }
 
     private FlickrMediaBackend.TimeSource clock() {

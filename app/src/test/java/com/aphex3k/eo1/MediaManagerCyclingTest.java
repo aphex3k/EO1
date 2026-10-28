@@ -3,6 +3,7 @@ package com.aphex3k.eo1;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 
 import com.aphex3k.media.MediaAsset;
@@ -740,6 +741,29 @@ public class MediaManagerCyclingTest {
         assertEquals("and never touches the degraded source", 0, fallbackOpens.get());
         assertTrue(new File(cacheDir, videoId + ".mov").isFile());
         assertFalse(new File(cacheDir, videoId + "_fb.mp4").exists());
+    }
+
+    /**
+     * An asset key is only meaningful with the backend it names. Accepting another source's key would
+     * mark the wrong ledger and free the wrong bytes while reporting a success — which, for a removal
+     * request, is the worst possible answer.
+     */
+    @Test
+    public void forgetAssetsRejectsAKeyBelongingToAnotherBackend() {
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(backendA(1)), listener, 9L);
+        mm.prefetchEnabled = false;
+        try {
+            mm.showNextImageLocked(tmp.newFolder("c1"), tmp.newFolder("u1"), directPoster, false);
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+        try {
+            mm.forgetAssets("fakeA", "fakeB:01234567-89ab-cdef-0123-456789abcdef");
+            fail("a mismatched key must be refused, not honoured");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("fakeB"));
+        }
     }
 
     /**
