@@ -5,8 +5,10 @@ them depending on a vendor cloud that no longer exists. It is a rewrite of
 [spalt/EO1](https://github.com/spalt/EO1).
 
 Where the pictures come from is your choice: files you upload straight to the frame over your own
-LAN, an [immich.app](https://immich.app/) server you host, or web pages. All three merge into one
-rotation. Nothing in this app contacts a host you did not put into its configuration.
+LAN, an [immich.app](https://immich.app/) server you host, a [Flickr](https://www.flickr.com/) stream
+you point it at, or web pages. All four merge into one rotation. Nothing in this app contacts a host you
+did not put into its configuration, and it ships no credential of its own for any of them — every key,
+password and address is yours to supply.
 
 There is a short front page for all of this at <https://aphex3k.github.io/EO1/> — it is a card, not a
 manual, and everything it says is expanded in the documents linked at the end of this one.
@@ -15,12 +17,13 @@ manual, and everything it says is expanded in the documents linked at the end of
 
 This concept guarantees that you control all aspects of the images displayed on your EO1 and/or EO2 and they will never go offline or stop displaying art ever again, because someone else decided to do so!
 
-## Three sources
+## Four sources
 
 | Source | What you must have | What appears |
 |---|---|---|
 | **Files you upload to the frame** | Nothing but the frame and a browser on the same LAN. No server, no account, no password, no TLS — a connected LAN is enough | Every accepted file, straight off the frame's own storage |
 | **An Immich server** | Immich **3.x**, and an account's email and password — there is no API key | Everything that account can see, minus trash and archived/hidden |
+| **A Flickr stream** | A Flickr **application key** (free for non-commercial use, applied for under your own account) and the photostream or album to show | That stream's public photos marked Safe, at **1024px or smaller** — see [the Flickr section](#add-a-flickr-stream-optional) for why the size is Flickr's rule and not this app's |
 | **A web page** | A URL something serves | That page, rendered fresh each time it comes up |
 
 > **Uploads do not start working by themselves.** A frame's files only rotate once its configuration
@@ -209,8 +212,8 @@ The full route-by-route reference is [docs/WEBSERVER.md](docs/WEBSERVER.md).
 The frame's configuration holds a list of **media backends**; the rotation pool merges the catalogs of
 all of them into one shuffled pass. Any number of Immich hosts is allowed, plus one optional **local**
 backend for files uploaded through the frame's [LAN web server](docs/WEBSERVER.md) — it joins the
-rotation as an equal peer and needs no account — plus any number of **web** backends, each showing one
-web page.
+rotation as an equal peer and needs no account — plus any number of **flickr** backends, each reading one
+photostream or album, and any number of **web** backends, each showing one web page.
 
 Template: [`configuration_example.json`](configuration_example.json).
 
@@ -223,6 +226,7 @@ Template: [`configuration_example.json`](configuration_example.json).
     { "type": "local", "id": "local" },
     { "type": "immich", "id": "immich-1", "host": "http://immich.local/", "userid": "frame1@example.com", "password": "secret", "apiVersion": "auto" },
     { "type": "immich", "id": "immich-2", "host": "https://other.example.com:3001/", "userid": "frame2@example.com", "password": "secret", "apiVersion": "3.1.0" },
+    { "type": "flickr", "id": "flickr-1", "apiKey": "0123456789abcdef0123456789abcdef", "source": "https://www.flickr.com/photos/you/" },
     { "type": "web", "id": "web-1", "host": "http://192.168.1.20/dashboard/" }
   ]
 }
@@ -238,10 +242,19 @@ Template: [`configuration_example.json`](configuration_example.json).
 - **Enabled** — every row carries an `enabled` flag, default true, and an absent key means true, so a
   config written before the flag existed keeps its backends running. A backend switched off costs only
   its own assets, and the entry stays in the document, so switching it back is a checkbox rather than
-  an edit. The page's config editor renders one for `immich` and `web` rows and **none** for the local
-  row — the entry's existence is that row's switch — though a hand-written `"enabled": false` on a
+  an edit. The page's config editor renders one for `immich`, `flickr` and `web` rows and **none** for the
+  local row — the entry's existence is that row's switch — though a hand-written `"enabled": false` on a
   local entry is still honored.
 - **`apiVersion`** — per backend, so one frame can point at servers of different vintages. `"auto"` (the default) probes the server's version on first contact and uses the matching client; a pinned semver like `"3.1.0"` skips the probe and selects the client for that band (the current band is **all of 3.x**). A version newer than the band is served best effort by the newest client with a compatibility toast; only a version older than every band — or a backend that genuinely fails — disables just that backend, while the others keep rotating.
+- **Flickr backend** — `"type": "flickr"`, holding `apiKey` (a Flickr *application* key — it identifies
+  your app, not a user) and `source` (a photostream or album URL, a username, or an nsid). It needs no
+  server of ours, no account login, and no `host`: the endpoint is a constant, so there is nothing to
+  mistype there. What it cannot do is stay secret-free in spirit — the key sits in `configuration.json`
+  like every other credential — and it shows **public, Safe-flagged photos at 1024px or below**, because
+  an unauthenticated call sees only Safe content and Flickr restricts larger files to paying accounts.
+  Both limits are stated on the frame (options dialog's About tab, `/state`, `/logs`) rather than left as
+  a mystery short list. A photo an owner asks to have removed is forgotten durably: see
+  [docs/WEBSERVER.md](docs/WEBSERVER.md#removal-requests-and-why-a-delete-is-not-one).
 - **Website backend** — `"type": "web"`, **one entry per page**, `host` holds that page's address used exactly as written (no trailing `/` is appended), and nothing else is needed — no account. What that engine can actually render, and how a dead page is abandoned, is [its own section](#show-a-web-page-limited).
 - **Quiet hours** — a list of 5-field cron expressions, evaluated in `selectedTimeZoneId`; the matching rules and examples are under [Day to day](#day-to-day). Old `startQuietHour`/`endQuietHour` values are migrated to the equivalent expression on load; a single whole-hour window is mirrored back into those fields on save so older APKs keep working.
 - **Legacy configs** — an old file with flat `host`/`userid`/`password` is migrated on load to a single `immich-1` backend and rewritten on disk; the flat fields are kept mirrored on save so older APK versions can still read the file.
@@ -304,6 +317,37 @@ HTTPS against that server is a separate problem with its own answer: the ROM's c
 from about 2013, and the app adds current roots to it for its own connections — see
 [docs/TRUST.md](docs/TRUST.md). The server does **not** have to weaken itself: TLS 1.2 is enabled on
 the frame side, forward secrecy is kept, and what remains is a matter of which gate your host trips.
+
+## Add a Flickr stream (optional)
+
+One credential and one address, and no server of yours: a Flickr **application key** (free for
+non-commercial use, issued to your own Flickr account) plus the photostream or album to show. Either the
+options dialog's **Basic** tab → *+ Add Flickr*, or `"type": "flickr"` in
+[`configuration_example.json`](configuration_example.json)'s shape, applied by hand. Step-by-step, with the
+form's caveats stated honestly, is in [docs/SETUP.md](docs/SETUP.md#flickr-getting-a-key-and-what-it-will-and-will-not-show).
+
+What appears, and why those two limits are not bugs to file:
+
+- **Public photos marked Safe.** The frame calls Flickr's API without a user login — there is no login
+  handshake a chrome-less frame could complete — and an unauthenticated listing sees only public, Safe
+  content. A stream that looks shorter than the library is that filter, and the frame says so rather than
+  rotating quietly through a subset.
+- **1024px on the longest edge.** Since May 2025 Flickr restricts originals and anything above 1024px to
+  **paying accounts** — Creative Commons-licensed and Flickr Commons photos excepted. This is a rule about
+  *the account being read*, not about this app's registration, and it is the whole of the "Flickr requires
+  Pro for third-party apps" complaint that prompted this feature. Nothing in this app can lift it; a Pro
+  or CC account simply shows larger files.
+
+The other half of that complaint — that only three or four frames could be running at once — was a traffic
+shape, and it is fixed here by design: this backend asks Flickr for its catalog **once per pool rebuild**
+and makes no request per rotation tick and none per asset. Several frames on one household key is therefore
+several clients, not several pollers.
+
+Photos the frame has already fetched are cached on the frame like any other source, and the retention rule
+is Flickr's, not the app's: a photo idle for 30 days gives up its cached copy, a photo still in rotation
+does not churn, and a photo that has been deleted or made private is freed at the next pool rebuild. If an
+owner asks for a photo to be removed, the frame's config page has **Forget this Flickr asset** — which
+stops showing it permanently, rather than re-downloading it on the next rotation.
 
 ## Show a web page (limited)
 
@@ -376,6 +420,8 @@ own — [docs/UPDATING.md](docs/UPDATING.md).
   token; file deletes are the one write route with no same-origin check. On an EO2, TCP adb is open on
   port 5555 as root in the shipped ROM, and no setting in this app turns that off.
 - **An Immich password sits in cleartext in `configuration.json`.** There is no API-key alternative.
+  A Flickr **application key** is stored the same way, and is a credential in the same sense: anyone who
+  can read that file can use your key against your quota and your name.
 - **No server is not the same as no network.** Rotation needs a connected link (API 19's `isConnected`
   — there is no reachability probe), so a LAN-only Wi-Fi network is enough and a dead one is not.
 

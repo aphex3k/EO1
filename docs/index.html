@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>EO1 &amp; EO2 — the picture frame that outlived its own service</title>
-<meta name="description" content="Replacement Android software for the Electric Objects EO1 and EO2 wall displays. Pictures come from files you upload to the frame, a self-hosted Immich server, or a web page — never from a vendor cloud.">
+<meta name="description" content="Replacement Android software for the Electric Objects EO1 and EO2 wall displays. Pictures come from files you upload to the frame, a self-hosted Immich server, a Flickr stream you point it at, or a web page — never from a vendor cloud.">
 <meta property="og:title" content="EO1 &amp; EO2 — replacement software for a dead cloud's picture frames">
 <meta property="og:description" content="Nothing in this app contacts a host you did not put into its configuration.">
 <meta property="og:image" content="https://aphex3k.github.io/EO1/assets/IMG_1452.jpg">
@@ -340,7 +340,7 @@ footer .links a { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 
     <dl class="meta">
       <div><dt>Object</dt><dd>Electric Objects EO1 / EO2, Geniatech hardware, Android 4.4.2 inside</dd></div>
       <div><dt>Software</dt><dd>replaced end to end. Java only, API 19, no Kotlin, no ExoPlayer</dd></div>
-      <div><dt>Sources</dt><dd>local uploads &middot; Immich 3.x &middot; web pages, in one shuffled pass</dd></div>
+      <div><dt>Sources</dt><dd>local uploads &middot; Immich 3.x &middot; a Flickr stream &middot; web pages, in one shuffled pass</dd></div>
       <div><dt>Playback</dt><dd>Amlogic TsPlayer, platform MediaPlayer as the fallback</dd></div>
       <div><dt>Still limits</dt><dd>jpg png gif webp bmp dng &mdash; not HEIF, not AVIF</dd></div>
       <div><dt>Video limits</dt><dd>H.264, longest side 1920, 1080p30, under 15&nbsp;Mbit/s, muted</dd></div>
@@ -382,6 +382,18 @@ footer .links a { font-family: var(--mono); font-size: 0.74rem; letter-spacing: 
 
     <div class="row">
       <span class="plate-no">03</span>
+      <h3>A Flickr<br>stream you own</h3>
+      <p>
+        <span class="needs">Needs a Flickr application key</span>
+        One key you applied for under your own account, one photostream or album named, and no server of
+        yours. Public, Safe-flagged photos at 1024px or smaller &mdash; above that is Flickr&rsquo;s rule about
+        paying accounts, not this app&rsquo;s limitation, and the frame says so rather than rotating a mystery
+        subset.
+      </p>
+    </div>
+
+    <div class="row">
+      <span class="plate-no">04</span>
       <h3>A web page,<br>rendered fresh</h3>
       <p>
         <span class="needs">Needs a URL</span>

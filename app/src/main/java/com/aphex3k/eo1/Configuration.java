@@ -96,9 +96,10 @@ public class Configuration {
      *       host/userid/password triple is present, synthesize one immich entry.</li>
      *   <li>Trims string fields; blank {@code apiVersion} becomes "auto"; an unparseable
      *       pinned version is relaxed to "auto" rather than silently disabling the backend.</li>
-     *   <li>Blank ids get auto-ids ("immich-N" / "web-N" 1-based, "local").</li>
+     *   <li>Blank ids get auto-ids ("immich-N" / "web-N" / "flickr-N" 1-based, "local").</li>
      *   <li>At most one local entry is kept (first wins); duplicate immich entries
-     *       (same host + userid) and duplicate web entries (same page URL) are dropped.</li>
+     *       (same host + userid), duplicate web entries (same page URL) and duplicate flickr
+     *       entries (same stream) are dropped.</li>
      *   <li>Immich hosts get a trailing "/" appended when missing (Retrofit baseUrl); web
      *       page URLs are left exactly as configured.</li>
      *   <li>Quiet hours: when no {@code quietHours} list is present but the legacy
@@ -166,6 +167,7 @@ public class Configuration {
         boolean sawLocal = false;
         Set<String> seenImmich = new HashSet<String>();
         Set<String> seenWeb = new HashSet<String>();
+        Set<String> seenFlickr = new HashSet<String>();
         for (ConfigurationBackendEntry e : c.backends) {
             if (e.isLocal()) {
                 if (sawLocal) {
@@ -177,6 +179,13 @@ public class Configuration {
                 // Compared exactly, case included: a URL path is case-sensitive, so folding case
                 // here would silently drop a page the user configured on purpose.
                 if (e.isValid() && !seenWeb.add(e.host)) {
+                    changed = true;
+                    continue;
+                }
+            } else if (e.isFlickr()) {
+                // Compared exactly: two entries naming the same stream would show every photo twice
+                // per cycle, which is the web page's argument in this step's own words.
+                if (e.isValid() && !seenFlickr.add(e.source)) {
                     changed = true;
                     continue;
                 }
@@ -196,6 +205,7 @@ public class Configuration {
         // 5. Auto-ids, plus a trailing slash for immich base URLs only.
         int immichCount = 0;
         int webCount = 0;
+        int flickrCount = 0;
         for (ConfigurationBackendEntry e : c.backends) {
             if (e.isLocal()) {
                 if (e.id.isEmpty()) {
@@ -210,6 +220,14 @@ public class Configuration {
                 }
                 // No trailing slash here: an immich host is a Retrofit base URL, while a slash
                 // on a page address is part of the resource path and would change what loads.
+            } else if (e.isFlickr()) {
+                flickrCount++;
+                if (e.id.isEmpty()) {
+                    e.id = "flickr-" + flickrCount;
+                    changed = true;
+                }
+                // No trailing slash and no host at all: a Flickr entry names a stream, not a base
+                // URL, and its endpoint is a constant in FlickrClient.
             } else if (e.isImmich()) {
                 immichCount++;
                 if (e.id.isEmpty()) {
@@ -362,14 +380,41 @@ public class Configuration {
         e.host = e.host == null ? "" : e.host.trim();
         e.userid = e.userid == null ? "" : e.userid.trim();
         e.apiVersion = e.apiVersion == null ? "" : e.apiVersion.trim();
+        e.apiKey = e.apiKey == null ? "" : e.apiKey.trim();
+        e.source = e.source == null ? "" : e.source.trim();
         return !before.equals(join(e));
+    }
+
+    /**
+     * The attribution a configured set of services legally requires, or "" when none of them asks for
+     * one.
+     *
+     * <p>Kept here because two surfaces must say the same thing word for word — the options dialog's
+     * About tab and the LAN page header — and a notice that exists to satisfy a service's terms must not
+     * be paraphrased differently by whoever added the second call site. Worded as Flickr specifies it,
+     * as text: its terms forbid using the Flickr logo without written permission.
+     */
+    public static String requiredServiceNotices(Configuration c) {
+        if (c == null) {
+            return "";
+        }
+        for (ConfigurationBackendEntry entry : c.backendsOrEmpty()) {
+            if (entry.isFlickr() && entry.enabled) {
+                return "This product uses the Flickr API but is not endorsed or certified by SmugMug, Inc.";
+            }
+        }
+        return "";
     }
 
     private static String join(ConfigurationBackendEntry e) {
         return e.type + "\u0000" + (e.id == null ? "" : e.id)
                 + "\u0000" + (e.host == null ? "" : e.host)
                 + "\u0000" + (e.userid == null ? "" : e.userid)
-                + "\u0000" + (e.apiVersion == null ? "" : e.apiVersion);
+                + "\u0000" + (e.apiVersion == null ? "" : e.apiVersion)
+                // Left out, and a trimmed apiKey or source becomes invisible to the "did normalizing
+                // change anything" answer, so the document is never re-saved with the tidied value.
+                + "\u0000" + (e.apiKey == null ? "" : e.apiKey)
+                + "\u0000" + (e.source == null ? "" : e.source);
     }
 
     private static boolean hasHttpScheme(String host) {

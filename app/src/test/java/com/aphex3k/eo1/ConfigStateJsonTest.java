@@ -130,6 +130,34 @@ public class ConfigStateJsonTest {
         assertFalse(backend.has("apiVersion"));
     }
 
+    /**
+     * A Flickr entry reports <em>which stream</em> it reads — the one fact that makes "the frame shows
+     * nothing" diagnosable from the LAN — and never the key that reads it. The key's absence is the same
+     * omission by which every type this method does not know about keeps its secrets out of {@code /state},
+     * so the assertion worth keeping is that {@code apiKey} is never named here at all.
+     */
+    @Test
+    public void flickrBackendShowsItsStreamAndNeverItsKey() {
+        ConfigurationBackendEntry e = new ConfigurationBackendEntry();
+        e.type = ConfigurationBackendEntry.TYPE_FLICKR;
+        e.id = "flickr-1";
+        e.apiKey = "0123456789abcdef0123456789abcdef";
+        e.source = "https://www.flickr.com/photos/mhenke/";
+        Configuration c = config(e);
+
+        String serialized = ConfigStateJson.configStateJson(c).toString();
+        JsonObject backend = ConfigStateJson.configStateJson(c)
+                .getAsJsonArray("backends").get(0).getAsJsonObject();
+
+        assertEquals("flickr", backend.get("type").getAsString());
+        assertEquals("https://www.flickr.com/photos/mhenke/", backend.get("source").getAsString());
+        assertTrue(backend.get("valid").getAsBoolean());
+        assertFalse(backend.has("apiKey"));
+        assertFalse(backend.has("host"));
+        assertFalse("the key must not appear anywhere in the document",
+                serialized.contains("0123456789abcdef"));
+    }
+
     /** A page address must never be mistaken for an Immich server by an older APK. */
     @Test
     public void webOnlyConfigHasEmptyLegacyHostAlias() {

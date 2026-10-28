@@ -3,6 +3,7 @@ package com.aphex3k.eo1;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
+import static org.junit.Assert.fail;
 import static org.junit.Assert.assertTrue;
 
 import com.aphex3k.media.MediaAsset;
@@ -743,6 +744,29 @@ public class MediaManagerCyclingTest {
     }
 
     /**
+     * An asset key is only meaningful with the backend it names. Accepting another source's key would
+     * mark the wrong ledger and free the wrong bytes while reporting a success — which, for a removal
+     * request, is the worst possible answer.
+     */
+    @Test
+    public void forgetAssetsRejectsAKeyBelongingToAnotherBackend() {
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(backendA(1)), listener, 9L);
+        mm.prefetchEnabled = false;
+        try {
+            mm.showNextImageLocked(tmp.newFolder("c1"), tmp.newFolder("u1"), directPoster, false);
+        } catch (Exception e) {
+            throw new AssertionError(e);
+        }
+        try {
+            mm.forgetAssets("fakeA", "fakeB:01234567-89ab-cdef-0123-456789abcdef");
+            fail("a mismatched key must be refused, not honoured");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("fakeB"));
+        }
+    }
+
+    /**
      * A source that reports no size must not reserve the per-file ceiling. This hardware has less free
      * space than {@link MediaManager#MAX_ASSET_BYTES}, so asking for ceiling+margin can never be
      * satisfied: {@code ensureSpace} evicts the whole shared cache — including other backends' originals
@@ -814,6 +838,55 @@ public class MediaManagerCyclingTest {
         assertEquals("a disk below the safety margin cannot take the asset", 0,
                 listener.displayedKeys.size());
         assertFalse("and making room for it is what eviction is for", neighbour.isFile());
+    }
+
+    /**
+     * {@code dropCachedAsset} deletes by prefix on an id a backend surfaced, never by glob over the
+     * cache directory — and this is the test that says why. A Flickr asset id is hex-and-dash by
+     * construction, which is the same alphabet as an Immich UUID, so a sweep that matched on shape
+     * rather than on the exact id would let one backend's privacy eviction destroy another's library.
+     */
+    @Test
+    public void dropCachedAssetTouchesOnlyTheIdsItWasGiven() throws Exception {
+        String flickrId = "36353533-35343132-6131623263";
+        String neighbour = "01234567-89ab-cdef-0123-456789abcdef";
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(backendA(1)), listener, 5L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("drop-cache");
+        mm.showNextImageLocked(cacheDir, tmp.newFolder("uploads"), directPoster, false);
+
+        File original = new File(cacheDir, flickrId + ".jpg");
+        File fallback = new File(cacheDir, flickrId + "_fb.jpg");
+        File other = new File(cacheDir, neighbour + ".jpg");
+        File unrelated = new File(cacheDir, flickrId + "x.jpg");
+        for (File f : new File[]{original, fallback, other, unrelated}) {
+            Files.write(f.toPath(), "bytes".getBytes(StandardCharsets.UTF_8));
+        }
+
+        assertEquals("the original and its degraded sibling", 2,
+                mm.dropCachedAsset("fakeA", flickrId));
+        assertFalse(original.isFile());
+        assertFalse(fallback.isFile());
+        assertTrue("another backend's cached original survives", other.isFile());
+        assertTrue("and a mere prefix collision is not the asset", unrelated.isFile());
+    }
+
+    /**
+     * An id nobody surfaced must free nothing, and a manager with no rotation in flight has no cache
+     * directory to look in — neither case may reach for files by name pattern.
+     */
+    @Test
+    public void dropCachedAssetWithNothingToDropIsHarmless() throws Exception {
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(backendA(1)), listener, 6L);
+        mm.prefetchEnabled = false;
+        File cacheDir = tmp.newFolder("drop-cache2");
+        File other = new File(cacheDir, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee.jpg");
+        Files.write(other.toPath(), "bytes".getBytes(StandardCharsets.UTF_8));
+
+        assertEquals(0, mm.dropCachedAsset("fakeA", "ffffffff-1111-2222-3333-444444444444"));
+        assertTrue(other.isFile());
     }
 
     /**

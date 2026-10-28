@@ -11,6 +11,7 @@ import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaBackend;
 import com.aphex3k.media.MediaSource;
 import com.aphex3k.media.MediaType;
+import com.aphex3k.media.flickr.FlickrMediaBackend;
 import com.aphex3k.media.immich.ImmichMediaBackend;
 import com.aphex3k.media.local.LocalMediaBackend;
 import com.aphex3k.media.web.WebsiteBackend;
@@ -300,7 +301,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             public void run() {
                 try {
                     showNextImageLocked(activity.getCacheDir(),
-                            UploadedMedia.dirFor(activity),
+                            UploadedMedia.dirFor(activity), activity.getFilesDir(),
                             new UiPoster() {
                                 @Override
                                 public void post(Runnable action) {
@@ -359,7 +360,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
     /** A tick that starts here rather than walking on from a failed page: resets the fallback count. */
     void showNextImageLocked(File cacheDir, File uploadsDir, UiPoster ui, boolean refetched) {
-        showNextImageLocked(cacheDir, uploadsDir, ui, refetched, false);
+        showNextImageLocked(cacheDir, uploadsDir, null, ui, refetched, false);
     }
 
     /**
@@ -370,8 +371,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * @param afterWebFailure true when this sweep continues a cycle that a failed page walked on
      *        from; keeps {@link #webFallbackDepth} counting instead of resetting it
      */
-    void showNextImageLocked(File cacheDir, File uploadsDir, UiPoster ui, boolean refetched,
-                             boolean afterWebFailure) {
+    /**
+     * @param filesDir this install's private directory, from which each backend derives its own state
+     *        store. {@code null} leaves a backend with no durable state — a test convenience, never a
+     *        production path, and a backend that needs durability must say so in its own report rather
+     *        than looking healthy while retaining nothing.
+     */
+    void showNextImageLocked(File cacheDir, @Nullable File uploadsDir, @Nullable File filesDir,
+                             UiPoster ui, boolean refetched, boolean afterWebFailure) {
         if (!afterWebFailure) {
             webFallbackDepth = 0;
         }
@@ -379,7 +386,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         Configuration configuration = loadConfiguration();
 
         if (pool.isEmpty() || poolStale || !fingerprint(configuration).equals(currentConfigurationFingerprint)) {
-            rebuildPool(configuration, uploadsDir, ui);
+            rebuildPool(configuration, uploadsDir, filesDir, ui);
         }
         refreshLocalUploads();
         if (pool.isEmpty()) {
@@ -440,13 +447,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             if (!refetched) {
                 // The whole remaining pool failed: refetch every backend's catalog once, retry.
                 Log.w(TAG, "showNextImage: all assets failed, refetching backend catalogs");
-                rebuildPool(configuration, uploadsDir, ui);
+                rebuildPool(configuration, uploadsDir, filesDir, ui);
                 if (pool.isEmpty()) {
                     Log.e(TAG, "showNextImage: no media found after refetch");
                     postException(ui, new NoMediaFoundException());
                     return;
                 }
-                showNextImageLocked(cacheDir, uploadsDir, ui, true, afterWebFailure);
+                showNextImageLocked(cacheDir, uploadsDir, filesDir, ui, true, afterWebFailure);
                 return;
             }
             Log.e(TAG, "showNextImage: all assets failed after refetch, deferring to next tick");
@@ -530,7 +537,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * Rebuilds the merged pool: one backend per valid config entry, each fetched in its own
      * try/catch so a failing backend only loses its own assets this cycle.
      */
-    private void rebuildPool(Configuration configuration, File uploadsDir, UiPoster ui) {
+    private void rebuildPool(Configuration configuration, @Nullable File uploadsDir,
+                             @Nullable File filesDir, UiPoster ui) {
         closeGeneration();
         pool.clear();
         poolKeys.clear();
@@ -538,7 +546,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         backendById.clear();
         final String generationFingerprint = fingerprint(configuration);
 
-        for (MediaBackend backend : buildGeneration(configuration, uploadsDir)) {
+        List<MediaBackend> next;
+        synchronized (generationLock) {
+            next = buildGeneration(configuration, uploadsDir, filesDir);
+        }
+        for (MediaBackend backend : next) {
             String backendId = backend.getId();
             if (backendById.containsKey(backendId)) {
                 Log.w(TAG, "rebuildPool: duplicate backend id '" + backendId + "', skipping later entry");
@@ -623,7 +635,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
     }
 
-    private List<MediaBackend> buildGeneration(Configuration configuration, File uploadsDir) {
+    /**
+     * Swaps in a new generation under {@link #generationLock}, so a removal in flight cannot be applied
+     * to a backend that is on its way out — the point of a durable mark is that the next generation
+     * honours it too.
+     */
+    private List<MediaBackend> buildGeneration(Configuration configuration,
+                                               @Nullable File uploadsDir,
+                                               @Nullable File filesDir) {
         List<MediaBackend> generation = new ArrayList<>();
         if (fixedBackends != null) {
             generation.addAll(fixedBackends);
@@ -647,6 +666,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 backend = new ImmichMediaBackend(entry, this);
             } else if (entry.isWeb()) {
                 backend = new WebsiteBackend(entry);
+            } else if (entry.isFlickr()) {
+                backend = new FlickrMediaBackend(entry,
+                        filesDir == null ? null : new File(filesDir, "backends"), this);
             }
             if (backend == null) {
                 Log.w(TAG, "rebuildPool: unknown backend type '" + entry.type + "' for '"
@@ -659,14 +681,17 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     private void closeGeneration() {
-        for (MediaBackend backend : generation) {
-            try {
-                backend.close();
-            } catch (Exception e) {
-                Log.w(TAG, "rebuildPool: closing backend '" + backend.getId() + "' failed", e);
+        // Same lock as a removal, so closing a generation and marking an asset cannot interleave.
+        synchronized (generationLock) {
+            for (MediaBackend backend : generation) {
+                try {
+                    backend.close();
+                } catch (Exception e) {
+                    Log.w(TAG, "rebuildPool: closing backend '" + backend.getId() + "' failed", e);
+                }
             }
+            generation.clear();
         }
-        generation.clear();
     }
 
     /**
@@ -834,7 +859,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     .append(e.host).append('|')
                     .append(e.userid).append('|')
                     .append(e.apiVersion).append('|')
-                    .append(e.password).append('\n');
+                    .append(e.password).append('|')
+                    // A Flickr entry's identity is its key and the stream it names, and neither is
+                    // covered by host/userid/password. Left out, editing one would keep the old pool
+                    // rotating until the frame restarted, and two flickr entries would share a
+                    // fingerprint and look unchanged.
+                    .append(e.apiKey).append('|')
+                    .append(e.source).append('\n');
         }
         try {
             byte[] d = MessageDigest.getInstance("SHA-1")
@@ -1497,6 +1528,89 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (file.exists() && !file.delete()) {
             Log.w(TAG, "deleteCachedFile: could not delete " + file.getAbsolutePath());
         }
+    }
+
+    /**
+     * Routes a removal request to the backend that owns the asset, and asks it to mark rather than
+     * merely delete: {@code MediaCacheManager} has no idea what a service owes its users, and a delete
+     * the next catalog build undoes would violate the clause it was meant to satisfy.
+     */
+    @Override
+    public int forgetAssets(String backendId, @Nullable String assetKey) {
+        String rawId = null;
+        if (assetKey != null) {
+            int colon = assetKey.indexOf(':');
+            if (colon > 0) {
+                String owner = assetKey.substring(0, colon);
+                if (!owner.equals(backendId)) {
+                    // A key is only meaningful with its own backend. Pasting a key from another source
+                    // and reporting success would mark the wrong ledger and free the wrong bytes.
+                    throw new IllegalArgumentException("asset key belongs to backend '" + owner
+                            + "', not '" + backendId + "'");
+                }
+                rawId = assetKey.substring(colon + 1);
+            } else {
+                rawId = assetKey;
+            }
+        }
+        int forgotten;
+        // Held for the whole call: a removal that lands while a pool rebuild is swapping generations can
+        // otherwise reach the backend being retired, whose ledger it then rewrites — and the replacement
+        // never sees the mark.
+        synchronized (generationLock) {
+            MediaBackend backend = backendId == null ? null : backendById.get(backendId);
+            if (backend == null) {
+                Log.w(TAG, "forgetAssets: backend '" + backendId + "' is not in the current generation");
+                return 0;
+            }
+            try {
+                forgotten = backend.forget(rawId);
+            } catch (Exception e) {
+                Log.w(TAG, "forgetAssets: backend '" + backendId + "' failed", e);
+                throw new IllegalStateException("backend '" + backendId + "' could not honour the request",
+                        e);
+            }
+        }
+        Log.i(TAG, "forgetAssets: backend '" + backendId + "' stopped holding " + forgotten
+                + " asset(s)");
+        return forgotten;
+    }
+
+    /** Guards the generation list and its id map against a swap racing a removal. */
+    private final Object generationLock = new Object();
+
+    /**
+     * Deletes every cached file this backend's asset id accounts for — the original and its
+     * {@code _fb} sibling — through {@link #removeFromCache(File)} so the ownership guards still apply.
+     *
+     * <p>The lookup is a prefix on an id the caller surfaced, never a glob over the directory: the ids
+     * two backends produce can share an alphabet, and eviction driven by a pattern would let one
+     * backend's privacy sweep destroy another's library.
+     */
+    @Override
+    public int dropCachedAsset(String backendId, String rawId) {
+        File dir = mediaCacheDir;
+        if (dir == null || rawId == null || rawId.isEmpty()) {
+            return 0;
+        }
+        int removed = 0;
+        downloadMutex.lock();
+        try {
+            File[] children = dir.listFiles();
+            if (children == null) {
+                return 0;
+            }
+            for (File child : children) {
+                String name = child.getName();
+                if (name.startsWith(rawId + ".") || name.startsWith(rawId + "_fb.")) {
+                    removeFromCache(child);
+                    removed++;
+                }
+            }
+        } finally {
+            downloadMutex.unlock();
+        }
+        return removed;
     }
 
     @Override

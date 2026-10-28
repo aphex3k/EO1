@@ -28,6 +28,13 @@
             "enabled": true
         },
         {
+            "type": "flickr",
+            "id": "flickr-1",
+            "apiKey": "0123456789abcdef0123456789abcdef",
+            "source": "https://www.flickr.com/photos/your-username/",
+            "enabled": true
+        },
+        {
             "type": "web",
             "id": "web-1",
             "host": "http://192.168.1.20/dashboard/",

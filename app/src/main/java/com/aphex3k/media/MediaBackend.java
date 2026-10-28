@@ -104,6 +104,22 @@ public interface MediaBackend {
     }
 
     /**
+     * Optional: stops this backend showing and holding one asset, on an operator's behalf, and keeps
+     * stopping — the durability is the point. Deleting the bytes alone satisfies nothing: whenever the
+     * source still lists the asset, the next rotation downloads it again, so a removal request that is
+     * only a delete is violated the day after it is honoured.
+     *
+     * <p>Backends whose service offers no comparable obligation, and backends with nothing durable to
+     * mark, leave this returning zero.
+     *
+     * @param assetId one asset's raw id, or {@code null} for everything this backend can reach
+     * @return how many assets it stopped holding
+     */
+    default int forget(@Nullable String assetId) throws Exception {
+        return 0;
+    }
+
+    /**
      * Optional: releases any resources the backend holds. No-op when there is nothing to
      * close.
      */

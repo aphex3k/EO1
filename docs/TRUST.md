@@ -15,6 +15,20 @@ around 2013. Measured on a live EO2 (`adb shell ls /system/etc/security/cacerts 
 | anchors shipped | **156** |
 | already past their own `notAfter` | **63** |
 | matching ISRG / Let's Encrypt | **0** |
+| matching Amazon / Starfield | **0** |
+
+The Amazon row is the same story one issuer later. Flickr's leaf is signed by `Amazon RSA 2048 M01`
+(`M04` on its static host), and the cross-signed Starfield intermediate that would let a 2013 store pass an
+Amazon chain is not merely unused on these devices — it is absent, which is why the bundle has had to carry
+an Amazon anchor at all. It now does so by inheritance rather than by choice: the Debian-sourced list
+includes all four Amazon roots, so the specific anchor is whatever the distribution ships rather than a
+decision made here. What was measured, and still holds, is which one the chains actually close at —
+validating each Amazon root alone as the only trust anchor made `api.flickr.com` and
+`live.staticflickr.com` both verify against Root CA 1 (HTTP 200 for root 1, handshake failure for 2, 3 and
+4), even though the two hosts name different intermediates. Note which gate that opens and which it does
+not: protocol and cipher were never the Flickr problem, because TLS 1.2 with a CBC-only suite negotiates
+against its hosts fine. The unresolved case is whether KitKat's verifier accepts the RSASSA-PSS signature
+those handshakes report, which still fails as a certificate error.
 
 That last row is the actual failure, and it is not the same story as "the certificates expired". An
 expired anchor is inert: it is never selected ahead of a valid one, so 63 dead roots cost nothing

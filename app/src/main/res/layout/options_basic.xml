@@ -49,6 +49,13 @@
             android:layout_marginTop="8dp"
             android:text="+ Add Website" />
 
+        <Button
+            android:id="@+id/btnAddFlickr"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="+ Add Flickr" />
+
         <!-- ...existing time zone, quiet hours, and interval fields... -->
         <RadioGroup
             android:id="@+id/optionsRadioGroup"

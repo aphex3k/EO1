@@ -154,6 +154,70 @@ public class ConfigurationTest {
         assertEquals("http://host/page", c.backends.get(1).host);
     }
 
+    /**
+     * A Flickr entry is configured by an application key and the stream it names. Either half missing
+     * must read as <em>not configured</em>: the app ships no key to fall back to, and a frame that shows
+     * an empty wall while reporting a healthy backend is worse than one that says it is incomplete.
+     */
+    @Test
+    public void flickrEntryNeedsAKeyAndAStream() {
+        Configuration c = new Gson().fromJson("{\"backends\":[{\"type\":\"flickr\","
+                + "\"apiKey\":\"0123456789abcdef0123456789abcdef\","
+                + "\"source\":\"  https://www.flickr.com/photos/mhenke/  \"}]}", Configuration.class);
+        Configuration.normalize(c);
+        ConfigurationBackendEntry e = c.backends.get(0);
+        assertEquals("flickr-1", e.id);
+        assertEquals("the value is trimmed like every other field",
+                "https://www.flickr.com/photos/mhenke/", e.source);
+        assertTrue(e.isValid());
+
+        Configuration streamless = new Gson().fromJson("{\"backends\":[{\"type\":\"flickr\","
+                + "\"apiKey\":\"0123456789abcdef0123456789abcdef\"}]}", Configuration.class);
+        Configuration.normalize(streamless);
+        assertFalse("a key with nowhere to point lists nothing",
+                streamless.backends.get(0).isValid());
+
+        Configuration keyless = new Gson().fromJson("{\"backends\":[{\"type\":\"flickr\","
+                + "\"source\":\"mhenke\"}]}", Configuration.class);
+        Configuration.normalize(keyless);
+        assertFalse("and a stream with no key is answered only with error code 100",
+                keyless.backends.get(0).isValid());
+    }
+
+    /** Two entries naming one stream would show every photo twice per cycle. */
+    @Test
+    public void duplicateFlickrStreamsAreDroppedAndDistinctOnesAreKept() {
+        Configuration c = new Gson().fromJson("{\"backends\":["
+                + "{\"type\":\"flickr\",\"id\":\"flickr-1\",\"apiKey\":\"k\","
+                + "\"source\":\"https://www.flickr.com/photos/a/\"},"
+                + "{\"type\":\"flickr\",\"id\":\"flickr-2\",\"apiKey\":\"k\","
+                + "\"source\":\"https://www.flickr.com/photos/a/\"},"
+                + "{\"type\":\"flickr\",\"id\":\"flickr-3\",\"apiKey\":\"k\","
+                + "\"source\":\"https://www.flickr.com/photos/b/\"}]}", Configuration.class);
+
+        Configuration.normalize(c);
+        assertEquals(2, c.backendsOrEmpty().size());
+        assertEquals("https://www.flickr.com/photos/a/", c.backends.get(0).source);
+        assertEquals("https://www.flickr.com/photos/b/", c.backends.get(1).source);
+    }
+
+    /**
+     * A Flickr entry has no base URL: its endpoint is a constant in the client. Getting a trailing slash
+     * appended by the immich rule would be harmless today and misleading tomorrow, and comparing a host
+     * path against a literal suffix would be order-dependent against this very step.
+     */
+    @Test
+    public void flickrEntriesTakeNoHostAndNoTrailingSlashRule() {
+        Configuration c = new Gson().fromJson("{\"backends\":[{\"type\":\"flickr\","
+                + "\"apiKey\":\"k\",\"source\":\"mhenke\",\"apiVersion\":\"3.1.0\"}]}",
+                Configuration.class);
+        Configuration.normalize(c);
+        ConfigurationBackendEntry e = c.backends.get(0);
+        assertEquals("", e.apiVersion);
+        assertEquals("mhenke", e.source);
+        assertTrue("a bare username is a complete source", e.isValid());
+    }
+
     @Test
     public void duplicateWebUrlsAreDroppedButDistinctPagesAreKept() {
         Configuration c = new Gson().fromJson(

@@ -253,9 +253,26 @@ public class ApiServiceGenerator {
 
         private static final String TAG = "EO1-http";
 
+        /**
+         * Credentials that travel in a query string rather than a header. Flickr has no documented
+         * header form for its application key, so {@code api_key} is in the URL of every call it makes,
+         * and {@code HttpLoggingInterceptor} prints the request line at {@code HEADERS} level — which in
+         * a debug build means a key readable by anyone with adb.
+         */
+        private static final java.util.regex.Pattern QUERY_SECRET =
+                java.util.regex.Pattern.compile(
+                        "(?i)\\b(api_key|oauth_[a-z]*|secret)=[^&\\s]+");
+
         @Override
         public void log(String message) {
             if (message == null) {
+                return;
+            }
+            if (message.indexOf('=') > 0 && QUERY_SECRET.matcher(message).find()) {
+                // Rewritten rather than dropped: the URL is the useful part of the line, and losing it
+                // would make this the one log that cannot say which host a frame was talking to.
+                Log.d(TAG, QUERY_SECRET.matcher(message)
+                        .replaceAll("$1=[redacted]"));
                 return;
             }
             int colon = message.indexOf(':');

@@ -23,7 +23,7 @@ your LAN. Example: <http://your-host/update-out/eo1-release-1.apk>
 - A keyboard, once, on one board — for the step that turns on local uploads. It is a one-time
   bootstrap on the frame's own screen, not a requirement of using the frame; see
   [the seam, stated plainly](#the-one-step-that-needs-hands).
-- (optionally) an Immich server — only if you want that source. Nothing here needs one.
+- (optionally) an Immich server, and/or a Flickr **application key** — only if you want those sources. Nothing here needs either, and the app ships no credential of its own for any source, so a key is always yours to supply.
 - (optionally) a web server hosting the APK for download onto the frames.
 
 ### The one step that needs hands
@@ -123,6 +123,35 @@ has instructions on getting it online.
 - Reboot your EO2 with the following command:
   1. `adb reboot`
 - When your EO2 reboots, it should connect and start displaying!
+
+## Flickr: getting a key, and what it will and will not show
+
+A frame reads Flickr with one credential: an **application key**, and the app ships none — every operator
+brings their own, as with every other backend here.
+
+1. Sign in at flickr.com with the account whose photos should rotate, and open
+   `flickr.com/services/api/keys/`. It redirects through sign-in to that member's "App Garden"; create an
+   app, describe it as personal/non-commercial (only commercial requests are reviewed by staff, so a
+   non-commercial key is issued by the form), and copy the 32-hex **API Key**.
+   *Honest caveat:* this walkthrough was written without opening that form — the page sits behind a login
+   and nobody building this had a key — so if its fields differ, believe the form and correct this page.
+2. In the frame's options dialog (**Basic** tab → *+ Add Flickr*) or the LAN page's config editor, paste
+   the key and the stream: a photostream URL (`https://www.flickr.com/photos/you/`), one album URL
+   (`…/photos/you/albums/721777…`), a bare username, or an nsid.
+3. Set `interval` as usual; the rotation timing is the same control every other backend uses.
+
+What it shows, and why that is not a bug to file: **public photos marked Safe**, at **1024px or smaller**.
+The first limit comes from calling the API unauthenticated (no login handshake exists for a headless frame
+to complete); the second is Flickr's own May 2025 restriction of originals and anything above 1024px to
+paying accounts, which applies to the *account being read* — not to this app's registration. That
+restriction is the substance of "Flickr now requires Pro for third-party access": a Pro or Creative
+Commons account is exempt and will show larger files. Nothing in this app can lift it, and a frame that
+showed a shorter list than the library without saying so would be repeating the complaint rather than
+answering it — which is why the limit is stated in the options dialog, `/state` and `/logs`.
+
+If a frame cannot reach Flickr at all with the error reading like a certificate problem, that is the 2013
+trust store, not Flickr: see [TRUST.md](TRUST.md) — Amazon roots are in `RootBundle` since 2026-10-26, and
+an older build has none.
 
 ## Writing configuration.json by hand
 
