@@ -3870,6 +3870,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * decision covers the Immich client and the update download, and cannot reach the kiosk
      * {@code WebView}, whose engine validates inside Chromium. See docs/TRUST.md.
      */
+    /** How many of the shipped anchors a store lacks by name before {@code /state} stops listing them. */
+    private static final int MISSING_ANCHORS_SHOWN = 12;
+
     private JsonObject trustBlockJson() {
         JsonObject o = new JsonObject();
         try {
@@ -3933,9 +3936,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.addProperty("expired", store.expired);
         o.addProperty("notYetValid", store.notYetValid);
         o.addProperty("unparseable", store.unparseable);
+        // Bounded on purpose. Against a ROM store from 2013 a whole-distribution bundle is "missing" from
+        // almost every frame, so the untruncated list is ~110 strings per store — tens of KB of near-zero
+        // information inside a diagnostics section that budgets 128 KB for /state as a whole. The count is
+        // the number anyone acts on; the names are a sample to confirm it.
+        List<String> missingAnchors = TrustCensus.missingFromBundle(store);
+        o.addProperty("missingBundleCount", missingAnchors.size());
         JsonArray missing = new JsonArray();
-        for (String entry : TrustCensus.missingFromBundle(store)) {
-            missing.add(entry);
+        for (int i = 0; i < missingAnchors.size() && i < MISSING_ANCHORS_SHOWN; i++) {
+            missing.add(missingAnchors.get(i));
         }
         o.add("missingBundleAnchors", missing);
         return o;
