@@ -40,8 +40,23 @@ The pin in `debian.json` is the provenance: fetch that version, re-hash it again
 `/usr/share/ca-certificates/mozilla/*.crt`, and every byte here follows. The archive's own `md5sums` member
 is checked per file, which is what catches a partially-extracted tree — a silently smaller bundle is the
 one failure mode `MergedTrust`'s merging-may-only-add guard cannot see, because that guard compares against
-the platform store and not against what this bundle used to hold.
+the platform store and not against what this bundle used to hold. Fingerprints and expiries per anchor are
+in `MANIFEST.tsv`, regenerated alongside the PEMs, so they cannot drift from the bytes they describe.
 
-Before 2026-10-27 the ten files here were extracted by hand from a machine-local `ca-certificates` bundle
-and their fingerprints were recorded in a table in this file; `git log` back through that date reads as the
-curation it was.
+Before 2026-10-27 the files here were extracted by hand from a machine-local `ca-certificates` bundle
+(`/opt/homebrew/etc/ca-certificates/cert.pem`, the Mozilla store) and their fingerprints were kept in a
+table in this file; `git log` back through that date reads as the curation it was.
+
+## Measurements this directory is the evidence for
+
+**Flickr's chain closes at Amazon Root CA 1, not at the whole ATS family.** Flickr's leaf names different
+intermediates on its two hosts (`Amazon RSA 2048 M01` on `flickr.com`, `M04` on `static.flickr.com`), which
+invites shipping all four Amazon roots; validating each one **alone**, as the only trust anchor, answered
+it — `curl --cacert amazon-root-ca-N.pem` against both hosts on 2026-10-26 returned HTTP 200 for N=1 and
+failed the handshake for N=2, 3 and 4. All four now ship anyway, because they are in Debian's set and this
+directory no longer hand-selects: the finding stands as a fact about Flickr's chains, and it is why N=1 is
+the anchor to look at first when a Flickr backend will not connect.
+
+**Still unsettled: whether KitKat's verifier accepts an RSASSA-PSS signature.** That is a failure these
+anchors can still produce — the bundle carries Sectigo's PSS roots and GlobalSign's R46 — and no
+measurement in this repository answers it. Only `TrustCensus` on a real frame does.

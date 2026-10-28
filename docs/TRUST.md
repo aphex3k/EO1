@@ -103,8 +103,9 @@ list in gate 2 above, and the first draft of this change got that backwards.
 **Measured on a bench EO2** (`/state`'s `trust` block, app build with this change installed):
 `mode=merged`, `platformAnchors=156`, `trustedAnchors=164` — the ROM's own 156 anchors enumerated
 through its provider, plus the 8 shipped roots that particular device was missing. That 8 is one
-frame's gap, not the size of the bundle, which was **10** at the time of that reading and is a whole
-distribution's store now — see "Where the roots come from". The
+frame's gap, not the size of the bundle — **10** at the time of that reading, **11** once
+`amazon-root-ca-1` was added for Flickr on 2026-10-26, and a whole distribution's store since the
+Debian-sourced bundle landed on 2026-10-27. See "Where the roots come from". The
 census reproduced the host-side measurements exactly (`readable=true`, `total=156`, `expired=63`,
 `unparseable=0`), which also proves the app uid can read `/system/etc/security/cacerts` under
 SELinux enforcing.
@@ -161,7 +162,11 @@ trust table, published with a version, a checksum and a per-file `md5sums` list 
 the list a reviewer reads (file, the store name Android gives it, SHA-256, expiry, subject, Mozilla
 label) and its diff is the change; [`debian.json`](debian.json) is the pin the download is checked
 against. `RootBundle.ENTRIES` carries exactly those anchors — it is generated from that directory — and
-`/state`'s `trust.bundleSize` reports the number on the device.
+`/state`'s `trust.bundleSize` reports the number on the device. Where an anchor was chosen for a specific
+reason rather than inherited — the single Amazon Trust Services root that Flickr's chain actually closes
+at — that measurement is recorded in
+[`certs/roots/README.md`](../certs/roots/README.md), and it survives here as a fact about a server's chain
+even though all four Amazon roots now arrive with the distribution's set.
 
 Following a distribution rather than curating is the point, and it has a price worth stating. Mozilla
 adds and removes trust continuously, and this project has no better source of truth than its list. So
@@ -170,6 +175,7 @@ one, by an explicit decision, because an anchor the app carries after its own up
 root nobody is watching. Between releases the only lever is `trust_bundle` at the end of this page,
 which is all-or-nothing for the entire bundle and has no UI. **Distrust latency equals release
 cadence**, and that is a property of the product rather than an oversight.
+
 They are compiled into the APK rather than downloaded because the APK is already authenticated by
 signature (`com.aphex3k.update`), and a second fetch path for trust material would mean a second
 verifier and a second set of failure modes for no gain. `res/raw` and `assets/` are avoided on
