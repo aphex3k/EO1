@@ -39,9 +39,11 @@ import javax.net.ssl.X509TrustManager;
  * performs its own hostname verification against the peer certificate
  * ({@code okhttp3.internal.connection.RealConnection} → {@code OkHostnameVerifier}), which is why
  * replacing the trust anchors here leaves identity checking intact — but a {@code WebView} validates
- * inside its own engine and ignores any Java trust manager entirely. That gap is
- * {@code CertStoreProvisioner}'s job, and it is why an https kiosk page is still broken after this
- * class has done its work.
+ * inside its own engine and ignores any Java trust manager entirely. Nothing in this app closes that
+ * gap — the {@code CertStoreProvisioner} this class used to promise was never added, and no code here
+ * writes to {@code /data/misc/keychain} — so an https kiosk page is still at the mercy of the ROM's
+ * 2013 store after this class has done its work. The bundle's anchors reaching a frame's platform store
+ * would be a separate change, with its own UI and its own opt-in.
  *
  * <p>Deliberately free of {@code android.*}: this runs, unchanged, in a JVM unit test.
  */
@@ -152,8 +154,29 @@ public final class MergedTrust {
      *        store and nothing else. Wired to a SharedPreferences flag, because the escape hatch from a
      *        trust change has to be reachable without shipping another APK.
      */
+    /**
+     * The one result this process has built, and the {@code enabled} value it was built under. Cached
+     * because {@code build} is not cheap and the callers are not rare: every OkHttp client this app
+     * constructs comes through here, and a frame whose pool is empty rebuilds its backends on every
+     * rotation tick — which is precisely the state a misconfigured trust bundle puts a frame in. An
+     * uncached build therefore re-enumerates the platform's anchors and re-parses all
+     * {@link RootBundle#size()} shipped ones per tick, on the rotation thread, forever.
+     *
+     * <p>The cache cannot go stale from anything but the flag. The bundle is compile-time constants, and
+     * the platform store this reads is one a rooted shell could change under a running process — but a
+     * frame that picks up a new ROM store does so by rebooting, and the rotation restart with it.
+     */
+    private static Result cached;
+    private static boolean cachedEnabled;
+
     public static synchronized Result create(boolean enabled) {
+        Result prior = cached;
+        if (prior != null && cachedEnabled == enabled) {
+            return prior;
+        }
         Result result = build(enabled);
+        cached = result;
+        cachedEnabled = enabled;
         last = result;
         return result;
     }
@@ -186,7 +209,8 @@ public final class MergedTrust {
         }
 
         int added = 0;
-        int skipped = 0;
+        int alreadyPresent = 0;
+        int unreadable = 0;
         RootBundle.Entry[] bundle = RootBundle.entries();
         for (int i = 0; i < bundle.length; i++) {
             RootBundle.Entry entry = bundle[i];
@@ -194,15 +218,18 @@ public final class MergedTrust {
                 X509Certificate certificate = entry.certificate();
                 String key = SubjectHashOld.hash(certificate) + '|' + certificate.getSerialNumber();
                 if (merged.containsKey(key)) {
-                    skipped++;
+                    alreadyPresent++;
                     continue;
                 }
                 merged.put(key, certificate);
                 added++;
             } catch (Throwable t) {
-                // One unreadable bundle entry must not cost the frame the other nine, and must not be
-                // silent either: the count below is what an operator reads.
-                skipped++;
+                // One unreadable bundle entry must not cost the frame the rest of the bundle, and must
+                // not be silent either: the counts below are what an operator reads. Kept separate from
+                // `alreadyPresent` on purpose — this is the one place that can learn that this device
+                // cannot parse something Mozilla ships, and reporting it as a duplicate would say the
+                // exact opposite of what happened.
+                unreadable++;
             }
         }
 
@@ -241,9 +268,15 @@ public final class MergedTrust {
                         "merged set is smaller than the platform's — refusing to install", null);
             }
 
+            String detail = added + " anchor(s) added, " + alreadyPresent + " already present";
+            if (unreadable > 0) {
+                // A shipped anchor this device could not parse is not a duplicate and must not read like
+                // one: it is the signature of a root format the platform does not know, which is the
+                // question a whole-distribution bundle makes live for the first time.
+                detail = detail + ", " + unreadable + " could not be parsed by this device";
+            }
             return new Result(MODE_MERGED, platform.size(),
-                    installed >= 0 ? installed : merged.size(),
-                    added + " anchor(s) added, " + skipped + " already present", manager);
+                    installed >= 0 ? installed : merged.size(), detail, manager);
         } catch (Throwable t) {
             return new Result(MODE_PLATFORM_ONLY, platform.size(), -1,
                     "could not build a trust manager: " + t, null);
