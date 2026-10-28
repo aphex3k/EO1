@@ -18,12 +18,17 @@ around 2013. Measured on a live EO2 (`adb shell ls /system/etc/security/cacerts 
 | matching Amazon / Starfield | **0** |
 
 The Amazon row is the same story one issuer later. Flickr's leaf is signed by `Amazon RSA 2048 M01`
-(`M04` on its static host), and the cross-signed Starfield intermediate that would let a 2013 store pass
-an Amazon chain is not merely unused on these devices — it is absent, which is why `amazon-root-ca-1` ships
-in the bundle. Note which gate that opens and which it does not: protocol and cipher were never the Flickr
-problem, because TLS 1.2 with a CBC-only suite negotiates against its hosts fine. The unresolved case is
-whether KitKat's verifier accepts the RSASSA-PSS signature those handshakes report, which still fails as a
-certificate error.
+(`M04` on its static host), and the cross-signed Starfield intermediate that would let a 2013 store pass an
+Amazon chain is not merely unused on these devices — it is absent, which is why the bundle has had to carry
+an Amazon anchor at all. It now does so by inheritance rather than by choice: the Debian-sourced list
+includes all four Amazon roots, so the specific anchor is whatever the distribution ships rather than a
+decision made here. What was measured, and still holds, is which one the chains actually close at —
+validating each Amazon root alone as the only trust anchor made `api.flickr.com` and
+`live.staticflickr.com` both verify against Root CA 1 (HTTP 200 for root 1, handshake failure for 2, 3 and
+4), even though the two hosts name different intermediates. Note which gate that opens and which it does
+not: protocol and cipher were never the Flickr problem, because TLS 1.2 with a CBC-only suite negotiates
+against its hosts fine. The unresolved case is whether KitKat's verifier accepts the RSASSA-PSS signature
+those handshakes report, which still fails as a certificate error.
 
 That last row is the actual failure, and it is not the same story as "the certificates expired". An
 expired anchor is inert: it is never selected ahead of a valid one, so 63 dead roots cost nothing
@@ -112,8 +117,9 @@ list in gate 2 above, and the first draft of this change got that backwards.
 **Measured on a bench EO2** (`/state`'s `trust` block, app build with this change installed):
 `mode=merged`, `platformAnchors=156`, `trustedAnchors=164` — the ROM's own 156 anchors enumerated
 through its provider, plus the 8 shipped roots that particular device was missing. That 8 is one
-frame's gap, not the size of the bundle, which was **10** at that measurement and is **11** since
-`amazon-root-ca-1` was added on 2026-10-26 — see "Where the roots come from". The
+frame's gap, not the size of the bundle — **10** at the time of that reading, **11** once
+`amazon-root-ca-1` was added for Flickr on 2026-10-26, and a whole distribution's store since the
+Debian-sourced bundle landed on 2026-10-27. See "Where the roots come from". The
 census reproduced the host-side measurements exactly (`readable=true`, `total=156`, `expired=63`,
 `unparseable=0`), which also proves the app uid can read `/system/etc/security/cacerts` under
 SELinux enforcing.
@@ -163,26 +169,63 @@ guess dressed as a plan.
 
 ## Where the roots come from
 
-**Eleven** roots: `certs/roots/*.pem`, one pure PEM each, with provenance and SHA-256 fingerprints in
-[`certs/roots/README.md`](../certs/roots/README.md) — including why exactly one Amazon Trust Services
-anchor is among them. `RootBundle.ENTRIES` carries the same eleven — it is
-generated from that directory — and `/state`'s `trust.bundleSize` reports the number on the device.
+**The roots are Debian's, not a list this project maintains.** `certs/roots/*.pem` is the whole
+`/usr/share/ca-certificates/mozilla` set from a pinned Debian `ca-certificates` package — Mozilla's
+trust table, published with a version, a checksum and a per-file `md5sums` list — refreshed by
+[`../update-roots.sh`](../update-roots.sh) and committed by a human. [`MANIFEST.tsv`](MANIFEST.tsv) is
+the list a reviewer reads (file, the store name Android gives it, SHA-256, expiry, subject, Mozilla
+label) and its diff is the change; [`debian.json`](debian.json) is the pin the download is checked
+against. `RootBundle.ENTRIES` carries exactly those anchors — it is generated from that directory — and
+`/state`'s `trust.bundleSize` reports the number on the device. Where an anchor was chosen for a specific
+reason rather than inherited — the single Amazon Trust Services root that Flickr's chain actually closes
+at — that measurement is recorded in
+[`certs/roots/README.md`](../certs/roots/README.md), and it survives here as a fact about a server's chain
+even though all four Amazon roots now arrive with the distribution's set.
+
+Following a distribution rather than curating is the point, and it has a price worth stating. Mozilla
+adds and removes trust continuously, and this project has no better source of truth than its list. So
+**a root Debian removes is gone from frames at the next release** — there is no override list to keep
+one, by an explicit decision, because an anchor the app carries after its own upstream withdrew it is a
+root nobody is watching. Between releases the only lever is `trust_bundle` at the end of this page,
+which is all-or-nothing for the entire bundle and has no UI. **Distrust latency equals release
+cadence**, and that is a property of the product rather than an oversight.
+
 They are compiled into the APK rather than downloaded because the APK is already authenticated by
 signature (`com.aphex3k.update`), and a second fetch path for trust material would mean a second
 verifier and a second set of failure modes for no gain. `res/raw` and `assets/` are avoided on
 purpose: release builds run `shrinkResources = true`, and a trust anchor that a resource-shrinking
 step can decide is unreferenced is the wrong thing to discover on a frame behind glass.
 
-Regenerate with:
+Refresh the set (fetch, verify, prune expired, show what would be added and removed, write nothing):
 
 ```bash
-./gen-root-bundle.sh
+./update-roots.sh --dry-run --suite sid
 ```
 
-The generator refuses to emit an entry for a certificate that does not parse, is past its own expiry,
-or disagrees with its own DER encoding, and `RootBundleTest` re-proves all of it from the generated
-file on every test run — including that each entry is genuinely self-signed, because an intermediate
-is not an anchor.
+Then do it for real, read the diff, and commit it:
+
+```bash
+./update-roots.sh --suite sid
+```
+
+`./gen-root-bundle.sh` is the lower half — it turns `certs/roots/*.pem` into `RootBundle.java` and takes
+no part in fetching. It refuses to emit an entry for a certificate that does not parse, is past its own
+expiry, disagrees with its own DER encoding, duplicates an anchor already in the set, or whose file name
+would sanitize to a Java identifier another input already claimed.
+
+Neither script runs during a build, and `publish-update.sh` reaches no network for trust material: it
+regenerates `RootBundle.java` from the committed PEMs into a temp directory and refuses the release if
+the result differs from what is committed, if `MANIFEST.tsv` disagrees with the entry count, or if any
+shipped anchor is past its own expiry — the same fail-closed-with-an-escape-hatch shape as the R8
+mapping, and `EO1_UPDATE_ROOTS_OPTIONAL=1` is its opt-out. That separation is what keeps the bundle
+reviewable at all: `BUILD_DATE` in a release is the commit's timestamp, so roots that varied without a
+commit would let two APKs carrying different trust material report the same `GIT_SHA`.
+
+Expiry is why the refresh prunes and the test only warns. A distribution's store always contains
+something on its way out — one sid release carries 120 anchors with nothing expiring before 2028, one
+stable release carries 148 with one already expired and another lapsing within weeks — and a
+`./gradlew test` that goes red on a calendar date, on every branch and every old commit, is a test that
+gets deleted rather than fixed. `RootBundleTest` prints what lapsed; the release gate is what refuses.
 
 The switch is the `trust_bundle` key in the app's **default SharedPreferences** —
 `/data/data/com.aphex3k.eo1/shared_prefs/com.aphex3k.eo1_preferences.xml`, read as

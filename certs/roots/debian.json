@@ -1,0 +1,13 @@
+{
+  "writtenBy": "./update-roots.sh — do not hand-edit; this file is the pin, and the pin is the review",
+  "note": "Integrity comes from re-hashing the download against sha256 below. There is no Debian keyring on a macOS release machine, so nothing verifies a signature here; what binds is that this file is committed.",
+  "source": "https://deb.debian.org/debian",
+  "suite": "sid",
+  "package": "ca-certificates",
+  "version": "20260816+nmu1",
+  "path": "pool/main/c/ca-certificates/ca-certificates_20260816+nmu1_all.deb",
+  "sizeBytes": 133868,
+  "sha256": "14a35850411e3a26ac4802638ccafe437dae4c79a1d10b3a264d1a404a286305",
+  "anchorsShipped": 120,
+  "anchorsPrunedExpired": 0
+}
