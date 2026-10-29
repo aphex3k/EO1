@@ -89,6 +89,13 @@ public final class CrashSources {
      */
     static final long SCRAPE_BUDGET_MS = TIMEOUT_MS + REAP_GRACE_MS + 3000L;
 
+    /**
+     * How long the reaper watches for a natural exit before killing the child. Deliberately inside the
+     * caller's bound: kill and status have to land before the scrape gives up and reports, or a child
+     * that finishes writing and then lingers produces an honest capture judged on a missing status.
+     */
+    static final long REAP_OBSERVE_MS = TIMEOUT_MS + REAP_GRACE_MS - 500L;
+
     static final int MAX_OUTPUT_CHARS = 512 * 1024;
     static final int MAX_COPIES_PER_DIR = 20;
     static final long COPY_BUDGET_BYTES = 1024L * 1024L;
@@ -770,6 +777,15 @@ public final class CrashSources {
         return d.text;
     }
 
+    /** Used by the reaper's bounded observation window; a poll that cannot sleep is a poll that spins. */
+    private static void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
     /** The clock every deadline in this class is measured against. See {@link #remainingMs}. */
     static long monoNow() {
         return android.os.SystemClock.elapsedRealtime();
@@ -861,27 +877,60 @@ public final class CrashSources {
                 }
                 int code = 0;
                 boolean known = false;
-                // Destroy first only for a child we are abandoning, where the status is expected to be
-                // ours and the terminated path in harvestLogcat already reads it that way. For a clean
-                // read the order is wait-then-destroy; see below.
+                boolean weKilled = abandoned;
                 if (abandoned) {
+                    // A read we gave up on: end the child now, so a parked reader and a live child are
+                    // both left behind for as little time as possible.
                     try {
                         process.destroy();
                     } catch (Throwable ignored) {
                         // best effort
                     }
                 }
-                try {
-                    code = process.waitFor();
-                    known = true;
-                } catch (Throwable ignored) {
-                    // A reap that cannot complete is reported as no status, never as status zero.
+                // Observe the exit without ever blocking on it. waitFor() has no timeout before API 26,
+                // so a child that reaches EOF and then hangs — or an error path that completes the reader
+                // while the child is still alive — parked this thread here and leaked the child, which is
+                // the leak the destroy below was meant to prevent and could never reach. exitValue()
+                // says "not yet" instead of blocking, so this thread can wait for the child without
+                // waiting ON it: a child that leaves on its own is still reaped before anything signals
+                // it, so its status stays its own rather than the signal we sent.
+                long observeUntil = beganAt + REAP_OBSERVE_MS;
+                while (true) {
+                    try {
+                        code = process.exitValue();
+                        known = true;
+                        break;
+                    } catch (IllegalThreadStateException stillRunning) {
+                        // alive at the poll; keep the window
+                    } catch (Throwable t) {
+                        break;
+                    }
+                    if (monoNow() >= observeUntil) {
+                        break;
+                    }
+                    sleepQuietly(50L);
                 }
-                // Reaped first, then destroyed, never the other way round. destroy() is a no-op on a
-                // child waitFor() just collected, so the child cannot leak and its exit status cannot be
-                // the signal we sent it. The reverse order put a signal number in `exit` and let the
-                // exit-status gate in harvestLogcat condemn a capture it had read in full: the frame's
-                // own log said `logcat exited 9` for a scrape that had worked.
+                if (!known) {
+                    // Still alive with the window gone: this thread is the child's only reaper, so it
+                    // leaves nothing running behind it. Calling that our own termination is what keeps
+                    // the kill out of the exit-status gate that already misread `exited 9` as refusal.
+                    weKilled = true;
+                    try {
+                        process.destroy();
+                    } catch (Throwable ignored) {
+                        // best effort
+                    }
+                    try {
+                        code = process.exitValue();
+                        known = true;
+                    } catch (Throwable ignored) {
+                        // destroyed; the status may simply not be collectable any more
+                    }
+                }
+                // Always, including after a clean reap. On a process that has already been collected this
+                // cannot do anything, and so cannot corrupt the status the poll above just read — but it
+                // is what makes "never leave the child running" true unconditionally rather than true
+                // whenever the reaper happens to reach a particular line.
                 try {
                     process.destroy();
                 } catch (Throwable ignored) {
@@ -890,6 +939,9 @@ public final class CrashSources {
                 synchronized (lock) {
                     d.exit = code;
                     d.exitKnown = known;
+                    if (weKilled) {
+                        d.terminated = true;
+                    }
                     lock.notifyAll();
                 }
             }

@@ -527,6 +527,85 @@ public class CrashScrapeBoundsTest {
         assertEquals(1, CrashStore.list(baseDir).length);
     }
 
+    /**
+     * A child that hands over all of its output and then never exits — and whose {@code waitFor()}
+     * therefore never returns. Reachable for real: {@code logcat -d} can close stdout once the dump is
+     * drained while the process itself lingers. Reaping it by waiting on {@code waitFor()} strands the
+     * reaper, and the child with it.
+     */
+    private static final class EofButNeverExitsChild extends Process {
+        private final InputStream in = new ByteArrayInputStream(
+                ("I/debuggerd( 1234): *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***\n"
+                        + "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x0 (code=1)\n").getBytes());
+        private volatile boolean destroyed;
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() throws InterruptedException {
+            // The shape the old reaper blocked in, forever, when the child did not exit.
+            if (!destroyed) {
+                new java.util.concurrent.CountDownLatch(1).await(60, java.util.concurrent.TimeUnit.SECONDS);
+            }
+            return 143;
+        }
+
+        @Override
+        public int exitValue() {
+            if (!destroyed) {
+                throw new IllegalThreadStateException();
+            }
+            return 143;
+        }
+
+        @Override
+        public void destroy() {
+            destroyed = true;
+        }
+
+        boolean wasKilled() {
+            return destroyed;
+        }
+    }
+
+    @Test
+    public void aChildThatFinishesWritingButNeverExitsIsStillKilled() throws Exception {
+        final File baseDir = temp.newFolder("crashes11");
+        final File dropbox = emptyDir("dropbox11");
+        final File anr = emptyDir("anr11");
+        final EofButNeverExitsChild child = new EofButNeverExitsChild();
+        final CrashSources.Availability[] box = new CrashSources.Availability[1];
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                box[0] = CrashSources.scrape(baseDir, null, new Runner(child), T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        worker.join(CrashSources.TIMEOUT_MS + CrashSources.REAP_GRACE_MS + 8_000L);
+        assertFalse("the scrape blocked on a child that would not exit", worker.isAlive());
+
+        assertTrue("the reaper must not leave the child running behind it", child.wasKilled());
+        assertEquals("and killing it is ours, not the child refusing, so the capture stands: "
+                + box[0].logcat, CrashSources.COPIED, box[0].logcat);
+        assertEquals(1, CrashStore.list(baseDir).length);
+    }
+
     @Test
     public void aHandedBackResultIsFrozenAgainstLateWorkerWrites() {
         // drain() finishes on a bounded wait while the reader and the reaper may still be alive, and both
