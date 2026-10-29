@@ -709,6 +709,45 @@ public class CrashSourcesTest {
                 CrashSources.monoNow() < System.currentTimeMillis() / 10L);
     }
 
+    @Test
+    public void aCrashAfterTwentyThousandLinesIsStillFound() throws Exception {
+        // The line bound used to stop the scan, and a log dump puts the newest lines last, so a busy
+        // frame's native death sat exactly where the scan gave up. The bound is on retention now.
+        File baseDir = crashDir();
+        StringBuilder noise = new StringBuilder();
+        for (int i = 0; i < 25_000; i++) {
+            noise.append("I/S(1): aa").append(i % 97).append('\n');
+        }
+        assertTrue("the fixture must stay under the retention cap to test the line bound",
+                noise.length() < CrashSources.MAX_OUTPUT_CHARS);
+        noise.append(CRASH_LINE);
+
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new FakeRunner(noise.toString()), T0);
+
+        assertEquals(CrashSources.COPIED, a.logcat);
+        assertEquals(1, CrashStore.list(baseDir).length);
+    }
+
+    @Test
+    public void aSecondNativeCrashOfTheSameShapeIsNotTreatedAsAlreadyStored() throws Exception {
+        // debuggerd writes a fixed-width template, so two different native deaths differ only in the
+        // hex of an address and a thread id — and their filtered text is therefore the same LENGTH
+        // routinely. A dedupe key of "logcat|" + length called the second one unchanged and dropped it.
+        File baseDir = crashDir();
+        String first = "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x00000000 (code=1), t 1240\n";
+        String second = "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x000000ff (code=1), t 1241\n";
+        assertEquals("the fixture must collide on length to prove the point",
+                first.length(), second.length());
+
+        CrashSources.scrape(baseDir, null, new FakeRunner(first), T0);
+        CrashSources.Availability again =
+                CrashSources.scrape(baseDir, null, new FakeRunner(second), T0 + 60_000L);
+
+        assertEquals(CrashSources.COPIED, again.logcat);
+        assertEquals("both deaths belong in the archive", 2, CrashStore.list(baseDir).length);
+    }
+
     private static String read(File f) throws IOException {
         java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
         java.io.InputStream in = new java.io.FileInputStream(f);

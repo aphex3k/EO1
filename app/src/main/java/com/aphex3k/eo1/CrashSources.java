@@ -475,13 +475,24 @@ public final class CrashSources {
             out.logcatReason = (out.logcatReason == null ? "" : out.logcatReason + "; ")
                     + "buffer exceeded " + MAX_OUTPUT_CHARS + " chars; scanned the oldest part only";
         }
-        String crash = filterNativeCrashLines(d.text);
+        boolean[] scanCapped = new boolean[1];
+        String crash = filterNativeCrashLines(d.text, scanCapped);
+        if (scanCapped[0]) {
+            out.logcatReason = (out.logcatReason == null ? "" : out.logcatReason + "; ")
+                    + "more than " + MAX_OUTPUT_LINES + " crash-marked lines; kept the oldest";
+        }
         if (crash.isEmpty()) {
             // The scrape worked and found nothing native. Distinct from UNAVAILABLE above.
             out.logcat = EMPTY;
             return;
         }
-        String origin = "logcat|" + crash.length();
+        // Length plus content, not length alone. debuggerd's output is a fixed-width template, so two
+        // different native deaths on the same frame normally differ only in the hex of an address and a
+        // thread id — which means their filtered lengths collide constantly. Fingerprinting by length
+        // made a second, genuinely new crash look unchanged and drop it: the store then held the old
+        // death and /state said the buffer had nothing new, which is the opposite of what a crash
+        // archive is for.
+        String origin = "logcat|" + crash.length() + "|" + Integer.toHexString(crash.hashCode());
         if (known.contains(origin)) {
             out.logcat = UNCHANGED;
             return;
@@ -512,17 +523,36 @@ public final class CrashSources {
      * fill the retention budget with noise and bury the two lines that matter.
      */
     static String filterNativeCrashLines(String buffer) {
+        return filterNativeCrashLines(buffer, null);
+    }
+
+    /**
+     * @param capped a one-element array, set true when matching lines were still in the buffer after
+     *               {@link #MAX_OUTPUT_LINES} had already been kept
+     */
+    static String filterNativeCrashLines(String buffer, boolean[] capped) {
         if (buffer == null || buffer.isEmpty()) {
             return "";
         }
         StringBuilder out = new StringBuilder();
-        int scanned = 0;
+        int kept = 0;
         java.util.StringTokenizer lines = new java.util.StringTokenizer(buffer, "\n");
-        while (lines.hasMoreTokens() && scanned++ < MAX_OUTPUT_LINES) {
+        // Every line is examined. Only retention is bounded.
+        //
+        // The loop used to stop at MAX_OUTPUT_LINES, which made a buffer's size decide whether a crash
+        // was found at all: the newest lines land at the end of a log dump, so a long-but-healthy
+        // buffer lost exactly the native death the scrape exists to catch, silently. Same mistake the
+        // byte cap made, one layer up.
+        while (lines.hasMoreTokens()) {
             String line = lines.nextToken();
             for (String marker : NATIVE_CRASH_MARKERS) {
                 if (line.contains(marker)) {
-                    out.append(line).append('\n');
+                    if (kept < MAX_OUTPUT_LINES) {
+                        out.append(line).append('\n');
+                        kept++;
+                    } else if (capped != null) {
+                        capped[0] = true;
+                    }
                     break;
                 }
             }
