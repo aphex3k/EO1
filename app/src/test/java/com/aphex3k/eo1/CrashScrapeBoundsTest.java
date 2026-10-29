@@ -463,6 +463,33 @@ public class CrashScrapeBoundsTest {
     }
 
     @Test
+    public void aHandedBackResultIsFrozenAgainstLateWorkerWrites() {
+        // drain() finishes on a bounded wait while the reader and the reaper may still be alive, and both
+        // write under the monitor afterwards. harvestLogcat reads the result with no lock, so what it
+        // reads has to be a copy: otherwise the exit-status decision and the report's warnings depend on
+        // when a detached daemon thread happens to wake.
+        CrashSources.Drain live = new CrashSources.Drain();
+        live.progress.append("Fatal signal 11\n");
+        live.exit = 0;
+        live.exitKnown = true;
+
+        CrashSources.Drain handedBack = live.copy();
+
+        live.progress.append("...and the reader woke up much later\n");
+        live.exit = 143;
+        live.exitKnown = false;
+        live.truncated = true;
+        live.terminated = true;
+
+        assertEquals("Fatal signal 11\n", handedBack.text);
+        assertEquals(0, handedBack.exit);
+        org.junit.Assert.assertTrue(handedBack.exitKnown);
+        org.junit.Assert.assertFalse("a late write must not add a warning to a finished result",
+                handedBack.truncated);
+        org.junit.Assert.assertFalse(handedBack.terminated);
+    }
+
+    @Test
     public void aCaptureExactlyAtTheCapIsNotCalledPartial() throws Exception {
         // Nothing was discarded when the buffer is exactly full at EOF, and claiming otherwise puts a
         // "scanned the oldest part only" warning in /state and in the report header for a capture that

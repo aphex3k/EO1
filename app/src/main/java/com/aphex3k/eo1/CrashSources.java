@@ -647,7 +647,11 @@ public final class CrashSources {
 
     /** What reading one child to a bounded end produced, and how it ended. */
     static final class Drain {
-        /** The output, at most {@link CrashSources#MAX_OUTPUT_CHARS} characters of it. */
+        /**
+         * The output, at most {@link CrashSources#MAX_OUTPUT_CHARS} characters of it. Materialised by
+         * {@link #copy()} from {@link #progress}; the live instance that the workers hold never assigns
+         * it, so there is one place where a result's text becomes fixed.
+         */
         String text = "";
         /**
          * What has been retained so far, appended to by the reader under {@code drain}'s monitor.
@@ -659,8 +663,6 @@ public final class CrashSources {
          * append alone and never across a read.
          */
         final StringBuilder progress = new StringBuilder();
-        /** Set by the caller when it stops waiting for the reader; the reader must then not publish. */
-        boolean abandoned;
         /** Set by the reader under {@code lock}: it has stopped reading, however it stopped. */
         boolean readDone;
         /** True when the child reached end of output, as opposed to us giving up on it. */
@@ -677,6 +679,23 @@ public final class CrashSources {
         boolean exitKnown;
         /** Why the read itself failed, if it did. */
         Throwable error;
+
+        /**
+         * This state as a detached object that nobody else can change. Call under {@code drain}'s
+         * monitor, which is what makes the fields below agree with each other and with {@code progress}.
+         */
+        Drain copy() {
+            Drain c = new Drain();
+            c.text = progress.toString();
+            c.readDone = readDone;
+            c.complete = complete;
+            c.terminated = terminated;
+            c.truncated = truncated;
+            c.exit = exit;
+            c.exitKnown = exitKnown;
+            c.error = error;
+            return c;
+        }
     }
 
     /**
@@ -772,11 +791,11 @@ public final class CrashSources {
                     }
                 }
                 if (abandoned) {
-                    // BEFORE destroy(), not after it. destroy() can itself block — that is the failure
-                    // mode this class exists to survive — and readChild runs on the calling thread, so
-                    // a blocked destroy() would keep drain() from ever reaching the bounded wait below.
-                    // Closing the pipe is what releases a reader parked inside read(); abandoning the
-                    // read beats parking the scrape.
+                    // BEFORE destroy(), not after it. destroy() can itself block — the failure mode this
+                    // class exists to survive — and closing the pipe is what lets a reader parked inside
+                    // read() leave it. Doing it first means the reader's retained bytes are in the
+                    // buffer before the caller's bounded wait can expire; doing it after would let a
+                    // wedged destroy() decide how much of the log we keep.
                     try {
                         process.getInputStream().close();
                     } catch (Throwable ignored) {
@@ -824,6 +843,7 @@ public final class CrashSources {
         reader.setDaemon(true);
         reader.start();
 
+        Drain out;
         synchronized (lock) {
             long left;
             while ((!d.readDone || !d.exitKnown)
@@ -837,27 +857,21 @@ public final class CrashSources {
                 }
             }
             if (!d.readDone) {
-                // Out of time with a reader still parked. Take what it has retained — all of it is
-                // already in the shared buffer, since the reader appends under this same monitor — and
-                // mark the drain abandoned so that reader, if it ever wakes, cannot publish over the
-                // snapshot the caller is about to hand back.
-                d.text = d.progress.toString();
-                d.abandoned = true;
+                // Out of time with a reader still parked. That is us ending the read by any name, and
+                // the partial-capture rule has to apply to it, not only to the reader that noticed the
+                // deadline itself. Late writes from that reader are harmless: the copy below has already
+                // fixed what the caller will see.
                 d.terminated = true;
-                lock.notifyAll();
             }
+            // Everything the caller will read is copied under the monitor. Returning the shared
+            // instance would leave harvestLogcat's exit-status decision and its report warnings racing
+            // with a reaper still sitting in waitFor() or a reader that wakes minutes later — both
+            // daemon threads, both writing fields read here with no lock at all.
+            out = d.copy();
         }
-        return d;
+        return out;
     }
 
-    /**
-     * Keeps what fits of one read and says whether anything was dropped.
-     *
-     * <p>The test is {@code n > room}, not {@code room <= 0}: the read that straddles the cap discards
-     * characters too, and marking only a fully-refused read left the cap-crossing silent whenever that
-     * last partial read was followed straight by EOF — which is the common shape, since the cap is an
-     * exact multiple of the read buffer and a real {@code logcat} ends as soon as it is drained.
-     */
     /**
      * Keeps what fits of one read and reports whether anything was dropped.
      *
@@ -929,22 +943,18 @@ public final class CrashSources {
                 }
             }
             synchronized (lock) {
-                // Everything the caller reads is assigned here and nowhere else, and not at all once the
-                // caller has given up on this thread: by then it has snapshotted the buffer and handed
-                // those fields to harvestLogcat, and a late write would be read with no ordering at all.
+                // Held for the assignments only. What the caller already copied cannot be changed by
+                // these, which is the whole reason a late wake-up from this thread is harmless.
                 d.readDone = true;
-                if (!d.abandoned) {
-                    d.text = d.progress.toString();
-                    d.complete = eof;
-                    d.error = error;
-                    // Only a read that stopped *without* failing means we ran out of time. A stream that
-                    // threw is a read failure whatever the clock says, and calling that ours would route
-                    // it past the error check and report an unreadable source as having come up empty.
-                    // The exception our own close provokes is already covered: the reaper marks this
-                    // under the same lock before it closes the pipe.
-                    if (error == null && !eof) {
-                        d.terminated = true;
-                    }
+                d.complete = eof;
+                d.error = error;
+                // Only a read that stopped *without* failing means we ran out of time. A stream that
+                // threw is a read failure whatever the clock says, and calling that ours would route
+                // it past the error check and report an unreadable source as having come up empty. The
+                // exception our own close provokes is already covered: the reaper marks this under the
+                // same lock before it closes the pipe.
+                if (error == null && !eof) {
+                    d.terminated = true;
                 }
                 lock.notifyAll();
             }
