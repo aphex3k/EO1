@@ -859,20 +859,33 @@ public final class CrashSources {
                         // best effort
                     }
                 }
-                // Always: destroying a child that already exited is a no-op, and leaving one running
-                // because the read went cleanly is the leak this thread exists to prevent.
-                try {
-                    process.destroy();
-                } catch (Throwable ignored) {
-                    // best effort
-                }
                 int code = 0;
                 boolean known = false;
+                // Destroy first only for a child we are abandoning, where the status is expected to be
+                // ours and the terminated path in harvestLogcat already reads it that way. For a clean
+                // read the order is wait-then-destroy; see below.
+                if (abandoned) {
+                    try {
+                        process.destroy();
+                    } catch (Throwable ignored) {
+                        // best effort
+                    }
+                }
                 try {
                     code = process.waitFor();
                     known = true;
                 } catch (Throwable ignored) {
                     // A reap that cannot complete is reported as no status, never as status zero.
+                }
+                // Reaped first, then destroyed, never the other way round. destroy() is a no-op on a
+                // child waitFor() just collected, so the child cannot leak and its exit status cannot be
+                // the signal we sent it. The reverse order put a signal number in `exit` and let the
+                // exit-status gate in harvestLogcat condemn a capture it had read in full: the frame's
+                // own log said `logcat exited 9` for a scrape that had worked.
+                try {
+                    process.destroy();
+                } catch (Throwable ignored) {
+                    // best effort
                 }
                 synchronized (lock) {
                     d.exit = code;

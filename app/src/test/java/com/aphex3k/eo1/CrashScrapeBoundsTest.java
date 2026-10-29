@@ -462,6 +462,71 @@ public class CrashScrapeBoundsTest {
         return sb.toString();
     }
 
+    /**
+     * A child whose reported status depends on whether it was destroyed before or after it was reaped —
+     * which is what a real one does: signalling a process that is merely finishing writing makes its exit
+     * status the signal number, so a wait-then-destroy order reads 0 and a destroy-then-wait order reads
+     * 9. That second value is ours, and harvestLogcat's exit-status gate treats any non-zero as the
+     * child refusing, which is how a frame ended up logging `logcat exited 9` for a capture it had read
+     * in full.
+     */
+    private static final class StatusDependsOnOrder extends Process {
+        private final InputStream in = new ByteArrayInputStream(
+                ("I/debuggerd( 1234): *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***\n"
+                        + "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x0 (code=1)\n").getBytes());
+        private volatile boolean destroyed;
+        private volatile boolean reaped;
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            reaped = true;
+            return destroyed ? 9 : 0;
+        }
+
+        @Override
+        public int exitValue() {
+            reaped = true;
+            return destroyed ? 9 : 0;
+        }
+
+        @Override
+        public void destroy() {
+            if (!reaped) {
+                destroyed = true;
+            }
+        }
+    }
+
+    @Test
+    public void ourOwnKillIsNotReportedAsTheChildsFailure() throws Exception {
+        File baseDir = temp.newFolder("crashes10");
+        File dropbox = emptyDir("dropbox10");
+        File anr = emptyDir("anr10");
+
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new Runner(new StatusDependsOnOrder()), T0, dropbox, anr);
+
+        assertEquals("a clean read must not inherit our signal as its exit status: " + a.logcat,
+                CrashSources.COPIED, a.logcat);
+        org.junit.Assert.assertNull("and a successful capture carries no reason", a.logcatReason);
+        assertEquals(1, CrashStore.list(baseDir).length);
+    }
+
     @Test
     public void aHandedBackResultIsFrozenAgainstLateWorkerWrites() {
         // drain() finishes on a bounded wait while the reader and the reaper may still be alive, and both
