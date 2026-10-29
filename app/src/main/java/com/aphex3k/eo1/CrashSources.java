@@ -230,14 +230,17 @@ public final class CrashSources {
                 a.logcatReason = "scrape did not publish within " + SCRAPE_BUDGET_MS + "ms"
                         + (attempt > 0 ? " (after retry " + attempt + ")" : "");
                 if (publishState(a, attempt, false)) {
-                    // Scheduled before any logging, and reached only when this attempt had not already
-                    // answered: a scrape stalled on the logger's monitor — or a disk that will not take a
-                    // write — must not be able to stall recovery, because this is the Timer's only thread
-                    // and blocking here strands every later watchdog task too.
+                    // Reached only when this attempt had not already answered. Order matters here: the
+                    // retry is started first, and the log line is handed off rather than written here.
+                    // AppLogger.info is synchronized and holds that monitor across an open, a write and a
+                    // close on flash, so a single stalled write on this thread — the Timer's only one —
+                    // would strand the retry's own timeout task, which is queued behind it. Recovery
+                    // would then have a worker and no watchdog, which is the failure this whole path
+                    // exists to survive.
                     if (attempt < MAX_RETRIES) {
                         startAttempt(attempt + 1, context, logger);
                     }
-                    logVerdict(a, logger);
+                    logVerdictAsync(a, logger);
                 }
             }
         }, SCRAPE_BUDGET_MS);
@@ -301,6 +304,33 @@ public final class CrashSources {
             }
             return true;
         }
+    }
+
+    /**
+     * Writes the durable log line for a verdict on a throwaway daemon thread, so the caller is never the
+     * one waiting on the logger's monitor.
+     *
+     * <p>Used only from the watchdog. Called at most once per attempt — twice per process — so the thread
+     * costs nothing steady, and a hand-off is the whole point: the Timer has a single thread, and
+     * everything later is queued on it. If the write itself stalls, the stranded thing is this daemon
+     * thread, not the next timeout.
+     *
+     * <p>The verdict is already published by the time this returns; handing off the log means the line
+     * can appear a moment after the state it describes. That ordering is the trade, and it is the right
+     * way round — {@code /state} and every later report header carry the truth regardless.
+     */
+    static void logVerdictAsync(final Availability a, final AppLogger logger) {
+        if (logger == null) {
+            return;
+        }
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                logVerdict(a, logger);
+            }
+        }, "eo1-crash-log");
+        t.setDaemon(true);
+        t.start();
     }
 
     /** The durable log line for one verdict. Best-effort, and never on the recovery path. */

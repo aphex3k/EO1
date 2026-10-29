@@ -607,15 +607,74 @@ public class CrashSourcesTest {
     }
 
     @Test
-    public void aTimeoutCannotOverwriteAnAnsweredScrape() {
-        // Two threads publish for an attempt that times out. The timeout must never replace the real
-        // answer that arrived a moment later, and on the last attempt nothing else would fix it.
-        assertFalse(CrashSources.mayPublish(0, false, 0, true));
-        assertTrue("a scrape that answers late still lands",
+    public void aTimeoutNeverOverwritesAnAnsweredScrape() throws Exception {
+        // Precedence must hold in BOTH arrival orders — the race is real, so assert the rule rather than
+        // trying to lose it on purpose.
+        assertFalse("a stub must not replace the real verdict it describes",
+                CrashSources.mayPublish(0, false, 0, true));
+        assertTrue("and a real verdict arriving late still lands",
                 CrashSources.mayPublish(0, true, 0, false));
-        assertFalse("an attempt superseded by a retry does not",
+        assertFalse("an attempt superseded by a retry does not publish",
                 CrashSources.mayPublish(0, true, 1, true));
-        assertTrue(CrashSources.mayPublish(1, false, 0, true));
+        assertTrue("the retry's own timeout still does",
+                CrashSources.mayPublish(1, false, 0, true));
+    }
+
+    @Test
+    public void watchdogLoggingDoesNotWaitOnTheLogger() throws Exception {
+        // AppLogger.info is synchronized and holds that monitor across an open, a write and a close. The
+        // watchdog runs on the Timer's only thread, so calling it inline means one stalled flash write
+        // strands the retry's timeout task behind it — a worker with no watchdog, which is the failure
+        // this path exists to survive.
+        final AppLogger logger = new AppLogger(new File(temp.getRoot(), "held.log"));
+        final CrashSources.Availability a = new CrashSources.Availability();
+        a.logcat = CrashSources.EMPTY;
+        final Object hold = new Object();
+        final Object ready = new Object();
+        final boolean[] acquired = new boolean[1];
+
+        Thread blocker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                synchronized (logger) {
+                    synchronized (ready) {
+                        acquired[0] = true;
+                        ready.notifyAll();
+                    }
+                    synchronized (hold) {
+                        try {
+                            hold.wait(10_000L);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                }
+            }
+        });
+        blocker.setDaemon(true);
+        blocker.start();
+        synchronized (ready) {
+            while (!acquired[0]) {
+                ready.wait(2_000L);
+            }
+        }
+
+        long beganAt = System.currentTimeMillis();
+        CrashSources.logVerdictAsync(a, logger);
+        long waited = System.currentTimeMillis() - beganAt;
+        assertTrue("the hand-off blocked on the logger for " + waited + "ms", waited < 2_000L);
+
+        // And the line still gets written once the monitor is free — the hand-off must not lose it.
+        synchronized (hold) {
+            hold.notifyAll();
+        }
+        blocker.join(10_000L);
+        String tail = "";
+        for (int i = 0; i < 100 && !tail.contains("crash sources"); i++) {
+            Thread.sleep(20L);
+            tail = logger.tail(5);
+        }
+        assertTrue("the verdict never reached the durable log", tail.contains("crash sources"));
     }
 
     private static String read(File f) throws IOException {
