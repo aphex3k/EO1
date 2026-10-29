@@ -595,7 +595,10 @@ follow_logcat() {
   # Dalvik's "thread exiting with uncaught exception" is the line that says a thread died at all — losing
   # it leaves frames with no event, exactly the confusion the whitelist caused before — and "... N more"
   # is what says frames were elided, so a trace that was cut short reads as one that ended naturally.
-  local trace_shapes='Exception in thread |Caused by: |[[:space:]]at [[:alnum:]_$.]+\(|prio=[0-9]+ tid=[0-9]+|\.[A-Za-z_$][A-Za-z_$0-9.]*(Exception|Error|Throwable)(:|$)|thread exiting with uncaught exception|[.][.][.] [0-9]+ more'
+  # <init> and <clinit> need the angle brackets in the class: they are the frames that say a constructor
+  # or a static initializer threw, which is usually the line worth reading, and without them a frame like
+  # `at java.lang.Thread.<init>(Thread.java:420)` matches nothing and vanishes.
+  local trace_shapes='Exception in thread |Caused by: |[[:space:]]at [[:alnum:]_$.<>]+\(|prio=[0-9]+ tid=[0-9]+|\.[A-Za-z_$][A-Za-z_$0-9.]*(Exception|Error|Throwable)(:|$)|thread exiting with uncaught exception|[.][.][.] [0-9]+ more'
   local logcat_grep="${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err|displayVideo|displayPictures|TextureVideo|TsVideoView|TsPlayer|MediaPlayer|Glide|OkHttp|Retrofit|download| D video:|${trace_shapes}"
 
   # Host adb advertises --pid even when the API 19 device cannot filter by it.
