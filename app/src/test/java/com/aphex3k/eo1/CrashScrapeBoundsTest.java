@@ -581,6 +581,87 @@ public class CrashScrapeBoundsTest {
         }
     }
 
+    /**
+     * A child whose stdout fails on its own — not because we closed it — while the process stays alive
+     * and refuses to exit, so the reaper's cleanup kill happens after an error is already on the record.
+     */
+    private static final class ErrorThenLingersChild extends Process {
+        private final InputStream in = new InputStream() {
+            @Override
+            public int read() throws IOException {
+                throw new IOException("failed read of its own");
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) throws IOException {
+                throw new IOException("failed read of its own");
+            }
+        };
+        private volatile boolean destroyed;
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            if (!destroyed) {
+                throw new IllegalThreadStateException();
+            }
+            return 143;
+        }
+
+        @Override
+        public void destroy() {
+            destroyed = true;
+        }
+    }
+
+    @Test
+    public void aCleanupKillDoesNotMaskAnIndependentReadFailure() throws Exception {
+        // The reader's failure is the finding here. Letting our own cleanup termination overwrite it
+        // makes harvestLogcat skip its read-error check and report a source it never read as having
+        // come up empty.
+        final File baseDir = temp.newFolder("crashes12");
+        final File dropbox = emptyDir("dropbox12");
+        final File anr = emptyDir("anr12");
+        final CrashSources.Availability[] box = new CrashSources.Availability[1];
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                box[0] = CrashSources.scrape(baseDir, null, new Runner(new ErrorThenLingersChild()),
+                        T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        worker.join(CrashSources.TIMEOUT_MS + CrashSources.REAP_GRACE_MS + 8_000L);
+        assertFalse(worker.isAlive());
+
+        assertEquals("our kill must not speak for the child: " + box[0].logcat,
+                CrashSources.UNAVAILABLE, box[0].logcat);
+        assertTrue("and the read failure has to be the stated reason: " + box[0].logcatReason,
+                box[0].logcatReason != null && box[0].logcatReason.startsWith("read:"));
+        assertEquals(0, CrashStore.list(baseDir).length);
+    }
+
     @Test
     public void aChildThatFinishesWritingButNeverExitsIsStillKilled() throws Exception {
         final File baseDir = temp.newFolder("crashes11");

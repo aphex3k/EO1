@@ -939,7 +939,14 @@ public final class CrashSources {
                 synchronized (lock) {
                     d.exit = code;
                     d.exitKnown = known;
-                    if (weKilled) {
+                    // Only a kill that explains an otherwise-unremarkable read counts as our
+                    // termination. If the reader reported a failure of its own while the child was
+                    // still alive, stamping this run terminated would route harvestLogcat past its
+                    // read-error check and turn a broken source into a clean `empty` or `copied` — the
+                    // same class of wrong verdict as the exit-status gate reading our signal as
+                    // logcat's. The flag the abandonment path set before closing the pipe is left
+                    // alone: those exceptions are the close's doing, and the reason says so.
+                    if (weKilled && d.error == null) {
                         d.terminated = true;
                     }
                     lock.notifyAll();
