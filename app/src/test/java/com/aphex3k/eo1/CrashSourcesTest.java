@@ -613,8 +613,12 @@ public class CrashSourcesTest {
                 CrashSources.mayPublish(0, false, 0, true));
         assertTrue("and a real verdict arriving late still lands",
                 CrashSources.mayPublish(0, true, 0, false));
-        assertFalse("an attempt superseded by a retry does not publish",
+        assertFalse("a real verdict from a newer attempt wins over an older one",
                 CrashSources.mayPublish(0, true, 1, true));
+        assertFalse("a real verdict from an older attempt cannot displace a newer attempt's real one",
+                CrashSources.mayPublish(0, false, 1, true));
+        assertTrue("but a retry that only ever timed out must not bury an answer that arrived",
+                CrashSources.mayPublish(0, true, 1, false));
         assertFalse("and a retry's timeout must not overwrite a verdict the first attempt recovered",
                 CrashSources.mayPublish(1, false, 0, true));
         assertTrue("while a retry's timeout still reports when nothing has answered",

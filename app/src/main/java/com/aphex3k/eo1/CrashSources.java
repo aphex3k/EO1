@@ -276,13 +276,17 @@ public final class CrashSources {
      */
     static boolean mayPublish(int attempt, boolean real, int published, boolean publishedWasReal) {
         if (attempt < published) {
-            return false;
+            // Lower is normally superseded — but not by a stub. The order this used to get wrong:
+            // attempt 0 stalls, its watchdog times out and starts attempt 1, attempt 1's own watchdog
+            // times out too and publishes a stub, and only then does attempt 0's scrape finally finish.
+            // Returning false here threw that finished scrape away over an attempt-number comparison,
+            // leaving /state and every later report header saying `unavailable` about a source that had
+            // answered. "A higher attempt exists" is not evidence that it answered.
+            return real && !publishedWasReal;
         }
         // A stub says only "this attempt has not answered yet". If some attempt already answered, the
         // statement is no longer true of the process — only of the thread that timed out — and writing
-        // it over a recovered verdict makes /state report `unavailable` for a scrape that worked. So a
-        // real verdict may always supersede a stub, and a stub never supersedes a real verdict, whatever
-        // the attempt numbers say.
+        // it over a recovered verdict makes /state report `unavailable` for a scrape that worked.
         return real || !publishedWasReal;
     }
 
