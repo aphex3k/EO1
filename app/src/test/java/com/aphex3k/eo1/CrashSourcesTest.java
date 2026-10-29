@@ -4,6 +4,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Rule;
@@ -37,6 +38,7 @@ public class CrashSourcesTest {
         private final String output;
         private final int exit;
         private final IOException failure;
+        private final Process canned;
 
         FakeRunner(String output) {
             this(output, 0, null);
@@ -50,6 +52,15 @@ public class CrashSourcesTest {
             this.output = output;
             this.exit = exit;
             this.failure = failure;
+            this.canned = null;
+        }
+
+        /** For the children that do not behave: argv is still recorded, the output is theirs. */
+        FakeRunner(Process canned) {
+            this.output = null;
+            this.exit = 0;
+            this.failure = null;
+            this.canned = canned;
         }
 
         @Override
@@ -58,7 +69,68 @@ public class CrashSourcesTest {
             if (failure != null) {
                 throw failure;
             }
+            if (canned != null) {
+                return canned;
+            }
             return new FakeProcess(output, exit);
+        }
+    }
+
+    /**
+     * A child that cannot be reaped: {@code destroy()} and {@code waitFor()} both sit on one gate,
+     * which is what a wedged process looks like from {@code UNIXProcess}'s side. The gate is released
+     * by the test's {@code finally}, so no thread outlives the test.
+     */
+    private static final class StuckProcess extends Process {
+        private final java.util.concurrent.CountDownLatch gate =
+                new java.util.concurrent.CountDownLatch(1);
+        private final InputStream in;
+
+        StuckProcess(InputStream in) {
+            this.in = in;
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new java.io.ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            await();
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return 0;
+        }
+
+        @Override
+        public void destroy() {
+            await();
+        }
+
+        void release() {
+            gate.countDown();
+        }
+
+        private void await() {
+            try {
+                gate.await(60, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -372,7 +444,10 @@ public class CrashSourcesTest {
         assertEquals(CrashSources.UNAVAILABLE, a.logcat);
         assertEquals(CrashSources.UNAVAILABLE, a.dropbox);
         assertEquals(CrashSources.UNAVAILABLE, a.anr);
+        assertNull("no scrape has run, so there is no reason to report", a.logcatReason);
         assertTrue(a.asMap().containsKey("Source-Dropbox"));
+        assertFalse("the reason key is additive and must not be there before one exists",
+                a.asMap().containsKey("Source-Logcat-Reason"));
     }
 
     @Test
@@ -382,6 +457,136 @@ public class CrashSourcesTest {
         assertTrue(out.contains("Fatal signal 6"));
         // waitFor(long, TimeUnit) does not exist before API 26, so the bound is destroy().
         assertTrue("child was left running", p.reaped);
+    }
+
+    @Test
+    public void anUnreapableChildCannotParkTheScrapeThread() throws Exception {
+        // The bug this test exists for: the read thread used to destroy() and waitFor() the child in
+        // its own finally while the deadline helper was still inside destroy() on the same process.
+        // Two waiters on one UNIXProcess means the second can wait for a notification already
+        // delivered — and a startup scrape that never returns publishes no verdict at all, which is
+        // how a frame with nothing wrong with it read as "unavailable" until the next reboot.
+        final File baseDir = crashDir();
+        final File dropbox = dirWith(temp.getRoot(), "stuck-dropbox");
+        final File anr = dirWith(temp.getRoot(), "stuck-anr");
+        final StuckProcess stuck = new StuckProcess(
+                new ByteArrayInputStream(CRASH_LINE.getBytes("UTF-8")));
+        final CrashSources.Availability[] box = new CrashSources.Availability[1];
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                box[0] = CrashSources.scrape(baseDir, null, new FakeRunner(stuck), T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            worker.join(CrashSources.TIMEOUT_MS + CrashSources.REAP_GRACE_MS + 5000L);
+            assertFalse("scrape thread parked in the child's destroy()/waitFor()",
+                    worker.isAlive());
+        } finally {
+            stuck.release();
+        }
+
+        assertNotNull("the scrape must return an answer, any answer", box[0]);
+        assertEquals(CrashSources.UNAVAILABLE, box[0].logcat);
+        assertTrue("the reason must name the reap that never completed: " + box[0].logcatReason,
+                box[0].logcatReason != null && box[0].logcatReason.contains("exit status"));
+        assertEquals("a child we could not reap is not a report", 0,
+                CrashStore.list(baseDir).length);
+    }
+
+    @Test
+    public void theByteCapBoundsWhatIsRetainedNotWhatWasSeen() throws Exception {
+        // A frame that has been up for hours has a system buffer larger than the cap. Until the cap
+        // bounded retention rather than the scan, that was indistinguishable from a dead radio: the
+        // read stopped at 512 KB, the child was killed for it, and the non-zero exit of the logcat we
+        // killed was reported as an unavailable source — discarding everything already found.
+        // ChildUnfinishedPastTheCap models that: it only exits clean if it was drained to EOF.
+        final File baseDir = crashDir();
+        final File dropbox = dirWith(temp.getRoot(), "big-dropbox");
+        final File anr = dirWith(temp.getRoot(), "big-anr");
+        StringBuilder noise = new StringBuilder();
+        while (noise.length() <= CrashSources.MAX_OUTPUT_CHARS) {
+            noise.append("I/ISystemWriteService(  123): readSysfs could not contact remote\n");
+        }
+
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new FakeRunner(new ChildUnfinishedPastTheCap(noise.toString())), T0, dropbox, anr);
+
+        assertTrue("a big buffer is a source that worked: " + a.logcat,
+                CrashSources.EMPTY.equals(a.logcat) || CrashSources.COPIED.equals(a.logcat));
+        assertTrue("and the cap must be admitted, not silently applied: " + a.logcatReason,
+                a.logcatReason != null && a.logcatReason.contains("oldest"));
+    }
+
+    /**
+     * A child with more output than the retention cap that exits 143 if it was destroyed before it
+     * finished writing, and 0 if it was drained to EOF. That is what {@code logcat -d} does: it is
+     * killed by a reader that gave up mid-buffer, not by a failure of its own. Stopping the read at
+     * the cap therefore produced a non-zero status, which the source reported as {@code unavailable}
+     * and everything already filtered was thrown away.
+     */
+    private static final class ChildUnfinishedPastTheCap extends Process {
+        private final byte[] out;
+        private final java.io.ByteArrayInputStream in;
+        private volatile boolean destroyed;
+
+        ChildUnfinishedPastTheCap(String output) {
+            this.out = output.getBytes();
+            this.in = new java.io.ByteArrayInputStream(this.out);
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new java.io.ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            return destroyed && in.available() > 0 ? 143 : 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return waitFor();
+        }
+
+        @Override
+        public void destroy() {
+            destroyed = true;
+        }
+    }
+
+    @Test
+    public void aFailedSourceNamesItsReasonAndAGoodOneDoesNot() throws Exception {
+        File baseDir = crashDir();
+        File dropbox = dirWith(temp.getRoot(), "why-dropbox");
+        File anr = dirWith(temp.getRoot(), "why-anr");
+
+        CrashSources.Availability failed = CrashSources.scrape(baseDir, null,
+                new FakeRunner("Unable to open log device 'crash': Permission denied\n", 1), T0,
+                dropbox, anr);
+        assertEquals(CrashSources.UNAVAILABLE, failed.logcat);
+        assertTrue(failed.asMap().containsKey("Source-Logcat-Reason"));
+        assertTrue(failed.asMap().get("Source-Logcat-Reason").contains("exited 1"));
+
+        CrashSources.Availability worked = CrashSources.scrape(baseDir, null,
+                new FakeRunner(CRASH_LINE), T0 + 1000L, dropbox, anr);
+        assertEquals(CrashSources.COPIED, worked.logcat);
+        assertFalse("nothing failed, so nothing may claim to have",
+                worked.asMap().containsKey("Source-Logcat-Reason"));
     }
 
     private static String read(File f) throws IOException {

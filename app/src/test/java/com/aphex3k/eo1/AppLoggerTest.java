@@ -90,4 +90,36 @@ public class AppLoggerTest {
         assertTrue("expected rotated file to exist", rotated.exists());
         assertTrue("expected active log to exist after rotation", logFile.exists());
     }
+
+    @Test
+    public void aCauseChainIsWalkedAndStoppedAtItsLimit() {
+        // This is the render CrashReporter calls from inside the uncaught-exception handler, on the
+        // thread that is already dying. It must walk the chain without recursing once per cause, and
+        // it must stop at a stated limit rather than at whatever the stack allows.
+        Throwable three = new Throwable("root");
+        for (int i = 0; i < 3; i++) {
+            three = new Throwable("cause-" + i, three);
+        }
+        logger.error("EO1-crash", "shallow:", three);
+        String shallow = logger.tail(2);
+        assertTrue("the walk descends the chain: " + shallow,
+                shallow.contains("Caused by: java.lang.Throwable: cause-0")
+                        && shallow.contains("Caused by: java.lang.Throwable: root"));
+
+        // Now arbitrarily long, which is what a wrapping exception factory or a retry loop produces.
+        Throwable deep = new Throwable("root");
+        for (int i = 0; i < 5000; i++) {
+            deep = new Throwable("cause-" + i, deep);
+        }
+        logger.error("EO1-crash", "FATAL uncaught on eo1-crash-scrape:", deep);
+
+        String tail = logger.tail(3);
+        assertTrue("the outermost frames must survive: " + tail.length(),
+                tail.contains("FATAL uncaught on eo1-crash-scrape:")
+                        && tail.contains("at com.aphex3k.eo1.AppLoggerTest"));
+        assertTrue("and it must say which limit stopped it, not simply stop",
+                tail.contains("truncated at"));
+        assertTrue("bounded means bounded: " + tail.length(),
+                tail.length() < CrashStore.MAX_DUMP_BYTES + 64_000L);
+    }
 }

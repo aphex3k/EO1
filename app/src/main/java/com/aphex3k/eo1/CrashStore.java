@@ -302,6 +302,66 @@ public final class CrashStore {
     }
 
     /**
+     * The same cause-chain walk {@link #printTrace} performs, rendered into one String for callers with
+     * no {@code BudgetedWriter} to hand — {@link AppLogger} is the one that matters, because both the
+     * {@code /logs} ring and a report's lead-up section hold a trace as a single string.
+     *
+     * <p>Iterative for the same reason {@code printTrace} is: {@code Throwable.printStackTrace}
+     * recurses once per cause, and the caller that needs this is {@code CrashReporter.record()}, which
+     * runs on the thread that is already dying — the one place a lost dump is both likely and fatal.
+     *
+     * <p>Duplicated rather than shared because {@code printTrace} streams into a byte budget and can
+     * abandon the chain mid-walk, while this must return one bounded string. Both stop at the same two
+     * numbers, {@link #MAX_CAUSES} and {@link #MAX_DUMP_BYTES}, which is what keeps the two renderings
+     * from disagreeing about how much of a trace is worth keeping.
+     */
+    static String traceToString(Throwable error) {
+        StringBuilder sb = new StringBuilder();
+        Throwable cur = error;
+        int depth = 0;
+        while (cur != null) {
+            if (depth == MAX_CAUSES) {
+                sb.append("[cause chain truncated at ").append(MAX_CAUSES).append(" causes]\n");
+                return sb.toString();
+            }
+            if (depth > 0) {
+                sb.append("Caused by: ");
+            }
+            sb.append(cur.getClass().getName());
+            String msg = cur.getMessage();
+            if (msg != null) {
+                sb.append(": ").append(msg);
+            }
+            sb.append('\n');
+            StackTraceElement[] frames = cur.getStackTrace();
+            if (frames != null) {
+                for (StackTraceElement frame : frames) {
+                    sb.append("\tat ").append(String.valueOf(frame)).append('\n');
+                }
+            }
+            Throwable[] suppressed = cur.getSuppressed();
+            if (suppressed != null && suppressed.length > 0) {
+                sb.append("\t... ").append(suppressed.length).append(" suppressed: ");
+                for (int i = 0; i < suppressed.length; i++) {
+                    if (i > 0) {
+                        sb.append(", ");
+                    }
+                    sb.append(String.valueOf(suppressed[i].getClass().getName()));
+                }
+                sb.append('\n');
+            }
+            if (sb.length() >= MAX_DUMP_BYTES) {
+                sb.append("[stack trace truncated at ").append(MAX_DUMP_BYTES).append(" bytes]\n");
+                return sb.toString();
+            }
+            Throwable next = cur.getCause();
+            cur = next == cur ? null : next;
+            depth++;
+        }
+        return sb.toString();
+    }
+
+    /**
      * The caller's header plus the identity fields, which come from the record itself and never from
      * what a caller remembered to add: {@code Version-Code} is the only thing that picks the mapping
      * file able to retrace the trace below it, so a report missing one is a report that can never be
@@ -339,7 +399,8 @@ public final class CrashStore {
         return s.substring(0, MAX_HEADER_VALUE) + "...[" + s.length() + " chars]";
     }
 
-    private static String oneLine(String s) {
+    /** Package-private: {@link CrashSources} names a failure with it in a report header. */
+    static String oneLine(String s) {
         if (s == null) {
             return "";
         }
