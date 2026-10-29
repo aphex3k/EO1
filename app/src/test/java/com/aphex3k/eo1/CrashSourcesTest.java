@@ -768,6 +768,24 @@ public class CrashSourcesTest {
         assertEquals("both deaths belong in the archive", 2, CrashStore.list(baseDir).length);
     }
 
+    @Test
+    public void aSupersededVerdictSaysSoInItsLogLine() {
+        // Two `crash sources:` lines that disagree, with nothing marking which one /state is answering,
+        // is how a stale log line becomes a stale claim about the frame.
+        CrashSources.Availability a = new CrashSources.Availability();
+        a.logcat = CrashSources.COPIED;
+        a.dropbox = CrashSources.UNAVAILABLE;
+        a.anr = CrashSources.EMPTY;
+        a.copies = 1;
+
+        String plain = CrashSources.verdictLine(a, null);
+        String late = CrashSources.verdictLine(a, "late result, not the published verdict");
+
+        assertTrue(plain.startsWith("crash sources: logcat=copied"));
+        assertFalse("an accepted verdict must not carry a caveat", plain.contains("late result"));
+        assertTrue("a superseded one must", late.contains("(late result, not the published verdict)"));
+    }
+
     private static String read(File f) throws IOException {
         java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
         java.io.InputStream in = new java.io.FileInputStream(f);

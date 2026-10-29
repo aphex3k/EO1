@@ -223,9 +223,13 @@ public final class CrashSources {
                 }
                 // A real verdict is published by precedence, not by who arrived first: publishState
                 // refuses to let a timeout stub overwrite it, and refuses this thread's late result if a
-                // retry already answered.
-                publishState(a, attempt, true);
-                logVerdict(a, logger);
+                // retry already answered. When it does refuse, the log line says so — a superseded
+                // result written in the same voice as the published one reads as two verdicts.
+                if (publishState(a, attempt, true)) {
+                    logVerdict(a, logger, null);
+                } else {
+                    logVerdict(a, logger, "late result, not the published verdict");
+                }
             }
         }, "eo1-crash-scrape");
         t.setDaemon(true);
@@ -347,21 +351,34 @@ public final class CrashSources {
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
-                logVerdict(a, logger);
+                logVerdict(a, logger, null);
             }
         }, "eo1-crash-log");
         t.setDaemon(true);
         t.start();
     }
 
+    /**
+     * The durable log line for one verdict, and the only place its format is decided.
+     *
+     * <p>{@code note} exists because a scrape that arrived too late to be published still has something
+     * worth saying, and writing it as an ordinary {@code crash sources:} line leaves two lines in
+     * {@code files/eo1-app.log} that disagree about the outcome with nothing marking which one
+     * {@code /state} is answering. Say which it is and the stale line stops being a stale claim.
+     */
+    static String verdictLine(Availability a, String note) {
+        return "crash sources: logcat=" + a.logcat
+                + " dropbox=" + a.dropbox + " anr=" + a.anr
+                + " copies=" + a.copies
+                + (a.logcatReason == null ? "" : " reason=" + a.logcatReason)
+                + (note == null ? "" : " (" + note + ")");
+    }
+
     /** The durable log line for one verdict. Best-effort, and never on the recovery path. */
-    private static void logVerdict(Availability a, AppLogger logger) {
+    private static void logVerdict(Availability a, AppLogger logger, String note) {
         try {
             if (logger != null) {
-                logger.info(TAG, "crash sources: logcat=" + a.logcat
-                        + " dropbox=" + a.dropbox + " anr=" + a.anr
-                        + " copies=" + a.copies
-                        + (a.logcatReason == null ? "" : " reason=" + a.logcatReason));
+                logger.info(TAG, verdictLine(a, note));
             }
         } catch (Throwable ignored) {
             // best effort
