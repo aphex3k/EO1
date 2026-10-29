@@ -677,6 +677,35 @@ public class CrashSourcesTest {
         assertTrue("the verdict never reached the durable log", tail.contains("crash sources"));
     }
 
+    @Test
+    public void aBackwardClockStepCannotExtendABound() {
+        // Every wait in the drain is `remainingMs(...) > 0`, so the whole bounding scheme rests on one
+        // property of one function: a bound may shrink, and it may go negative, but it may never exceed
+        // the budget it came from. These frames boot with no time at all and the first NTP correction
+        // moves the clock by hours either way, so the reading that gets subtracted really can step
+        // backwards underneath a running deadline.
+        final long beganAt = 1_000_000L;
+        final long budget = 3_000L;
+
+        assertEquals("a fresh bound is the budget", budget,
+                CrashSources.remainingMs(beganAt, budget, beganAt));
+        assertEquals("and it shrinks as time passes", 1_000L,
+                CrashSources.remainingMs(beganAt, budget, beganAt + 2_000L));
+        assertEquals("a clock that stepped back 5s must not hand back 8s",
+                budget, CrashSources.remainingMs(beganAt, budget, beganAt - 5_000L));
+        assertTrue("an expired bound stays expired, not negative-and-huge",
+                CrashSources.remainingMs(beganAt, budget, beganAt + 60_000L) <= 0L);
+
+        // The same through the real clock: whatever it reads, the answer is never more than the budget.
+        assertTrue(CrashSources.remainingMs(CrashSources.monoNow(), budget) <= budget);
+
+        // And the clock must actually be a since-boot counter, not epoch time wearing the name. The
+        // clamp above bounds the damage from a wrong choice; this catches the choice itself. Margin:
+        // an elapsedRealtime this large would mean the frame had been up for about five years.
+        assertTrue("the bound clock is measuring epoch, not boot",
+                CrashSources.monoNow() < System.currentTimeMillis() / 10L);
+    }
+
     private static String read(File f) throws IOException {
         java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
         java.io.InputStream in = new java.io.FileInputStream(f);

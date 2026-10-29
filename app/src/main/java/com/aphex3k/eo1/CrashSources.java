@@ -81,6 +81,11 @@ public final class CrashSources {
      * On top of the two bounds above: when the watchdog gives up on a scrape thread that never
      * published and says so. Slack, not a fifth timeout — a scrape that crosses it is wedged in
      * something this class cannot bound, and that is a reportable fact rather than a silence.
+     *
+     * <p>Residual limitation worth naming: {@link java.util.Timer} schedules against wall time, so a
+     * backward correction can fire this task late. It is a backstop only — the scrape's own bounds are
+     * monotonic (see {@link #monoNow}), so a healthy read still returns on time and publishes whether
+     * or not the watchdog ever arrives.
      */
     static final long SCRAPE_BUDGET_MS = TIMEOUT_MS + REAP_GRACE_MS + 3000L;
 
@@ -677,6 +682,34 @@ public final class CrashSources {
         return d.text;
     }
 
+    /** The clock every deadline in this class is measured against. See {@link #remainingMs}. */
+    static long monoNow() {
+        return android.os.SystemClock.elapsedRealtime();
+    }
+
+    /** How much of a deadline is left, measured only against {@link #monoNow}. */
+    static long remainingMs(long beganAt, long budgetMs) {
+        return remainingMs(beganAt, budgetMs, monoNow());
+    }
+
+    /**
+     * The same bound against a supplied reading of the clock, so the property can be asserted for a
+     * clock that moved rather than only for one that behaved.
+     *
+     * <p>Never measure a bound against {@link System#currentTimeMillis()}. These frames boot with no time
+     * at all — one of this app's own logs carries entries stamped {@code 1970-01-01} followed by ones
+     * stamped weeks later — and the first NTP correction can move wall time by hours in either
+     * direction. Subtracting a reading that stepped backwards yields MORE time left than the budget ever
+     * was: a three-second read timeout becomes an open-ended wait, which is precisely the failure these
+     * bounds exist to prevent. {@link #monoNow} avoids that by choosing a since-boot counter; the clamp
+     * below makes it impossible regardless of what any future edit feeds in. A bound may shrink, and it
+     * may go negative. It may never grow.
+     */
+    static long remainingMs(long beganAt, long budgetMs, long nowMs) {
+        long left = beganAt + budgetMs - nowMs;
+        return left > budgetMs ? budgetMs : left;
+    }
+
     /**
      * Reads {@code process} to end of output or to the deadline, whichever comes first, and always
      * leaves it reaped.
@@ -698,15 +731,14 @@ public final class CrashSources {
     static Drain drain(final Process process) {
         final Drain d = new Drain();
         final Object lock = new Object();
-        final long beganAt = System.currentTimeMillis();
+        final long beganAt = monoNow();
         Thread reaper = new Thread(new Runnable() {
             @Override
             public void run() {
                 boolean abandoned;
                 synchronized (lock) {
                     long left;
-                    while (!d.readDone
-                            && (left = beganAt + TIMEOUT_MS - System.currentTimeMillis()) > 0) {
+                    while (!d.readDone && (left = remainingMs(beganAt, TIMEOUT_MS)) > 0) {
                         try {
                             lock.wait(left);
                         } catch (InterruptedException e) {
@@ -760,9 +792,8 @@ public final class CrashSources {
 
         synchronized (lock) {
             long left;
-            while (!d.exitKnown
-                    && (left = beganAt + TIMEOUT_MS + REAP_GRACE_MS
-                            - System.currentTimeMillis()) > 0) {
+            while (!d.exitKnown && (left = remainingMs(beganAt,
+                    TIMEOUT_MS + REAP_GRACE_MS)) > 0) {
                 try {
                     lock.wait(left);
                 } catch (InterruptedException e) {
@@ -809,7 +840,7 @@ public final class CrashSources {
             int n;
             // The child dies at the deadline whether or not this loop notices, so the clock test here
             // is only against a child that produces output forever and survives destroy().
-            while (System.currentTimeMillis() - beganAt <= TIMEOUT_MS) {
+            while (remainingMs(beganAt, TIMEOUT_MS) > 0) {
                 n = r.read(buf);
                 if (n < 0) {
                     eof = true;
