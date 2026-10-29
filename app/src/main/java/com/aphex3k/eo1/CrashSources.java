@@ -756,6 +756,12 @@ public final class CrashSources {
         boolean terminated;
         /** True when there was more output than the retention cap could hold. */
         boolean truncated;
+        /**
+         * True from the moment the reaper decides to close the pipe out from under the reader. Read by
+         * the reader when it catches an exception, to tell "the source broke" apart from "we just shot
+         * the pipe they were reading" — the exceptions look identical and only the ordering differs.
+         */
+        boolean closedByUs;
         int exit;
         boolean exitKnown;
         /** Why the read itself failed, if it did. */
@@ -878,6 +884,10 @@ public final class CrashSources {
                     abandoned = !d.readDone;
                     if (abandoned) {
                         d.terminated = true;
+                        // Said here, before the close below, so a reader that fails later can tell
+                        // whether its exception is the sound of our pipe closing or of the source being
+                        // broken. Timing is the only thing that distinguishes them.
+                        d.closedByUs = true;
                     }
                 }
                 if (abandoned) {
@@ -1046,6 +1056,7 @@ public final class CrashSources {
         InputStream is = null;
         Reader r = null;
         boolean eof = false;
+        boolean failedWhileClosing = false;
         Throwable error = null;
         try {
             is = process.getInputStream();
@@ -1074,6 +1085,12 @@ public final class CrashSources {
             }
         } catch (Throwable t) {
             error = t;
+            // Captured at the instant of failure, not in the finally: the reaper can start closing the
+            // pipe while this thread is blocked in its own close(), and by then the answer would be true
+            // for the wrong reason.
+            synchronized (lock) {
+                failedWhileClosing = d.closedByUs;
+            }
         } finally {
             if (r != null) {
                 try {
@@ -1101,6 +1118,13 @@ public final class CrashSources {
                 // same lock before it closes the pipe.
                 if (error == null && !eof) {
                     d.terminated = true;
+                } else if (error != null && !failedWhileClosing) {
+                    // Undo a stamp made while this thread was still in flight. The reaper gives up on a
+                    // read it cannot see the end of, and if this reader then reports a failure of its own
+                    // it knew something the stamp did not: the source broke, it was not merely slow.
+                    // Leaving the stamp in place routes harvestLogcat past its read-error check and files
+                    // crash text from a broken source as if it had been read cleanly.
+                    d.terminated = false;
                 }
                 lock.notifyAll();
             }

@@ -695,6 +695,106 @@ public class CrashScrapeBoundsTest {
         }
     }
 
+    /**
+     * A source that hands over crash text, breaks on its own, and then has a closure that blocks long
+     * enough for the reaper's deadline to pass while the reader is still inside its {@code finally}. This
+     * is the ordering in which the reaper stamps the run terminated without knowing the read failed — and
+     * because the stamp is only ever set, never cleared, that knowledge never arrived.
+     */
+    private static final class BrokenThenBlockedCloseChild extends Process {
+        private final byte[] head =
+                ("F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x0 (code=1)\n").getBytes();
+        private int pos;
+        private int closeCalls;
+        private final java.util.concurrent.CountDownLatch letCloseFinish =
+                new java.util.concurrent.CountDownLatch(1);
+
+        @Override
+        public InputStream getInputStream() {
+            return new InputStream() {
+                @Override
+                public int read() throws IOException {
+                    return read(new byte[1], 0, 1);
+                }
+
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    if (pos < head.length) {
+                        b[off] = head[pos++];
+                        return 1;
+                    }
+                    throw new IOException("source broke on its own");
+                }
+
+                @Override
+                public void close() throws IOException {
+                    // The reader gets here first and stays; whoever comes after lets it go. A pipe close
+                    // that blocks past the deadline is the whole point of the scenario.
+                    if (++closeCalls == 1) {
+                        try {
+                            letCloseFinish.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    } else {
+                        letCloseFinish.countDown();
+                    }
+                }
+            };
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return 0;
+        }
+
+        @Override
+        public void destroy() {
+            letCloseFinish.countDown();
+        }
+    }
+
+    @Test
+    public void aStampMadeWhileTheReaderWasStillInFlightDoesNotSurviveItsFailure() throws Exception {
+        final File baseDir = temp.newFolder("crashes14");
+        final File dropbox = emptyDir("dropbox14");
+        final File anr = emptyDir("anr14");
+        final CrashSources.Availability[] box = new CrashSources.Availability[1];
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                box[0] = CrashSources.scrape(baseDir, null,
+                        new Runner(new BrokenThenBlockedCloseChild()), T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        worker.join(CrashSources.TIMEOUT_MS + CrashSources.REAP_GRACE_MS + 10_000L);
+        assertFalse(worker.isAlive());
+
+        assertEquals("crash text from a broken source must not be filed: " + box[0].logcat,
+                CrashSources.UNAVAILABLE, box[0].logcat);
+        assertTrue("the read failure has to be what is reported: " + box[0].logcatReason,
+                box[0].logcatReason != null && box[0].logcatReason.startsWith("read:"));
+        assertEquals(0, CrashStore.list(baseDir).length);
+    }
+
     @Test
     public void aReadThatBrokeAfterSomeOutputIsAFailureNotAPartialCapture() throws Exception {
         // Bytes arrived and then the stream failed on its own. That is a broken source, not a truncated
