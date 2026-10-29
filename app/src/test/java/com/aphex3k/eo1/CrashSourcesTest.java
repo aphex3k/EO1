@@ -710,6 +710,22 @@ public class CrashSourcesTest {
     }
 
     @Test
+    public void aSilentLogcatSaysItWasSilentRatherThanClean() throws Exception {
+        // A sideload without READ_LOGS often gets an immediate EOF and exit 0 out of logcat, which is
+        // indistinguishable from a genuinely empty buffer by status alone. `empty` beside
+        // `readLogs: denied` still tells an operator the buffer was checked and held nothing; the reason
+        // is what separates "nothing to report" from "nothing was handed over".
+        File baseDir = crashDir();
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new FakeRunner(""), T0);
+
+        assertEquals(CrashSources.EMPTY, a.logcat);
+        assertTrue("a zero-byte answer must be admitted: " + a.logcatReason,
+                a.logcatReason != null && a.logcatReason.contains("no output at all"));
+        assertEquals(0, CrashStore.list(baseDir).length);
+    }
+
+    @Test
     public void aCrashAfterTwentyThousandLinesIsStillFound() throws Exception {
         // The line bound used to stop the scan, and a log dump puts the newest lines last, so a busy
         // frame's native death sat exactly where the scan gave up. The bound is on retention now.

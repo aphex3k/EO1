@@ -591,7 +591,11 @@ follow_logcat() {
   # frames of a trace whose exception the source provably cannot throw. That cost the whole of one
   # investigation into CrashSources. So the anchored trace shapes are part of the filter now, not an
   # afterthought: they keep a dump whole while leaving unrelated vendor chatter out.
-  local trace_shapes='Exception in thread |Caused by: |[[:space:]]at [[:alnum:]_$.]+\(|prio=[0-9]+ tid=[0-9]+|\.[A-Za-z_$][A-Za-z_$0-9.]*(Exception|Error|Throwable)(:|$)'
+  # Two shapes the first widening missed, both verified by running a real trace through the filter:
+  # Dalvik's "thread exiting with uncaught exception" is the line that says a thread died at all — losing
+  # it leaves frames with no event, exactly the confusion the whitelist caused before — and "... N more"
+  # is what says frames were elided, so a trace that was cut short reads as one that ended naturally.
+  local trace_shapes='Exception in thread |Caused by: |[[:space:]]at [[:alnum:]_$.]+\(|prio=[0-9]+ tid=[0-9]+|\.[A-Za-z_$][A-Za-z_$0-9.]*(Exception|Error|Throwable)(:|$)|thread exiting with uncaught exception|[.][.][.] [0-9]+ more'
   local logcat_grep="${PACKAGE_ID}|EO1|Immich|MainActivity|AndroidRuntime|System.err|displayVideo|displayPictures|TextureVideo|TsVideoView|TsPlayer|MediaPlayer|Glide|OkHttp|Retrofit|download| D video:|${trace_shapes}"
 
   # Host adb advertises --pid even when the API 19 device cannot filter by it.

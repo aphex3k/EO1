@@ -482,8 +482,17 @@ public final class CrashSources {
                     + "more than " + MAX_OUTPUT_LINES + " crash-marked lines; kept the oldest";
         }
         if (crash.isEmpty()) {
-            // The scrape worked and found nothing native. Distinct from UNAVAILABLE above.
+            // The scrape worked and found nothing native. Distinct from UNAVAILABLE above — but a child
+            // that handed over not one byte did not "find nothing native", it said nothing at all, which
+            // on a sideload is what a denied READ_LOGS looks like when the ROM's logcat exits clean.
+            // `empty` next to `readLogs: denied` in /state reads as a buffer with no crash in it, and an
+            // operator stops looking; the word has to carry that it was an empty answer, not an empty
+            // buffer.
             out.logcat = EMPTY;
+            if (d.text.isEmpty()) {
+                out.logcatReason = (out.logcatReason == null ? "" : out.logcatReason + "; ")
+                        + "logcat returned no output at all";
+            }
             return;
         }
         // Length plus content, not length alone. debuggerd's output is a fixed-width template, so two
