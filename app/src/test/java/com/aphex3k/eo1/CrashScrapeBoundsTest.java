@@ -633,6 +633,97 @@ public class CrashScrapeBoundsTest {
         }
     }
 
+    /**
+     * A child that hands over real output and <i>then</i> fails in the stream, while the process stays
+     * alive — the middle case between "clean read, lingering child" and "reader failed before anything
+     * arrived". Whether the retained bytes survive is a deliberate choice, so it is pinned here rather
+     * than left to whichever branch happens to win.
+     */
+    private static final class PartialThenFailingChild extends Process {
+        private final InputStream in = new InputStream() {
+            private final byte[] head =
+                    ("F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x0 (code=1)\n").getBytes();
+            private int pos;
+
+            @Override
+            public int read() throws IOException {
+                return read(new byte[1], 0, 1);
+            }
+
+            @Override
+            public int read(byte[] b, int off, int len) throws IOException {
+                if (pos < head.length) {
+                    b[off] = head[pos++];
+                    return 1;
+                }
+                throw new IOException("pipe broke mid-dump");
+            }
+        };
+        private volatile boolean destroyed;
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            if (!destroyed) {
+                throw new IllegalThreadStateException();
+            }
+            return 143;
+        }
+
+        @Override
+        public void destroy() {
+            destroyed = true;
+        }
+    }
+
+    @Test
+    public void aReadThatBrokeAfterSomeOutputIsAFailureNotAPartialCapture() throws Exception {
+        // Bytes arrived and then the stream failed on its own. That is a broken source, not a truncated
+        // look at a healthy one, so it is reported unavailable and nothing is filed as a finding — the
+        // alternative would let a half-read buffer claim there was no more crash in it.
+        final File baseDir = temp.newFolder("crashes13");
+        final File dropbox = emptyDir("dropbox13");
+        final File anr = emptyDir("anr13");
+        final CrashSources.Availability[] box = new CrashSources.Availability[1];
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                box[0] = CrashSources.scrape(baseDir, null, new Runner(new PartialThenFailingChild()),
+                        T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        worker.join(CrashSources.TIMEOUT_MS + CrashSources.REAP_GRACE_MS + 8_000L);
+        assertFalse(worker.isAlive());
+
+        assertEquals(CrashSources.UNAVAILABLE, box[0].logcat);
+        assertTrue("the failure must be the stated cause: " + box[0].logcatReason,
+                box[0].logcatReason != null && box[0].logcatReason.startsWith("read:"));
+        assertEquals("a half-read buffer must not be filed as a finding", 0,
+                CrashStore.list(baseDir).length);
+    }
+
     @Test
     public void aCleanupKillDoesNotMaskAnIndependentReadFailure() throws Exception {
         // The reader's failure is the finding here. Letting our own cleanup termination overwrite it
