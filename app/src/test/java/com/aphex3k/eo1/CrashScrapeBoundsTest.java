@@ -490,6 +490,39 @@ public class CrashScrapeBoundsTest {
     }
 
     @Test
+    public void aTimeoutThatReadNothingIsNotReportedAsNothingCrashed() throws Exception {
+        // `empty` means the scrape worked and found nothing native. A read that timed out without ever
+        // returning a byte did not work, and calling it `empty` would tell an operator the buffer held
+        // no crash on a frame where the source was never read at all.
+        final File baseDir = temp.newFolder("crashes9");
+        final File dropbox = emptyDir("dropbox9");
+        final File anr = emptyDir("anr9");
+        final UnreleasableReadChild child = new UnreleasableReadChild(new byte[0]);
+        final CrashSources.Availability[] box = new CrashSources.Availability[1];
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                box[0] = CrashSources.scrape(baseDir, null, new Runner(child), T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            worker.join(CrashSources.TIMEOUT_MS + CrashSources.REAP_GRACE_MS + 5_000L);
+            assertFalse(worker.isAlive());
+        } finally {
+            child.release();
+        }
+
+        org.junit.Assert.assertEquals(CrashSources.UNAVAILABLE, box[0].logcat);
+        assertTrue("and it must say the read timed out: " + box[0].logcatReason,
+                box[0].logcatReason != null && box[0].logcatReason.contains("deadline"));
+        assertEquals("nothing was read, so nothing may be stored as a finding", 0,
+                CrashStore.list(baseDir).length);
+    }
+
+    @Test
     public void aCaptureExactlyAtTheCapIsNotCalledPartial() throws Exception {
         // Nothing was discarded when the buffer is exactly full at EOF, and claiming otherwise puts a
         // "scanned the oldest part only" warning in /state and in the report header for a capture that
@@ -556,13 +589,23 @@ public class CrashScrapeBoundsTest {
      * the read — the assumption a JVM fake cannot exercise and no hardware here has confirmed.
      */
     private static final class UnreleasableReadChild extends Process {
-        /** Written before the read wedges, so there is something that must survive. */
-        private final byte[] head =
+        /** Written before the read wedges; empty means the read timed out having seen nothing. */
+        private static final byte[] CRASH_HEAD =
                 ("I/debuggerd( 1234): *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***\n"
                         + "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x0 (code=1), thread 12\n")
                         .getBytes();
+
+        private final byte[] head;
         private int pos;
         private final CountDownLatch gate = new CountDownLatch(1);
+
+        UnreleasableReadChild() {
+            this(CRASH_HEAD);
+        }
+
+        UnreleasableReadChild(byte[] head) {
+            this.head = head;
+        }
 
         @Override
         public InputStream getInputStream() {

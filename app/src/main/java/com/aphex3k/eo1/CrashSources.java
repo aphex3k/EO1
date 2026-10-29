@@ -434,6 +434,15 @@ public final class CrashSources {
                     + d.text.length() + " chars retained"
                     + (d.exitKnown && d.exit != 0 ? ", exited " + d.exit : "")
                     + (d.error != null ? ", read: " + oneLine(d.error) : "");
+            if (d.text.isEmpty()) {
+                // …but there is nothing to keep, and then this is not a partial look, it is no look.
+                // `empty` means "the scrape worked and found nothing native"; applying it to a read
+                // that never returned a byte would tell an operator the buffer held no crash when the
+                // source was never successfully read at all — the exact confusion the reason field and
+                // this word were introduced to keep apart.
+                out.logcat = UNAVAILABLE;
+                return;
+            }
         } else {
             if (d.error != null) {
                 out.logcat = UNAVAILABLE;
