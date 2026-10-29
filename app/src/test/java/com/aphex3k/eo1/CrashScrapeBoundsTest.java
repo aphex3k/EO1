@@ -241,4 +241,155 @@ public class CrashScrapeBoundsTest {
         public void destroy() {
         }
     }
+
+    /**
+     * A child that writes a native crash and then blocks without reaching EOF, whose {@code destroy()}
+     * blocks as well — the combination a wedged {@code logcat} presents. Closing the pipe is the only
+     * thing that ends the read, so the reaper must close <i>before</i> it destroys: in the other order
+     * the reader never wakes, {@code readChild} never returns, and {@code drain()} never reaches the
+     * bounded wait that is supposed to be its guarantee.
+     */
+    private static final class StallingChild extends Process {
+        private final byte[] bytes =
+                ("I/debuggerd( 1234): *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***\n"
+                        + "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x0 (code=1), thread 12\n")
+                        .getBytes();
+        private final Object pump = new Object();
+        private volatile boolean released;
+        private volatile boolean closed;
+        private int pos;
+
+        @Override
+        public InputStream getInputStream() {
+            return new InputStream() {
+                @Override
+                public int read() throws IOException {
+                    byte[] one = new byte[1];
+                    return read(one, 0, 1) < 0 ? -1 : (one[0] & 0xFF);
+                }
+
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    synchronized (pump) {
+                        // A pipe hands over what it already has before it ever blocks.
+                        if (pos < bytes.length) {
+                            int n = Math.min(len, bytes.length - pos);
+                            System.arraycopy(bytes, pos, b, off, n);
+                            pos += n;
+                            return n;
+                        }
+                        long until = System.currentTimeMillis() + 60_000L;
+                        try {
+                            while (!closed && !released && System.currentTimeMillis() < until) {
+                                pump.wait(20L);
+                            }
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return -1;
+                        }
+                        if (closed) {
+                            // What a pipe hands to a reader when another thread closes its fd.
+                            throw new IOException("Stream Closed");
+                        }
+                        return -1;
+                    }
+                }
+
+                @Override
+                public void close() throws IOException {
+                    closed = true;
+                    synchronized (pump) {
+                        pump.notifyAll();
+                    }
+                }
+            };
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() throws InterruptedException {
+            blockUntilReleased();
+            return 143;
+        }
+
+        @Override
+        public int exitValue() {
+            return 143;
+        }
+
+        @Override
+        public void destroy() {
+            try {
+                blockUntilReleased();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        }
+
+        private void blockUntilReleased() throws InterruptedException {
+            synchronized (pump) {
+                while (!released) {
+                    pump.wait(50L);
+                }
+            }
+        }
+
+        void release() {
+            released = true;
+            synchronized (pump) {
+                pump.notifyAll();
+            }
+        }
+    }
+
+    @Test
+    public void aStallingChildStillKeepsWhatItAlreadyWrote() throws Exception {
+        final File baseDir = temp.newFolder("crashes4");
+        final File dropbox = emptyDir("dropbox4");
+        final File anr = emptyDir("anr4");
+        final StallingChild child = new StallingChild();
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                CrashSources.scrape(baseDir, null, new Runner(child), T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            worker.join(20_000L);
+            assertFalse("the scrape parked: destroy() blocked before anything closed the pipe",
+                    worker.isAlive());
+        } finally {
+            child.release();
+        }
+
+        CrashStore.Info[] infos = CrashStore.list(baseDir);
+        org.junit.Assert.assertEquals(
+                "crash lines already read must survive our own deadline", 1, infos.length);
+        org.junit.Assert.assertEquals(CrashStore.KIND_LOGCAT, infos[0].kind);
+    }
+
+    @Test
+    public void oneOversizedThrowableIsStillBounded() {
+        // The budget has to cut inside a single throwable, not only between them: AppLogger holds and
+        // writes whatever this returns, on the thread that is already dying.
+        StringBuilder big = new StringBuilder();
+        for (int i = 0; i < 40_000; i++) {
+            big.append("0123456789");
+        }
+        String rendered = CrashStore.traceToString(new Throwable(big.toString()));
+        assertTrue("one throwable came back at " + rendered.length() + " chars",
+                rendered.length() <= CrashStore.MAX_DUMP_BYTES + 1024L);
+    }
 }

@@ -336,38 +336,42 @@ public final class CrashSources {
             out.logcatReason = "exec: " + oneLine(t);
             return;
         }
-        if (d.error != null) {
-            out.logcat = UNAVAILABLE;
-            out.logcatReason = "read: " + oneLine(d.error);
-            return;
-        }
-        if (!d.complete) {
-            // We gave up on the child; it did not fail on its own. Worth saying differently.
-            out.logcat = UNAVAILABLE;
-            out.logcatReason = "logcat did not reach end of output within "
-                    + (TIMEOUT_MS + REAP_GRACE_MS) + "ms";
-            return;
-        }
-        if (!d.exitKnown) {
-            out.logcat = UNAVAILABLE;
-            out.logcatReason = "no exit status within " + REAP_GRACE_MS
-                    + "ms of the last byte";
-            return;
-        }
-        // Must be read, not ignored: the drain merges stderr, so a rejected logcat — an unknown buffer
-        // name, or READ_LOGS denied on a sideload — yields a non-empty string of error text that would
-        // otherwise be stored as if it were the crash it never read.
-        if (d.exit != 0) {
-            out.logcat = UNAVAILABLE;
-            out.logcatReason = "logcat exited " + d.exit;
-            return;
+        if (d.terminated) {
+            // We ended this child, so its non-zero exit (or the read error our own close provoked) is
+            // our doing and not evidence that the buffer was unreadable. What it wrote before that
+            // point is real output, and the whole reason the drain reads to end of output is to keep
+            // it: discarding a partial capture is how a slow-but-working logcat lost its crash lines.
+            out.logcatReason = "ended by us at the read deadline ("
+                    + (TIMEOUT_MS + REAP_GRACE_MS) + "ms); partial capture of "
+                    + d.text.length() + " chars retained"
+                    + (d.exitKnown && d.exit != 0 ? ", exited " + d.exit : "")
+                    + (d.error != null ? ", read: " + oneLine(d.error) : "");
+        } else {
+            if (d.error != null) {
+                out.logcat = UNAVAILABLE;
+                out.logcatReason = "read: " + oneLine(d.error);
+                return;
+            }
+            if (!d.exitKnown) {
+                out.logcat = UNAVAILABLE;
+                out.logcatReason = "no exit status within " + REAP_GRACE_MS
+                        + "ms of the last byte";
+                return;
+            }
+            // Must be read, not ignored: the drain merges stderr, so a rejected logcat — an unknown
+            // buffer name, or READ_LOGS denied on a sideload — yields a non-empty string of error text
+            // that would otherwise be stored as if it were the crash it never read.
+            if (d.exit != 0) {
+                out.logcat = UNAVAILABLE;
+                out.logcatReason = "logcat exited " + d.exit;
+                return;
+            }
         }
         if (d.truncated) {
-            // Set before the verdict, because it colours every outcome below: a buffer bigger than
-            // the cap is a source that worked and was only partly read, not a dead one, and an
-            // operator comparing two frames must be able to tell those apart.
-            out.logcatReason = "buffer exceeded " + MAX_OUTPUT_CHARS
-                    + " chars; scanned the oldest part only";
+            // Appended, not assigned: a read can be both past the retention cap and ended by our
+            // deadline, and dropping either fact would misreport what was actually looked at.
+            out.logcatReason = (out.logcatReason == null ? "" : out.logcatReason + "; ")
+                    + "buffer exceeded " + MAX_OUTPUT_CHARS + " chars; scanned the oldest part only";
         }
         String crash = filterNativeCrashLines(d.text);
         if (crash.isEmpty()) {
@@ -553,6 +557,12 @@ public final class CrashSources {
         boolean readDone;
         /** True when the child reached end of output, as opposed to us giving up on it. */
         boolean complete;
+        /**
+         * True when we ended the child — at the deadline, or because the read stopped without EOF. Its
+         * exit status is then <i>our</i> kill rather than its own failure, which is the difference
+         * between discarding a working capture and keeping a refused one.
+         */
+        boolean terminated;
         /** True when there was more output than the retention cap could hold. */
         boolean truncated;
         int exit;
@@ -601,6 +611,7 @@ public final class CrashSources {
         Thread reaper = new Thread(new Runnable() {
             @Override
             public void run() {
+                boolean abandoned;
                 synchronized (lock) {
                     long left;
                     while (!d.readDone
@@ -612,6 +623,22 @@ public final class CrashSources {
                             break;
                         }
                     }
+                    abandoned = !d.readDone;
+                    if (abandoned) {
+                        d.terminated = true;
+                    }
+                }
+                if (abandoned) {
+                    // BEFORE destroy(), not after it. destroy() can itself block — that is the failure
+                    // mode this class exists to survive — and readChild runs on the calling thread, so
+                    // a blocked destroy() would keep drain() from ever reaching the bounded wait below.
+                    // Closing the pipe is what releases a reader parked inside read(); abandoning the
+                    // read beats parking the scrape.
+                    try {
+                        process.getInputStream().close();
+                    } catch (Throwable ignored) {
+                        // best effort
+                    }
                 }
                 // Always: destroying a child that already exited is a no-op, and leaving one running
                 // because the read went cleanly is the leak this thread exists to prevent.
@@ -619,15 +646,6 @@ public final class CrashSources {
                     process.destroy();
                 } catch (Throwable ignored) {
                     // best effort
-                }
-                if (!d.readDone) {
-                    // destroy() did not end it. Closing the pipe is the only thing that releases a
-                    // reader parked inside read(), and abandoning the read beats parking the scrape.
-                    try {
-                        process.getInputStream().close();
-                    } catch (Throwable ignored) {
-                        // best effort
-                    }
                 }
                 int code = 0;
                 boolean known = false;
@@ -718,6 +736,11 @@ public final class CrashSources {
             d.complete = eof;
             d.error = error;
             synchronized (lock) {
+                // Not reaching EOF means the deadline ended this read, whatever the child's own status
+                // then says — so mark it here as well as in the reaper, whose view can be earlier.
+                if (!eof) {
+                    d.terminated = true;
+                }
                 d.readDone = true;
                 lock.notifyAll();
             }

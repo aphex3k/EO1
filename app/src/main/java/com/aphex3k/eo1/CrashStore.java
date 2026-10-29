@@ -310,55 +310,25 @@ public final class CrashStore {
      * recurses once per cause, and the caller that needs this is {@code CrashReporter.record()}, which
      * runs on the thread that is already dying — the one place a lost dump is both likely and fatal.
      *
-     * <p>Duplicated rather than shared because {@code printTrace} streams into a byte budget and can
-     * abandon the chain mid-walk, while this must return one bounded string. Both stop at the same two
-     * numbers, {@link #MAX_CAUSES} and {@link #MAX_DUMP_BYTES}, which is what keeps the two renderings
-     * from disagreeing about how much of a trace is worth keeping.
+     * <p>It is {@code printTrace} itself over a {@link BudgetedWriter} that drains into a string, not a
+     * second walk: a bound that is checked between throwables would let one throwable with a long
+     * message or a deep stack come back oversized, and {@link AppLogger} would then hold and write all
+     * of it on the crash-handling thread.
      */
     static String traceToString(Throwable error) {
-        StringBuilder sb = new StringBuilder();
-        Throwable cur = error;
-        int depth = 0;
-        while (cur != null) {
-            if (depth == MAX_CAUSES) {
-                sb.append("[cause chain truncated at ").append(MAX_CAUSES).append(" causes]\n");
-                return sb.toString();
-            }
-            if (depth > 0) {
-                sb.append("Caused by: ");
-            }
-            sb.append(cur.getClass().getName());
-            String msg = cur.getMessage();
-            if (msg != null) {
-                sb.append(": ").append(msg);
-            }
-            sb.append('\n');
-            StackTraceElement[] frames = cur.getStackTrace();
-            if (frames != null) {
-                for (StackTraceElement frame : frames) {
-                    sb.append("\tat ").append(String.valueOf(frame)).append('\n');
-                }
-            }
-            Throwable[] suppressed = cur.getSuppressed();
-            if (suppressed != null && suppressed.length > 0) {
-                sb.append("\t... ").append(suppressed.length).append(" suppressed: ");
-                for (int i = 0; i < suppressed.length; i++) {
-                    if (i > 0) {
-                        sb.append(", ");
-                    }
-                    sb.append(String.valueOf(suppressed[i].getClass().getName()));
-                }
-                sb.append('\n');
-            }
-            if (sb.length() >= MAX_DUMP_BYTES) {
-                sb.append("[stack trace truncated at ").append(MAX_DUMP_BYTES).append(" bytes]\n");
-                return sb.toString();
-            }
-            Throwable next = cur.getCause();
-            cur = next == cur ? null : next;
-            depth++;
+        java.io.StringWriter sw = new java.io.StringWriter();
+        BudgetedWriter w = new BudgetedWriter(sw);
+        try {
+            printTrace(w, error);
+            w.flush();
+        } catch (IOException ignored) {
+            // A StringWriter cannot fail; the only bound is the one BudgetedWriter applies.
         }
-        return sb.toString();
+        if (w.truncated()) {
+            // Same wording the report body uses, so the two renderings of one trace cannot diverge.
+            sw.write("[stack trace truncated at " + MAX_DUMP_BYTES + " bytes]\n");
+        }
+        return sw.toString();
     }
 
     /**
