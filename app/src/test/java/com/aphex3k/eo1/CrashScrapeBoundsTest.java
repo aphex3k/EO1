@@ -462,6 +462,66 @@ public class CrashScrapeBoundsTest {
         return sb.toString();
     }
 
+    @Test
+    public void aCaptureExactlyAtTheCapIsNotCalledPartial() throws Exception {
+        // Nothing was discarded when the buffer is exactly full at EOF, and claiming otherwise puts a
+        // "scanned the oldest part only" warning in /state and in the report header for a capture that
+        // was complete. The cap is an exact multiple of the read buffer, so this is a shape a real
+        // drained logcat reaches often.
+        File baseDir = temp.newFolder("crashes8");
+        File dropbox = emptyDir("dropbox8");
+        File anr = emptyDir("anr8");
+        byte[] exact = new byte[CrashSources.MAX_OUTPUT_CHARS];
+        for (int i = 0; i < exact.length; i++) {
+            exact[i] = (byte) ('a' + (i % 26));
+        }
+
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new Runner(new FlatChild(exact)), T0, dropbox, anr);
+
+        assertEquals(CrashSources.EMPTY, a.logcat);
+        assertTrue("a complete capture must not carry a truncation warning: " + a.logcatReason,
+                a.logcatReason == null);
+    }
+
+    /** A child that writes exactly what it is given and exits clean; nothing about it is wedged. */
+    private static final class FlatChild extends Process {
+        private final InputStream in;
+
+        FlatChild(byte[] output) {
+            this.in = new ByteArrayInputStream(output);
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return 0;
+        }
+
+        @Override
+        public void destroy() {
+        }
+    }
+
     /**
      * The worst case the platform could hand us: a pipe read that another thread's {@code close()} does
      * not release. Nothing the reader can do ends it, so this is the case in which the scrape's bound
@@ -469,6 +529,12 @@ public class CrashScrapeBoundsTest {
      * the read — the assumption a JVM fake cannot exercise and no hardware here has confirmed.
      */
     private static final class UnreleasableReadChild extends Process {
+        /** Written before the read wedges, so there is something that must survive. */
+        private final byte[] head =
+                ("I/debuggerd( 1234): *** *** *** *** *** *** *** *** *** *** *** *** *** *** ***\n"
+                        + "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x0 (code=1), thread 12\n")
+                        .getBytes();
+        private int pos;
         private final CountDownLatch gate = new CountDownLatch(1);
 
         @Override
@@ -481,6 +547,13 @@ public class CrashScrapeBoundsTest {
 
                 @Override
                 public int read(byte[] b, int off, int len) throws IOException {
+                    if (pos < head.length) {
+                        int n = Math.min(len, head.length - pos);
+                        System.arraycopy(head, pos, b, off, n);
+                        pos += n;
+                        return n;
+                    }
+                    // Past the prefix, park in a read that nothing releases.
                     try {
                         gate.await();
                     } catch (InterruptedException e) {
@@ -529,10 +602,11 @@ public class CrashScrapeBoundsTest {
         final File anr = emptyDir("anr7");
         final UnreleasableReadChild child = new UnreleasableReadChild();
 
+        final CrashSources.Availability[] box = new CrashSources.Availability[1];
         Thread worker = new Thread(new Runnable() {
             @Override
             public void run() {
-                CrashSources.scrape(baseDir, null, new Runner(child), T0, dropbox, anr);
+                box[0] = CrashSources.scrape(baseDir, null, new Runner(child), T0, dropbox, anr);
             }
         });
         worker.setDaemon(true);
@@ -544,6 +618,15 @@ public class CrashScrapeBoundsTest {
         } finally {
             child.release();
         }
+
+        // Returning on time is only half of it: the lines read before the read wedged are the evidence,
+        // and losing them would make the source report `empty` — found nothing — while it actually
+        // found a native crash and simply could not finish looking.
+        assertEquals(CrashSources.COPIED, box[0].logcat);
+        CrashStore.Info[] infos = CrashStore.list(baseDir);
+        assertEquals(1, infos.length);
+        assertTrue("the crash prefix did not survive the abandoned read",
+                firstLines(new File(baseDir, infos[0].name), 40).contains("Fatal signal 11"));
     }
 
     @Test

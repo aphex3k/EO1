@@ -649,6 +649,18 @@ public final class CrashSources {
     static final class Drain {
         /** The output, at most {@link CrashSources#MAX_OUTPUT_CHARS} characters of it. */
         String text = "";
+        /**
+         * What has been retained so far, appended to by the reader under {@code drain}'s monitor.
+         *
+         * <p>Shared rather than copied forward at intervals, because the reader can be parked in a
+         * blocking read that nothing releases: a snapshot taken only at intervals or only at the cap
+         * loses whatever arrived between them, and losing it makes {@code empty} mean "found nothing"
+         * when it should mean "found something, could not finish reading it". The lock is held for the
+         * append alone and never across a read.
+         */
+        final StringBuilder progress = new StringBuilder();
+        /** Set by the caller when it stops waiting for the reader; the reader must then not publish. */
+        boolean abandoned;
         /** Set by the reader under {@code lock}: it has stopped reading, however it stopped. */
         boolean readDone;
         /** True when the child reached end of output, as opposed to us giving up on it. */
@@ -825,8 +837,12 @@ public final class CrashSources {
                 }
             }
             if (!d.readDone) {
-                // Out of time with a reader still parked. That is us ending the read by any name, and
-                // the partial-capture rule has to apply, not just to the reader that noticed.
+                // Out of time with a reader still parked. Take what it has retained — all of it is
+                // already in the shared buffer, since the reader appends under this same monitor — and
+                // mark the drain abandoned so that reader, if it ever wakes, cannot publish over the
+                // snapshot the caller is about to hand back.
+                d.text = d.progress.toString();
+                d.abandoned = true;
                 d.terminated = true;
                 lock.notifyAll();
             }
@@ -867,12 +883,9 @@ public final class CrashSources {
      * draining because the cap is full. Runs on its own daemon thread — see {@link #drain} for why.
      */
     private static void readChild(Process process, Drain d, Object lock, long beganAt) {
-        StringBuilder sb = new StringBuilder();
         InputStream is = null;
         Reader r = null;
         boolean eof = false;
-        boolean truncated = false;
-        boolean capPublished = false;
         Throwable error = null;
         try {
             is = process.getInputStream();
@@ -890,18 +903,11 @@ public final class CrashSources {
                 if (n == 0) {
                     continue;
                 }
-                if (retain(sb, buf, n)) {
-                    truncated = true;
-                }
-                if (!capPublished && sb.length() >= MAX_OUTPUT_CHARS) {
-                    // Publish the retained prefix now, under the lock. The rest of this loop only
-                    // drains and discards, so this is the last content that can matter — and if the
-                    // child never reaches EOF, the caller abandons this thread at its own deadline and
-                    // would otherwise find an empty buffer and call it an empty buffer.
-                    capPublished = true;
-                    String snapshot = sb.toString();
-                    synchronized (lock) {
-                        d.text = snapshot;
+                // Held for the append only, never across the read above. Retaining into the shared
+                // buffer here is what makes the caller's snapshot at its deadline contain everything
+                // read so far, however far that is — the cap is not the only place content can matter.
+                synchronized (lock) {
+                    if (retain(d.progress, buf, n)) {
                         d.truncated = true;
                     }
                 }
@@ -923,24 +929,23 @@ public final class CrashSources {
                 }
             }
             synchronized (lock) {
-                // Everything the caller reads is assigned here and nowhere else. This thread can be
-                // abandoned mid-loop, and a field written outside the lock would then be read without
-                // any ordering at all — a stale flag whose only symptom is a missing warning.
-                d.text = sb.toString();
-                d.complete = eof;
-                d.error = error;
-                if (truncated) {
-                    d.truncated = true;
-                }
-                // Only a read that stopped *without* failing means we ran out of time. A stream that
-                // threw is a read failure whatever the clock says, and calling that ours would route it
-                // past the error check and report an unreadable source as having come up empty. The
-                // exception our own close provokes is already covered: the reaper marks this under the
-                // same lock before it closes the pipe.
-                if (error == null && !eof) {
-                    d.terminated = true;
-                }
+                // Everything the caller reads is assigned here and nowhere else, and not at all once the
+                // caller has given up on this thread: by then it has snapshotted the buffer and handed
+                // those fields to harvestLogcat, and a late write would be read with no ordering at all.
                 d.readDone = true;
+                if (!d.abandoned) {
+                    d.text = d.progress.toString();
+                    d.complete = eof;
+                    d.error = error;
+                    // Only a read that stopped *without* failing means we ran out of time. A stream that
+                    // threw is a read failure whatever the clock says, and calling that ours would route
+                    // it past the error check and report an unreadable source as having come up empty.
+                    // The exception our own close provokes is already covered: the reaper marks this
+                    // under the same lock before it closes the pipe.
+                    if (error == null && !eof) {
+                        d.terminated = true;
+                    }
+                }
                 lock.notifyAll();
             }
         }
