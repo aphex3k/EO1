@@ -714,15 +714,23 @@ public final class CrashSources {
      * Reads {@code process} to end of output or to the deadline, whichever comes first, and always
      * leaves it reaped.
      *
-     * <p><b>Exactly one thread ever destroys or waits on the child:</b> the reaper. The reader closes
-     * the stream it was handed and touches nothing else. That is why this is two threads and a monitor
-     * rather than a read loop with a {@code finally}. Until it was one thread doing both, the read
-     * thread called {@code destroy()} and then {@code waitFor()} while the deadline helper was still
-     * inside {@code destroy()} on the same process — and {@code java.lang.UNIXProcess} hands the exit
-     * status to the first waiter and can leave a second waiting for a notification already delivered.
-     * The scrape thread parked there, on a frame with nothing wrong with it, and a startup scrape that
-     * never returns publishes no verdict at all: every wait in this class is now bounded, and none of
-     * them is on the calling thread's unbounded goodwill.
+     * <p>Three threads and one monitor: this method's caller, a reader, and a reaper. The split is what
+     * makes the deadline real rather than conditional.
+     *
+     * <p><b>Exactly one thread ever destroys or waits on the child: the reaper.</b> The reader closes the
+     * stream it was handed and touches nothing else. Until the read and the reap were one thread, the
+     * reader called {@code destroy()} and then {@code waitFor()} in its own {@code finally} while the
+     * deadline helper was still inside {@code destroy()} on the same process — and
+     * {@code java.lang.UNIXProcess} hands the exit status to the first waiter and can leave a second
+     * waiting for a notification already delivered. The scrape thread parked there, on a frame with
+     * nothing wrong with it, and a scrape that never returns publishes no verdict at all.
+     *
+     * <p><b>The read is not on the caller's thread either.</b> Doing so would have made the caller's
+     * bound depend on getting <i>out</i> of a blocked pipe read, which means depending on another
+     * thread's {@code close()} releasing it — behaviour of API 19's process streams that a JVM fake
+     * cannot exercise and that this project has no confirmed hardware read of. Now the caller only ever
+     * waits on a monitor with a timeout, which the JVM guarantees, and the worst case for a wrong
+     * assumption about pipes is a daemon thread nobody will ever join.
      *
      * <p>Reading to end of output rather than stopping at the byte cap matters twice over: the child is
      * never left blocked writing into a pipe nobody empties, and the cap then bounds what is
@@ -788,11 +796,26 @@ public final class CrashSources {
         reaper.setDaemon(true);
         reaper.start();
 
-        readChild(process, d, lock, beganAt);
+        // The read runs on its own daemon thread rather than on the caller's, and that is the difference
+        // between a bound and a promise. The caller's wait below is a monitor timeout, which the JVM
+        // guarantees; reaching it, by contrast, would depend on a blocked pipe read being released by
+        // another thread's close() — behaviour of API 19's process streams that no JVM fake can exercise
+        // and that this project has no hardware to confirm. If that assumption is wrong, the wrongness
+        // is now confined to a daemon thread that will never be waited on, and the scrape still returns
+        // on time and still publishes a verdict.
+        Thread reader = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                readChild(process, d, lock, beganAt);
+            }
+        }, "eo1-logcat-read");
+        reader.setDaemon(true);
+        reader.start();
 
         synchronized (lock) {
             long left;
-            while (!d.exitKnown && (left = remainingMs(beganAt,
+            while ((!d.readDone || !d.exitKnown)
+                    && (left = remainingMs(beganAt,
                     TIMEOUT_MS + REAP_GRACE_MS)) > 0) {
                 try {
                     lock.wait(left);
@@ -800,6 +823,12 @@ public final class CrashSources {
                     Thread.currentThread().interrupt();
                     break;
                 }
+            }
+            if (!d.readDone) {
+                // Out of time with a reader still parked. That is us ending the read by any name, and
+                // the partial-capture rule has to apply, not just to the reader that noticed.
+                d.terminated = true;
+                lock.notifyAll();
             }
         }
         return d;
@@ -813,25 +842,37 @@ public final class CrashSources {
      * last partial read was followed straight by EOF — which is the common shape, since the cap is an
      * exact multiple of the read buffer and a real {@code logcat} ends as soon as it is drained.
      */
-    static void retain(StringBuilder sb, char[] buf, int n, Drain d) {
+    /**
+     * Keeps what fits of one read and reports whether anything was dropped.
+     *
+     * <p>Returns the flag rather than writing it, because the writer is a thread the caller may abandon
+     * at any moment: everything the caller reads has to be published under {@code drain}'s lock, and a
+     * per-chunk field write would be a race whose only symptom is a missing warning.
+     *
+     * <p>The test is {@code n > room}, not {@code room <= 0}: the read that straddles the cap discards
+     * characters too, and marking only a fully-refused read left the cap-crossing silent whenever that
+     * last partial read was followed straight by EOF — the common shape, since the cap is an exact
+     * multiple of the read buffer and a real {@code logcat} ends as soon as it is drained.
+     */
+    static boolean retain(StringBuilder sb, char[] buf, int n) {
         int room = MAX_OUTPUT_CHARS - sb.length();
-        if (n > room) {
-            d.truncated = true;
-        }
         if (room > 0) {
             sb.append(buf, 0, Math.min(n, room));
         }
+        return n > room;
     }
 
     /**
      * The reader half of {@link #drain}: drain the pipe to EOF, keep at most the cap, never stop
-     * draining because the cap is full. Runs on the calling thread.
+     * draining because the cap is full. Runs on its own daemon thread — see {@link #drain} for why.
      */
     private static void readChild(Process process, Drain d, Object lock, long beganAt) {
         StringBuilder sb = new StringBuilder();
         InputStream is = null;
         Reader r = null;
         boolean eof = false;
+        boolean truncated = false;
+        boolean capPublished = false;
         Throwable error = null;
         try {
             is = process.getInputStream();
@@ -849,7 +890,21 @@ public final class CrashSources {
                 if (n == 0) {
                     continue;
                 }
-                retain(sb, buf, n, d);
+                if (retain(sb, buf, n)) {
+                    truncated = true;
+                }
+                if (!capPublished && sb.length() >= MAX_OUTPUT_CHARS) {
+                    // Publish the retained prefix now, under the lock. The rest of this loop only
+                    // drains and discards, so this is the last content that can matter — and if the
+                    // child never reaches EOF, the caller abandons this thread at its own deadline and
+                    // would otherwise find an empty buffer and call it an empty buffer.
+                    capPublished = true;
+                    String snapshot = sb.toString();
+                    synchronized (lock) {
+                        d.text = snapshot;
+                        d.truncated = true;
+                    }
+                }
             }
         } catch (Throwable t) {
             error = t;
@@ -867,10 +922,16 @@ public final class CrashSources {
                     // best effort
                 }
             }
-            d.text = sb.toString();
-            d.complete = eof;
-            d.error = error;
             synchronized (lock) {
+                // Everything the caller reads is assigned here and nowhere else. This thread can be
+                // abandoned mid-loop, and a field written outside the lock would then be read without
+                // any ordering at all — a stale flag whose only symptom is a missing warning.
+                d.text = sb.toString();
+                d.complete = eof;
+                d.error = error;
+                if (truncated) {
+                    d.truncated = true;
+                }
                 // Only a read that stopped *without* failing means we ran out of time. A stream that
                 // threw is a read failure whatever the clock says, and calling that ours would route it
                 // past the error check and report an unreadable source as having come up empty. The

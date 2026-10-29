@@ -598,12 +598,11 @@ public class CrashSourcesTest {
         for (int i = 0; i < CrashSources.MAX_OUTPUT_CHARS - 10; i++) {
             sb.append('x');
         }
-        CrashSources.Drain d = new CrashSources.Drain();
-
-        CrashSources.retain(sb, new char[4096], 4096, d);
-
-        assertTrue("a partly-kept read must be admitted", d.truncated);
+        assertTrue("a partly-kept read must be admitted",
+                CrashSources.retain(sb, new char[4096], 4096));
         assertEquals(CrashSources.MAX_OUTPUT_CHARS, sb.length());
+        assertFalse("a read that fits entirely must not claim otherwise",
+                CrashSources.retain(sb, new char[8], 0));
     }
 
     @Test

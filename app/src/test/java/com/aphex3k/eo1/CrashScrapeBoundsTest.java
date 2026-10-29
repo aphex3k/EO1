@@ -462,6 +462,90 @@ public class CrashScrapeBoundsTest {
         return sb.toString();
     }
 
+    /**
+     * The worst case the platform could hand us: a pipe read that another thread's {@code close()} does
+     * not release. Nothing the reader can do ends it, so this is the case in which the scrape's bound
+     * would be a promise rather than a guarantee if reaching the bound depended on getting <i>out</i> of
+     * the read — the assumption a JVM fake cannot exercise and no hardware here has confirmed.
+     */
+    private static final class UnreleasableReadChild extends Process {
+        private final CountDownLatch gate = new CountDownLatch(1);
+
+        @Override
+        public InputStream getInputStream() {
+            return new InputStream() {
+                @Override
+                public int read() throws IOException {
+                    return read(new byte[1], 0, 1);
+                }
+
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    try {
+                        gate.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        return -1;
+                    }
+                    return -1;
+                }
+                // Deliberately no close() override: the parked reader stays parked, which is the point.
+            };
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            return 143;
+        }
+
+        @Override
+        public int exitValue() {
+            return 143;
+        }
+
+        @Override
+        public void destroy() {
+        }
+
+        void release() {
+            gate.countDown();
+        }
+    }
+
+    @Test
+    public void aBoundNeverDependsOnGettingOutOfTheRead() throws Exception {
+        final File baseDir = temp.newFolder("crashes7");
+        final File dropbox = emptyDir("dropbox7");
+        final File anr = emptyDir("anr7");
+        final UnreleasableReadChild child = new UnreleasableReadChild();
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                CrashSources.scrape(baseDir, null, new Runner(child), T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            worker.join(CrashSources.TIMEOUT_MS + CrashSources.REAP_GRACE_MS + 5_000L);
+            assertFalse("the scrape was held hostage by a read it could not leave",
+                    worker.isAlive());
+        } finally {
+            child.release();
+        }
+    }
+
     @Test
     public void oneOversizedThrowableIsStillBounded() {
         // The budget has to cut inside a single throwable, not only between them: AppLogger holds and
