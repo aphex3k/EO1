@@ -1013,6 +1013,18 @@ public class CrashScrapeBoundsTest {
         assertEquals(1, infos.length);
         assertTrue("the crash prefix did not survive the abandoned read",
                 firstLines(new File(baseDir, infos[0].name), 40).contains("Fatal signal 11"));
+
+        // The artifact has to stay distinguishable from a clean sweep, and the way it does that here is
+        // the deadline in the reason plus the retained byte count. There is deliberately no `read:`
+        // clause, and checking for one was a wrong guess on my part: the reader is parked in a read that
+        // nothing releases, so nothing threw — the capture is incomplete, not failed. A child whose
+        // stream breaks on its own is a different path and asserts its own reason there
+        // (aCleanupKillDoesNotMaskAnIndependentReadFailure), which is the case this one is easy to
+        // mistake for.
+        assertTrue("the reason must name the deadline: " + box[0].logcatReason,
+                box[0].logcatReason != null && box[0].logcatReason.contains("deadline"));
+        assertTrue("and the retained length, so `copied` cannot be read as a full sweep: "
+                + box[0].logcatReason, box[0].logcatReason.contains("chars retained"));
     }
 
     @Test
