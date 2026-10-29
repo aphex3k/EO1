@@ -278,7 +278,12 @@ public final class CrashSources {
         if (attempt < published) {
             return false;
         }
-        return attempt > published || !publishedWasReal || real;
+        // A stub says only "this attempt has not answered yet". If some attempt already answered, the
+        // statement is no longer true of the process — only of the thread that timed out — and writing
+        // it over a recovered verdict makes /state report `unavailable` for a scrape that worked. So a
+        // real verdict may always supersede a stub, and a stub never supersedes a real verdict, whatever
+        // the attempt numbers say.
+        return real || !publishedWasReal;
     }
 
     /**
