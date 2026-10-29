@@ -3908,6 +3908,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             sources.addProperty("anr", a.anr);
             sources.addProperty("copies", a.copies);
             sources.addProperty("readLogs", hasReadLogsPermission() ? "granted" : "denied");
+            // Only when there is something to say. "unavailable" is five diagnoses wearing one word,
+            // and this is the ungated read an operator has on a frame that is not producing logcat.
+            if (a.logcatReason != null) {
+                sources.addProperty("reason", a.logcatReason);
+            }
             o.add("sources", sources);
         } catch (Throwable t) {
             // Report whatever was assembled before the failure; never fail /state over this.

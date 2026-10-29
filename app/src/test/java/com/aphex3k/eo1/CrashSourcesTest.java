@@ -4,6 +4,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Rule;
@@ -37,6 +38,7 @@ public class CrashSourcesTest {
         private final String output;
         private final int exit;
         private final IOException failure;
+        private final Process canned;
 
         FakeRunner(String output) {
             this(output, 0, null);
@@ -50,6 +52,15 @@ public class CrashSourcesTest {
             this.output = output;
             this.exit = exit;
             this.failure = failure;
+            this.canned = null;
+        }
+
+        /** For the children that do not behave: argv is still recorded, the output is theirs. */
+        FakeRunner(Process canned) {
+            this.output = null;
+            this.exit = 0;
+            this.failure = null;
+            this.canned = canned;
         }
 
         @Override
@@ -58,7 +69,68 @@ public class CrashSourcesTest {
             if (failure != null) {
                 throw failure;
             }
+            if (canned != null) {
+                return canned;
+            }
             return new FakeProcess(output, exit);
+        }
+    }
+
+    /**
+     * A child that cannot be reaped: {@code destroy()} and {@code waitFor()} both sit on one gate,
+     * which is what a wedged process looks like from {@code UNIXProcess}'s side. The gate is released
+     * by the test's {@code finally}, so no thread outlives the test.
+     */
+    private static final class StuckProcess extends Process {
+        private final java.util.concurrent.CountDownLatch gate =
+                new java.util.concurrent.CountDownLatch(1);
+        private final InputStream in;
+
+        StuckProcess(InputStream in) {
+            this.in = in;
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new java.io.ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            await();
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return 0;
+        }
+
+        @Override
+        public void destroy() {
+            await();
+        }
+
+        void release() {
+            gate.countDown();
+        }
+
+        private void await() {
+            try {
+                gate.await(60, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
         }
     }
 
@@ -372,7 +444,10 @@ public class CrashSourcesTest {
         assertEquals(CrashSources.UNAVAILABLE, a.logcat);
         assertEquals(CrashSources.UNAVAILABLE, a.dropbox);
         assertEquals(CrashSources.UNAVAILABLE, a.anr);
+        assertNull("no scrape has run, so there is no reason to report", a.logcatReason);
         assertTrue(a.asMap().containsKey("Source-Dropbox"));
+        assertFalse("the reason key is additive and must not be there before one exists",
+                a.asMap().containsKey("Source-Logcat-Reason"));
     }
 
     @Test
@@ -382,6 +457,333 @@ public class CrashSourcesTest {
         assertTrue(out.contains("Fatal signal 6"));
         // waitFor(long, TimeUnit) does not exist before API 26, so the bound is destroy().
         assertTrue("child was left running", p.reaped);
+    }
+
+    @Test
+    public void anUnreapableChildCannotParkTheScrapeThread() throws Exception {
+        // The bug this test exists for: the read thread used to destroy() and waitFor() the child in
+        // its own finally while the deadline helper was still inside destroy() on the same process.
+        // Two waiters on one UNIXProcess means the second can wait for a notification already
+        // delivered — and a startup scrape that never returns publishes no verdict at all, which is
+        // how a frame with nothing wrong with it read as "unavailable" until the next reboot.
+        final File baseDir = crashDir();
+        final File dropbox = dirWith(temp.getRoot(), "stuck-dropbox");
+        final File anr = dirWith(temp.getRoot(), "stuck-anr");
+        final StuckProcess stuck = new StuckProcess(
+                new ByteArrayInputStream(CRASH_LINE.getBytes("UTF-8")));
+        final CrashSources.Availability[] box = new CrashSources.Availability[1];
+
+        Thread worker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                box[0] = CrashSources.scrape(baseDir, null, new FakeRunner(stuck), T0, dropbox, anr);
+            }
+        });
+        worker.setDaemon(true);
+        worker.start();
+        try {
+            worker.join(CrashSources.TIMEOUT_MS + CrashSources.REAP_GRACE_MS + 5000L);
+            assertFalse("scrape thread parked in the child's destroy()/waitFor()",
+                    worker.isAlive());
+        } finally {
+            stuck.release();
+        }
+
+        assertNotNull("the scrape must return an answer, any answer", box[0]);
+        assertEquals(CrashSources.UNAVAILABLE, box[0].logcat);
+        assertTrue("the reason must name the reap that never completed: " + box[0].logcatReason,
+                box[0].logcatReason != null && box[0].logcatReason.contains("exit status"));
+        assertEquals("a child we could not reap is not a report", 0,
+                CrashStore.list(baseDir).length);
+    }
+
+    @Test
+    public void theByteCapBoundsWhatIsRetainedNotWhatWasSeen() throws Exception {
+        // A frame that has been up for hours has a system buffer larger than the cap. Until the cap
+        // bounded retention rather than the scan, that was indistinguishable from a dead radio: the
+        // read stopped at 512 KB, the child was killed for it, and the non-zero exit of the logcat we
+        // killed was reported as an unavailable source — discarding everything already found.
+        // ChildUnfinishedPastTheCap models that: it only exits clean if it was drained to EOF.
+        final File baseDir = crashDir();
+        final File dropbox = dirWith(temp.getRoot(), "big-dropbox");
+        final File anr = dirWith(temp.getRoot(), "big-anr");
+        StringBuilder noise = new StringBuilder();
+        while (noise.length() <= CrashSources.MAX_OUTPUT_CHARS) {
+            noise.append("I/ISystemWriteService(  123): readSysfs could not contact remote\n");
+        }
+
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new FakeRunner(new ChildUnfinishedPastTheCap(noise.toString())), T0, dropbox, anr);
+
+        assertTrue("a big buffer is a source that worked: " + a.logcat,
+                CrashSources.EMPTY.equals(a.logcat) || CrashSources.COPIED.equals(a.logcat));
+        assertTrue("and the cap must be admitted, not silently applied: " + a.logcatReason,
+                a.logcatReason != null && a.logcatReason.contains("oldest"));
+    }
+
+    /**
+     * A child with more output than the retention cap that exits 143 if it was destroyed before it
+     * finished writing, and 0 if it was drained to EOF. That is what {@code logcat -d} does: it is
+     * killed by a reader that gave up mid-buffer, not by a failure of its own. Stopping the read at
+     * the cap therefore produced a non-zero status, which the source reported as {@code unavailable}
+     * and everything already filtered was thrown away.
+     */
+    private static final class ChildUnfinishedPastTheCap extends Process {
+        private final byte[] out;
+        private final java.io.ByteArrayInputStream in;
+        private volatile boolean destroyed;
+
+        ChildUnfinishedPastTheCap(String output) {
+            this.out = output.getBytes();
+            this.in = new java.io.ByteArrayInputStream(this.out);
+        }
+
+        @Override
+        public InputStream getInputStream() {
+            return in;
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new java.io.ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            return destroyed && in.available() > 0 ? 143 : 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return waitFor();
+        }
+
+        @Override
+        public void destroy() {
+            destroyed = true;
+        }
+    }
+
+    @Test
+    public void aFailedSourceNamesItsReasonAndAGoodOneDoesNot() throws Exception {
+        File baseDir = crashDir();
+        File dropbox = dirWith(temp.getRoot(), "why-dropbox");
+        File anr = dirWith(temp.getRoot(), "why-anr");
+
+        CrashSources.Availability failed = CrashSources.scrape(baseDir, null,
+                new FakeRunner("Unable to open log device 'crash': Permission denied\n", 1), T0,
+                dropbox, anr);
+        assertEquals(CrashSources.UNAVAILABLE, failed.logcat);
+        assertTrue(failed.asMap().containsKey("Source-Logcat-Reason"));
+        assertTrue(failed.asMap().get("Source-Logcat-Reason").contains("exited 1"));
+
+        CrashSources.Availability worked = CrashSources.scrape(baseDir, null,
+                new FakeRunner(CRASH_LINE), T0 + 1000L, dropbox, anr);
+        assertEquals(CrashSources.COPIED, worked.logcat);
+        assertFalse("nothing failed, so nothing may claim to have",
+                worked.asMap().containsKey("Source-Logcat-Reason"));
+    }
+
+    @Test
+    public void theReadThatStraddlesTheRetentionCapSaysSo() {
+        // The cap is an exact multiple of the read buffer, so the read that crosses it usually keeps
+        // only part of itself and is followed straight by EOF. Marking truncation solely for a read
+        // refused outright left that — the ordinary case — reporting a complete scan.
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < CrashSources.MAX_OUTPUT_CHARS - 10; i++) {
+            sb.append('x');
+        }
+        assertTrue("a partly-kept read must be admitted",
+                CrashSources.retain(sb, new char[4096], 4096));
+        assertEquals(CrashSources.MAX_OUTPUT_CHARS, sb.length());
+        assertFalse("a read that fits entirely must not claim otherwise",
+                CrashSources.retain(sb, new char[8], 0));
+    }
+
+    @Test
+    public void aTimeoutNeverOverwritesAnAnsweredScrape() throws Exception {
+        // Precedence must hold in BOTH arrival orders — the race is real, so assert the rule rather than
+        // trying to lose it on purpose.
+        assertFalse("a stub must not replace the real verdict it describes",
+                CrashSources.mayPublish(0, false, 0, true));
+        assertTrue("and a real verdict arriving late still lands",
+                CrashSources.mayPublish(0, true, 0, false));
+        assertFalse("a real verdict from a newer attempt wins over an older one",
+                CrashSources.mayPublish(0, true, 1, true));
+        assertFalse("a real verdict from an older attempt cannot displace a newer attempt's real one",
+                CrashSources.mayPublish(0, false, 1, true));
+        assertTrue("but a retry that only ever timed out must not bury an answer that arrived",
+                CrashSources.mayPublish(0, true, 1, false));
+        assertFalse("and a retry's timeout must not overwrite a verdict the first attempt recovered",
+                CrashSources.mayPublish(1, false, 0, true));
+        assertTrue("while a retry's timeout still reports when nothing has answered",
+                CrashSources.mayPublish(1, false, 0, false));
+        assertTrue("and a later real verdict still lands",
+                CrashSources.mayPublish(1, true, 0, true));
+    }
+
+    @Test
+    public void watchdogLoggingDoesNotWaitOnTheLogger() throws Exception {
+        // AppLogger.info is synchronized and holds that monitor across an open, a write and a close. The
+        // watchdog runs on the Timer's only thread, so calling it inline means one stalled flash write
+        // strands the retry's timeout task behind it — a worker with no watchdog, which is the failure
+        // this path exists to survive.
+        final AppLogger logger = new AppLogger(new File(temp.getRoot(), "held.log"));
+        final CrashSources.Availability a = new CrashSources.Availability();
+        a.logcat = CrashSources.EMPTY;
+        final Object hold = new Object();
+        final Object ready = new Object();
+        final boolean[] acquired = new boolean[1];
+
+        Thread blocker = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                synchronized (logger) {
+                    synchronized (ready) {
+                        acquired[0] = true;
+                        ready.notifyAll();
+                    }
+                    synchronized (hold) {
+                        try {
+                            hold.wait(10_000L);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                }
+            }
+        });
+        blocker.setDaemon(true);
+        blocker.start();
+        synchronized (ready) {
+            while (!acquired[0]) {
+                ready.wait(2_000L);
+            }
+        }
+
+        long beganAt = System.currentTimeMillis();
+        CrashSources.logVerdictAsync(a, logger);
+        long waited = System.currentTimeMillis() - beganAt;
+        assertTrue("the hand-off blocked on the logger for " + waited + "ms", waited < 2_000L);
+
+        // And the line still gets written once the monitor is free — the hand-off must not lose it.
+        synchronized (hold) {
+            hold.notifyAll();
+        }
+        blocker.join(10_000L);
+        String tail = "";
+        for (int i = 0; i < 100 && !tail.contains("crash sources"); i++) {
+            Thread.sleep(20L);
+            tail = logger.tail(5);
+        }
+        assertTrue("the verdict never reached the durable log", tail.contains("crash sources"));
+    }
+
+    @Test
+    public void aBackwardClockStepCannotExtendABound() {
+        // Every wait in the drain is `remainingMs(...) > 0`, so the whole bounding scheme rests on one
+        // property of one function: a bound may shrink, and it may go negative, but it may never exceed
+        // the budget it came from. These frames boot with no time at all and the first NTP correction
+        // moves the clock by hours either way, so the reading that gets subtracted really can step
+        // backwards underneath a running deadline.
+        final long beganAt = 1_000_000L;
+        final long budget = 3_000L;
+
+        assertEquals("a fresh bound is the budget", budget,
+                CrashSources.remainingMs(beganAt, budget, beganAt));
+        assertEquals("and it shrinks as time passes", 1_000L,
+                CrashSources.remainingMs(beganAt, budget, beganAt + 2_000L));
+        assertEquals("a clock that stepped back 5s must not hand back 8s",
+                budget, CrashSources.remainingMs(beganAt, budget, beganAt - 5_000L));
+        assertTrue("an expired bound stays expired, not negative-and-huge",
+                CrashSources.remainingMs(beganAt, budget, beganAt + 60_000L) <= 0L);
+
+        // The same through the real clock: whatever it reads, the answer is never more than the budget.
+        assertTrue(CrashSources.remainingMs(CrashSources.monoNow(), budget) <= budget);
+
+        // And the clock must actually be a since-boot counter, not epoch time wearing the name. The
+        // clamp above bounds the damage from a wrong choice; this catches the choice itself. Margin:
+        // an elapsedRealtime this large would mean the frame had been up for about five years.
+        assertTrue("the bound clock is measuring epoch, not boot",
+                CrashSources.monoNow() < System.currentTimeMillis() / 10L);
+    }
+
+    @Test
+    public void aSilentLogcatSaysItWasSilentRatherThanClean() throws Exception {
+        // A sideload without READ_LOGS often gets an immediate EOF and exit 0 out of logcat, which is
+        // indistinguishable from a genuinely empty buffer by status alone. `empty` beside
+        // `readLogs: denied` still tells an operator the buffer was checked and held nothing; the reason
+        // is what separates "nothing to report" from "nothing was handed over".
+        File baseDir = crashDir();
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new FakeRunner(""), T0);
+
+        assertEquals(CrashSources.EMPTY, a.logcat);
+        assertTrue("a zero-byte answer must be admitted: " + a.logcatReason,
+                a.logcatReason != null && a.logcatReason.contains("no output at all"));
+        assertEquals(0, CrashStore.list(baseDir).length);
+    }
+
+    @Test
+    public void aCrashAfterTwentyThousandLinesIsStillFound() throws Exception {
+        // The line bound used to stop the scan, and a log dump puts the newest lines last, so a busy
+        // frame's native death sat exactly where the scan gave up. The bound is on retention now.
+        File baseDir = crashDir();
+        StringBuilder noise = new StringBuilder();
+        for (int i = 0; i < 25_000; i++) {
+            noise.append("I/S(1): aa").append(i % 97).append('\n');
+        }
+        assertTrue("the fixture must stay under the retention cap to test the line bound",
+                noise.length() < CrashSources.MAX_OUTPUT_CHARS);
+        noise.append(CRASH_LINE);
+
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new FakeRunner(noise.toString()), T0);
+
+        assertEquals(CrashSources.COPIED, a.logcat);
+        assertEquals(1, CrashStore.list(baseDir).length);
+    }
+
+    @Test
+    public void aSecondNativeCrashOfTheSameShapeIsNotTreatedAsAlreadyStored() throws Exception {
+        // debuggerd writes a fixed-width template, so two different native deaths differ only in the
+        // hex of an address and a thread id — and their filtered text is therefore the same LENGTH
+        // routinely. A dedupe key of "logcat|" + length called the second one unchanged and dropped it.
+        File baseDir = crashDir();
+        String first = "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x00000000 (code=1), t 1240\n";
+        String second = "F/libc    ( 1234): Fatal signal 11 (SIGSEGV) at 0x000000ff (code=1), t 1241\n";
+        assertEquals("the fixture must collide on length to prove the point",
+                first.length(), second.length());
+
+        CrashSources.scrape(baseDir, null, new FakeRunner(first), T0);
+        CrashSources.Availability again =
+                CrashSources.scrape(baseDir, null, new FakeRunner(second), T0 + 60_000L);
+
+        assertEquals(CrashSources.COPIED, again.logcat);
+        assertEquals("both deaths belong in the archive", 2, CrashStore.list(baseDir).length);
+    }
+
+    @Test
+    public void aSupersededVerdictSaysSoInItsLogLine() {
+        // Two `crash sources:` lines that disagree, with nothing marking which one /state is answering,
+        // is how a stale log line becomes a stale claim about the frame.
+        CrashSources.Availability a = new CrashSources.Availability();
+        a.logcat = CrashSources.COPIED;
+        a.dropbox = CrashSources.UNAVAILABLE;
+        a.anr = CrashSources.EMPTY;
+        a.copies = 1;
+
+        String plain = CrashSources.verdictLine(a, null);
+        String late = CrashSources.verdictLine(a, "late result, not the published verdict");
+
+        assertTrue(plain.startsWith("crash sources: logcat=copied"));
+        assertFalse("an accepted verdict must not carry a caveat", plain.contains("late result"));
+        assertTrue("a superseded one must", late.contains("(late result, not the published verdict)"));
     }
 
     private static String read(File f) throws IOException {

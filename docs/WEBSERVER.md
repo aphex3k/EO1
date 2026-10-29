@@ -445,6 +445,15 @@ reports go. The newest report is never evicted.
 `/state`'s `crash.sources` distinguishes *"nothing crashed"* (`empty`) from *"we could not look"*
 (`unavailable`) — and from `unchanged`, meaning a scrape found nothing new since the last boot, which
 is what stops a night of boot loops from spending the whole 4 MB cap re-copying one ANR trace.
+Because `unavailable` is five different failures wearing one word, `crash.sources.reason` names which
+one it was whenever there is a failure to explain: a refused `exec`, a read that failed, a child we
+ended at the deadline instead of one that failed on its own, an exit status the reap never returned, a
+`logcat` that exited non-zero, a store that would not take the report — or the scrape thread never
+publishing at all, which is also the only case that gets retried, once. The same string appears in a
+report header as `Source-Logcat-Reason` and on one `EO1-crash` line in `files/eo1-app.log`, because
+logcat on these frames holds about thirteen minutes and the reason has to outlive the diagnosis. When
+the source *worked* but the buffer was larger than the retention cap, `reason` says so while `logcat`
+still reads `empty` or `copied` — a big buffer is a source that was partly read, not a dead one.
 Copying is capped per boot, and a copied artifact is **copied into `filesDir/crashes`** — no crash
 route reads anywhere else, so nothing reaches `/data` in place. Harvesting the two framework
 directories through the device's adbd would work, but it would mean opening TCP adb as root to

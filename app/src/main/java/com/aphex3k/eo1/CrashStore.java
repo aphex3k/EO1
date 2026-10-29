@@ -302,6 +302,36 @@ public final class CrashStore {
     }
 
     /**
+     * The same cause-chain walk {@link #printTrace} performs, rendered into one String for callers with
+     * no {@code BudgetedWriter} to hand — {@link AppLogger} is the one that matters, because both the
+     * {@code /logs} ring and a report's lead-up section hold a trace as a single string.
+     *
+     * <p>Iterative for the same reason {@code printTrace} is: {@code Throwable.printStackTrace}
+     * recurses once per cause, and the caller that needs this is {@code CrashReporter.record()}, which
+     * runs on the thread that is already dying — the one place a lost dump is both likely and fatal.
+     *
+     * <p>It is {@code printTrace} itself over a {@link BudgetedWriter} that drains into a string, not a
+     * second walk: a bound that is checked between throwables would let one throwable with a long
+     * message or a deep stack come back oversized, and {@link AppLogger} would then hold and write all
+     * of it on the crash-handling thread.
+     */
+    static String traceToString(Throwable error) {
+        java.io.StringWriter sw = new java.io.StringWriter();
+        BudgetedWriter w = new BudgetedWriter(sw);
+        try {
+            printTrace(w, error);
+            w.flush();
+        } catch (IOException ignored) {
+            // A StringWriter cannot fail; the only bound is the one BudgetedWriter applies.
+        }
+        if (w.truncated()) {
+            // Same wording the report body uses, so the two renderings of one trace cannot diverge.
+            sw.write("[stack trace truncated at " + MAX_DUMP_BYTES + " bytes]\n");
+        }
+        return sw.toString();
+    }
+
+    /**
      * The caller's header plus the identity fields, which come from the record itself and never from
      * what a caller remembered to add: {@code Version-Code} is the only thing that picks the mapping
      * file able to retrace the trace below it, so a report missing one is a report that can never be
@@ -339,7 +369,8 @@ public final class CrashStore {
         return s.substring(0, MAX_HEADER_VALUE) + "...[" + s.length() + " chars]";
     }
 
-    private static String oneLine(String s) {
+    /** Package-private: {@link CrashSources} names a failure with it in a report header. */
+    static String oneLine(String s) {
         if (s == null) {
             return "";
         }

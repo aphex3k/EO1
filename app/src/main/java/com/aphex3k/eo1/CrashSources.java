@@ -23,9 +23,12 @@ import java.util.Set;
  * {@code system} log buffer, where debuggerd writes a native death on this API level, and the
  * framework's {@code /data/system/dropbox} and {@code /data/anr} entries.
  *
- * <p>Runs once per process on a background thread ({@code Eo1Application} must not wait on it) and
- * reports what it found per source, because "nothing crashed" and "we could not look" must not look
- * the same to an operator. Expect {@code dropbox} and {@code anr} to read
+ * <p>Runs on a background thread ({@code Eo1Application} must not wait on it), once per process and
+ * once more if that attempt never publishes, and reports what it found per source, because "nothing
+ * crashed" and "we could not look" must not look the same to an operator. {@link
+ * Availability#logcatReason} is the other half of that sentence: it says <i>which</i> failure made a
+ * source read {@link #UNAVAILABLE}, because one word was five diagnoses and an operator cannot act on
+ * a word. Expect {@code dropbox} and {@code anr} to read
  * {@link #UNAVAILABLE} on a frame: neither directory is traversable by a non-system uid on
  * API 19, and this class deliberately does not escalate — harvesting them through
  * {@code DeviceRepair}/{@code AdbdInstallClient} would mean opening TCP adb <i>as root</i> to satisfy
@@ -64,8 +67,35 @@ public final class CrashSources {
     static final String DIR_DROPBOX = "/data/system/dropbox";
     static final String DIR_ANR = "/data/anr";
 
-    /** A subprocess we cannot reap is not worth a hung startup thread. */
+    /**
+     * How long the child gets to reach end of output before we end it. A subprocess we cannot reap is
+     * not worth a hung startup thread — and the bound has to be a deadline that destroys the child,
+     * because {@code Process.waitFor(long, TimeUnit)} does not exist before API 26.
+     */
     static final long TIMEOUT_MS = 3000L;
+
+    /** On top of {@link #TIMEOUT_MS}: how long the reader waits for the reaper's exit status. */
+    static final long REAP_GRACE_MS = 1000L;
+
+    /**
+     * On top of the two bounds above: when the watchdog gives up on a scrape thread that never
+     * published and says so. Slack, not a fifth timeout — a scrape that crosses it is wedged in
+     * something this class cannot bound, and that is a reportable fact rather than a silence.
+     *
+     * <p>Residual limitation worth naming: {@link java.util.Timer} schedules against wall time, so a
+     * backward correction can fire this task late. It is a backstop only — the scrape's own bounds are
+     * monotonic (see {@link #monoNow}), so a healthy read still returns on time and publishes whether
+     * or not the watchdog ever arrives.
+     */
+    static final long SCRAPE_BUDGET_MS = TIMEOUT_MS + REAP_GRACE_MS + 3000L;
+
+    /**
+     * How long the reaper watches for a natural exit before killing the child. Deliberately inside the
+     * caller's bound: kill and status have to land before the scrape gives up and reports, or a child
+     * that finishes writing and then lingers produces an honest capture judged on a missing status.
+     */
+    static final long REAP_OBSERVE_MS = TIMEOUT_MS + REAP_GRACE_MS - 500L;
+
     static final int MAX_OUTPUT_CHARS = 512 * 1024;
     static final int MAX_COPIES_PER_DIR = 20;
     static final long COPY_BUDGET_BYTES = 1024L * 1024L;
@@ -103,16 +133,49 @@ public final class CrashSources {
         public String anr = UNAVAILABLE;
         public int copies;
 
+        /**
+         * Why {@link #logcat} reads what it does when the answer is not "it worked" — a refused exec,
+         * a child that would not end, a non-zero exit, a reap we could not complete, or a buffer past
+         * the retention cap. Null when there is nothing to explain.
+         *
+         * <p>{@link #UNAVAILABLE} alone is five different diagnoses wearing one word, and an operator
+         * cannot act on a word. This is the half of the contract that makes a frame that could not
+         * look distinguishable from one where nothing crashed.
+         */
+        public String logcatReason;
+
         Map<String, String> asMap() {
             Map<String, String> m = new LinkedHashMap<>();
             m.put("Source-Logcat", logcat);
             m.put("Source-Dropbox", dropbox);
             m.put("Source-Anr", anr);
+            if (logcatReason != null) {
+                m.put(HEADER_LOGCAT_REASON, logcatReason);
+            }
             return m;
         }
     }
 
+    private static final String TAG = "EO1-crash";
+
+    /**
+     * One name for the reason, shared by the report header that carries it and the map {@code /state}
+     * and Java-crash headers are built from. A scraped artifact and a later report must not be able to
+     * disagree about what field holds it.
+     */
+    static final String HEADER_LOGCAT_REASON = "Source-Logcat-Reason";
+
     private static volatile Availability last = new Availability();
+
+    /** Guards which attempt's verdict is the published one; see {@link #publishState}. */
+    private static final Object PUBLISH = new Object();
+
+    private static int publishedAttempt = -1;
+
+    /** Whether what is published came from a scrape rather than from a timeout stub. */
+    private static boolean publishedReal;
+
+    private static volatile java.util.Timer watchdog;
 
     private CrashSources() {
     }
@@ -128,6 +191,14 @@ public final class CrashSources {
      * {@code MainActivity.onCreate} on a device this slow.
      */
     public static void start(final Context context, final AppLogger logger) {
+        startAttempt(0, context, logger);
+    }
+
+    /** How many times a scrape that never published is allowed to be tried again. */
+    private static final int MAX_RETRIES = 1;
+
+    private static void startAttempt(final int attempt, final Context context,
+            final AppLogger logger) {
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -135,24 +206,192 @@ public final class CrashSources {
                 try {
                     a = scrape(CrashStore.dirFor(context), logger, PROCESS_RUNNER,
                             System.currentTimeMillis());
-                } catch (Throwable ignored) {
-                    // Diagnostics that cannot be harvested are not worth a crash of their own.
+                } catch (Throwable e) {
+                    // Diagnostics that cannot be harvested are not worth a crash of their own. The
+                    // catch stays; what used to be wrong about it is the silence — this thread is a
+                    // daemon with no supervisor, so a swallowed throw here was indistinguishable from
+                    // a frame that simply had nothing to find, and logcat holds ~13 minutes.
                     a = new Availability();
+                    a.logcatReason = "scrape: " + oneLine(e);
+                    try {
+                        if (logger != null) {
+                            logger.error(TAG, "crash scrape failed", e);
+                        }
+                    } catch (Throwable ignored) {
+                        // Reporting must not become the failure it is reporting.
+                    }
                 }
-                last = a;
-                CrashReporter reporter = CrashReporter.get();
-                if (reporter != null) {
-                    reporter.setSourceAvailability(a.asMap());
-                }
-                if (logger != null) {
-                    logger.info("EO1-crash", "crash sources: logcat=" + a.logcat
-                            + " dropbox=" + a.dropbox + " anr=" + a.anr
-                            + " copies=" + a.copies);
+                // A real verdict is published by precedence, not by who arrived first: publishState
+                // refuses to let a timeout stub overwrite it, and refuses this thread's late result if a
+                // retry already answered. When it does refuse, the log line says so — a superseded
+                // result written in the same voice as the published one reads as two verdicts.
+                if (publishState(a, attempt, true)) {
+                    logVerdict(a, logger, null);
+                } else {
+                    logVerdict(a, logger, "late result, not the published verdict");
                 }
             }
         }, "eo1-crash-scrape");
         t.setDaemon(true);
         t.start();
+
+        // One deadline for the thread, not for the child: every wait inside the scrape is bounded in
+        // drain(), so crossing this one means something this class cannot bound has wedged. Say so
+        // durably, and try once more — a frame that never hears back should not read "unavailable"
+        // until the next reboot just because one scrape got stuck.
+        watchdog().schedule(new java.util.TimerTask() {
+            @Override
+            public void run() {
+                Availability a = new Availability();
+                a.logcatReason = "scrape did not publish within " + SCRAPE_BUDGET_MS + "ms"
+                        + (attempt > 0 ? " (after retry " + attempt + ")" : "");
+                if (publishState(a, attempt, false)) {
+                    // Reached only when this attempt had not already answered. Order matters here: the
+                    // retry is started first, and the log line is handed off rather than written here.
+                    // AppLogger.info is synchronized and holds that monitor across an open, a write and a
+                    // close on flash, so a single stalled write on this thread — the Timer's only one —
+                    // would strand the retry's own timeout task, which is queued behind it. Recovery
+                    // would then have a worker and no watchdog, which is the failure this whole path
+                    // exists to survive.
+                    if (attempt < MAX_RETRIES) {
+                        startAttempt(attempt + 1, context, logger);
+                    }
+                    logVerdictAsync(a, logger);
+                }
+            }
+        }, SCRAPE_BUDGET_MS);
+    }
+
+    private static java.util.Timer watchdog() {
+        synchronized (CrashSources.class) {
+            if (watchdog == null) {
+                watchdog = new java.util.Timer("eo1-crash-watchdog", true);
+            }
+            return watchdog;
+        }
+    }
+
+    /**
+     * Which of two racing publications may take effect, given what is already published.
+     *
+     * <p>Two threads publish for any attempt that times out — the worker whenever the scrape eventually
+     * returns, the watchdog when the budget runs out — and a check-then-publish lets the timeout win by
+     * reading "not finished yet" a moment before the scrape completed, replacing a real answer with
+     * {@code unavailable}. On the last attempt nothing later would correct it. So this is a precedence,
+     * not a race: a superseded attempt never publishes, and a timeout stub never replaces a real verdict
+     * for the attempt it describes. A real result arriving late still lands.
+     *
+     * <p>Separated from {@link #publishState} because the rule, not the lock, is the part worth
+     * asserting: it holds for any pair of arrival orders, and a test that exercised it through the real
+     * fields would change what {@link #last()} reports for every later test.
+     */
+    static boolean mayPublish(int attempt, boolean real, int published, boolean publishedWasReal) {
+        if (attempt < published) {
+            // Lower is normally superseded — but not by a stub. The order this used to get wrong:
+            // attempt 0 stalls, its watchdog times out and starts attempt 1, attempt 1's own watchdog
+            // times out too and publishes a stub, and only then does attempt 0's scrape finally finish.
+            // Returning false here threw that finished scrape away over an attempt-number comparison,
+            // leaving /state and every later report header saying `unavailable` about a source that had
+            // answered. "A higher attempt exists" is not evidence that it answered.
+            return real && !publishedWasReal;
+        }
+        // A stub says only "this attempt has not answered yet". If some attempt already answered, the
+        // statement is no longer true of the process — only of the thread that timed out — and writing
+        // it over a recovered verdict makes /state report `unavailable` for a scrape that worked.
+        return real || !publishedWasReal;
+    }
+
+    /**
+     * Makes one scrape's verdict the one {@code /state} reports, if {@link #mayPublish} allows it.
+     *
+     * <p>Nothing here may touch the log. This runs on the watchdog's {@code Timer} thread, and
+     * {@link AppLogger} writes to disk under its own monitor — a stalled flash write would block
+     * recovery and, because that Timer has a single thread, every later watchdog task with it.
+     *
+     * @param real whether this is a scrape's own answer rather than a timeout stub
+     * @return whether it became the published verdict
+     */
+    private static boolean publishState(Availability a, int attempt, boolean real) {
+        synchronized (PUBLISH) {
+            if (!mayPublish(attempt, real, publishedAttempt, publishedReal)) {
+                return false;
+            }
+            publishedAttempt = attempt;
+            publishedReal = real;
+            last = a;
+            try {
+                CrashReporter reporter = CrashReporter.get();
+                if (reporter != null) {
+                    reporter.setSourceAvailability(a.asMap());
+                }
+            } catch (Throwable ignored) {
+                // best effort
+            }
+            return true;
+        }
+    }
+
+    /**
+     * Writes the durable log line for a verdict on a throwaway daemon thread, so the caller is never the
+     * one waiting on the logger's monitor.
+     *
+     * <p>Used only from the watchdog. Called at most once per attempt — twice per process — so the thread
+     * costs nothing steady, and a hand-off is the whole point: the Timer has a single thread, and
+     * everything later is queued on it. If the write itself stalls, the stranded thing is this daemon
+     * thread, not the next timeout.
+     *
+     * <p>The verdict is already published by the time this returns; handing off the log means the line
+     * can appear a moment after the state it describes. That ordering is the trade, and it is the right
+     * way round — {@code /state} and every later report header carry the truth regardless.
+     */
+    static void logVerdictAsync(final Availability a, final AppLogger logger) {
+        if (logger == null) {
+            return;
+        }
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                logVerdict(a, logger, null);
+            }
+        }, "eo1-crash-log");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /**
+     * The durable log line for one verdict, and the only place its format is decided.
+     *
+     * <p>{@code note} exists because a scrape that arrived too late to be published still has something
+     * worth saying, and writing it as an ordinary {@code crash sources:} line leaves two lines in
+     * {@code files/eo1-app.log} that disagree about the outcome with nothing marking which one
+     * {@code /state} is answering. Say which it is and the stale line stops being a stale claim.
+     */
+    static String verdictLine(Availability a, String note) {
+        return "crash sources: logcat=" + a.logcat
+                + " dropbox=" + a.dropbox + " anr=" + a.anr
+                + " copies=" + a.copies
+                + (a.logcatReason == null ? "" : " reason=" + a.logcatReason)
+                + (note == null ? "" : " (" + note + ")");
+    }
+
+    /** The durable log line for one verdict. Best-effort, and never on the recovery path. */
+    private static void logVerdict(Availability a, AppLogger logger, String note) {
+        try {
+            if (logger != null) {
+                logger.info(TAG, verdictLine(a, note));
+            }
+        } catch (Throwable ignored) {
+            // best effort
+        }
+    }
+
+    /**
+     * A throwable named on one line. These strings become report header values and {@code /state}
+     * fields, and an exception message is free to contain a newline — so the same rule
+     * {@link CrashStore} applies to every header value applies here too.
+     */
+    private static String oneLine(Throwable t) {
+        return CrashStore.oneLine(t == null ? "null" : t.toString());
     }
 
     /**
@@ -210,40 +449,106 @@ public final class CrashSources {
 
     private static void harvestLogcat(File baseDir, AppLogger logger, CommandRunner runner,
             long nowMs, Set<String> known, Availability out) {
-        String text;
-        int exit;
+        Drain d;
         try {
-            Process p = runner.start(LOGCAT_NATIVE);
-            text = capture(p);
-            // Must be read, not ignored: capture() merges stderr, so a rejected logcat — an unknown
-            // buffer name, or READ_LOGS denied on a sideload — yields a non-empty string of error
-            // text that would otherwise be stored as if it were the crash it never read.
-            exit = p.waitFor();
+            d = drain(runner.start(LOGCAT_NATIVE));
         } catch (Throwable t) {
             out.logcat = UNAVAILABLE;
+            out.logcatReason = "exec: " + oneLine(t);
             return;
         }
-        if (exit != 0) {
-            out.logcat = UNAVAILABLE;
-            return;
+        if (d.terminated) {
+            // We ended this child, so its non-zero exit (or the read error our own close provoked) is
+            // our doing and not evidence that the buffer was unreadable. What it wrote before that
+            // point is real output, and the whole reason the drain reads to end of output is to keep
+            // it: discarding a partial capture is how a slow-but-working logcat lost its crash lines.
+            out.logcatReason = "ended by us at the read deadline ("
+                    + (TIMEOUT_MS + REAP_GRACE_MS) + "ms); partial capture of "
+                    + d.text.length() + " chars retained"
+                    + (d.exitKnown && d.exit != 0 ? ", exited " + d.exit : "")
+                    + (d.error != null ? ", read: " + oneLine(d.error) : "");
+            if (d.text.isEmpty()) {
+                // …but there is nothing to keep, and then this is not a partial look, it is no look.
+                // `empty` means "the scrape worked and found nothing native"; applying it to a read
+                // that never returned a byte would tell an operator the buffer held no crash when the
+                // source was never successfully read at all — the exact confusion the reason field and
+                // this word were introduced to keep apart.
+                out.logcat = UNAVAILABLE;
+                return;
+            }
+        } else {
+            if (d.error != null) {
+                out.logcat = UNAVAILABLE;
+                out.logcatReason = "read: " + oneLine(d.error);
+                return;
+            }
+            if (!d.exitKnown) {
+                out.logcat = UNAVAILABLE;
+                out.logcatReason = "no exit status within " + REAP_GRACE_MS
+                        + "ms of the last byte";
+                return;
+            }
+            // Must be read, not ignored: the drain merges stderr, so a rejected logcat — an unknown
+            // buffer name, or READ_LOGS denied on a sideload — yields a non-empty string of error text
+            // that would otherwise be stored as if it were the crash it never read.
+            if (d.exit != 0) {
+                out.logcat = UNAVAILABLE;
+                out.logcatReason = "logcat exited " + d.exit;
+                return;
+            }
         }
-        String crash = filterNativeCrashLines(text);
+        if (d.truncated) {
+            // Appended, not assigned: a read can be both past the retention cap and ended by our
+            // deadline, and dropping either fact would misreport what was actually looked at.
+            out.logcatReason = (out.logcatReason == null ? "" : out.logcatReason + "; ")
+                    + "buffer exceeded " + MAX_OUTPUT_CHARS + " chars; scanned the oldest part only";
+        }
+        boolean[] scanCapped = new boolean[1];
+        String crash = filterNativeCrashLines(d.text, scanCapped);
+        if (scanCapped[0]) {
+            out.logcatReason = (out.logcatReason == null ? "" : out.logcatReason + "; ")
+                    + "more than " + MAX_OUTPUT_LINES + " crash-marked lines; kept the oldest";
+        }
         if (crash.isEmpty()) {
-            // The scrape worked and found nothing native. Distinct from UNAVAILABLE above.
+            // The scrape worked and found nothing native. Distinct from UNAVAILABLE above — but a child
+            // that handed over not one byte did not "find nothing native", it said nothing at all, which
+            // on a sideload is what a denied READ_LOGS looks like when the ROM's logcat exits clean.
+            // `empty` next to `readLogs: denied` in /state reads as a buffer with no crash in it, and an
+            // operator stops looking; the word has to carry that it was an empty answer, not an empty
+            // buffer.
             out.logcat = EMPTY;
+            if (d.text.isEmpty()) {
+                out.logcatReason = (out.logcatReason == null ? "" : out.logcatReason + "; ")
+                        + "logcat returned no output at all";
+            }
             return;
         }
-        String origin = "logcat|" + crash.length();
+        // Length plus content, not length alone. debuggerd's output is a fixed-width template, so two
+        // different native deaths on the same frame normally differ only in the hex of an address and a
+        // thread id — which means their filtered lengths collide constantly. Fingerprinting by length
+        // made a second, genuinely new crash look unchanged and drop it: the store then held the old
+        // death and /state said the buffer had nothing new, which is the opposite of what a crash
+        // archive is for.
+        String origin = "logcat|" + crash.length() + "|" + Integer.toHexString(crash.hashCode());
         if (known.contains(origin)) {
             out.logcat = UNCHANGED;
             return;
         }
-        if (write(baseDir, logger, CrashStore.KIND_LOGCAT, nowMs, origin, null, crash, null)
+        // Carried into the report itself, not only into /state: an artifact of a partial capture has to
+        // say so on its own, because the verdict published later describes a different scrape, and a
+        // truncated log read months afterwards cannot be told from a complete one.
+        Map<String, String> extra = null;
+        if (out.logcatReason != null) {
+            extra = new LinkedHashMap<>();
+            extra.put(HEADER_LOGCAT_REASON, out.logcatReason);
+        }
+        if (write(baseDir, logger, CrashStore.KIND_LOGCAT, nowMs, origin, null, crash, extra)
                 != null) {
             out.logcat = COPIED;
             out.copies++;
         } else {
             out.logcat = UNAVAILABLE;
+            out.logcatReason = "store: could not write the report into " + baseDir.getName();
         }
     }
 
@@ -255,17 +560,36 @@ public final class CrashSources {
      * fill the retention budget with noise and bury the two lines that matter.
      */
     static String filterNativeCrashLines(String buffer) {
+        return filterNativeCrashLines(buffer, null);
+    }
+
+    /**
+     * @param capped a one-element array, set true when matching lines were still in the buffer after
+     *               {@link #MAX_OUTPUT_LINES} had already been kept
+     */
+    static String filterNativeCrashLines(String buffer, boolean[] capped) {
         if (buffer == null || buffer.isEmpty()) {
             return "";
         }
         StringBuilder out = new StringBuilder();
-        int scanned = 0;
+        int kept = 0;
         java.util.StringTokenizer lines = new java.util.StringTokenizer(buffer, "\n");
-        while (lines.hasMoreTokens() && scanned++ < MAX_OUTPUT_LINES) {
+        // Every line is examined. Only retention is bounded.
+        //
+        // The loop used to stop at MAX_OUTPUT_LINES, which made a buffer's size decide whether a crash
+        // was found at all: the newest lines land at the end of a log dump, so a long-but-healthy
+        // buffer lost exactly the native death the scrape exists to catch, silently. Same mistake the
+        // byte cap made, one layer up.
+        while (lines.hasMoreTokens()) {
             String line = lines.nextToken();
             for (String marker : NATIVE_CRASH_MARKERS) {
                 if (line.contains(marker)) {
-                    out.append(line).append('\n');
+                    if (kept < MAX_OUTPUT_LINES) {
+                        out.append(line).append('\n');
+                        kept++;
+                    } else if (capped != null) {
+                        capped[0] = true;
+                    }
                     break;
                 }
             }
@@ -402,44 +726,372 @@ public final class CrashSources {
     private static final java.util.concurrent.atomic.AtomicInteger SEQ =
             new java.util.concurrent.atomic.AtomicInteger(500);
 
+    /** What reading one child to a bounded end produced, and how it ended. */
+    static final class Drain {
+        /**
+         * The output, at most {@link CrashSources#MAX_OUTPUT_CHARS} characters of it. Materialised by
+         * {@link #copy()} from {@link #progress}; the live instance that the workers hold never assigns
+         * it, so there is one place where a result's text becomes fixed.
+         */
+        String text = "";
+        /**
+         * What has been retained so far, appended to by the reader under {@code drain}'s monitor.
+         *
+         * <p>Shared rather than copied forward at intervals, because the reader can be parked in a
+         * blocking read that nothing releases: a snapshot taken only at intervals or only at the cap
+         * loses whatever arrived between them, and losing it makes {@code empty} mean "found nothing"
+         * when it should mean "found something, could not finish reading it". The lock is held for the
+         * append alone and never across a read.
+         */
+        final StringBuilder progress = new StringBuilder();
+        /** Set by the reader under {@code lock}: it has stopped reading, however it stopped. */
+        boolean readDone;
+        /** True when the child reached end of output, as opposed to us giving up on it. */
+        boolean complete;
+        /**
+         * True when we ended the child — at the deadline, or because the read stopped without EOF. Its
+         * exit status is then <i>our</i> kill rather than its own failure, which is the difference
+         * between discarding a working capture and keeping a refused one.
+         */
+        boolean terminated;
+        /** True when there was more output than the retention cap could hold. */
+        boolean truncated;
+        /**
+         * True from the moment the reaper decides to close the pipe out from under the reader. Read by
+         * the reader when it catches an exception, to tell "the source broke" apart from "we just shot
+         * the pipe they were reading" — the exceptions look identical and only the ordering differs.
+         */
+        boolean closedByUs;
+        int exit;
+        boolean exitKnown;
+        /** Why the read itself failed, if it did. */
+        Throwable error;
+
+        /**
+         * This state as a detached object that nobody else can change. Call under {@code drain}'s
+         * monitor, which is what makes the fields below agree with each other and with {@code progress}.
+         */
+        Drain copy() {
+            Drain c = new Drain();
+            c.text = progress.toString();
+            c.readDone = readDone;
+            c.complete = complete;
+            c.terminated = terminated;
+            c.truncated = truncated;
+            c.exit = exit;
+            c.exitKnown = exitKnown;
+            c.error = error;
+            return c;
+        }
+    }
+
     /**
-     * Reads a {@code -d}-style child to completion, bounded by both elapsed time and size.
-     *
-     * <p>The bound is a helper thread that destroys the process at the deadline, because
-     * {@code Process.waitFor(long, TimeUnit)} does not exist before API 26 and a plain
-     * {@code waitFor()} before draining can block forever.
+     * Reads a {@code -d}-style child to completion and returns only its text. Kept because the
+     * discipline it encodes is what tests assert; {@link #drain} is the real thing.
      */
     static String capture(final Process process) throws IOException {
-        final Thread killer = new Thread(new Runnable() {
+        Drain d = drain(process);
+        if (d.error != null) {
+            if (d.error instanceof IOException) {
+                throw (IOException) d.error;
+            }
+            throw new IOException(String.valueOf(d.error));
+        }
+        return d.text;
+    }
+
+    /** Used by the reaper's bounded observation window; a poll that cannot sleep is a poll that spins. */
+    private static void sleepQuietly(long ms) {
+        try {
+            Thread.sleep(ms);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    /** The clock every deadline in this class is measured against. See {@link #remainingMs}. */
+    static long monoNow() {
+        return android.os.SystemClock.elapsedRealtime();
+    }
+
+    /** How much of a deadline is left, measured only against {@link #monoNow}. */
+    static long remainingMs(long beganAt, long budgetMs) {
+        return remainingMs(beganAt, budgetMs, monoNow());
+    }
+
+    /**
+     * The same bound against a supplied reading of the clock, so the property can be asserted for a
+     * clock that moved rather than only for one that behaved.
+     *
+     * <p>Never measure a bound against {@link System#currentTimeMillis()}. These frames boot with no time
+     * at all — one of this app's own logs carries entries stamped {@code 1970-01-01} followed by ones
+     * stamped weeks later — and the first NTP correction can move wall time by hours in either
+     * direction. Subtracting a reading that stepped backwards yields MORE time left than the budget ever
+     * was: a three-second read timeout becomes an open-ended wait, which is precisely the failure these
+     * bounds exist to prevent. {@link #monoNow} avoids that by choosing a since-boot counter; the clamp
+     * below makes it impossible regardless of what any future edit feeds in. A bound may shrink, and it
+     * may go negative. It may never grow.
+     */
+    static long remainingMs(long beganAt, long budgetMs, long nowMs) {
+        long left = beganAt + budgetMs - nowMs;
+        return left > budgetMs ? budgetMs : left;
+    }
+
+    /**
+     * Reads {@code process} to end of output or to the deadline, whichever comes first, and always
+     * leaves it reaped.
+     *
+     * <p>Three threads and one monitor: this method's caller, a reader, and a reaper. The split is what
+     * makes the deadline real rather than conditional.
+     *
+     * <p><b>Exactly one thread ever destroys or waits on the child: the reaper.</b> The reader closes the
+     * stream it was handed and touches nothing else. Until the read and the reap were one thread, the
+     * reader called {@code destroy()} and then {@code waitFor()} in its own {@code finally} while the
+     * deadline helper was still inside {@code destroy()} on the same process — and
+     * {@code java.lang.UNIXProcess} hands the exit status to the first waiter and can leave a second
+     * waiting for a notification already delivered. The scrape thread parked there, on a frame with
+     * nothing wrong with it, and a scrape that never returns publishes no verdict at all.
+     *
+     * <p><b>The read is not on the caller's thread either.</b> Doing so would have made the caller's
+     * bound depend on getting <i>out</i> of a blocked pipe read, which means depending on another
+     * thread's {@code close()} releasing it — behaviour of API 19's process streams that a JVM fake
+     * cannot exercise and that this project has no confirmed hardware read of. Now the caller only ever
+     * waits on a monitor with a timeout, which the JVM guarantees, and the worst case for a wrong
+     * assumption about pipes is a daemon thread nobody will ever join.
+     *
+     * <p>Reading to end of output rather than stopping at the byte cap matters twice over: the child is
+     * never left blocked writing into a pipe nobody empties, and the cap then bounds what is
+     * <i>kept</i> instead of what is <i>seen</i>.
+     */
+    static Drain drain(final Process process) {
+        final Drain d = new Drain();
+        final Object lock = new Object();
+        final long beganAt = monoNow();
+        Thread reaper = new Thread(new Runnable() {
             @Override
             public void run() {
-                try {
-                    Thread.sleep(TIMEOUT_MS);
-                } catch (InterruptedException e) {
-                    return;
+                boolean abandoned;
+                synchronized (lock) {
+                    long left;
+                    while (!d.readDone && (left = remainingMs(beganAt, TIMEOUT_MS)) > 0) {
+                        try {
+                            lock.wait(left);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                    abandoned = !d.readDone;
+                    if (abandoned) {
+                        d.terminated = true;
+                        // Said here, before the close below, so a reader that fails later can tell
+                        // whether its exception is the sound of our pipe closing or of the source being
+                        // broken. Timing is the only thing that distinguishes them.
+                        d.closedByUs = true;
+                    }
                 }
+                if (abandoned) {
+                    // BEFORE destroy(), not after it. destroy() can itself block — the failure mode this
+                    // class exists to survive — and closing the pipe is what lets a reader parked inside
+                    // read() leave it. Doing it first means the reader's retained bytes are in the
+                    // buffer before the caller's bounded wait can expire; doing it after would let a
+                    // wedged destroy() decide how much of the log we keep.
+                    try {
+                        process.getInputStream().close();
+                    } catch (Throwable ignored) {
+                        // best effort
+                    }
+                }
+                int code = 0;
+                boolean known = false;
+                boolean weKilled = abandoned;
+                if (abandoned) {
+                    // A read we gave up on: end the child now, so a parked reader and a live child are
+                    // both left behind for as little time as possible.
+                    try {
+                        process.destroy();
+                    } catch (Throwable ignored) {
+                        // best effort
+                    }
+                }
+                // Observe the exit without ever blocking on it. waitFor() has no timeout before API 26,
+                // so a child that reaches EOF and then hangs — or an error path that completes the reader
+                // while the child is still alive — parked this thread here and leaked the child, which is
+                // the leak the destroy below was meant to prevent and could never reach. exitValue()
+                // says "not yet" instead of blocking, so this thread can wait for the child without
+                // waiting ON it: a child that leaves on its own is still reaped before anything signals
+                // it, so its status stays its own rather than the signal we sent.
+                long observeUntil = beganAt + REAP_OBSERVE_MS;
+                while (true) {
+                    try {
+                        code = process.exitValue();
+                        known = true;
+                        break;
+                    } catch (IllegalThreadStateException stillRunning) {
+                        // alive at the poll; keep the window
+                    } catch (Throwable t) {
+                        break;
+                    }
+                    if (monoNow() >= observeUntil) {
+                        break;
+                    }
+                    sleepQuietly(50L);
+                }
+                if (!known) {
+                    // Still alive with the window gone: this thread is the child's only reaper, so it
+                    // leaves nothing running behind it. Calling that our own termination is what keeps
+                    // the kill out of the exit-status gate that already misread `exited 9` as refusal.
+                    weKilled = true;
+                    try {
+                        process.destroy();
+                    } catch (Throwable ignored) {
+                        // best effort
+                    }
+                    try {
+                        code = process.exitValue();
+                        known = true;
+                    } catch (Throwable ignored) {
+                        // destroyed; the status may simply not be collectable any more
+                    }
+                }
+                // Always, including after a clean reap. On a process that has already been collected this
+                // cannot do anything, and so cannot corrupt the status the poll above just read — but it
+                // is what makes "never leave the child running" true unconditionally rather than true
+                // whenever the reaper happens to reach a particular line.
                 try {
                     process.destroy();
                 } catch (Throwable ignored) {
                     // best effort
                 }
+                synchronized (lock) {
+                    d.exit = code;
+                    d.exitKnown = known;
+                    // Only a kill that explains an otherwise-unremarkable read counts as our
+                    // termination. If the reader reported a failure of its own while the child was
+                    // still alive, stamping this run terminated would route harvestLogcat past its
+                    // read-error check and turn a broken source into a clean `empty` or `copied` — the
+                    // same class of wrong verdict as the exit-status gate reading our signal as
+                    // logcat's. The flag the abandonment path set before closing the pipe is left
+                    // alone: those exceptions are the close's doing, and the reason says so.
+                    if (weKilled && d.error == null) {
+                        d.terminated = true;
+                    }
+                    lock.notifyAll();
+                }
             }
-        }, "eo1-logcat-deadline");
-        killer.setDaemon(true);
-        killer.start();
-        StringBuilder sb = new StringBuilder();
+        }, "eo1-logcat-reap");
+        reaper.setDaemon(true);
+        reaper.start();
+
+        // The read runs on its own daemon thread rather than on the caller's, and that is the difference
+        // between a bound and a promise. The caller's wait below is a monitor timeout, which the JVM
+        // guarantees; reaching it, by contrast, would depend on a blocked pipe read being released by
+        // another thread's close() — behaviour of API 19's process streams that no JVM fake can exercise
+        // and that this project has no hardware to confirm. If that assumption is wrong, the wrongness
+        // is now confined to a daemon thread that will never be waited on, and the scrape still returns
+        // on time and still publishes a verdict.
+        Thread reader = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                readChild(process, d, lock, beganAt);
+            }
+        }, "eo1-logcat-read");
+        reader.setDaemon(true);
+        reader.start();
+
+        Drain out;
+        synchronized (lock) {
+            long left;
+            while ((!d.readDone || !d.exitKnown)
+                    && (left = remainingMs(beganAt,
+                    TIMEOUT_MS + REAP_GRACE_MS)) > 0) {
+                try {
+                    lock.wait(left);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    break;
+                }
+            }
+            if (!d.readDone) {
+                // Out of time with a reader still parked. That is us ending the read by any name, and
+                // the partial-capture rule has to apply to it, not only to the reader that noticed the
+                // deadline itself. Late writes from that reader are harmless: the copy below has already
+                // fixed what the caller will see.
+                d.terminated = true;
+            }
+            // Everything the caller will read is copied under the monitor. Returning the shared
+            // instance would leave harvestLogcat's exit-status decision and its report warnings racing
+            // with a reaper still sitting in waitFor() or a reader that wakes minutes later — both
+            // daemon threads, both writing fields read here with no lock at all.
+            out = d.copy();
+        }
+        return out;
+    }
+
+    /**
+     * Keeps what fits of one read and reports whether anything was dropped.
+     *
+     * <p>Returns the flag rather than writing it, because the writer is a thread the caller may abandon
+     * at any moment: everything the caller reads has to be published under {@code drain}'s lock, and a
+     * per-chunk field write would be a race whose only symptom is a missing warning.
+     *
+     * <p>The test is {@code n > room}, not {@code room <= 0}: the read that straddles the cap discards
+     * characters too, and marking only a fully-refused read left the cap-crossing silent whenever that
+     * last partial read was followed straight by EOF — the common shape, since the cap is an exact
+     * multiple of the read buffer and a real {@code logcat} ends as soon as it is drained.
+     */
+    static boolean retain(StringBuilder sb, char[] buf, int n) {
+        int room = MAX_OUTPUT_CHARS - sb.length();
+        if (room > 0) {
+            sb.append(buf, 0, Math.min(n, room));
+        }
+        return n > room;
+    }
+
+    /**
+     * The reader half of {@link #drain}: drain the pipe to EOF, keep at most the cap, never stop
+     * draining because the cap is full. Runs on its own daemon thread — see {@link #drain} for why.
+     */
+    private static void readChild(Process process, Drain d, Object lock, long beganAt) {
         InputStream is = null;
         Reader r = null;
+        boolean eof = false;
+        boolean failedWhileClosing = false;
+        Throwable error = null;
         try {
             is = process.getInputStream();
             r = new InputStreamReader(is, Charset.forName("UTF-8"));
             char[] buf = new char[4096];
             int n;
-            while (sb.length() < MAX_OUTPUT_CHARS && (n = r.read(buf)) > 0) {
-                sb.append(buf, 0, n);
+            // The child dies at the deadline whether or not this loop notices, so the clock test here
+            // is only against a child that produces output forever and survives destroy().
+            while (remainingMs(beganAt, TIMEOUT_MS) > 0) {
+                n = r.read(buf);
+                if (n < 0) {
+                    eof = true;
+                    break;
+                }
+                if (n == 0) {
+                    continue;
+                }
+                // Held for the append only, never across the read above. Retaining into the shared
+                // buffer here is what makes the caller's snapshot at its deadline contain everything
+                // read so far, however far that is — the cap is not the only place content can matter.
+                synchronized (lock) {
+                    if (retain(d.progress, buf, n)) {
+                        d.truncated = true;
+                    }
+                }
+            }
+        } catch (Throwable t) {
+            error = t;
+            // Captured at the instant of failure, not in the finally: the reaper can start closing the
+            // pipe while this thread is blocked in its own close(), and by then the answer would be true
+            // for the wrong reason.
+            synchronized (lock) {
+                failedWhileClosing = d.closedByUs;
             }
         } finally {
-            killer.interrupt();
             if (r != null) {
                 try {
                     r.close();
@@ -453,19 +1105,29 @@ public final class CrashSources {
                     // best effort
                 }
             }
-            try {
-                process.destroy();
-            } catch (Throwable ignored) {
-                // best effort
-            }
-            try {
-                process.waitFor();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-            } catch (Throwable ignored) {
-                // best effort
+            synchronized (lock) {
+                // Held for the assignments only. What the caller already copied cannot be changed by
+                // these, which is the whole reason a late wake-up from this thread is harmless.
+                d.readDone = true;
+                d.complete = eof;
+                d.error = error;
+                // Only a read that stopped *without* failing means we ran out of time. A stream that
+                // threw is a read failure whatever the clock says, and calling that ours would route
+                // it past the error check and report an unreadable source as having come up empty. The
+                // exception our own close provokes is already covered: the reaper marks this under the
+                // same lock before it closes the pipe.
+                if (error == null && !eof) {
+                    d.terminated = true;
+                } else if (error != null && !failedWhileClosing) {
+                    // Undo a stamp made while this thread was still in flight. The reaper gives up on a
+                    // read it cannot see the end of, and if this reader then reports a failure of its own
+                    // it knew something the stamp did not: the source broke, it was not merely slow.
+                    // Leaving the stamp in place routes harvestLogcat past its read-error check and files
+                    // crash text from a broken source as if it had been read cleanly.
+                    d.terminated = false;
+                }
+                lock.notifyAll();
             }
         }
-        return sb.toString();
     }
 }

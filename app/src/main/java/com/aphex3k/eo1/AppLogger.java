@@ -11,8 +11,6 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.OutputStreamWriter;
-import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.io.Writer;
 import java.nio.charset.Charset;
 import java.text.SimpleDateFormat;
@@ -120,10 +118,18 @@ public final class AppLogger {
         append("E", tag, t != null ? msg + " " + stackTraceToString(t) : msg);
     }
 
+    /**
+     * Renders a trace for the ring buffer and the rolling file.
+     *
+     * <p>Delegates to {@link CrashStore#traceToString} rather than
+     * {@code t.printStackTrace(new PrintWriter(sw))}: this method is called from
+     * {@code CrashReporter.record()}, on the thread that is already dying, and
+     * {@code printStackTrace} recurses once per cause — so a deep cause chain raises
+     * {@link StackOverflowError} there and the whole report is lost. Same rule, same budget, one
+     * fewer version of it to keep honest.
+     */
     private static String stackTraceToString(Throwable t) {
-        StringWriter sw = new StringWriter();
-        t.printStackTrace(new PrintWriter(sw));
-        return sw.toString().trim();
+        return CrashStore.traceToString(t).trim();
     }
 
     private void append(String level, String tag, String msg) {
