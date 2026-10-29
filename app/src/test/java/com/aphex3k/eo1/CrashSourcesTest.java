@@ -589,6 +589,35 @@ public class CrashSourcesTest {
                 worked.asMap().containsKey("Source-Logcat-Reason"));
     }
 
+    @Test
+    public void theReadThatStraddlesTheRetentionCapSaysSo() {
+        // The cap is an exact multiple of the read buffer, so the read that crosses it usually keeps
+        // only part of itself and is followed straight by EOF. Marking truncation solely for a read
+        // refused outright left that — the ordinary case — reporting a complete scan.
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < CrashSources.MAX_OUTPUT_CHARS - 10; i++) {
+            sb.append('x');
+        }
+        CrashSources.Drain d = new CrashSources.Drain();
+
+        CrashSources.retain(sb, new char[4096], 4096, d);
+
+        assertTrue("a partly-kept read must be admitted", d.truncated);
+        assertEquals(CrashSources.MAX_OUTPUT_CHARS, sb.length());
+    }
+
+    @Test
+    public void aTimeoutCannotOverwriteAnAnsweredScrape() {
+        // Two threads publish for an attempt that times out. The timeout must never replace the real
+        // answer that arrived a moment later, and on the last attempt nothing else would fix it.
+        assertFalse(CrashSources.mayPublish(0, false, 0, true));
+        assertTrue("a scrape that answers late still lands",
+                CrashSources.mayPublish(0, true, 0, false));
+        assertFalse("an attempt superseded by a retry does not",
+                CrashSources.mayPublish(0, true, 1, true));
+        assertTrue(CrashSources.mayPublish(1, false, 0, true));
+    }
+
     private static String read(File f) throws IOException {
         java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
         java.io.InputStream in = new java.io.FileInputStream(f);

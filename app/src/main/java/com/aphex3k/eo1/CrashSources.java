@@ -155,13 +155,13 @@ public final class CrashSources {
 
     private static volatile Availability last = new Availability();
 
-    /**
-     * Which attempt the published verdict is allowed to come from: the highest index started so far.
-     * Whether a given attempt's thread has come back is per-attempt state, held by that attempt's own
-     * watchdog, because one process-wide flag lets a late thread answer a retry's watchdog on the
-     * retry's behalf.
-     */
-    private static volatile int newestAttempt = -1;
+    /** Guards which attempt's verdict is the published one; see {@link #publishState}. */
+    private static final Object PUBLISH = new Object();
+
+    private static int publishedAttempt = -1;
+
+    /** Whether what is published came from a scrape rather than from a timeout stub. */
+    private static boolean publishedReal;
 
     private static volatile java.util.Timer watchdog;
 
@@ -187,11 +187,6 @@ public final class CrashSources {
 
     private static void startAttempt(final int attempt, final Context context,
             final AppLogger logger) {
-        // Per attempt, not shared. With one flag for the process, a first attempt whose thread woke up
-        // late would set it true and silence the retry's watchdog, and then publish its own stale
-        // verdict over the retry's recovered one.
-        final boolean[] finished = new boolean[1];
-        newestAttempt = attempt;
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -214,10 +209,11 @@ public final class CrashSources {
                         // Reporting must not become the failure it is reporting.
                     }
                 }
-                finished[0] = true;
-                // Set before the publish so a watchdog reading the flag cannot see "published" as
-                // "still pending"; it only ever acts on a scrape that never came back at all.
-                publish(a, attempt, logger);
+                // A real verdict is published by precedence, not by who arrived first: publishState
+                // refuses to let a timeout stub overwrite it, and refuses this thread's late result if a
+                // retry already answered.
+                publishState(a, attempt, true);
+                logVerdict(a, logger);
             }
         }, "eo1-crash-scrape");
         t.setDaemon(true);
@@ -230,15 +226,18 @@ public final class CrashSources {
         watchdog().schedule(new java.util.TimerTask() {
             @Override
             public void run() {
-                if (finished[0]) {
-                    return;
-                }
                 Availability a = new Availability();
                 a.logcatReason = "scrape did not publish within " + SCRAPE_BUDGET_MS + "ms"
                         + (attempt > 0 ? " (after retry " + attempt + ")" : "");
-                publish(a, attempt, logger);
-                if (attempt < MAX_RETRIES) {
-                    startAttempt(attempt + 1, context, logger);
+                if (publishState(a, attempt, false)) {
+                    // Scheduled before any logging, and reached only when this attempt had not already
+                    // answered: a scrape stalled on the logger's monitor — or a disk that will not take a
+                    // write — must not be able to stall recovery, because this is the Timer's only thread
+                    // and blocking here strands every later watchdog task too.
+                    if (attempt < MAX_RETRIES) {
+                        startAttempt(attempt + 1, context, logger);
+                    }
+                    logVerdict(a, logger);
                 }
             }
         }, SCRAPE_BUDGET_MS);
@@ -254,26 +253,58 @@ public final class CrashSources {
     }
 
     /**
-     * Publishes one scrape's verdict: the read for {@code /state}, the header for reports, the log.
+     * Which of two racing publications may take effect, given what is already published.
      *
-     * <p>A verdict from a superseded attempt is dropped rather than published. It is not wrong about
-     * the store, but it is older than the one already there, and letting a thread that woke up late
-     * overwrite a retry's answer makes {@code /state} depend on which of two daemon threads got there
-     * first.
+     * <p>Two threads publish for any attempt that times out — the worker whenever the scrape eventually
+     * returns, the watchdog when the budget runs out — and a check-then-publish lets the timeout win by
+     * reading "not finished yet" a moment before the scrape completed, replacing a real answer with
+     * {@code unavailable}. On the last attempt nothing later would correct it. So this is a precedence,
+     * not a race: a superseded attempt never publishes, and a timeout stub never replaces a real verdict
+     * for the attempt it describes. A real result arriving late still lands.
+     *
+     * <p>Separated from {@link #publishState} because the rule, not the lock, is the part worth
+     * asserting: it holds for any pair of arrival orders, and a test that exercised it through the real
+     * fields would change what {@link #last()} reports for every later test.
      */
-    private static void publish(Availability a, int attempt, AppLogger logger) {
-        if (attempt < newestAttempt) {
-            return;
+    static boolean mayPublish(int attempt, boolean real, int published, boolean publishedWasReal) {
+        if (attempt < published) {
+            return false;
         }
-        last = a;
-        try {
-            CrashReporter reporter = CrashReporter.get();
-            if (reporter != null) {
-                reporter.setSourceAvailability(a.asMap());
+        return attempt > published || !publishedWasReal || real;
+    }
+
+    /**
+     * Makes one scrape's verdict the one {@code /state} reports, if {@link #mayPublish} allows it.
+     *
+     * <p>Nothing here may touch the log. This runs on the watchdog's {@code Timer} thread, and
+     * {@link AppLogger} writes to disk under its own monitor — a stalled flash write would block
+     * recovery and, because that Timer has a single thread, every later watchdog task with it.
+     *
+     * @param real whether this is a scrape's own answer rather than a timeout stub
+     * @return whether it became the published verdict
+     */
+    private static boolean publishState(Availability a, int attempt, boolean real) {
+        synchronized (PUBLISH) {
+            if (!mayPublish(attempt, real, publishedAttempt, publishedReal)) {
+                return false;
             }
-        } catch (Throwable ignored) {
-            // best effort
+            publishedAttempt = attempt;
+            publishedReal = real;
+            last = a;
+            try {
+                CrashReporter reporter = CrashReporter.get();
+                if (reporter != null) {
+                    reporter.setSourceAvailability(a.asMap());
+                }
+            } catch (Throwable ignored) {
+                // best effort
+            }
+            return true;
         }
+    }
+
+    /** The durable log line for one verdict. Best-effort, and never on the recovery path. */
+    private static void logVerdict(Availability a, AppLogger logger) {
         try {
             if (logger != null) {
                 logger.info(TAG, "crash sources: logcat=" + a.logcat
@@ -714,6 +745,24 @@ public final class CrashSources {
     }
 
     /**
+     * Keeps what fits of one read and says whether anything was dropped.
+     *
+     * <p>The test is {@code n > room}, not {@code room <= 0}: the read that straddles the cap discards
+     * characters too, and marking only a fully-refused read left the cap-crossing silent whenever that
+     * last partial read was followed straight by EOF — which is the common shape, since the cap is an
+     * exact multiple of the read buffer and a real {@code logcat} ends as soon as it is drained.
+     */
+    static void retain(StringBuilder sb, char[] buf, int n, Drain d) {
+        int room = MAX_OUTPUT_CHARS - sb.length();
+        if (n > room) {
+            d.truncated = true;
+        }
+        if (room > 0) {
+            sb.append(buf, 0, Math.min(n, room));
+        }
+    }
+
+    /**
      * The reader half of {@link #drain}: drain the pipe to EOF, keep at most the cap, never stop
      * draining because the cap is full. Runs on the calling thread.
      */
@@ -739,12 +788,7 @@ public final class CrashSources {
                 if (n == 0) {
                     continue;
                 }
-                int room = MAX_OUTPUT_CHARS - sb.length();
-                if (room <= 0) {
-                    d.truncated = true;
-                } else {
-                    sb.append(buf, 0, Math.min(n, room));
-                }
+                retain(sb, buf, n, d);
             }
         } catch (Throwable t) {
             error = t;
