@@ -138,7 +138,7 @@ public final class CrashSources {
             m.put("Source-Dropbox", dropbox);
             m.put("Source-Anr", anr);
             if (logcatReason != null) {
-                m.put("Source-Logcat-Reason", logcatReason);
+                m.put(HEADER_LOGCAT_REASON, logcatReason);
             }
             return m;
         }
@@ -146,13 +146,22 @@ public final class CrashSources {
 
     private static final String TAG = "EO1-crash";
 
+    /**
+     * One name for the reason, shared by the report header that carries it and the map {@code /state}
+     * and Java-crash headers are built from. A scraped artifact and a later report must not be able to
+     * disagree about what field holds it.
+     */
+    static final String HEADER_LOGCAT_REASON = "Source-Logcat-Reason";
+
     private static volatile Availability last = new Availability();
 
     /**
-     * Whether a scrape thread is expected to publish. Cleared by that thread in a {@code finally}, so
-     * the watchdog's only read is "has anybody come back yet".
+     * Which attempt the published verdict is allowed to come from: the highest index started so far.
+     * Whether a given attempt's thread has come back is per-attempt state, held by that attempt's own
+     * watchdog, because one process-wide flag lets a late thread answer a retry's watchdog on the
+     * retry's behalf.
      */
-    private static volatile boolean scrapeFinished = true;
+    private static volatile int newestAttempt = -1;
 
     private static volatile java.util.Timer watchdog;
 
@@ -178,7 +187,11 @@ public final class CrashSources {
 
     private static void startAttempt(final int attempt, final Context context,
             final AppLogger logger) {
-        scrapeFinished = false;
+        // Per attempt, not shared. With one flag for the process, a first attempt whose thread woke up
+        // late would set it true and silence the retry's watchdog, and then publish its own stale
+        // verdict over the retry's recovered one.
+        final boolean[] finished = new boolean[1];
+        newestAttempt = attempt;
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
@@ -201,11 +214,10 @@ public final class CrashSources {
                         // Reporting must not become the failure it is reporting.
                     }
                 }
-                publish(a, logger);
-                // After the publish: the flag means "the read is already the real verdict", not
-                // merely "a thread stopped", or the watchdog could read a finished scrape as one
-                // that never published.
-                scrapeFinished = true;
+                finished[0] = true;
+                // Set before the publish so a watchdog reading the flag cannot see "published" as
+                // "still pending"; it only ever acts on a scrape that never came back at all.
+                publish(a, attempt, logger);
             }
         }, "eo1-crash-scrape");
         t.setDaemon(true);
@@ -218,13 +230,13 @@ public final class CrashSources {
         watchdog().schedule(new java.util.TimerTask() {
             @Override
             public void run() {
-                if (scrapeFinished) {
+                if (finished[0]) {
                     return;
                 }
                 Availability a = new Availability();
                 a.logcatReason = "scrape did not publish within " + SCRAPE_BUDGET_MS + "ms"
                         + (attempt > 0 ? " (after retry " + attempt + ")" : "");
-                publish(a, logger);
+                publish(a, attempt, logger);
                 if (attempt < MAX_RETRIES) {
                     startAttempt(attempt + 1, context, logger);
                 }
@@ -241,8 +253,18 @@ public final class CrashSources {
         }
     }
 
-    /** Publishes one scrape's verdict: the read for {@code /state}, the header for reports, the log. */
-    private static void publish(Availability a, AppLogger logger) {
+    /**
+     * Publishes one scrape's verdict: the read for {@code /state}, the header for reports, the log.
+     *
+     * <p>A verdict from a superseded attempt is dropped rather than published. It is not wrong about
+     * the store, but it is older than the one already there, and letting a thread that woke up late
+     * overwrite a retry's answer makes {@code /state} depend on which of two daemon threads got there
+     * first.
+     */
+    private static void publish(Availability a, int attempt, AppLogger logger) {
+        if (attempt < newestAttempt) {
+            return;
+        }
         last = a;
         try {
             CrashReporter reporter = CrashReporter.get();
@@ -384,7 +406,15 @@ public final class CrashSources {
             out.logcat = UNCHANGED;
             return;
         }
-        if (write(baseDir, logger, CrashStore.KIND_LOGCAT, nowMs, origin, null, crash, null)
+        // Carried into the report itself, not only into /state: an artifact of a partial capture has to
+        // say so on its own, because the verdict published later describes a different scrape, and a
+        // truncated log read months afterwards cannot be told from a complete one.
+        Map<String, String> extra = null;
+        if (out.logcatReason != null) {
+            extra = new LinkedHashMap<>();
+            extra.put(HEADER_LOGCAT_REASON, out.logcatReason);
+        }
+        if (write(baseDir, logger, CrashStore.KIND_LOGCAT, nowMs, origin, null, crash, extra)
                 != null) {
             out.logcat = COPIED;
             out.copies++;
@@ -736,9 +766,12 @@ public final class CrashSources {
             d.complete = eof;
             d.error = error;
             synchronized (lock) {
-                // Not reaching EOF means the deadline ended this read, whatever the child's own status
-                // then says — so mark it here as well as in the reaper, whose view can be earlier.
-                if (!eof) {
+                // Only a read that stopped *without* failing means we ran out of time. A stream that
+                // threw is a read failure whatever the clock says, and calling that ours would route it
+                // past the error check and report an unreadable source as having come up empty. The
+                // exception our own close provokes is already covered: the reaper marks this under the
+                // same lock before it closes the pipe.
+                if (error == null && !eof) {
                     d.terminated = true;
                 }
                 d.readDone = true;

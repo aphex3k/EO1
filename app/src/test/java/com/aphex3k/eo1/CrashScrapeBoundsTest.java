@@ -1,5 +1,6 @@
 package com.aphex3k.eo1;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
@@ -378,6 +379,87 @@ public class CrashScrapeBoundsTest {
         org.junit.Assert.assertEquals(
                 "crash lines already read must survive our own deadline", 1, infos.length);
         org.junit.Assert.assertEquals(CrashStore.KIND_LOGCAT, infos[0].kind);
+
+        // And the caveat travels with the artifact, not only with the live verdict: a partial log read
+        // opened months later has to say it was partial, because /state by then describes another boot.
+        String head = firstLines(new File(baseDir, infos[0].name), 25);
+        assertTrue("the report must carry its own truncation evidence:\n" + head,
+                head.contains("Source-Logcat-Reason"));
+    }
+
+    @Test
+    public void aStreamThatFailsIsNotAnEmptyBuffer() throws Exception {
+        // The failure must stay a failure. Marking "we terminated this" for any read that did not reach
+        // EOF routes a throwing stream past the read-error check, and an unreadable source comes up
+        // reading "empty" — which is the one verdict that tells an operator to stop looking.
+        File baseDir = temp.newFolder("crashes5");
+        File dropbox = emptyDir("dropbox5");
+        File anr = emptyDir("anr5");
+
+        CrashSources.Availability a = CrashSources.scrape(baseDir, null,
+                new Runner(new ThrowingChild()), T0, dropbox, anr);
+
+        org.junit.Assert.assertEquals(CrashSources.UNAVAILABLE, a.logcat);
+        assertTrue("and it must name the read, not a deadline: " + a.logcatReason,
+                a.logcatReason != null && a.logcatReason.startsWith("read:"));
+        assertEquals(0, CrashStore.list(baseDir).length);
+    }
+
+    /** Reads output that dies the moment anything asks for it, without ever reaching EOF. */
+    private static final class ThrowingChild extends Process {
+        @Override
+        public InputStream getInputStream() {
+            return new InputStream() {
+                @Override
+                public int read() throws IOException {
+                    throw new IOException("unexpected EOF while reading header");
+                }
+
+                @Override
+                public int read(byte[] b, int off, int len) throws IOException {
+                    throw new IOException("unexpected EOF while reading header");
+                }
+            };
+        }
+
+        @Override
+        public OutputStream getOutputStream() {
+            return new ByteArrayOutputStream();
+        }
+
+        @Override
+        public InputStream getErrorStream() {
+            return new ByteArrayInputStream(new byte[0]);
+        }
+
+        @Override
+        public int waitFor() {
+            return 0;
+        }
+
+        @Override
+        public int exitValue() {
+            return 0;
+        }
+
+        @Override
+        public void destroy() {
+        }
+    }
+
+    private static String firstLines(File f, int n) throws IOException {
+        StringBuilder sb = new StringBuilder();
+        java.io.BufferedReader r = new java.io.BufferedReader(
+                new java.io.InputStreamReader(new java.io.FileInputStream(f), "UTF-8"));
+        try {
+            String line;
+            while (n-- > 0 && (line = r.readLine()) != null) {
+                sb.append(line).append('\n');
+            }
+        } finally {
+            r.close();
+        }
+        return sb.toString();
     }
 
     @Test
