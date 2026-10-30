@@ -313,6 +313,25 @@ has landed — an EO1 on the stock ROM runs every video on the platform MediaPla
 5. HEVC (or other incompatible) plays via TsPlayer/MediaPlayer; on failure it falls back to Immich /video/playback (images: preview thumbnail)
 6. Force Ts failure (corrupt file) → log `TsPlayer → MediaPlayer fallback` then thumbnail/next asset path
 
+Steps 7–9 are the parts of this branch that no JVM test can reach, because they are the wiring around a
+live Activity rather than the helpers:
+
+7. **The probe, on both frames.** `/state` → `video.systemWrite` must report `registrant: present` and a
+   `clientPath` on the EO2. On the EO1 either value is a finding in its own right — that field is what
+   Phase B of the table below waits on. `pending` after a minute means the reflective lookup did not
+   settle; `unreadable` means it answered a question about the framework, not about the service.
+8. **A clip the frame cannot draw** (render-silent, not corrupt). Play something decodes-but-does-not-
+   paint and confirm: `/state` shows `renderSilent: true`, the still preview appears on the *next*
+   rotation, `eo1-app.log` says `noteRenderSilent`, and the Immich asset carries **no**
+   `EO1_INCOMPATIBLE` tag. Then confirm the opposite for a genuinely broken file — that one must still
+   be tagged. A build that tags the silent clip has regressed the one verdict this app must never
+   write to the user's library.
+9. **The no-transcode dead end on the single-engine frame.** On the EO1, against an Immich with no
+   transcodes, a video that fails to display must log `has no degraded source distinct from its
+   original`, must not download a second copy (watch the cache: one `<id>_fb.*`, never two names for
+   the same bytes), and must still reach its terminal outcome — tag if it was refused, show the still if
+   it merely painted nothing. Repeat after a restart, since both verdicts are per-process.
+
 To force MediaPlayer only: set `buildConfigField "boolean", "USE_TSPLAYER", "false"` and rebuild.
 
 ## Packaging notes
