@@ -472,11 +472,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // frame's video path that cannot be recovered afterwards: logcat on a device that has been up for
         // hours is gone, and a panel that lost its preferred engine looks from outside exactly like a
         // panel showing a video that renders nothing. The line above reaches logcat only.
+        //
+        // Recorded on every launch rather than only on failure. An engine that loaded is a fact with
+        // no other durable record — /state says which engine is active now, and nothing says which one
+        // this frame booted intending to use — so a build that ever fixed the load would delete the
+        // only line that distinguishes "MediaPlayer by choice" from "MediaPlayer because something
+        // broke".
         String tsLoadError = TsPlayerNative.getLoadError();
-        if (tsLoadError != null) {
-            this.appLogger.info(TAG, "TsPlayer native library unavailable (" + tsLoadError
-                    + "); every video on this frame runs on the platform MediaPlayer");
-        }
+        this.appLogger.info(TAG, "video engine: "
+                + (preferTsPlayer ? VideoEngineReport.TS_PLAYER : VideoEngineReport.MEDIA_PLAYER)
+                + " (USE_TSPLAYER=" + BuildConfig.USE_TSPLAYER
+                + " native=" + (tsLoadError == null ? "loaded"
+                        : "failed: " + VideoEngineReport.loadSentence(tsLoadError)) + ")");
+        // Whether this ROM registers the service the native player waits on. Read here rather than
+        // at the line above, because that line is written synchronously and this answer is not: a
+        // verdict taken from a settled read belongs in /state, where it can be re-asked, not in a
+        // boot log that would print "pending" on every frame forever.
+        SystemWriteServiceProbe.refreshAsync();
         // What the backlight restore actually found, in the log that survives a reboot. A frame at
         // 0.3 has one of three histories and they are not the same report: a level that came off
         // disk, a level this process is guessing because the store would not answer, and a frame
@@ -1838,6 +1850,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     private void assetFallback(String assetId, WeakReference<MainActivity> activityReference,
                                boolean isVideo, File file, DisplayStage stage) {
+        assetFallback(assetId, activityReference, isVideo, file, stage, false);
+    }
+
+    /**
+     * @param silentDescent true when the rung above was left because it put <b>nothing</b> on the panel
+     *                      rather than because it refused the file. Only the paint watchdog can say so,
+     *                      and the dead end at the bottom of the ladder means two different things
+     *                      depending on it — see {@code MediaManager#displayThumbnailAsset}.
+     */
+    private void assetFallback(String assetId, WeakReference<MainActivity> activityReference,
+                               boolean isVideo, File file, DisplayStage stage,
+                               boolean silentDescent) {
         // assetId may be null (a display that came from no pool asset); Objects.equals keeps
         // this guard null-safe (a bare assetId.equals() would NPE and kill the app).
         if (isVideo && !Objects.equals(assetId, activeVideoAssetId)) {
@@ -1848,7 +1872,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // nothing all arrive at this line. Counted, not judged: a failure that reaches the last rung
         // becomes an incompatibility verdict somewhere else.
         displayFailedCount++;
-        playbackFallback(assetId, activityReference, isVideo, file, stage);
+        playbackFallback(assetId, activityReference, isVideo, file, stage, silentDescent);
     }
 
     /**
@@ -1866,7 +1890,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * too, which is the rung below.
      */
     private void playbackFallback(String assetId, WeakReference<MainActivity> activityReference,
-                                  boolean isVideo, File file, DisplayStage stage) {
+                                  boolean isVideo, File file, DisplayStage stage,
+                                  boolean silentDescent) {
         // restoreImageViewAfterVideoFailure is called at each transition that stops showing
         // video, never before a rung that immediately starts another video.
         if (assetId == null) {
@@ -1912,7 +1937,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         MainActivity activity = activityReference.get();
         if (activity != null) {
-            mediaManager.displayThumbnailAsset(activity, assetId, isVideo);
+            mediaManager.displayThumbnailAsset(activity, assetId, isVideo, silentDescent);
         }
         // Local uploads may point at the persistent original in filesDir/uploaded;
         // removeFromCache's file-based guards (cache-dir match + owned-name check) make
@@ -2941,15 +2966,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         lastVideoStats = probe.stats;
         lastVideoDurationMs = probe.stats.durationMs;
         lastFrameOrientation = frameOrientationWord(framePortrait);
+        // Said with preferTsPlayer in the sentence, not from the routing outcome alone: this method
+        // decides which engine a clip is suitable for, and on a frame whose native library never
+        // loaded the answer it hands to selectVideoPlayer is discarded. Naming TsPlayer here while
+        // MediaPlayer composites the clip is what made an EO1's log read like an EO2's.
+        String engineWord = VideoEngineReport.engineWord(forceFallback, preferTsPlayer);
         Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
                 + " coded=" + width + "x" + height
-                + " frame=" + lastFrameOrientation + " player="
-                + (forceFallback ? "MediaPlayer" : "TsPlayer")
+                + " frame=" + lastFrameOrientation + " player=" + engineWord
                 + " " + describeStream(probe));
         debugInformationProvided(new DebugInformation("videoRouting",
                 "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
-                        + " frame=" + lastFrameOrientation + " -> "
-                        + (forceFallback ? "MediaPlayer" : "TsPlayer") + "; "
+                        + " frame=" + lastFrameOrientation + " -> " + engineWord + "; "
                         + describeStream(probe)));
         return !forceFallback;
     }
@@ -3355,8 +3383,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
         // Earlier rungs descend exactly as an error would, so a clip that silently paints nothing
-        // spends the same engine and degraded-source attempts as one that refuses to decode loudly.
-        assetFallback(assetId, activityReference, true, file, stage);
+        // spends the same engine and degraded-source attempts as one that refuses to decode loudly —
+        // but it is this call that says so, and the difference decides whether the file gets tagged.
+        assetFallback(assetId, activityReference, true, file, stage, true);
     }
 
     /**
@@ -3725,6 +3754,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (tsLoadError != null) {
             video.addProperty("tsLoadError", tsLoadError);
         }
+        // tsLoadError says a soname was not on the path. This says whether the service behind it is
+        // registered, which is the fact that decides whether supplying that soname fixes the frame or
+        // freezes it — and it is read through the framework, never by loading the library that hangs.
+        video.add("systemWrite", SystemWriteServiceProbe.report());
         if (!activeVideoPath.isEmpty()) {
             video.addProperty("path", activeVideoPath);
             video.addProperty("stage", activeVideoStage);
