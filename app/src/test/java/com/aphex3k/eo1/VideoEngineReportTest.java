@@ -60,6 +60,25 @@ public class VideoEngineReportTest {
         assertNull(VideoEngineReport.loadSentence(null));
     }
 
+    /**
+     * The same wrapper form, for a dependency that <em>is</em> on the path and failed anyway. Saying
+     * "not on this ROM's library path" here would send an operator off to ship a file the frame
+     * already has.
+     */
+    @Test
+    public void aDependencyThatExistsButWillNotLoadKeepsItsRealCause() {
+        String unresolved = "UnsatisfiedLinkError: dlopen failed: could not load library"
+                + " \"libsystemwriteservice.so\" needed by \"libTsPlayer-jni.so\"; caused by cannot"
+                + " locate symbol \"_ZN7android19ISystemWriteService11asInterfaceERKNS_2spINS_7IBinderEEE\""
+                + " referenced by \"libTsPlayer-jni.so\"";
+        assertEquals(unresolved, VideoEngineReport.loadSentence(unresolved));
+
+        String badElf = "UnsatisfiedLinkError: dlopen failed: could not load library"
+                + " \"libsystemwriteservice.so\" needed by \"libTsPlayer-jni.so\"; caused by\"/system/lib"
+                + "/libsystemwriteservice.so\" has bad ELF magic";
+        assertEquals(badElf, VideoEngineReport.loadSentence(badElf));
+    }
+
     /** A malformed shape must not become a confident wrong sentence. */
     @Test
     public void aTruncatedLinkerMessageIsNotRewritten() {

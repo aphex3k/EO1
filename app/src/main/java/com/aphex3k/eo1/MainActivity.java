@@ -1850,6 +1850,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     private void assetFallback(String assetId, WeakReference<MainActivity> activityReference,
                                boolean isVideo, File file, DisplayStage stage) {
+        assetFallback(assetId, activityReference, isVideo, file, stage, false);
+    }
+
+    /**
+     * @param silentDescent true when the rung above was left because it put <b>nothing</b> on the panel
+     *                      rather than because it refused the file. Only the paint watchdog can say so,
+     *                      and the dead end at the bottom of the ladder means two different things
+     *                      depending on it — see {@code MediaManager#displayThumbnailAsset}.
+     */
+    private void assetFallback(String assetId, WeakReference<MainActivity> activityReference,
+                               boolean isVideo, File file, DisplayStage stage,
+                               boolean silentDescent) {
         // assetId may be null (a display that came from no pool asset); Objects.equals keeps
         // this guard null-safe (a bare assetId.equals() would NPE and kill the app).
         if (isVideo && !Objects.equals(assetId, activeVideoAssetId)) {
@@ -1860,7 +1872,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // nothing all arrive at this line. Counted, not judged: a failure that reaches the last rung
         // becomes an incompatibility verdict somewhere else.
         displayFailedCount++;
-        playbackFallback(assetId, activityReference, isVideo, file, stage);
+        playbackFallback(assetId, activityReference, isVideo, file, stage, silentDescent);
     }
 
     /**
@@ -1878,7 +1890,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * too, which is the rung below.
      */
     private void playbackFallback(String assetId, WeakReference<MainActivity> activityReference,
-                                  boolean isVideo, File file, DisplayStage stage) {
+                                  boolean isVideo, File file, DisplayStage stage,
+                                  boolean silentDescent) {
         // restoreImageViewAfterVideoFailure is called at each transition that stops showing
         // video, never before a rung that immediately starts another video.
         if (assetId == null) {
@@ -1924,7 +1937,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         MainActivity activity = activityReference.get();
         if (activity != null) {
-            mediaManager.displayThumbnailAsset(activity, assetId, isVideo);
+            mediaManager.displayThumbnailAsset(activity, assetId, isVideo, silentDescent);
         }
         // Local uploads may point at the persistent original in filesDir/uploaded;
         // removeFromCache's file-based guards (cache-dir match + owned-name check) make
@@ -3370,8 +3383,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
         // Earlier rungs descend exactly as an error would, so a clip that silently paints nothing
-        // spends the same engine and degraded-source attempts as one that refuses to decode loudly.
-        assetFallback(assetId, activityReference, true, file, stage);
+        // spends the same engine and degraded-source attempts as one that refuses to decode loudly —
+        // but it is this call that says so, and the difference decides whether the file gets tagged.
+        assetFallback(assetId, activityReference, true, file, stage, true);
     }
 
     /**

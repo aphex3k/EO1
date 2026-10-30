@@ -135,9 +135,31 @@ public class MediaManagerFallbackSourceTest {
         assertFalse(MediaManager.hasNoDistinctFallback(asset.key(), asset, preview, true, known()));
     }
 
+    /**
+     * The mark is a stand-in for a probe that could not answer — never an override of one that did. An
+     * operator who generates transcodes yesterday gets the new encode on the next failure, not after a
+     * power-cycle: metadata is the one thing in this pipeline allowed to be stale, and a verdict the
+     * frame cannot undo would be a lie about the user's library.
+     */
+    @Test
+    public void aFreshDistinctSizeOutranksTheRememberedMark() {
+        MediaAsset asset = video("a5b", 31617645L);
+        MediaSource transcoded = MediaSource.remoteVideoPlayback(NOTHING, Long.valueOf(8000000L));
+        assertFalse("the transcode exists now, so it is the fallback",
+                MediaManager.hasNoDistinctFallback(asset.key(), asset, transcoded, true,
+                        known(asset.key())));
+    }
+
+    @Test
+    public void aFreshIdenticalSizeConfirmsTheMarkWithoutNeedingIt() {
+        MediaAsset asset = video("a5c", 31617645L);
+        MediaSource same = MediaSource.remoteVideoPlayback(NOTHING, Long.valueOf(31617645L));
+        assertTrue(MediaManager.hasNoDistinctFallback(asset.key(), asset, same, true, known()));
+    }
+
     /** A mark taken once, so the cycle after it does not re-probe the endpoint for the same answer. */
     @Test
-    public void aRememberedVerdictIsHonoredWithoutReprobing() {
+    public void aRememberedVerdictIsHonoredWhenTheProbeCannotAnswer() {
         MediaAsset asset = video("a5", 31617645L);
         MediaSource probeCouldNotAnswer = MediaSource.remoteVideoPlayback(NOTHING, null);
         assertTrue(MediaManager.hasNoDistinctFallback(asset.key(), asset,

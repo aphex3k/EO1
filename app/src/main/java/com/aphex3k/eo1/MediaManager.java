@@ -1672,7 +1672,21 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     @Override
     public void displayThumbnailAsset(Activity activity, String assetKey, boolean isVideo) {
-        displayFallbackSource(activity, assetKey, isVideo, true);
+        displayFallbackSource(activity, assetKey, isVideo, true, false);
+    }
+
+    /**
+     * The same rung, for a descent that happened because the rung above put <b>nothing</b> on the
+     * panel rather than because it was refused.
+     *
+     * <p>The distinction decides what a dead end here means. A clip that decoded to no pixels is a
+     * fact about this device's decoder, so running out of rungs records render-silence and shows the
+     * still preview, and never reaches the server. A clip that was refused is a verdict on the file,
+     * and gets the tag. Only the last rung can tell them apart, which is why the caller says so.
+     */
+    public void displayThumbnailAsset(Activity activity, String assetKey, boolean isVideo,
+                                      boolean silentDescent) {
+        displayFallbackSource(activity, assetKey, isVideo, true, silentDescent);
     }
 
     /**
@@ -1683,7 +1697,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      *                     problem to be tagged for.
      */
     private void displayFallbackSource(final Activity activity, final String assetKey,
-                                       final boolean isVideo, final boolean tagOnDeadEnd) {
+                                       final boolean isVideo, final boolean tagOnDeadEnd,
+                                       final boolean silentDescent) {
         final String key = assetKey;
         // Read on the caller's thread: currentAsset belongs to the rotation, and this Runnable is free
         // to run after it has moved on. A stale reference costs nothing — the key comparison below is
@@ -1710,15 +1725,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     return;
                 }
                 if (hasNoDistinctFallback(key, asset, source, isVideo, noTranscodeVideoKeys)) {
-                    noTranscodeVideoKeys.add(key);
-                    // Also the display side of the sweep acquireFallbackSource cannot reach: a
-                    // duplicate an older build left in the cache gets removed here, not remembered.
-                    discardByteIdenticalFallback(asset, activity.getCacheDir());
-                    Log.i(TAG, "displayFallbackSource: " + key + " has no degraded source distinct"
-                            + " from its original; not fetching a second copy");
-                    if (tagOnDeadEnd) {
-                        tagAssetAsIncompatible(key);
-                    }
+                    finishWithoutDistinctSource(activity, key, asset, activity.getCacheDir(), isVideo,
+                            tagOnDeadEnd, silentDescent, "not fetching a second copy");
                     return;
                 }
                 if (source == null || source.opener == null) {
@@ -1731,7 +1739,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 }
                 try {
                     mediaCacheDir = activity.getCacheDir();
-                    File thumbnail = acquireRemoteFile(asset, source, activity.getCacheDir());
+                    final File cacheDir = mediaCacheDir;
+                    File thumbnail = acquireRemoteFile(asset, source, cacheDir);
+                    // The probe is the cheap way to avoid a fallback that is only a copy of the
+                    // original; this is the guarantee that one does not survive when the probe could
+                    // not answer — and, on this path, when acquireRemoteFile handed back a duplicate
+                    // an earlier run had already cached, which it compares against nothing.
+                    if (thumbnail != null && source.isVideoPlayback() && asset.sizeBytes != null
+                            && thumbnail.length() == asset.sizeBytes.longValue()) {
+                        finishWithoutDistinctSource(activity, key, asset, cacheDir, isVideo,
+                                tagOnDeadEnd, silentDescent, "the fetched copy is the original");
+                        return;
+                    }
                     final File shown = thumbnail;
                     activity.runOnUiThread(new Runnable() {
                         @Override
@@ -1788,7 +1807,38 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
     /** Displays a render-silent video as its still preview. Idempotent; records nothing. */
     public void showRenderSilentStill(Activity activity, String assetKey) {
-        displayFallbackSource(activity, assetKey, false, false);
+        displayFallbackSource(activity, assetKey, false, false, false);
+    }
+
+    /**
+     * The ladder has run out on a video whose degraded source is the original under another name.
+     *
+     * <p>The rung is genuinely spent — routing is content-deterministic, so the same bytes reach the
+     * same player that just declined to draw them — but what that <em>means</em> depends on the rung
+     * above. Arrived at after a clip put no pixels on the panel, this is the device failing, and the
+     * asset is remembered as render-silent and shown as a still, exactly as the paint watchdog would
+     * have concluded after spending a download to observe it. Arrived at after an explicit refusal, it
+     * is the file's verdict and the tag is the only channel the operator has. Getting this backwards
+     * writes {@code EO1_INCOMPATIBLE} into a real library for a clip the frame merely cannot draw, and
+     * makes the clip retry as video forever instead of showing its preview.
+     */
+    private void finishWithoutDistinctSource(Activity activity, String key, MediaAsset asset,
+                                            File cacheDir, boolean isVideo, boolean tagOnDeadEnd,
+                                            boolean silentDescent, String why) {
+        noTranscodeVideoKeys.add(key);
+        // The display side of the sweep the acquisition path cannot reach: a duplicate this build or
+        // an older one left in the cache is removed here, not merely skipped.
+        discardByteIdenticalFallback(asset, cacheDir);
+        Log.i(TAG, "displayFallbackSource: " + key + " has no degraded source distinct from its"
+                + " original (" + why + ")");
+        if (silentDescent && isVideo) {
+            noteRenderSilent(key);
+            showRenderSilentStill(activity, key);
+            return;
+        }
+        if (tagOnDeadEnd) {
+            tagAssetAsIncompatible(key);
+        }
     }
 
     /**
@@ -1862,18 +1912,23 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * verdict: the asset still lands on the ladder's dead-end branch, having failed to display rather
      * than having failed to download.
      *
-     * <p>The remembered mark is honoured on video-shaped calls only. A still preview is always a
-     * different artifact, and honouring it on an image-shaped call would leave a render-silent clip
-     * showing nothing at all.
+     * <p>The remembered mark is a stand-in for a probe that could not answer, and nothing more: when
+     * this call <em>can</em> compare sizes, the comparison wins, both ways. A mark that outranked a
+     * fresh answer would suppress a transcode the operator produced yesterday until the frame was
+     * power-cycled — and metadata is the one thing in this pipeline that is allowed to be stale.
+     *
+     * <p>The mark applies to video-shaped calls only. A still preview is always a different artifact,
+     * and honouring it on an image-shaped call would leave a render-silent clip showing nothing at all.
      */
     static boolean hasNoDistinctFallback(String key, MediaAsset asset, MediaSource source,
                                          boolean isVideo, Set<String> alreadyKnown) {
         if (source == null) {
             return false;
         }
-        if (source.isVideoPlayback() && source.expectedBytes != null && asset.sizeBytes != null
-                && source.expectedBytes.longValue() == asset.sizeBytes.longValue()) {
-            return true;
+        boolean comparable = source.isVideoPlayback()
+                && source.expectedBytes != null && asset.sizeBytes != null;
+        if (comparable) {
+            return source.expectedBytes.longValue() == asset.sizeBytes.longValue();
         }
         return isVideo && alreadyKnown.contains(key);
     }

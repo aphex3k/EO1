@@ -17,6 +17,7 @@ public final class VideoEngineReport {
     private static final String NEEDED_PREFIX = "could not load library \"";
     private static final String NEEDED_MIDDLE = "\" needed by \"";
     private static final String NEEDED_SUFFIX = "\"";
+    private static final String NOT_FOUND_CAUSE_PREFIX = "caused by library \"";
 
     private VideoEngineReport() {
     }
@@ -39,8 +40,14 @@ public final class VideoEngineReport {
      * read, in {@code /state}'s {@code video.systemWrite} block — and conflating the two is how a
      * frame gets reinstalled against the wrong problem.
      *
-     * @return a sentence naming the missing library, or {@code rawLoadError} unchanged when the
-     *         failure is not the linker's missing-dependency shape
+     * <p>The wrapper form {@code could not load library "X" needed by "Y"} is also what the linker
+     * prints when X <em>exists</em> and failed for another reason — an unresolved symbol, a bad ELF
+     * header. The "not found" cause is the only part of the message that distinguishes an absent
+     * library from a present broken one, so it is required, and its absence means the raw text is the
+     * honest answer.
+     *
+     * @return a sentence naming the missing library, or {@code rawLoadError} unchanged when the failure
+     *         is not provably a missing dependency
      */
     public static String loadSentence(String rawLoadError) {
         if (rawLoadError == null) {
@@ -60,8 +67,13 @@ public final class VideoEngineReport {
         if (end < 0) {
             return rawLoadError;
         }
-        return rawLoadError.substring(nameStart, middle) + " (a dependency of "
-                + rawLoadError.substring(parentStart, end)
+        String missing = rawLoadError.substring(nameStart, middle);
+        // "not found", about this same library, is the only clause that separates a dependency this
+        // ROM does not have from one it has and could not load.
+        if (rawLoadError.indexOf(NOT_FOUND_CAUSE_PREFIX + missing + "\" not found", end) < 0) {
+            return rawLoadError;
+        }
+        return missing + " (a dependency of " + rawLoadError.substring(parentStart, end)
                 + ") is not on this ROM's library path, so the native player cannot be loaded";
     }
 }
