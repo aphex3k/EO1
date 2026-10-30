@@ -299,8 +299,14 @@ On a physical EO2, and on an EO1 only if [Getting TsPlayer onto an EO1](#getting
 has landed — an EO1 on the stock ROM runs every video on the platform MediaPlayer and should:
 
 1. Logcat `EO1: video player: TsPlayer (USE_TSPLAYER=true native=true)`. On an EO1 expect
-   `native=failed`, and read the engine name in the durable `video engine:` line rather than the one in
-   the routing line: routing says which engine a clip is *suitable* for, which is not the same question.
+   `native=failed`. Two lines name the engine and they answer two different questions, so read the one
+   that matches the question: the durable `video engine:` line, once per launch, is the frame's
+   **default** — the engine it will use for a clip nothing routes away, which is the only thing a
+   "does this frame have TsPlayer" check can mean. The per-clip `displayVideo routing: … player=` line
+   is the engine that will actually composite *that* file, and on a healthy EO2 a rotated or
+   wrong-aspect clip correctly says `MediaPlayer` there while the launch line says `TsPlayer`. Neither
+   line is more right than the other; a frame that says one thing at launch and the other per clip is
+   working, not contradicting itself.
 2. Play a known-good local H.264 from Immich cache full-screen
 3. Loop ≥2 minutes without surface loss **and without black flicker between passes** — `/state` shows `loopGen=0` and `lastRestartMethod=native-loop` (no Java recreate)
 4. Image ↔ video handoff and screen off/on
@@ -355,18 +361,28 @@ dead UI that needs a power cable.
 
 | `video.systemWrite.registrant` | ROM client | What to do |
 |---|---|---|
-| `present` | absent | Ship the client. Put it in `app/src/main/jniLibs/armeabi-v7a/` as a **regular git object** (`.gitattributes`: `-filter -diff -merge -text`, following the `gradle-wrapper.jar` exemption — a build-required file must not depend on a fork's ability to serve LFS), and `System.load` it by absolute path **only when `/system/lib/libsystemwriteservice.so` does not exist**, before `System.loadLibrary("TsPlayer-jni")`. `BIND_NOW` means the soname must be resolvable at load, and a library already loaded by absolute path satisfies a later `DT_NEEDED` lookup for its basename. |
+| `present` | absent | Ship the client. Put it in `app/src/main/jniLibs/armeabi-v7a/` as a **regular git object** (`.gitattributes`: `-filter -diff -merge -text`, following the `gradle-wrapper.jar` exemption — a build-required file must not depend on a fork's ability to serve LFS). Then, **in every build that bundles it**, resolve the client before touching TsPlayer: `System.load` the ROM path when the ROM has one, and the bundled path only when the ROM is confirmed not to — and `System.loadLibrary("TsPlayer-jni")` after that. `BIND_NOW` means the soname must be resolvable at load, and a library already loaded by absolute path satisfies the later `DT_NEEDED` lookup by basename, so whichever one is loaded first is the one TsPlayer talks through. Skipping the load when a ROM client exists does **not** achieve that on its own: the `DT_NEEDED` lookup still searches the bundled copy's directory, so the *choice* has to be made by loading, not by declining to. |
 | `present` | present | Nothing to ship: the linker would have found it. A miss with the file on disk is a search-path problem, so preload the path `video.systemWrite.clientPath` names. No blob in the repo. |
 | `absent` | absent | **Do not ship the client.** This is the row where loading it hangs the frame. See the bounded-wait option below. |
 | `unreadable` / `pending` | — | The probe did not answer. Re-measure over a cable; do not decide from this row. |
 
-**Why the existence check is runtime, not build-time.** On API 19 the app's `nativeLibraryDir` precedes
-`/system/lib` in the linker's search, so an *unconditional* `jniLibs/` drop replaces the framework-matched
-client **on the EO2 — the one frame where TsPlayer paints today** — with ours. If the two differ in
-transaction codes, EO2's sysfs pokes start returning defaults to a player that keeps drawing: a silent
-regression on the working frame, invisible to every signal the app has, and not the kind of thing the
-10-minute logcat window would show. A SHA-256 of the in-tree dump against the APK proves nothing about
-EO2's live ROM copy. The guard has to be a check the running frame makes.
+**Why the existence check is runtime, not build-time — and why it must load rather than merely skip.**
+A client shipped inside the APK can answer the `DT_NEEDED` lookup before the ROM's does, which would
+replace the framework-matched client **on the EO2 — the one frame where TsPlayer paints today** with
+ours. Whether it does depends on the linker's search order for a library loaded by a library, which
+varies across AOSP lines and **this repository has not measured it** — an earlier draft of this table
+asserted that the app's `nativeLibraryDir` precedes `/system/lib` on API 19 as though it were a fact,
+and that is exactly the kind of claim that has already cost this branch a correction once. The recipe
+must not depend on the answer: load the ROM client by absolute path when it exists, so the soname is
+already resolved by name before TsPlayer is dlopened, and load the bundled one only when the ROM has
+nothing. Whichever precedence the linker implements, the first loaded wins by lookup order, and the
+frame says which one it chose.
+
+If the two clients differ in transaction codes and ours wins anyway, EO2's sysfs pokes start returning
+defaults to a player that keeps drawing: a silent regression on the working frame, invisible to every
+signal the app has, and not the kind of thing the 10-minute logcat window would show. A SHA-256 of the
+in-tree dump against the APK proves nothing about EO2's live ROM copy. So the guard is a check the
+running frame makes, and the check is expressed as a load.
 
 **And the gate has to be in the build, not in the operator's judgment.** EO1 has no wireless adb and its
 ROM's adbd does not listen on TCP 5555, so a wrong guess there is a wall-mount trip with a keyboard, and
