@@ -1685,6 +1685,10 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private void displayFallbackSource(final Activity activity, final String assetKey,
                                        final boolean isVideo, final boolean tagOnDeadEnd) {
         final String key = assetKey;
+        // Read on the caller's thread: currentAsset belongs to the rotation, and this Runnable is free
+        // to run after it has moved on. A stale reference costs nothing — the key comparison below is
+        // what decides whether it describes this asset.
+        final MediaAsset held = currentAsset;
         new Thread(new Runnable() {
             @Override
             public void run() {
@@ -1693,13 +1697,25 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     Log.w(TAG, "displayFallbackSource: no backend for asset " + key);
                     return;
                 }
-                MediaAsset asset = assetFromKey(key, isVideo);
+                MediaAsset asset = fallbackAssetFor(key, isVideo, held);
                 MediaSource source;
                 try {
                     source = backend.resolveThumbnailFallback(asset);
                 } catch (Exception e) {
                     Log.w(TAG, "displayFallbackSource: " + key, e);
                     postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
+                    if (tagOnDeadEnd) {
+                        tagAssetAsIncompatible(key);
+                    }
+                    return;
+                }
+                if (hasNoDistinctFallback(key, asset, source, isVideo, noTranscodeVideoKeys)) {
+                    noTranscodeVideoKeys.add(key);
+                    // Also the display side of the sweep acquireFallbackSource cannot reach: a
+                    // duplicate an older build left in the cache gets removed here, not remembered.
+                    discardByteIdenticalFallback(asset, activity.getCacheDir());
+                    Log.i(TAG, "displayFallbackSource: " + key + " has no degraded source distinct"
+                            + " from its original; not fetching a second copy");
                     if (tagOnDeadEnd) {
                         tagAssetAsIncompatible(key);
                     }
@@ -1834,6 +1850,56 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return null;
         }
         return backendById.get(key.substring(0, colon));
+    }
+
+    /**
+     * Whether the display path's degraded source is worth fetching at all.
+     *
+     * <p>A server with nothing transcoded answers {@code /video/playback} with the original's own
+     * bytes, so the "degraded" source can be a second copy of the file whose display just failed — the
+     * same trap {@link #acquireResolvedFallback} refuses on the acquisition path, which could not
+     * reach this one while the record built from a key carried no size. Refusing it is not a softer
+     * verdict: the asset still lands on the ladder's dead-end branch, having failed to display rather
+     * than having failed to download.
+     *
+     * <p>The remembered mark is honoured on video-shaped calls only. A still preview is always a
+     * different artifact, and honouring it on an image-shaped call would leave a render-silent clip
+     * showing nothing at all.
+     */
+    static boolean hasNoDistinctFallback(String key, MediaAsset asset, MediaSource source,
+                                         boolean isVideo, Set<String> alreadyKnown) {
+        if (source == null) {
+            return false;
+        }
+        if (source.isVideoPlayback() && source.expectedBytes != null && asset.sizeBytes != null
+                && source.expectedBytes.longValue() == asset.sizeBytes.longValue()) {
+            return true;
+        }
+        return isVideo && alreadyKnown.contains(key);
+    }
+
+    /**
+     * What {@link #assetFromKey} can rebuild from a key alone, enriched with the byte size and file
+     * names that only the asset still in hand carries.
+     *
+     * <p>The display path has no pool record to look at, and every guard that refuses a degraded source
+     * which is really a second copy of the original compares against {@code sizeBytes} — so with a bare
+     * {@code assetFromKey} record they are structurally incapable of firing here, and an Immich with
+     * nothing transcoded gets fetched in full twice.
+     *
+     * <p>{@code type} stays the caller's rather than the asset's, deliberately: {@code isVideo} is what
+     * selects the endpoint and the {@code _fb} extension, and {@link #showRenderSilentStill} passes
+     * false for a video on purpose — handing a render-silent clip its own VIDEO record would ask the
+     * server for the playback stream that just produced no pixels, under a different cache name.
+     */
+    static MediaAsset fallbackAssetFor(String key, boolean isVideo, MediaAsset held) {
+        MediaAsset minimal = assetFromKey(key, isVideo);
+        if (held == null || !key.equals(held.key())) {
+            return minimal;
+        }
+        return new MediaAsset(minimal.id, minimal.backendId, minimal.type, held.durationMs,
+                held.checksum, held.originalFileName, held.originalPath, held.sizeBytes,
+                held.localPath, held.width, held.height);
     }
 
     /** Rebuilds the minimal record a fallback/tagging call needs from an opaque asset key. */
