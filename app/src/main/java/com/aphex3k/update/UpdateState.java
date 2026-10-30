@@ -29,6 +29,19 @@ public class UpdateState {
 
     public State state = State.IDLE;
     /**
+     * The build this cycle is <em>fetching</em>, kept apart from the {@code expected*} fields
+     * because those describe the APK actually on disk. A cycle used to overwrite them the moment
+     * it parsed a manifest, so a process killed during the download or between the copy and the
+     * master rename left state naming bytes that were nowhere on disk while the real staged APK
+     * sat there unowned — unrecoverable at startup, and for an uploaded stage it also lost the
+     * {@link #stagedSource} that protects it. The {@code fetch*} values are promoted into
+     * {@code expected*} only when the swap commits.
+     */
+    public int fetchVersionCode;
+    public String fetchVersionName = "";
+    public String fetchSha256 = "";
+    public long fetchSizeBytes;
+    /**
      * What produced the staged APK. Only {@link #SOURCE_MANIFEST} may be displaced automatically
      * when the host publishes something else: an uploaded APK was put here on purpose, and
      * {@link #SOURCE_UNKNOWN} is whatever a frame had staged before this field existed — neither
@@ -79,6 +92,10 @@ public class UpdateState {
             s.manifestSha256 = previous.manifestSha256;
             s.expectedSizeBytes = previous.expectedSizeBytes;
             s.stagedSource = previous.stagedSource;
+            s.fetchVersionCode = previous.fetchVersionCode;
+            s.fetchVersionName = previous.fetchVersionName;
+            s.fetchSha256 = previous.fetchSha256;
+            s.fetchSizeBytes = previous.fetchSizeBytes;
             s.lastCheckedMs = previous.lastCheckedMs;
             s.attempts = previous.attempts;
         }

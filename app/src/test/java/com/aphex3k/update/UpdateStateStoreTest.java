@@ -174,6 +174,31 @@ public class UpdateStateStoreTest {
         assertEquals("needs-human-confirmation", read.lastError);
     }
 
+    /**
+     * The fetched identity has to reach disk, because it is the only thing that tells a later
+     * process which of the two builds the bytes on disk are.
+     */
+    @Test
+    public void fetchedIdentityRoundTrips() throws Exception {
+        File f = new File(folder.getRoot(), "update-state.json");
+        UpdateStateStore store = new UpdateStateStore(f);
+        UpdateState s = stateIn(UpdateState.State.DOWNLOADING, "");
+        s.stagedSource = UpdateState.SOURCE_UPLOAD;
+        s.fetchVersionCode = 9;
+        s.fetchVersionName = "1.9.0";
+        s.fetchSha256 = "bb0009dcee21620b166f3abfecb5eff7a873be729d1c2d53822e7acc5f34eb9b";
+        s.fetchSizeBytes = 999L;
+        assertTrue(store.write(s));
+
+        UpdateState read = store.read();
+        assertEquals(UpdateState.SOURCE_UPLOAD, read.stagedSource);
+        assertEquals(7, read.expectedVersionCode);
+        assertEquals(9, read.fetchVersionCode);
+        assertEquals("1.9.0", read.fetchVersionName);
+        assertEquals(s.fetchSha256, read.fetchSha256);
+        assertEquals(999L, read.fetchSizeBytes);
+    }
+
     @Test
     public void deleteRemovesState() throws Exception {
         File f = new File(folder.getRoot(), "update-state.json");

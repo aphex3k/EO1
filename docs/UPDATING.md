@@ -115,7 +115,14 @@ Install is a ladder, and a frame walks down it only as far as it can do the work
   anything staged before `stagedSource` existed, which the app cannot attribute) stays exactly where
   you put it until you install it or reset it. If the re-download fails, the old stage survives —
   the state goes back to `STAGED`, not `FAILED`, so the retry keeps running — with the failure in
-  `lastError` and `/logs` naming which gate or which wire it died on.
+  `lastError` and `/logs` naming which gate or which wire it died on. Two things make that survive a
+  crash rather than only a clean failure: the stage's own identity (`expectedVersionCode`,
+  `stagedSha256`, `stagedSource`) is left alone while a replacement is in flight and only promoted
+  when the swap commits, so a frame killed mid-download still knows which build its bytes are and
+  reclaims them at the next launch; and an install that finds a sound private master behind a public
+  copy it cannot re-make stays `STAGED` (`public-copy-failed`) instead of deleting the good APK over
+  a defect in its copy — a full or unmounted `/sdcard` is a condition that clears, and `FAILED`
+  would have stopped the retry that outlives it.
 
 ### The choice that removes every caveat above
 

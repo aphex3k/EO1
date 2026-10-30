@@ -3,6 +3,7 @@ package com.aphex3k.eo1;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
@@ -191,50 +192,94 @@ public class UpdateManagerTest {
     }
 
     /**
-     * The half of the start-up rule that must never delete: an {@code IDLE} state only takes
-     * ownership of bytes it can vouch for, and vouching for an upload is not this code's to do.
+     * The half of the start-up rule that may only ever add a stage back, never delete one: an
+     * {@code IDLE} state left by a killed check takes ownership of the bytes on disk if they match
+     * the stage that was there, or else the build the swap had just committed.
      */
     @Test
-    public void adoptsInterruptedStage_onlyTheHostsOwnVerifiedBytes() {
-        UpdateState interrupted = hostStage(SHA_A);
-        interrupted.state = UpdateState.State.IDLE;
-        assertTrue(UpdateManager.adoptsInterruptedStage(interrupted, true));
+    public void recoversWhicheverIdentityTheBytesMatch() {
+        UpdateState killed = hostStage(SHA_A);
+        killed.state = UpdateState.State.IDLE;
+        killed.fetchVersionCode = 8;
+        killed.fetchVersionName = "1.8.0";
+        killed.fetchSha256 = SHA_B;
+        killed.fetchSizeBytes = 4096L;
 
-        // A master that does not hash to the state is a different build than the state names.
-        assertFalse(UpdateManager.adoptsInterruptedStage(interrupted, false));
+        // The master is still the stage that was here before the check: restore that identity,
+        // source included, so the next check still has to consult judgeStaged about it.
+        UpdateState restored = UpdateManager.recoverInterruptedStage(killed, true, false);
+        assertEquals(UpdateState.State.STAGED, restored.state);
+        assertEquals(7, restored.expectedVersionCode);
+        assertEquals(SHA_A, restored.manifestSha256);
+        assertEquals(UpdateState.SOURCE_MANIFEST, restored.stagedSource);
+        assertEquals("staged-recovered-after-restart", restored.lastError);
+        assertEquals("nothing is pending once a stage is recovered", 0, restored.fetchVersionCode);
 
+        // The master is the build the swap had just committed: promote the fetched identity, which
+        // is the only case where recovery may rewrite what the stage is called.
+        UpdateState promoted = UpdateManager.recoverInterruptedStage(killed, false, true);
+        assertEquals(UpdateState.State.STAGED, promoted.state);
+        assertEquals(8, promoted.expectedVersionCode);
+        assertEquals(SHA_B, promoted.manifestSha256);
+        assertEquals(UpdateState.SOURCE_MANIFEST, promoted.stagedSource);
+        assertEquals(0, promoted.fetchVersionCode);
+
+        // An uploaded stage comes back still marked as one, which is the whole point: without the
+        // source surviving the crash, the next automatic check would overwrite operator bytes.
         UpdateState upload = hostStage(SHA_A);
         upload.state = UpdateState.State.IDLE;
         upload.stagedSource = UpdateState.SOURCE_UPLOAD;
-        assertFalse("a killed POST /update swap leaves operator bytes, not a host stage",
-                UpdateManager.adoptsInterruptedStage(upload, true));
+        UpdateState uploadBack = UpdateManager.recoverInterruptedStage(upload, true, false);
+        assertEquals(UpdateState.SOURCE_UPLOAD, uploadBack.stagedSource);
+        assertEquals(UpdateState.State.STAGED, uploadBack.state);
+        assertFalse("a recovered upload is still not the host's to discard",
+                UpdateManager.mayDiscardStage(uploadBack.stagedSource));
 
-        UpdateState legacy = hostStage(SHA_A);
-        legacy.state = UpdateState.State.IDLE;
-        legacy.stagedSource = UpdateState.SOURCE_UNKNOWN;
-        assertFalse(UpdateManager.adoptsInterruptedStage(legacy, true));
+        // Neither identity matches the bytes: recovery adds nothing. It never deletes either.
+        assertSame(killed, UpdateManager.recoverInterruptedStage(killed, false, false));
+        assertNull(UpdateManager.recoverInterruptedStage(null, true, true));
 
-        // reconcileState news up a blank state once an install is confirmed; expectedVersionCode 0
-        // is that case, and adopting there would re-stage the build already running.
-        UpdateState confirmed = hostStage(SHA_A);
+        // A state that still owns its stage needs no recovery, and a confirmed install — which
+        // reconcileState blanks, shas and all — has nothing for either match to succeed against.
+        UpdateState stillStaged = hostStage(SHA_A);
+        assertSame(stillStaged, UpdateManager.recoverInterruptedStage(stillStaged, true, false));
+        UpdateState confirmed = UpdateState.idle();
         confirmed.state = UpdateState.State.IDLE;
-        confirmed.expectedVersionCode = 0;
-        assertFalse(UpdateManager.adoptsInterruptedStage(confirmed, true));
+        assertSame(confirmed, UpdateManager.recoverInterruptedStage(confirmed, false, false));
+    }
 
-        assertFalse("nothing to adopt when the state still owns the stage",
-                UpdateManager.adoptsInterruptedStage(hostStage(SHA_A), true));
+    @Test
+    public void mayDiscardStage_onlyTheHostsOwnBuild() {
+        assertTrue(UpdateManager.mayDiscardStage(UpdateState.SOURCE_MANIFEST));
+        assertFalse(UpdateManager.mayDiscardStage(UpdateState.SOURCE_UPLOAD));
+        assertFalse("an unattributable stage is left alone, not deleted on an assumption",
+                UpdateManager.mayDiscardStage(UpdateState.SOURCE_UNKNOWN));
+        assertFalse(UpdateManager.mayDiscardStage(null));
     }
 
     /** withState() lists its fields by hand, which is how a new one goes missing quietly. */
     @Test
     public void withState_carriesStagedSourceThroughATransition() {
         UpdateState staged = hostStage(SHA_A);
+        staged.fetchVersionCode = 8;
+        staged.fetchVersionName = "1.8.0";
+        staged.fetchSha256 = SHA_B;
+        staged.fetchSizeBytes = 4096L;
+
         UpdateState failed = UpdateManager.withState(staged, UpdateState.State.FAILED, "boom");
         assertEquals(UpdateState.SOURCE_MANIFEST, failed.stagedSource);
         assertEquals(SHA_A, failed.manifestSha256);
         assertEquals(7, failed.expectedVersionCode);
+        // Both identities have to survive a transition: losing fetch* is how a killed check
+        // becomes an unrecoverable one, since the stage's own fields say nothing about it.
+        assertEquals(8, failed.fetchVersionCode);
+        assertEquals(SHA_B, failed.fetchSha256);
+        assertEquals(4096L, failed.fetchSizeBytes);
+        assertEquals("1.8.0", failed.fetchVersionName);
 
-        assertEquals(UpdateState.SOURCE_MANIFEST, UpdateState.failed(staged, "boom").stagedSource);
+        UpdateState fromFailed = UpdateState.failed(staged, "boom");
+        assertEquals(UpdateState.SOURCE_MANIFEST, fromFailed.stagedSource);
+        assertEquals(SHA_B, fromFailed.fetchSha256);
     }
 
     @Test

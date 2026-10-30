@@ -227,16 +227,19 @@ public class UpdateManager {
                 deleteStagedFiles();
                 notifyDebug("self-update " + current.expectedVersionCode + " confirmed installed; state reset");
             }
-            if (adoptsInterruptedStage(reconciled, stagedIntactAs(reconciled))) {
-                // A re-check that reached the swap and was killed there leaves an IDLE state sitting
-                // on top of a complete, verified stage: reconcileState demotes the mid-cycle state,
-                // and the swap writes the public copy before the master, so the master is still the
-                // authority on what is installable. Adopt it rather than fetch the same build a
-                // second time. Nothing here ever deletes: a VERIFYING state is also what
-                // POST /update parks in while it swaps an uploaded APK, and those bytes belong to
-                // the operator, not to this start-up path.
-                reconciled = withState(reconciled, UpdateState.State.STAGED,
-                        "staged-recovered-after-restart");
+            // A check killed anywhere between the manifest parse and the final rename leaves an
+            // IDLE state (reconcileState demotes a mid-cycle one) sitting on top of a complete APK
+            // that no state claims. Both identities survive — expected* names the stage that was
+            // installable when the cycle started, fetch* the build it was replacing — so whichever
+            // the bytes match decides what the frame owns again. Recovering the first one also
+            // hands an uploaded stage back its stagedSource, which is the only thing protecting it
+            // from the next check. Nothing here ever deletes: VERIFYING is also what POST /update
+            // parks in while it swaps an uploaded APK, and those bytes are the operator's.
+            UpdateState recovered = recoverInterruptedStage(reconciled,
+                    stagedIntactAs(reconciled.manifestSha256, reconciled.expectedSizeBytes),
+                    stagedIntactAs(reconciled.fetchSha256, reconciled.fetchSizeBytes));
+            if (recovered != reconciled) {
+                reconciled = recovered;
             }
             if (reconciled.state == UpdateState.State.STAGED
                     && !stagedPublic.exists()
@@ -298,19 +301,51 @@ public class UpdateManager {
     }
 
     /**
-     * Package-visible for unit tests. Pure half of the start-up adoption rule: may an {@code IDLE}
-     * state that a killed cycle left behind take ownership of the stage on disk?
+     * Package-visible for unit tests. Pure half of the start-up recovery described at the call
+     * site: given an {@code IDLE} state a killed cycle left behind and what the private master
+     * turned out to be, return the state this launch should run with.
      *
-     * <p>Only one the update host produced, whose private master still hashes to what the state
-     * expects, and whose expected build is not the one already running — {@link #reconcileState}
-     * news up a blank state on a confirmed install, which is what keeps that case out of here.
+     * <p>Either answer restores a {@code STAGED} state rather than inventing one — the first from
+     * the identity that was on disk when the cycle started (carrying its {@code stagedSource}, so
+     * an uploaded stage is protected again), the second by promoting the fetched identity, which
+     * is what the swap had just committed to the master. A confirmed install is excluded by
+     * construction: {@link #reconcileState} news up a blank state for that, and a blank state has
+     * no sha for either comparison to match.
      */
-    static boolean adoptsInterruptedStage(UpdateState reconciled, boolean masterIntact) {
-        return reconciled != null
-                && reconciled.state == UpdateState.State.IDLE
-                && masterIntact
-                && reconciled.expectedVersionCode > 0
-                && UpdateState.SOURCE_MANIFEST.equals(reconciled.stagedSource);
+    static UpdateState recoverInterruptedStage(UpdateState reconciled, boolean masterIsStaged,
+            boolean masterIsFetching) {
+        if (reconciled == null || reconciled.state != UpdateState.State.IDLE) {
+            return reconciled;
+        }
+        if (masterIsStaged) {
+            // The bytes on disk are the stage that was there before the check, so the build the
+            // check was fetching is simply not here and nothing is pending. Leaving fetch* set
+            // would have /state advertise a download that is not running, and let a later crash
+            // match these bytes against a hash that never described them.
+            UpdateState restored = withState(reconciled, UpdateState.State.STAGED,
+                    "staged-recovered-after-restart");
+            restored.fetchVersionCode = 0;
+            restored.fetchVersionName = "";
+            restored.fetchSha256 = "";
+            restored.fetchSizeBytes = 0L;
+            return restored;
+        }
+        if (masterIsFetching && reconciled.fetchVersionCode > 0
+                && reconciled.fetchSha256 != null && !reconciled.fetchSha256.isEmpty()) {
+            UpdateState promoted = withState(reconciled, UpdateState.State.STAGED,
+                    "staged-recovered-after-restart");
+            promoted.expectedVersionCode = reconciled.fetchVersionCode;
+            promoted.expectedVersionName = reconciled.fetchVersionName;
+            promoted.manifestSha256 = reconciled.fetchSha256;
+            promoted.expectedSizeBytes = reconciled.fetchSizeBytes;
+            promoted.stagedSource = UpdateState.SOURCE_MANIFEST;
+            promoted.fetchVersionCode = 0;
+            promoted.fetchVersionName = "";
+            promoted.fetchSha256 = "";
+            promoted.fetchSizeBytes = 0L;
+            return promoted;
+        }
+        return reconciled;
     }
 
     /**
@@ -465,10 +500,22 @@ public class UpdateManager {
             Log.w(TAG, "staged public copy changed on disk; re-copying from private master");
             boolean masterOk = snapshot.manifestSha256.equals(sha256Safe(stagedMaster))
                     && stagedMaster.length() == snapshot.expectedSizeBytes;
-            if (!masterOk || !copyFile(stagedMaster, stagedPublic)
-                    || stagedPublic.length() != snapshot.expectedSizeBytes) {
+            if (!masterOk) {
+                // The private master is the corrupt one, so nothing on disk is trustworthy and the
+                // pair goes. This is the only case that may delete.
                 deleteStagedFiles();
                 failState("staged-file-changed");
+                return;
+            }
+            if (!copyFile(stagedMaster, stagedPublic)
+                    || stagedPublic.length() != snapshot.expectedSizeBytes) {
+                // The master is intact and the destination is the problem — full, unmounted, or
+                // otherwise unwritable. Deleting the good master here would throw away the only
+                // installable APK the frame has because of a defect in its copy, and FAILED would
+                // stop the retry that is the one thing likely to succeed later. Stay staged.
+                setStaged("public-copy-failed");
+                notifyDebug("install: staged APK is sound but the installer-readable copy failed;"
+                        + " retrying on the next tick");
                 return;
             }
         }
@@ -653,8 +700,13 @@ public class UpdateManager {
             state = withState(state, UpdateState.State.IDLE, "");
             state.attempts = 0;
             // withState carries stagedSource, and an IDLE state with no stage on disk must not
-            // keep naming the source of one.
+            // keep naming the source of one — nor a build some earlier cycle was still fetching,
+            // which recovery would otherwise try to match against files that are about to be gone.
             state.stagedSource = UpdateState.SOURCE_UNKNOWN;
+            state.fetchVersionCode = 0;
+            state.fetchVersionName = "";
+            state.fetchSha256 = "";
+            state.fetchSizeBytes = 0L;
             stateStore.write(state);
         }
         notifyDebug("update reset");
@@ -787,8 +839,13 @@ public class UpdateManager {
             state.expectedSizeBytes = size;
             state.lastCheckedMs = System.currentTimeMillis();
             // This stage is the operator's, not the update host's: judgeStaged must never displace
-            // it, whatever the manifest starts saying.
+            // it, whatever the manifest starts saying. And whatever a cycle was mid-fetch of is
+            // moot now — these bytes won.
             state.stagedSource = UpdateState.SOURCE_UPLOAD;
+            state.fetchVersionCode = 0;
+            state.fetchVersionName = "";
+            state.fetchSha256 = "";
+            state.fetchSizeBytes = 0L;
             state = withState(state, UpdateState.State.STAGED, "");
             stateStore.write(state);
         }
@@ -975,21 +1032,27 @@ public class UpdateManager {
 
         if (!manifest.isNewerThan(BuildConfig.VERSION_CODE)) {
             // The host has nothing newer than what is running. Staged bytes under an IDLE state
-            // would have /state advertise a build no state owns, so they go with it. This removes
-            // local files only — the app never installs anything not strictly newer.
-            deleteStagedFiles();
+            // would have /state advertise a build no state owns, so the host's own go with it —
+            // but an APK the operator uploaded is never deleted on a manifest's say-so, however
+            // pointless the host thinks it has become. Local files only; nothing is ever installed
+            // that is not strictly newer than what is running.
+            if (mayDiscardStage(state.stagedSource)) {
+                deleteStagedFiles();
+            }
             notifyUpdateChecked(false);
             setIdle("up-to-date");
             return;
         }
         notifyUpdateChecked(true);
 
+        // What the cycle is going to fetch — deliberately NOT written into the expected* fields,
+        // which keep describing the APK that is actually on disk until the swap commits below.
+        // Overwriting them here is what made an interrupted check unrecoverable.
         synchronized (this) {
-            state.expectedVersionCode = manifest.versionCode;
-            state.expectedVersionName = manifest.versionName == null ? "" : manifest.versionName;
-            state.manifestSha256 = manifest.sha256.trim().toLowerCase(Locale.US);
-            state.expectedSizeBytes = manifest.sizeBytes;
-            state.stagedSource = UpdateState.SOURCE_MANIFEST;
+            state.fetchVersionCode = manifest.versionCode;
+            state.fetchVersionName = manifest.versionName == null ? "" : manifest.versionName;
+            state.fetchSha256 = manifest.sha256.trim().toLowerCase(Locale.US);
+            state.fetchSizeBytes = manifest.sizeBytes;
             stateStore.write(state);
         }
 
@@ -1022,7 +1085,7 @@ public class UpdateManager {
         // VERIFYING: SHA-256 → JAR signature (incl. signer-certificate match) → version gate.
         try {
             String sha = sha256Safe(partFile);
-            if (!sha.equalsIgnoreCase(state.manifestSha256)) {
+            if (!sha.equalsIgnoreCase(state.fetchSha256)) {
                 partFile.delete();
                 failOrRestore(prior, "sha256-mismatch");
                 return;
@@ -1087,7 +1150,10 @@ public class UpdateManager {
             return;
         }
 
-        setState(UpdateState.State.STAGED);
+        // The swap committed: the identity that described the incoming build becomes the identity
+        // of the stage on disk, and only now. Until this line the persisted expected* still named
+        // whatever was installable before the cycle started.
+        commitFetchedStage();
         notifyDebug("staged update " + manifest.versionName + " (" + manifest.versionCode + ")");
 
         // Proceed straight to the install; if this process dies before firing, the next
@@ -1380,6 +1446,11 @@ public class UpdateManager {
             long checkedMs = state.lastCheckedMs;
             int att = state.attempts;
             state = withState(prior, UpdateState.State.STAGED, reason);
+            // Nothing is pending any more — the cycle decided not to replace this stage.
+            state.fetchVersionCode = 0;
+            state.fetchVersionName = "";
+            state.fetchSha256 = "";
+            state.fetchSizeBytes = 0L;
             state.needsHumanConfirmation = prior.needsHumanConfirmation;
             state.lastCheckedMs = checkedMs;
             state.attempts = att;
@@ -1397,7 +1468,8 @@ public class UpdateManager {
      */
     private void failOrRestore(UpdateState prior, String reason) {
         partFile.delete();
-        if (prior != null && prior.state == UpdateState.State.STAGED && stagedIntactAs(prior)) {
+        if (prior != null && prior.state == UpdateState.State.STAGED
+                && stagedIntactAs(prior.manifestSha256, prior.expectedSizeBytes)) {
             restoreStaged(prior, reason);
             notifyDebug("update cycle failed; keeping staged "
                     + prior.expectedVersionName + " (" + prior.expectedVersionCode + ")");
@@ -1406,17 +1478,49 @@ public class UpdateManager {
         failState(reason);
     }
 
-    /** True when the private master is still byte-for-byte the build {@code s} describes. */
-    private boolean stagedIntactAs(UpdateState s) {
-        return s.manifestSha256 != null && !s.manifestSha256.isEmpty()
-                && s.manifestSha256.equals(sha256Safe(stagedMaster))
-                && stagedMaster.length() == s.expectedSizeBytes;
+    /** True when the private master is byte-for-byte the build named by {@code sha}/{@code size}. */
+    private boolean stagedIntactAs(String sha, long size) {
+        return sha != null && !sha.isEmpty()
+                && sha.equals(sha256Safe(stagedMaster))
+                && stagedMaster.length() == size;
+    }
+
+    /**
+     * Whether a stage's bytes may be discarded because the update host has stopped wanting them.
+     * Only a stage the host produced. An uploaded APK is the operator's to keep or reset, and an
+     * unattributable one is left alone for the same reason — the same rule {@link #judgeStaged}
+     * applies to replacement, applied to deletion, so no path reaches deletion by accident.
+     */
+    static boolean mayDiscardStage(String stagedSource) {
+        return UpdateState.SOURCE_MANIFEST.equals(stagedSource);
     }
 
     private void persistInstallPending() {
         synchronized (this) {
             state = withState(state, UpdateState.State.INSTALL_PENDING, "");
             state.installFiredAtMs = System.currentTimeMillis();
+            stateStore.write(state);
+        }
+    }
+
+    /**
+     * Promotes the build a cycle fetched into the identity of the stage on disk. Called only after
+     * the swap committed, so up to this instant {@code expected*} and {@code stagedSource} still
+     * described the APK that was installable — which is what lets a killed check be recovered
+     * instead of lost, and keeps an uploaded stage marked as one while a replacement is in flight.
+     */
+    private void commitFetchedStage() {
+        synchronized (this) {
+            state.expectedVersionCode = state.fetchVersionCode;
+            state.expectedVersionName = state.fetchVersionName;
+            state.manifestSha256 = state.fetchSha256;
+            state.expectedSizeBytes = state.fetchSizeBytes;
+            state.stagedSource = UpdateState.SOURCE_MANIFEST;
+            state.fetchVersionCode = 0;
+            state.fetchVersionName = "";
+            state.fetchSha256 = "";
+            state.fetchSizeBytes = 0L;
+            state = withState(state, UpdateState.State.STAGED, "");
             stateStore.write(state);
         }
     }
@@ -1436,6 +1540,10 @@ public class UpdateManager {
         c.manifestSha256 = s.manifestSha256;
         c.expectedSizeBytes = s.expectedSizeBytes;
         c.stagedSource = s.stagedSource;
+        c.fetchVersionCode = s.fetchVersionCode;
+        c.fetchVersionName = s.fetchVersionName;
+        c.fetchSha256 = s.fetchSha256;
+        c.fetchSizeBytes = s.fetchSizeBytes;
         c.lastCheckedMs = s.lastCheckedMs;
         c.attempts = s.attempts;
         c.installFiredAtMs = s.installFiredAtMs;
@@ -1486,6 +1594,11 @@ public class UpdateManager {
         o.addProperty("lastError", s.lastError);
         o.addProperty("attempts", s.attempts);
         o.addProperty("stagedSha256", s.manifestSha256);
+        // What the running cycle is fetching, when one is. During a supersede this names the new
+        // build while expectedVersionCode/stagedSha256 still describe the APK on disk, which is the
+        // point: those two are the stage, not a promise about it.
+        o.addProperty("fetchingVersionCode", s.fetchVersionCode);
+        o.addProperty("fetchingSha256", s.fetchSha256);
         // "manifest" — the host owns this stage and may replace it; "upload" — an operator put it
         // here and nothing automatic will; "" — staged by a build older than this field, so the
         // app cannot tell and leaves it alone.
