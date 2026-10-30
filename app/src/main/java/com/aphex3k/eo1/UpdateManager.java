@@ -62,7 +62,13 @@ import okhttp3.Response;
  * no other way (an OTG keyboard or mouse plugged into the frame).
  *
  * <p>Retries ride the rotation tick — {@code interval} minutes, and the tick stops with the
- * activity — so the settle window below is a floor, not a schedule.
+ * activity — so the settle window below is a floor, not a schedule. And a stage is not the end of
+ * the story: while the host's own build sits staged, the ordinary check interval still re-reads the
+ * manifest and {@link #judgeStaged} decides whether those bytes are still what is published. If the
+ * operator has since shipped something else, the published build is fetched and verified first and
+ * only then replaces the stage, so a superseded frame converges on the release that was meant for
+ * it instead of retrying a stale one forever. A stage an operator uploaded by hand is never
+ * displaced by that path — see {@link UpdateState#stagedSource}.
  *
  * <p>Recovery across process death: the installer kills this process on success, so success
  * is detected only by the new process's {@link #reconcileOnStartup()}. A +120 s relaunch alarm
@@ -149,8 +155,19 @@ public class UpdateManager {
     }
 
     /**
-     * Package-visible for unit tests. True when a new check cycle may start: no cycle in
-     * flight, nothing staged/pending, and the configured interval has elapsed.
+     * Package-visible for unit tests. True when a new check cycle may start: no cycle in flight,
+     * no install awaiting its settle window, and the configured interval has elapsed.
+     *
+     * <p>A {@code STAGED} update the host itself produced does <em>not</em> block a check. It used
+     * to, permanently, which is how a frame that staged build N and was then left waiting on a
+     * person — or on a transport that keeps refusing — kept re-installing a build the operator had
+     * since replaced, without ever learning. While such a stage exists the manifest is re-read on
+     * the ordinary interval and {@link #judgeStaged} decides whether the bytes on disk are still
+     * the bytes published.
+     *
+     * <p>A stage this code did not fetch stays blocked: an APK the operator uploaded by hand, and
+     * anything staged by a build older than {@link UpdateState#stagedSource}, are not this
+     * predicate's to displace.
      */
     static boolean checkDue(long nowMs, UpdateState state, int intervalMinutes) {
         if (state == null) {
@@ -159,10 +176,14 @@ public class UpdateManager {
         }
         if (state.state != null) {
             switch (state.state) {
+                case STAGED:
+                    if (!UpdateState.SOURCE_MANIFEST.equals(state.stagedSource)) {
+                        return false;
+                    }
+                    break;
                 case CHECKING:
                 case DOWNLOADING:
                 case VERIFYING:
-                case STAGED:
                 case INSTALL_PENDING:
                     return false;
                 default:
@@ -206,11 +227,23 @@ public class UpdateManager {
                 deleteStagedFiles();
                 notifyDebug("self-update " + current.expectedVersionCode + " confirmed installed; state reset");
             }
+            if (adoptsInterruptedStage(reconciled, stagedIntactAs(reconciled))) {
+                // A re-check that reached the swap and was killed there leaves an IDLE state sitting
+                // on top of a complete, verified stage: reconcileState demotes the mid-cycle state,
+                // and the swap writes the public copy before the master, so the master is still the
+                // authority on what is installable. Adopt it rather than fetch the same build a
+                // second time. Nothing here ever deletes: a VERIFYING state is also what
+                // POST /update parks in while it swaps an uploaded APK, and those bytes belong to
+                // the operator, not to this start-up path.
+                reconciled = withState(reconciled, UpdateState.State.STAGED,
+                        "staged-recovered-after-restart");
+            }
             if (reconciled.state == UpdateState.State.STAGED
                     && !stagedPublic.exists()
                     && !stagedMaster.exists()) {
                 // A staged state without its files can never install.
                 reconciled = withState(reconciled, UpdateState.State.IDLE, "staged-files-missing");
+                reconciled.stagedSource = UpdateState.SOURCE_UNKNOWN;
             }
             // Orphaned temp dirs from a process death mid POST /update (the web server's
             // finally-block cleanup never got to run).
@@ -262,6 +295,22 @@ public class UpdateManager {
             default:
                 return state;
         }
+    }
+
+    /**
+     * Package-visible for unit tests. Pure half of the start-up adoption rule: may an {@code IDLE}
+     * state that a killed cycle left behind take ownership of the stage on disk?
+     *
+     * <p>Only one the update host produced, whose private master still hashes to what the state
+     * expects, and whose expected build is not the one already running — {@link #reconcileState}
+     * news up a blank state on a confirmed install, which is what keeps that case out of here.
+     */
+    static boolean adoptsInterruptedStage(UpdateState reconciled, boolean masterIntact) {
+        return reconciled != null
+                && reconciled.state == UpdateState.State.IDLE
+                && masterIntact
+                && reconciled.expectedVersionCode > 0
+                && UpdateState.SOURCE_MANIFEST.equals(reconciled.stagedSource);
     }
 
     /**
@@ -603,6 +652,9 @@ public class UpdateManager {
             installFiredInThisProcess = false;
             state = withState(state, UpdateState.State.IDLE, "");
             state.attempts = 0;
+            // withState carries stagedSource, and an IDLE state with no stage on disk must not
+            // keep naming the source of one.
+            state.stagedSource = UpdateState.SOURCE_UNKNOWN;
             stateStore.write(state);
         }
         notifyDebug("update reset");
@@ -734,6 +786,9 @@ public class UpdateManager {
             state.manifestSha256 = sha;
             state.expectedSizeBytes = size;
             state.lastCheckedMs = System.currentTimeMillis();
+            // This stage is the operator's, not the update host's: judgeStaged must never displace
+            // it, whatever the manifest starts saying.
+            state.stagedSource = UpdateState.SOURCE_UPLOAD;
             state = withState(state, UpdateState.State.STAGED, "");
             stateStore.write(state);
         }
@@ -766,21 +821,33 @@ public class UpdateManager {
     // ---------------------------------------------------------------------- cycle
 
     private void startCycle() {
+        final UpdateState prior;
         synchronized (this) {
             UpdateState s = state;
+            if (installInFlight) {
+                // The platform installer has stagedPublic open right now. A cycle that replaces
+                // that pair mid-install would have the installer read a file that is being
+                // rewritten under it, and runInstall's own re-hash gate would then throw away a
+                // stage that was about to land.
+                notifyDebug("update cycle refused (install in flight)");
+                return;
+            }
             switch (s.state) {
                 case CHECKING:
                 case DOWNLOADING:
                 case VERIFYING:
-                case STAGED:
                 case INSTALL_PENDING:
-                    // A cycle is already in flight, or a staged update is owned by
-                    // installStaged()/reconciliation — do not fight it.
+                    // A cycle is already in flight, or an install is inside its settle window.
                     notifyDebug("update cycle refused (state=" + s.state + ")");
                     return;
                 default:
                     break;
             }
+            // A STAGED update no longer stops a check: checkDue lets the timer re-read the host for
+            // a stage the host itself produced, and a forced check gets here for any stage. Either
+            // way runCycle consults judgeStaged before it overwrites anything, so a stage this app
+            // did not download is still untouched when the cycle decides what it may do.
+            prior = s;
             state = withState(s, UpdateState.State.CHECKING, "");
             state.attempts = s.attempts + 1;
             state.lastCheckedMs = System.currentTimeMillis();
@@ -790,22 +857,74 @@ public class UpdateManager {
             @Override
             public void run() {
                 try {
-                    runCycle();
+                    runCycle(prior);
                 } catch (Throwable t) {
                     Log.e(TAG, "update cycle crashed", t);
-                    failState("cycle-crashed: " + t);
+                    failOrRestore(prior, "cycle-crashed: " + t);
                 }
             }
         }, "EO1-update-cycle");
         thread.start();
     }
 
-    private void runCycle() {
+    /** What the published manifest says about a build already staged on disk. */
+    enum StagedVerdict {
+        /** Not this code's stage to touch: an upload, a pre-{@code stagedSource} stage, no stage. */
+        SKIP,
+        /** What is staged is what is published, or the host cannot be believed about it. */
+        KEEP,
+        /** The host publishes different bytes — fetch them and replace the stage on verification. */
+        REPLACE,
+        /** The staged build is already running (or older than it): the stage is pointless. */
+        CLEAR
+    }
+
+    /**
+     * Package-visible for unit tests. Pure: does the manifest still describe what is staged?
+     *
+     * <p>The asymmetry is the whole point. An unreadable or invalid manifest answers {@code KEEP},
+     * never {@code REPLACE}: a host that hiccups must not cost a frame the installable build it
+     * already holds. And a stage this app did not download is not this app's to replace, whatever
+     * the host says.
+     */
+    static StagedVerdict judgeStaged(UpdateManifest manifest, UpdateState staged, int installedVersionCode) {
+        if (staged == null || staged.state != UpdateState.State.STAGED
+                || !UpdateState.SOURCE_MANIFEST.equals(staged.stagedSource)) {
+            return StagedVerdict.SKIP;
+        }
+        if (manifest == null || !manifest.isValid()) {
+            return StagedVerdict.KEEP;
+        }
+        if (manifest.versionCode <= installedVersionCode) {
+            return StagedVerdict.CLEAR;
+        }
+        if (manifest.versionCode == staged.expectedVersionCode
+                && staged.manifestSha256 != null
+                && manifest.sha256.trim().equalsIgnoreCase(staged.manifestSha256.trim())) {
+            return StagedVerdict.KEEP;
+        }
+        return StagedVerdict.REPLACE;
+    }
+
+    /**
+     * One check cycle, on the {@code EO1-update-cycle} thread.
+     *
+     * @param prior the state as it was before this cycle claimed {@code CHECKING} — the stage a
+     *              failure must go back to, if there was one.
+     */
+    private void runCycle(UpdateState prior) {
         // CHECKING: fetch + validate the manifest.
         Configuration config = settingsManager.getConfiguration();
         String manifestUrl = config != null ? config.updateManifestUrl : null;
         if (manifestUrl == null || manifestUrl.trim().isEmpty()) {
-            setIdle("manifest-url-not-configured");
+            // Nothing to compare against. A stage already on disk stays a stage — the host being
+            // unconfigured is not a verdict on it, and deleting it here would be an edit to the
+            // config silently becoming an uninstall.
+            if (prior.state == UpdateState.State.STAGED) {
+                restoreStaged(prior, "manifest-url-not-configured");
+            } else {
+                setIdle("manifest-url-not-configured");
+            }
             return;
         }
 
@@ -813,24 +932,52 @@ public class UpdateManager {
         try {
             body = fetchManifest(manifestUrl.trim());
         } catch (ManifestHttpException e) {
-            failState("manifest-http-" + e.statusCode);
+            failOrRestore(prior, "manifest-http-" + e.statusCode);
             return;
         } catch (Exception e) {
-            failState("manifest-fetch: " + e + TrustCensus.gateNote(e));
+            failOrRestore(prior, "manifest-fetch: " + e + TrustCensus.gateNote(e));
             return;
         }
 
         UpdateManifest manifest = UpdateManifest.parse(body);
         if (manifest == null) {
-            failState("manifest-unparseable");
+            failOrRestore(prior, "manifest-unparseable");
             return;
         }
         String invalid = manifest.validationError();
         if (invalid != null) {
-            failState("manifest-invalid: " + invalid);
+            failOrRestore(prior, "manifest-invalid: " + invalid);
             return;
         }
+
+        // What the host says about a build already staged. A cycle only starts from STAGED when a
+        // person forced it — checkDue() gates the automatic one — so either way the answer decides
+        // whether anything below this line is allowed to touch the staged pair.
+        if (prior.state == UpdateState.State.STAGED) {
+            StagedVerdict verdict = judgeStaged(manifest, prior, BuildConfig.VERSION_CODE);
+            if (verdict == StagedVerdict.SKIP) {
+                restoreStaged(prior, UpdateState.SOURCE_UPLOAD.equals(prior.stagedSource)
+                        ? "staged-source-upload" : "staged-source-unknown");
+                return;
+            }
+            if (verdict == StagedVerdict.KEEP) {
+                restoreStaged(prior, "staged-still-current");
+                return;
+            }
+            if (verdict == StagedVerdict.REPLACE) {
+                notifyDebug("staged " + prior.expectedVersionName + " (" + prior.expectedVersionCode
+                        + ") is superseded by " + manifest.versionName + " (" + manifest.versionCode
+                        + (manifest.versionCode == prior.expectedVersionCode
+                                ? ", same code different bytes" : "") + "); fetching the published one");
+            }
+            // CLEAR falls through to the gate below, which now also discards the pointless stage.
+        }
+
         if (!manifest.isNewerThan(BuildConfig.VERSION_CODE)) {
+            // The host has nothing newer than what is running. Staged bytes under an IDLE state
+            // would have /state advertise a build no state owns, so they go with it. This removes
+            // local files only — the app never installs anything not strictly newer.
+            deleteStagedFiles();
             notifyUpdateChecked(false);
             setIdle("up-to-date");
             return;
@@ -842,13 +989,14 @@ public class UpdateManager {
             state.expectedVersionName = manifest.versionName == null ? "" : manifest.versionName;
             state.manifestSha256 = manifest.sha256.trim().toLowerCase(Locale.US);
             state.expectedSizeBytes = manifest.sizeBytes;
+            state.stagedSource = UpdateState.SOURCE_MANIFEST;
             stateStore.write(state);
         }
 
         // Space pre-check (advisory; the installer is the final authority).
         long required = manifest.sizeBytes + STAGING_HEADROOM_BYTES;
         if (freeBytes(updatesDir) < required || freeBytes(stagedPublic.getParentFile()) < required) {
-            failState("insufficient-space");
+            failOrRestore(prior, "insufficient-space");
             return;
         }
 
@@ -860,12 +1008,12 @@ public class UpdateManager {
             long total = download(manifest.apkUrl.trim(), manifest.sizeBytes);
             if (total != manifest.sizeBytes) {
                 partFile.delete();
-                failState("size-mismatch");
+                failOrRestore(prior, "size-mismatch");
                 return;
             }
         } catch (Exception e) {
             partFile.delete();
-            failState("download-failed: " + e + TrustCensus.gateNote(e));
+            failOrRestore(prior, "download-failed: " + e + TrustCensus.gateNote(e));
             return;
         }
 
@@ -876,54 +1024,66 @@ public class UpdateManager {
             String sha = sha256Safe(partFile);
             if (!sha.equalsIgnoreCase(state.manifestSha256)) {
                 partFile.delete();
-                failState("sha256-mismatch");
+                failOrRestore(prior, "sha256-mismatch");
                 return;
             }
             X509Certificate installed = installedCert();
             if (installed == null) {
                 partFile.delete();
-                failState("no-installed-cert");
+                failOrRestore(prior, "no-installed-cert");
                 return;
             }
             ApkSignatureVerifier.Result result = ApkSignatureVerifier.verify(partFile, installed);
             if (!result.valid) {
                 partFile.delete();
-                failState("signature-rejected: " + result.reason);
+                failOrRestore(prior, "signature-rejected: " + result.reason);
                 return;
             }
             if (!manifest.isNewerThan(BuildConfig.VERSION_CODE)) {
                 partFile.delete();
-                failState("not-newer");
+                failOrRestore(prior, "not-newer");
                 return;
             }
         } catch (Exception e) {
             partFile.delete();
-            failState("verify-crashed: " + e);
+            failOrRestore(prior, "verify-crashed: " + e);
             return;
         }
 
-        // STAGED: private master + world-readable public copy.
+        // STAGED. The two files are written in the opposite order to what looks natural — the
+        // installer-readable copy first, the private master last — because every rung that can
+        // still fail must leave the previous stage intact for failOrRestore's re-hash gate.
+        // Renaming over the master first made that rename the point of no return: rename(2)
+        // unlinks bytes_N there, and the three rungs after it all deleted the pair, so a build
+        // that had already passed all four gates could still leave a REPLACE frame with nothing
+        // staged and its install retry dead.
         try {
+            if (!externalStorageWritable()) {
+                // Nothing has been touched yet, so the stage this frame already holds survives.
+                failOrRestore(prior, "external-storage-unavailable");
+                return;
+            }
+            if (!copyFile(partFile, stagedPublic) || stagedPublic.length() != manifest.sizeBytes) {
+                // The public file may now be a truncated new build, but the master still carries
+                // the old one, and runInstall re-makes the public copy from the master before it
+                // dispatches — so restoring the old stage here is self-healing, not a lie.
+                failOrRestore(prior, "stage-copy-failed");
+                return;
+            }
+            // Last irreversible step: this rename replaces the master atomically and consumes the
+            // part file, so from here both halves are the verified new build.
             if (!partFile.renameTo(stagedMaster)) {
+                // Same directory, so an existing target is the only plausible reason. Retrying
+                // costs the old master, which is why this one rung gives up on the restore.
                 stagedMaster.delete();
                 if (!partFile.renameTo(stagedMaster)) {
+                    deleteStagedFiles();
                     failState("stage-rename-failed");
                     return;
                 }
             }
-            if (!externalStorageWritable()) {
-                deleteStagedFiles();
-                failState("external-storage-unavailable");
-                return;
-            }
-            if (!copyFile(stagedMaster, stagedPublic) || stagedPublic.length() != stagedMaster.length()) {
-                deleteStagedFiles();
-                failState("stage-copy-failed");
-                return;
-            }
         } catch (Exception e) {
-            deleteStagedFiles();
-            failState("stage-failed: " + e);
+            failOrRestore(prior, "stage-failed: " + e);
             return;
         }
 
@@ -1205,6 +1365,54 @@ public class UpdateManager {
         notifyDebug("update FAILED: " + reason);
     }
 
+    /**
+     * Puts back a stage that a cycle started and did not change: the same build, the same
+     * metadata, and the same debt to a human — {@link #withState} would otherwise drop
+     * {@code needsHumanConfirmation}, and a re-check that found nothing to do must not retire the
+     * claim that someone still owes this frame a click.
+     *
+     * <p>This cycle's check timestamp and attempt count are kept rather than restored, so
+     * re-checking a stage that is still current costs one manifest fetch per interval and not one
+     * per rotation tick.
+     */
+    private void restoreStaged(UpdateState prior, String reason) {
+        synchronized (this) {
+            long checkedMs = state.lastCheckedMs;
+            int att = state.attempts;
+            state = withState(prior, UpdateState.State.STAGED, reason);
+            state.needsHumanConfirmation = prior.needsHumanConfirmation;
+            state.lastCheckedMs = checkedMs;
+            state.attempts = att;
+            stateStore.write(state);
+        }
+        notifyDebug("update: " + reason);
+    }
+
+    /**
+     * Records a cycle failure that found a still-installable stage on disk by going back to
+     * {@code STAGED} instead of {@code FAILED}. A build the frame could not fetch must not leave
+     * it worse off than before it noticed: {@code FAILED} also stops the install retry, which is
+     * the only thing keeping an unattended frame current. The failure is still the
+     * {@code lastError}, so {@code /state} and {@code eo1-app.log} say why nothing landed.
+     */
+    private void failOrRestore(UpdateState prior, String reason) {
+        partFile.delete();
+        if (prior != null && prior.state == UpdateState.State.STAGED && stagedIntactAs(prior)) {
+            restoreStaged(prior, reason);
+            notifyDebug("update cycle failed; keeping staged "
+                    + prior.expectedVersionName + " (" + prior.expectedVersionCode + ")");
+            return;
+        }
+        failState(reason);
+    }
+
+    /** True when the private master is still byte-for-byte the build {@code s} describes. */
+    private boolean stagedIntactAs(UpdateState s) {
+        return s.manifestSha256 != null && !s.manifestSha256.isEmpty()
+                && s.manifestSha256.equals(sha256Safe(stagedMaster))
+                && stagedMaster.length() == s.expectedSizeBytes;
+    }
+
     private void persistInstallPending() {
         synchronized (this) {
             state = withState(state, UpdateState.State.INSTALL_PENDING, "");
@@ -1220,12 +1428,14 @@ public class UpdateManager {
         }
     }
 
-    private static UpdateState withState(UpdateState s, UpdateState.State newState, String lastError) {
+    /** Package-visible for unit tests: every field a transition must survive is listed here. */
+    static UpdateState withState(UpdateState s, UpdateState.State newState, String lastError) {
         UpdateState c = new UpdateState();
         c.expectedVersionCode = s.expectedVersionCode;
         c.expectedVersionName = s.expectedVersionName;
         c.manifestSha256 = s.manifestSha256;
         c.expectedSizeBytes = s.expectedSizeBytes;
+        c.stagedSource = s.stagedSource;
         c.lastCheckedMs = s.lastCheckedMs;
         c.attempts = s.attempts;
         c.installFiredAtMs = s.installFiredAtMs;
@@ -1276,9 +1486,23 @@ public class UpdateManager {
         o.addProperty("lastError", s.lastError);
         o.addProperty("attempts", s.attempts);
         o.addProperty("stagedSha256", s.manifestSha256);
+        // "manifest" — the host owns this stage and may replace it; "upload" — an operator put it
+        // here and nothing automatic will; "" — staged by a build older than this field, so the
+        // app cannot tell and leaves it alone.
+        o.addProperty("stagedSource", s.stagedSource);
         JsonObject staged = new JsonObject();
-        staged.addProperty("present", stagedPublic.exists() || stagedMaster.exists());
+        boolean present = stagedPublic.exists() || stagedMaster.exists();
+        staged.addProperty("present", present);
         staged.addProperty("bytes", stagedPublic.length());
+        // Bytes in the staging directory that no state owns. A cycle re-checking a stage runs
+        // through CHECKING/DOWNLOADING/VERIFYING while the parked APK is still on disk and still
+        // installable, so those states own it too — only IDLE (an interrupted swap that
+        // reconciled away) and FAILED (a cycle that gave up on these bytes) mean the file
+        // belongs to nothing and will not be installed. Deliberately not a re-hash: /state is
+        // polled, and hashing a 30 MB APK on the web thread to answer a question the state
+        // already answers is the wrong trade.
+        staged.addProperty("owned", present && s.state != UpdateState.State.IDLE
+                && s.state != UpdateState.State.FAILED);
         o.add("stagedApk", staged);
         o.addProperty("installPermissionHeld", headless);
         // "defer-to-human": the next automatic dispatch puts nothing on screen and waits. Pressing

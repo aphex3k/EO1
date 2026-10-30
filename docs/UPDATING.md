@@ -106,6 +106,16 @@ Install is a ladder, and a frame walks down it only as far as it can do the work
   the retryable `STAGED` state and is retried on the next timer tick — so the retry cadence is
   your `interval` setting, and it pauses with the activity. `INSTALL_PENDING` carries the
   persisted time it was fired, so a pending install can settle in a process that never started it.
+- **A staged build is not the last word.** While the host's build sits staged, the ordinary check
+  interval still re-reads the manifest, and if the host now publishes a higher `versionCode` — or the
+  same code built from different bytes — that published build is fetched and put through all four
+  gates above, and only *then* replaces what is on disk. So a frame you left waiting on a click
+  converges on the release you shipped afterwards instead of retrying the one you withdrew. A stage
+  the host did not produce is never touched by this: an APK you uploaded through `POST /update` (and
+  anything staged before `stagedSource` existed, which the app cannot attribute) stays exactly where
+  you put it until you install it or reset it. If the re-download fails, the old stage survives —
+  the state goes back to `STAGED`, not `FAILED`, so the retry keeps running — with the failure in
+  `lastError` and `/logs` naming which gate or which wire it died on.
 
 ### The choice that removes every caveat above
 
@@ -118,9 +128,10 @@ the only install mode in which a frame truly updates itself unattended.
 
 | Symptom | Action |
 |---|---|
-| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `installMode` (`headless`/`adbd`/`defer-to-human`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable`, `loopbackAdbAllowed`, `tcpAdbArmedByApp`, `needsHumanConfirmation`, `installFiredAtMs` |
+| Need to see where an update stands | `GET /state` → `update` block: `state`, `expectedVersionCode`, `lastError`, `attempts`, `stagedSource` (`manifest`/`upload`/empty — who owns the stage), `installMode` (`headless`/`adbd`/`defer-to-human`), `lastInstallAttempt` (`none`/`headless`/`adbd`/`intent`), `adbdReachable`, `loopbackAdbAllowed`, `tcpAdbArmedByApp`, `needsHumanConfirmation`, `installFiredAtMs` |
 | Staged but not installed | `/logs` says which transport failed. If `needsHumanConfirmation` is set, no silent install is possible on that frame: `/control?action=install-staged` (turns the screen on and shows the confirmation dialog there) |
 | Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
+| Something staged, but you have shipped since | Nothing to do: the next check re-reads the manifest and replaces the stage once the new build verifies (`stagedSource: "manifest"` in `/state` is what makes that true). To do it now, `/control?action=check-updates`. If `stagedSource` is `upload` or empty, the frame will not displace it — press **Update reset** first |
 | Force a re-check now | `/control?action=check-updates` |
 | Nothing ever arrives, and `lastError` says `manifest-fetch` or `download-failed` with an `SSLHandshakeException` | If the update host is HTTPS, this is a TLS gate, not a missing release: `lastError` carries a `[TLS gate: NAME]` note naming it. An empty note means the failure was never about certificates — the host is unreachable, not untrusted. See [docs/TRUST.md](TRUST.md) |
 

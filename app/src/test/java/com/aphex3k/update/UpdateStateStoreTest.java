@@ -135,6 +135,25 @@ public class UpdateStateStoreTest {
         assertEquals(0L, s.installFiredAtMs);
         assertFalse(s.needsHumanConfirmation);
         assertFalse("an old state file never claims an open adb window", s.armedTcpAdb);
+        // Same reasoning as installFiredAtMs: a stage of unknown origin is not the update host's to
+        // replace, so the absence of this field must read as "leave it alone", never as "manifest".
+        assertEquals(UpdateState.SOURCE_UNKNOWN, s.stagedSource);
+    }
+
+    @Test
+    public void stagedSourceRoundTrips() throws Exception {
+        File f = new File(folder.getRoot(), "update-state.json");
+        UpdateStateStore store = new UpdateStateStore(f);
+        UpdateState uploaded = stateIn(UpdateState.State.STAGED, "");
+        uploaded.stagedSource = UpdateState.SOURCE_UPLOAD;
+        assertTrue(store.write(uploaded));
+
+        assertEquals(UpdateState.SOURCE_UPLOAD, store.read().stagedSource);
+
+        UpdateState fromHost = stateIn(UpdateState.State.STAGED, "");
+        fromHost.stagedSource = UpdateState.SOURCE_MANIFEST;
+        assertTrue(store.write(fromHost));
+        assertEquals(UpdateState.SOURCE_MANIFEST, store.read().stagedSource);
     }
 
     @Test

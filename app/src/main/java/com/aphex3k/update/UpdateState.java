@@ -20,7 +20,21 @@ public class UpdateState {
         FAILED
     }
 
+    /** A state file written before {@link #stagedSource} existed, or a state with no stage. */
+    public static final String SOURCE_UNKNOWN = "";
+    /** The staged APK was fetched from the update host, so the host may replace it. */
+    public static final String SOURCE_MANIFEST = "manifest";
+    /** An operator staged this APK through {@code POST /update}, so nothing may replace it. */
+    public static final String SOURCE_UPLOAD = "upload";
+
     public State state = State.IDLE;
+    /**
+     * What produced the staged APK. Only {@link #SOURCE_MANIFEST} may be displaced automatically
+     * when the host publishes something else: an uploaded APK was put here on purpose, and
+     * {@link #SOURCE_UNKNOWN} is whatever a frame had staged before this field existed — neither
+     * may be guessed at, so both are left alone. Never infer it from a file name.
+     */
+    public String stagedSource = SOURCE_UNKNOWN;
     /** versionCode the staged update (if any) is expected to install. */
     public int expectedVersionCode;
     public String expectedVersionName = "";
@@ -64,6 +78,7 @@ public class UpdateState {
             s.expectedVersionName = previous.expectedVersionName;
             s.manifestSha256 = previous.manifestSha256;
             s.expectedSizeBytes = previous.expectedSizeBytes;
+            s.stagedSource = previous.stagedSource;
             s.lastCheckedMs = previous.lastCheckedMs;
             s.attempts = previous.attempts;
         }
