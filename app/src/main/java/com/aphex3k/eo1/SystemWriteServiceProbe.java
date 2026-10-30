@@ -3,8 +3,8 @@ package com.aphex3k.eo1;
 import com.google.gson.JsonObject;
 
 import java.io.File;
+import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
-
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
@@ -19,13 +19,13 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * class is the read that tells them apart, taken through the framework rather than through the vendor
  * blob, so taking it cannot itself hang anything.
  *
- * <p>The lookup is {@code ServiceManager.getService(String)}, which is one {@code CHECK_SERVICE}
- * transaction to servicemanager and returns null when nothing is registered — unlike
- * {@code waitForService}, which is the waiting variant. It still runs on a worker thread, because
- * "cannot block" is a reading of AOSP rather than a measurement of this ROM, and the price of being
- * wrong is a frame with a dead UI. Every outcome is reported, including the ones where the probe could
- * not answer: an unreadable verdict must never read as an absent one, because "absent" is the answer
- * that decides not to ship a fix.
+ * <p>The lookup goes under {@code ServiceManager} to {@code IServiceManager.checkService} — one
+ * transaction, and the one that cannot wait for a registrant that never arrives. It runs on a worker
+ * thread regardless, because "cannot block" is a reading of AOSP rather than a measurement of this
+ * ROM. Every outcome is reported, including the ones where the probe could not answer: an unreadable
+ * verdict must never read as an absent one, because {@code absent} is the answer that decides not to
+ * ship a fix — and it is reached twice in this class, once for a binder that would not answer and once
+ * for a directory that would not say.
  */
 public final class SystemWriteServiceProbe {
 
@@ -95,14 +95,6 @@ public final class SystemWriteServiceProbe {
         return new Snapshot(readRegistrant(), client.verdict, client.path, countAmstreamNodes());
     }
 
-    /** The reflective read, separated so the classification can be tested without a framework. */
-    static String classify(Boolean found, boolean lookupThrew) {
-        if (lookupThrew) {
-            return UNREADABLE;
-        }
-        return Boolean.TRUE.equals(found) ? PRESENT : ABSENT;
-    }
-
     /** The client library's state on this ROM, and where it was found. */
     static final class ClientRead {
         final String verdict;
@@ -115,22 +107,60 @@ public final class SystemWriteServiceProbe {
     }
 
     /**
-     * Package-visible for tests. A found path wins outright; a directory this process could not read
-     * is reported as unreadable rather than as a missing file, because "absent" is the verdict that
-     * decides to ship a replacement for it.
+     * Package-visible for tests. A found path wins outright; nothing wins only when every candidate
+     * was confirmed <em>absent</em>, because {@code absent} is the verdict that tells an operator to
+     * ship a replacement for a library the ROM may in fact have.
      */
     static ClientRead readClient(String[] paths) {
-        boolean unreadable = false;
+        boolean undetermined = false;
         for (int i = 0; i < paths.length; i++) {
-            try {
-                if (new File(paths[i]).isFile()) {
-                    return new ClientRead(PRESENT, paths[i]);
-                }
-            } catch (SecurityException e) {
-                unreadable = true;
+            String verdict = probePath(paths[i]);
+            if (PRESENT.equals(verdict)) {
+                return new ClientRead(PRESENT, paths[i]);
+            }
+            if (UNREADABLE.equals(verdict)) {
+                undetermined = true;
             }
         }
-        return new ClientRead(unreadable ? UNREADABLE : ABSENT, null);
+        return new ClientRead(undetermined ? UNREADABLE : ABSENT, null);
+    }
+
+    /**
+     * {@link File#isFile()} answers "no" to every failure mode without saying which: a directory this
+     * process cannot search and a file that was never installed return the same {@code false}, and it
+     * does not throw {@code SecurityException} for the first — Android installs no security manager, so
+     * catching one there was catching nothing. So each ancestor directory is confirmed traversable
+     * before anything below it is trusted, which is the only way a "no" means "not there".
+     *
+     * <p>On these frames {@code /system/lib} is world-readable and this returns exactly what
+     * {@code isFile()} would. The third answer is for a ROM where it is not.
+     *
+     * @return {@link #PRESENT}, {@link #ABSENT} or {@link #UNREADABLE} for this one path
+     */
+    static String probePath(String path) {
+        File cur = new File("/");
+        if (!cur.isDirectory() || !cur.canExecute()) {
+            return UNREADABLE;
+        }
+        String[] parts = path.split("/");
+        for (int i = 0; i < parts.length; i++) {
+            if (parts[i].length() == 0) {
+                continue;
+            }
+            cur = new File(cur, parts[i]);
+            if (i == parts.length - 1) {
+                return cur.isFile() ? PRESENT : ABSENT;
+            }
+            // Order matters: a directory that was never installed is absent, and only one that is
+            // there but will not be searched is unknown. canExecute() is false for both.
+            if (!cur.isDirectory()) {
+                return ABSENT;
+            }
+            if (!cur.canExecute()) {
+                return UNREADABLE;
+            }
+        }
+        return ABSENT;
     }
 
     private static int countAmstreamNodes() {
@@ -151,16 +181,39 @@ public final class SystemWriteServiceProbe {
     }
 
     /**
-     * {@code android.os.ServiceManager} is hidden, so it is absent from the compile-time android.jar
+     * The registrant read, through {@code IServiceManager.checkService} rather than the convenient
+     * {@code ServiceManager.getService}.
+     *
+     * <p>Two reasons, and the second is the one that matters here. {@code ServiceManager.getService}
+     * catches {@code RemoteException} inside the framework and returns null, so a servicemanager that
+     * could not be reached at all would be cached as {@code absent} — the verdict that tells an
+     * operator the ROM has no such service, and that this build therefore declines to ship the client
+     * for it. Going under the wrapper lets the transport failure reach the catch below and be reported
+     * as what it was. And {@code checkService} is the single {@code CHECK_SERVICE} transaction: it
+     * cannot wait for a registrant that never arrives. {@code ServiceManager.getService} is the other
+     * shape in some AOSP lines, and this runs inside a diagnostics path on an unattended frame, where
+     * the variant that might block is not acceptable on probability alone.
+     *
+     * <p>{@code android.os.ServiceManager} is hidden, so it is absent from the compile-time android.jar
      * and reflection is the only way in — the same shape as the {@code SystemProperties} write in
      * {@code AdbdInstallClient}.
      */
     private static String readRegistrant() {
         try {
             Class<?> sm = Class.forName("android.os.ServiceManager");
-            Method getService = sm.getMethod("getService", String.class);
-            Object binder = getService.invoke(null, SERVICE_NAME);
-            return classify(binder != null, false);
+            Method getIsm = sm.getDeclaredMethod("getIServiceManager");
+            getIsm.setAccessible(true);
+            Object ism = getIsm.invoke(null);
+            if (ism == null) {
+                return UNREADABLE;
+            }
+            Object binder = Class.forName("android.os.IServiceManager")
+                    .getMethod("checkService", String.class).invoke(ism, SERVICE_NAME);
+            return binder != null ? PRESENT : ABSENT;
+        } catch (InvocationTargetException e) {
+            // A RemoteException arrives here rather than as a null the framework would have handed
+            // back on its own behalf.
+            return UNREADABLE;
         } catch (Throwable t) {
             return UNREADABLE;
         }

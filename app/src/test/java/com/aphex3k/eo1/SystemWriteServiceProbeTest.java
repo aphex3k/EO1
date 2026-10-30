@@ -14,6 +14,7 @@ import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assume.assumeTrue;
 
 /**
  * The read that decides whether supplying {@code libsystemwriteservice.so} fixes an EO1 or freezes it.
@@ -30,21 +31,67 @@ public class SystemWriteServiceProbeTest {
     public TemporaryFolder tmp = new TemporaryFolder();
 
     @Test
-    public void aFoundBinderIsPresentAndANullOneIsAbsent() {
+    public void aFileThatIsThereIsPresent() throws Exception {
+        File dir = tmp.newFolder("lib");
+        File so = new File(dir, "libsystemwriteservice.so");
+        write(so);
         assertEquals(SystemWriteServiceProbe.PRESENT,
-                SystemWriteServiceProbe.classify(Boolean.TRUE, false));
-        assertEquals(SystemWriteServiceProbe.ABSENT,
-                SystemWriteServiceProbe.classify(Boolean.FALSE, false));
+                SystemWriteServiceProbe.probePath(so.getAbsolutePath()));
     }
 
-    /** The asymmetry the whole class exists for: a failed read is never an absent read. */
+    /** The ordinary case on a frame: the directory is there, the library is not. */
     @Test
-    public void anUnreadableLookupIsNotReportedAsAbsent() {
-        assertEquals(SystemWriteServiceProbe.UNREADABLE,
-                SystemWriteServiceProbe.classify(Boolean.FALSE, true));
-        assertEquals("and it outranks the null it happens to have",
-                SystemWriteServiceProbe.UNREADABLE,
-                SystemWriteServiceProbe.classify(null, true));
+    public void aFileThatIsNotThereIsAbsentNotUnknown() throws Exception {
+        File dir = tmp.newFolder("empty-lib");
+        assertEquals(SystemWriteServiceProbe.ABSENT,
+                SystemWriteServiceProbe.probePath(new File(dir, "libsystemwriteservice.so")
+                        .getAbsolutePath()));
+        assertEquals("and so is a path whose parent was never installed",
+                SystemWriteServiceProbe.ABSENT,
+                SystemWriteServiceProbe.probePath("/vendor/lib/libsystemwriteservice.so"));
+    }
+
+    /**
+     * The asymmetry the whole class exists for. {@code File.isFile()} returns false for a directory it
+     * cannot search, exactly as it does for a missing file — and it does not throw, because Android
+     * installs no security manager. So a ROM that <em>has</em> the client behind an unreadable
+     * directory must not be reported as one that lacks it, because {@code absent} is the verdict that
+     * sends an operator to replace a file that is already there.
+     */
+    @Test
+    public void aDirectoryThatCannotBeSearchedIsNotAnAbsentFile() throws Exception {
+        File dir = tmp.newFolder("locked-lib");
+        File so = new File(dir, "libsystemwriteservice.so");
+        write(so);
+        assumeTrue("this host let us drop the search bit", dir.setExecutable(false));
+        try {
+            assertEquals(SystemWriteServiceProbe.UNREADABLE,
+                    SystemWriteServiceProbe.probePath(so.getAbsolutePath()));
+            assertEquals("and the aggregate refuses to guess",
+                    SystemWriteServiceProbe.UNREADABLE,
+                    SystemWriteServiceProbe.readClient(new String[]{so.getAbsolutePath()}).verdict);
+        } finally {
+            dir.setExecutable(true);
+        }
+    }
+
+    @Test
+    public void oneReachablePathSettlesWhatAnotherCannotTell() throws Exception {
+        File locked = tmp.newFolder("locked2");
+        File so = new File(locked, "libsystemwriteservice.so");
+        write(so);
+        File found = tmp.newFolder("lib2");
+        File so2 = new File(found, "libsystemwriteservice.so");
+        write(so2);
+        boolean lockedOk = locked.setExecutable(false);
+        // A present path anywhere in the list wins outright, whether or not a sibling was readable.
+        SystemWriteServiceProbe.ClientRead r = SystemWriteServiceProbe.readClient(
+                new String[]{so.getAbsolutePath(), so2.getAbsolutePath()});
+        assertEquals(SystemWriteServiceProbe.PRESENT, r.verdict);
+        assertEquals(so2.getAbsolutePath(), r.path);
+        if (lockedOk) {
+            locked.setExecutable(true);
+        }
     }
 
     @Test
