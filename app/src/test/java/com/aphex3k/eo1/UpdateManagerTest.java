@@ -204,6 +204,7 @@ public class UpdateManagerTest {
         killed.fetchVersionName = "1.8.0";
         killed.fetchSha256 = SHA_B;
         killed.fetchSizeBytes = 4096L;
+        killed.fetchOrigin = UpdateState.SOURCE_MANIFEST;
 
         // The master is still the stage that was here before the check: restore that identity,
         // source included, so the next check still has to consult judgeStaged about it.
@@ -234,6 +235,22 @@ public class UpdateManagerTest {
         assertEquals(UpdateState.State.STAGED, uploadBack.state);
         assertFalse("a recovered upload is still not the host's to discard",
                 UpdateManager.mayDiscardStage(uploadBack.stagedSource));
+
+        // An uploaded APK killed between its swap and its metadata write is recovered through the
+        // same promote branch — and must come back as an UPLOAD, or the next check reads it as the
+        // host's and is free to delete the operator's file.
+        UpdateState midUpload = hostStage(SHA_A);
+        midUpload.state = UpdateState.State.IDLE;
+        midUpload.stagedSource = UpdateState.SOURCE_MANIFEST;
+        midUpload.fetchVersionCode = 9;
+        midUpload.fetchSha256 = SHA_B;
+        midUpload.fetchSizeBytes = 4096L;
+        midUpload.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+        UpdateState uploaded = UpdateManager.recoverInterruptedStage(midUpload, false, true);
+        assertEquals(UpdateState.SOURCE_UPLOAD, uploaded.stagedSource);
+        assertEquals(9, uploaded.expectedVersionCode);
+        assertFalse("and it stays that way for the next check",
+                UpdateManager.mayDiscardStage(uploaded.stagedSource));
 
         // Neither identity matches the bytes: recovery adds nothing. It never deletes either.
         assertSame(killed, UpdateManager.recoverInterruptedStage(killed, false, false));

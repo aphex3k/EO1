@@ -101,6 +101,17 @@ public class UpdateManager {
     private final File stagedPublic;
 
     private UpdateState state;
+    /**
+     * The thread currently entitled to change update state or touch the staged files — the cycle
+     * thread while a check is running, the install thread once one is dispatched, and nobody after
+     * an operator resets or uploads. A cycle blocks for seconds in {@code fetchManifest} and minutes
+     * in {@code download}, and it carries a {@code prior} snapshot from the moment it started;
+     * without this, a reset plus a fresh upload that completes in that window would have the old
+     * cycle write the discarded stage's identity over the new one, and the next install would find
+     * a pair that matches nothing and delete it. Checked under the monitor at every mutation, so a
+     * superseded worker simply discards itself rather than corrupting what replaced it.
+     */
+    private Thread updateWorker;
     private boolean installInFlight;
     private boolean installFiredInThisProcess;
     private volatile String lastInstallAttempt = "none";
@@ -338,11 +349,16 @@ public class UpdateManager {
             promoted.expectedVersionName = reconciled.fetchVersionName;
             promoted.manifestSha256 = reconciled.fetchSha256;
             promoted.expectedSizeBytes = reconciled.fetchSizeBytes;
-            promoted.stagedSource = UpdateState.SOURCE_MANIFEST;
+            // Not necessarily the host's: an uploaded APK killed between its swap and its metadata
+            // write is recovered through this branch, and promoting it as manifest-sourced would
+            // license the next check to delete it.
+            promoted.stagedSource = reconciled.fetchOrigin == null
+                    ? UpdateState.SOURCE_UNKNOWN : reconciled.fetchOrigin;
             promoted.fetchVersionCode = 0;
             promoted.fetchVersionName = "";
             promoted.fetchSha256 = "";
             promoted.fetchSizeBytes = 0L;
+            promoted.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
             return promoted;
         }
         return reconciled;
@@ -420,6 +436,9 @@ public class UpdateManager {
             }
             if (state.state == UpdateState.State.STAGED) {
                 installInFlight = true;
+                // The install owns the update work from here: a check thread still blocked on a
+                // fetch must not come back and rewrite the stage this install is reading.
+                updateWorker = null;
                 dispatch = true;
             } else if (note == null) {
                 note = "nothing staged (state=" + state.state + ")";
@@ -696,6 +715,9 @@ public class UpdateManager {
         synchronized (this) {
             deleteStagedFiles();
             partFile.delete();
+            // Whatever check is blocked on a fetch no longer owns anything: its stage is gone, and
+            // letting it resume would describe this frame as staged when nothing is.
+            updateWorker = null;
             installFiredInThisProcess = false;
             state = withState(state, UpdateState.State.IDLE, "");
             state.attempts = 0;
@@ -768,7 +790,10 @@ public class UpdateManager {
             replacingStaged = state.state == UpdateState.State.STAGED;
             previousLastError = state.lastError;
             // Reserve the state as in-flight before the slow verification work, the same
-            // way startCycle() reserves CHECKING.
+            // way startCycle() reserves CHECKING — and take the mutation right away from any check
+            // thread that is still blocked on a fetch, because its snapshot of this stage is now
+            // the thing being replaced.
+            updateWorker = null;
             state = withState(state, UpdateState.State.VERIFYING, "");
             stateStore.write(state);
         }
@@ -801,6 +826,19 @@ public class UpdateManager {
             long required = size + STAGING_HEADROOM_BYTES;
             if (freeBytes(updatesDir) < required || freeBytes(stagedPublic.getParentFile()) < required) {
                 return failUpload(apk, replacingStaged, previousLastError, sha, size, true, "insufficient-space");
+            }
+            // Claim the bytes' identity BEFORE they replace anything on disk. A process killed
+            // between the rename below and the metadata write at the end would otherwise come back
+            // describing the stage it overwrote — and if that one was host-sourced, the next check
+            // would be free to delete the operator's APK. fetchOrigin is what makes the recovered
+            // stage an upload rather than a licence to discard it.
+            synchronized (this) {
+                state.fetchVersionCode = manifest.versionCode;
+                state.fetchVersionName = manifest.versionName == null ? "" : manifest.versionName;
+                state.fetchSha256 = sha;
+                state.fetchSizeBytes = size;
+                state.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+                stateStore.write(state);
             }
             // Swap: replace any previously staged update. Remember whether the old staged
             // files are actually gone: a later failure must only restore the STAGED state
@@ -846,6 +884,7 @@ public class UpdateManager {
             state.fetchVersionName = "";
             state.fetchSha256 = "";
             state.fetchSizeBytes = 0L;
+            state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
             state = withState(state, UpdateState.State.STAGED, "");
             stateStore.write(state);
         }
@@ -868,6 +907,12 @@ public class UpdateManager {
             } else {
                 state = withState(state, UpdateState.State.FAILED, reason);
             }
+            // The rejected upload is not pending anywhere; the identity claimed for it is void.
+            state.fetchVersionCode = 0;
+            state.fetchVersionName = "";
+            state.fetchSha256 = "";
+            state.fetchSizeBytes = 0L;
+            state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
             stateStore.write(state);
         }
         Log.w(TAG, "uploaded APK rejected: " + reason);
@@ -878,7 +923,6 @@ public class UpdateManager {
     // ---------------------------------------------------------------------- cycle
 
     private void startCycle() {
-        final UpdateState prior;
         synchronized (this) {
             UpdateState s = state;
             if (installInFlight) {
@@ -904,24 +948,30 @@ public class UpdateManager {
             // a stage the host itself produced, and a forced check gets here for any stage. Either
             // way runCycle consults judgeStaged before it overwrites anything, so a stage this app
             // did not download is still untouched when the cycle decides what it may do.
-            prior = s;
+            final UpdateState prior = s;
             state = withState(s, UpdateState.State.CHECKING, "");
             state.attempts = s.attempts + 1;
             state.lastCheckedMs = System.currentTimeMillis();
             stateStore.write(state);
-        }
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    runCycle(prior);
-                } catch (Throwable t) {
-                    Log.e(TAG, "update cycle crashed", t);
-                    failOrRestore(prior, "cycle-crashed: " + t);
+            Thread worker = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        runCycle(prior);
+                    } catch (Throwable t) {
+                        Log.e(TAG, "update cycle crashed", t);
+                        failOrRestore(prior, "cycle-crashed: " + t);
+                    }
                 }
-            }
-        }, "EO1-update-cycle");
-        thread.start();
+            }, "EO1-update-cycle");
+            // Claim the mutation right for this worker in the same monitor transaction that put the
+            // state into CHECKING, so no other thread can be handed the update work while it runs.
+            // Starting it under the lock is deliberate: the thread's first act is to contend for
+            // this same monitor, and holding it until start() returns is what keeps the claim
+            // unambiguous.
+            updateWorker = worker;
+            worker.start();
+        }
     }
 
     /** What the published manifest says about a build already staged on disk. */
@@ -1053,6 +1103,8 @@ public class UpdateManager {
             state.fetchVersionName = manifest.versionName == null ? "" : manifest.versionName;
             state.fetchSha256 = manifest.sha256.trim().toLowerCase(Locale.US);
             state.fetchSizeBytes = manifest.sizeBytes;
+            // Whichever way these bytes land, a stage made of them is the host's to replace next.
+            state.fetchOrigin = UpdateState.SOURCE_MANIFEST;
             stateStore.write(state);
         }
 
@@ -1120,6 +1172,13 @@ public class UpdateManager {
         // unlinks bytes_N there, and the three rungs after it all deleted the pair, so a build
         // that had already passed all four gates could still leave a REPLACE frame with nothing
         // staged and its install retry dead.
+        // Last chance to back out cleanly: everything below this line changes files.
+        synchronized (this) {
+            if (!ownsUpdateWork()) {
+                notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
+                return;
+            }
+        }
         try {
             if (!externalStorageWritable()) {
                 // Nothing has been touched yet, so the stage this frame already holds survives.
@@ -1141,7 +1200,7 @@ public class UpdateManager {
                 stagedMaster.delete();
                 if (!partFile.renameTo(stagedMaster)) {
                     deleteStagedFiles();
-                    failState("stage-rename-failed");
+                    failState("stage-rename-failed", true);
                     return;
                 }
             }
@@ -1422,13 +1481,32 @@ public class UpdateManager {
     }
 
     private void failState(String reason) {
+        failState(reason, false);
+    }
+
+    /**
+     * @param cycleOwned true when the caller is a check cycle, which must still own the update work
+     *                   to record a failure: a {@code FAILED} written by an abandoned cycle over an
+     *                   upload that landed meanwhile would stop the install retry and hand the next
+     *                   check a state that no longer matches the stage on disk.
+     */
+    private void failState(String reason, boolean cycleOwned) {
         partFile.delete();
         synchronized (this) {
+            if (cycleOwned && !ownsUpdateWork()) {
+                notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
+                return;
+            }
             state = UpdateState.failed(state, reason);
             stateStore.write(state);
         }
         Log.e(TAG, "update FAILED: " + reason);
         notifyDebug("update FAILED: " + reason);
+    }
+
+    /** Whether the calling thread is still the one entitled to change update state or files. */
+    private boolean ownsUpdateWork() {
+        return Thread.currentThread() == updateWorker;
     }
 
     /**
@@ -1443,6 +1521,15 @@ public class UpdateManager {
      */
     private void restoreStaged(UpdateState prior, String reason) {
         synchronized (this) {
+            // Ownership and mutation in one transaction: checked in a lock of its own, another
+            // thread could take the stage over in the gap between it and the write below.
+            if (!ownsUpdateWork()) {
+                // A reset or an upload took this stage over while the check was fetching. Its
+                // snapshot of the old identity is now fiction, and writing it would leave the new
+                // APK described as the discarded one.
+                notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
+                return;
+            }
             long checkedMs = state.lastCheckedMs;
             int att = state.attempts;
             state = withState(prior, UpdateState.State.STAGED, reason);
@@ -1451,12 +1538,20 @@ public class UpdateManager {
             state.fetchVersionName = "";
             state.fetchSha256 = "";
             state.fetchSizeBytes = 0L;
+            state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
             state.needsHumanConfirmation = prior.needsHumanConfirmation;
             state.lastCheckedMs = checkedMs;
             state.attempts = att;
             stateStore.write(state);
         }
         notifyDebug("update: " + reason);
+        // A tick that starts a re-check spends itself on the check: MainActivity's runOnTimer calls
+        // checkIfDue() and then installStaged(false), and while the cycle is in flight that second
+        // call sees CHECKING and dispatches nothing. With updateCheckIntervalMinutes at or below the
+        // rotation interval, every tick started a check and no tick ever installed — the stage sat
+        // there even after the transport recovered. The cycle that leaves a stage in place has to
+        // attempt the install the tick was going to.
+        installStaged(false);
     }
 
     /**
@@ -1467,6 +1562,15 @@ public class UpdateManager {
      * {@code lastError}, so {@code /state} and {@code eo1-app.log} say why nothing landed.
      */
     private void failOrRestore(UpdateState prior, String reason) {
+        boolean ours;
+        synchronized (this) {
+            ours = ownsUpdateWork();
+        }
+        if (!ours) {
+            // Not even the partial download is ours to delete: another worker may own it now.
+            notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
+            return;
+        }
         partFile.delete();
         if (prior != null && prior.state == UpdateState.State.STAGED
                 && stagedIntactAs(prior.manifestSha256, prior.expectedSizeBytes)) {
@@ -1475,7 +1579,7 @@ public class UpdateManager {
                     + prior.expectedVersionName + " (" + prior.expectedVersionCode + ")");
             return;
         }
-        failState(reason);
+        failState(reason, true);
     }
 
     /** True when the private master is byte-for-byte the build named by {@code sha}/{@code size}. */
@@ -1515,11 +1619,13 @@ public class UpdateManager {
             state.expectedVersionName = state.fetchVersionName;
             state.manifestSha256 = state.fetchSha256;
             state.expectedSizeBytes = state.fetchSizeBytes;
-            state.stagedSource = UpdateState.SOURCE_MANIFEST;
+            // Whichever worker's bytes these are, that worker's source is what protects them next.
+            state.stagedSource = state.fetchOrigin;
             state.fetchVersionCode = 0;
             state.fetchVersionName = "";
             state.fetchSha256 = "";
             state.fetchSizeBytes = 0L;
+            state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
             state = withState(state, UpdateState.State.STAGED, "");
             stateStore.write(state);
         }
@@ -1544,6 +1650,7 @@ public class UpdateManager {
         c.fetchVersionName = s.fetchVersionName;
         c.fetchSha256 = s.fetchSha256;
         c.fetchSizeBytes = s.fetchSizeBytes;
+        c.fetchOrigin = s.fetchOrigin;
         c.lastCheckedMs = s.lastCheckedMs;
         c.attempts = s.attempts;
         c.installFiredAtMs = s.installFiredAtMs;
@@ -1596,9 +1703,15 @@ public class UpdateManager {
         o.addProperty("stagedSha256", s.manifestSha256);
         // What the running cycle is fetching, when one is. During a supersede this names the new
         // build while expectedVersionCode/stagedSha256 still describe the APK on disk, which is the
-        // point: those two are the stage, not a promise about it.
-        o.addProperty("fetchingVersionCode", s.fetchVersionCode);
-        o.addProperty("fetchingSha256", s.fetchSha256);
+        // point: those two are the stage, not a promise about it. Reported only while a cycle is
+        // actually running — the values stay on disk after a failure so a later launch can match
+        // them against the master, but a FAILED or STAGED frame that advertises a download has
+        // stopped describing this frame and started describing the last one it failed at.
+        boolean fetching = s.state == UpdateState.State.CHECKING
+                || s.state == UpdateState.State.DOWNLOADING
+                || s.state == UpdateState.State.VERIFYING;
+        o.addProperty("fetchingVersionCode", fetching ? s.fetchVersionCode : 0);
+        o.addProperty("fetchingSha256", fetching ? s.fetchSha256 : "");
         // "manifest" — the host owns this stage and may replace it; "upload" — an operator put it
         // here and nothing automatic will; "" — staged by a build older than this field, so the
         // app cannot tell and leaves it alone.

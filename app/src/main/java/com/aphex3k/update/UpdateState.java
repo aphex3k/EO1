@@ -42,6 +42,15 @@ public class UpdateState {
     public String fetchSha256 = "";
     public long fetchSizeBytes;
     /**
+     * Who will own the bytes described by the {@code fetch*} fields once they are on disk —
+     * {@link #SOURCE_MANIFEST} for a build the check is downloading, {@link #SOURCE_UPLOAD} for an
+     * APK being staged by {@code POST /update}. Written <em>before</em> the file swap that puts
+     * those bytes in place, because a process killed between the swap and the metadata write
+     * otherwise comes back claiming the stage it replaced, and a host-sourced claim lets the next
+     * check delete an operator's uploaded APK.
+     */
+    public String fetchOrigin = SOURCE_UNKNOWN;
+    /**
      * What produced the staged APK. Only {@link #SOURCE_MANIFEST} may be displaced automatically
      * when the host publishes something else: an uploaded APK was put here on purpose, and
      * {@link #SOURCE_UNKNOWN} is whatever a frame had staged before this field existed — neither
@@ -96,6 +105,7 @@ public class UpdateState {
             s.fetchVersionName = previous.fetchVersionName;
             s.fetchSha256 = previous.fetchSha256;
             s.fetchSizeBytes = previous.fetchSizeBytes;
+            s.fetchOrigin = previous.fetchOrigin;
             s.lastCheckedMs = previous.lastCheckedMs;
             s.attempts = previous.attempts;
         }

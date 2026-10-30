@@ -188,6 +188,7 @@ public class UpdateStateStoreTest {
         s.fetchVersionName = "1.9.0";
         s.fetchSha256 = "bb0009dcee21620b166f3abfecb5eff7a873be729d1c2d53822e7acc5f34eb9b";
         s.fetchSizeBytes = 999L;
+        s.fetchOrigin = UpdateState.SOURCE_UPLOAD;
         assertTrue(store.write(s));
 
         UpdateState read = store.read();
@@ -197,6 +198,8 @@ public class UpdateStateStoreTest {
         assertEquals("1.9.0", read.fetchVersionName);
         assertEquals(s.fetchSha256, read.fetchSha256);
         assertEquals(999L, read.fetchSizeBytes);
+        assertEquals("the pending stage's owner has to survive the swap, not just its bytes",
+                UpdateState.SOURCE_UPLOAD, read.fetchOrigin);
     }
 
     @Test
