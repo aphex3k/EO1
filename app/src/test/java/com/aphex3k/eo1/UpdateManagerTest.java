@@ -252,6 +252,26 @@ public class UpdateManagerTest {
         assertFalse("and it stays that way for the next check",
                 UpdateManager.mayDiscardStage(uploaded.stagedSource));
 
+        // Both matches true — the operator uploaded the very APK the host had already staged, and
+        // the process died between the swap and the metadata write. The pending upload's
+        // provenance has to win, because "manifest" is a licence for the next check to delete it.
+        UpdateState identical = hostStage(SHA_A);
+        identical.state = UpdateState.State.IDLE;
+        identical.fetchVersionCode = 7;
+        identical.fetchVersionName = "1.7.0";
+        identical.fetchSha256 = SHA_A;
+        identical.fetchSizeBytes = identical.expectedSizeBytes;
+        identical.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+        UpdateState both = UpdateManager.recoverInterruptedStage(identical, true, true);
+        assertEquals(UpdateState.State.STAGED, both.state);
+        assertEquals("the upload's provenance survives the ambiguity",
+                UpdateState.SOURCE_UPLOAD, both.stagedSource);
+        assertFalse(UpdateManager.mayDiscardStage(both.stagedSource));
+        // And with no upload pending, the same ambiguity is simply the stage that was already there.
+        identical.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
+        assertEquals(UpdateState.SOURCE_MANIFEST,
+                UpdateManager.recoverInterruptedStage(identical, true, false).stagedSource);
+
         // Neither identity matches the bytes: recovery adds nothing. It never deletes either.
         assertSame(killed, UpdateManager.recoverInterruptedStage(killed, false, false));
         assertNull(UpdateManager.recoverInterruptedStage(null, true, true));
