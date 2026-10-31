@@ -485,19 +485,24 @@ public class UpdateManager {
      * no sha for either comparison to match.
      */
     /**
-     * Package-visible for unit tests. Whether a stage recovered at startup is the build already
-     * running, which must never be handed back as installable: {@code runInstall()} has no
-     * newer-than-installed gate of its own — that gate lives in {@code runCycle} and in
-     * {@code stageUploadedApk} — so a {@code STAGED} state naming the running version means the next
-     * tick reinstalls it. {@code expectedVersionCode == 0} is the blank state
-     * {@link #reconcileState()} leaves on a confirmed install and must not read as equal to a device
-     * that happens to be at zero.
+    /**
+     * Package-visible for unit tests. Whether a stage recovered at startup could never install
+     * anyway, and must therefore not be handed back as installable.
+     *
+     * <p>{@code <=} rather than {@code ==}: {@code runInstall()} has no newer-than-installed gate of
+     * its own — that gate lives in {@code runCycle} and in {@code stageUploadedApk} — so a recovered
+     * stage at <em>or below</em> the running version is a tick away from an attempt to downgrade. The
+     * case is not exotic: an interrupted check whose staged build was 7, with the operator having
+     * sideloaded 9 since, restores 7 as though it were an upgrade. An uploaded or legacy stage left
+     * in that position is worse than useless, because it also blocks automatic update checks without
+     * ever being installable. {@code expectedVersionCode == 0} is the blank state
+     * {@link #reconcileState()} leaves on a confirmed install and must not be compared at all.
      */
     static boolean recoveredAlreadyRunning(UpdateState recovered, int installedVersionCode) {
         return recovered != null
                 && recovered.state == UpdateState.State.STAGED
                 && recovered.expectedVersionCode > 0
-                && recovered.expectedVersionCode == installedVersionCode;
+                && recovered.expectedVersionCode <= installedVersionCode;
     }
 
     static UpdateState recoverInterruptedStage(UpdateState reconciled, boolean masterIsStaged,
@@ -747,7 +752,9 @@ public class UpdateManager {
 
         switch (chooseInstallPath(holdsPermission, adbdReachable, humanRequested)) {
             case HEADLESS:
-                armAndPersist("headless installPackage", snapshot.expectedVersionCode);
+                if (!armAndPersist("headless installPackage", snapshot.expectedVersionCode)) {
+                    return;
+                }
                 lastInstallAttempt = "headless";
                 try {
                     fireHeadlessInstall(Uri.fromFile(stagedPublic));
@@ -758,7 +765,12 @@ public class UpdateManager {
                 break;
 
             case ADBD: {
-                armAndPersist("adbd pm install", snapshot.expectedVersionCode);
+                if (!armAndPersist("adbd pm install", snapshot.expectedVersionCode)) {
+                    // Cancelled — but an adbd this call started is still this call's to close, and
+                    // the exposure is meant to be one action, never a boot.
+                    closeAdbIfWeOpenedIt(armedByUs);
+                    return;
+                }
                 // Record it before the attempt: a successful pm install kills this process, and the
                 // next one has to know it inherited a door the last one opened.
                 persistAdbArmed(armedByUs);
@@ -811,7 +823,9 @@ public class UpdateManager {
     private void persistAdbArmed(boolean armed) {
         synchronized (this) {
             state.armedTcpAdb = armed;
-            stateStore.write(state);
+            if (!writeState(state)) {
+                return;
+            }
         }
         if (armed) {
             notifyDebug("install: started adbd for this install; it will be closed again after");
@@ -829,11 +843,25 @@ public class UpdateManager {
     }
 
     /** Records that a silent install is being fired, and keeps the frame launchable if we die. */
-    private void armAndPersist(String how, int expectedVersionCode) {
+    /**
+     * Readies the process for an install and records it as pending.
+     *
+     * @return false when the install must not be dispatched because another manager owns the update
+     *         work now — the caller is on an install thread that resumed across an Activity
+     *         recreation, and firing would have the replacement's staged APK installed by a worker
+     *         whose snapshot of it is stale. The relaunch alarm armed before this point is the one
+     *         the crash handler already relies on and is left alone; adbd teardown stays in the
+     *         caller's {@code finally}, which is the whole reason cancellation happens here rather
+     *         than deeper in.
+     */
+    private boolean armAndPersist(String how, int expectedVersionCode) {
         armRelaunchAlarm();
-        persistInstallPending();
+        if (!persistInstallPending()) {
+            return false;
+        }
         installFiredInThisProcess = true;
         notifyDebug("install: " + how + " (version " + expectedVersionCode + ")");
+        return true;
     }
 
     private void fireInstallIntent(UpdateState snapshot) {
@@ -908,6 +936,15 @@ public class UpdateManager {
     public void resetUpdate() {
         synchronized (stageGate) {
             synchronized (this) {
+                if (!ownsProcessWork()) {
+                    // MainActivity queues this on the UI thread, so a reset pressed before an
+                    // Activity recreation can run on the manager that recreation retired. Clearing
+                    // its own state would then delete the replacement's staged APK, sweep a temp its
+                    // worker is writing, and persist an IDLE that describes nobody.
+                    notifyDebug("update: a reset queued before the recreation ran on a retired"
+                            + " manager; ignored");
+                    return;
+                }
                 // Revoked before the files go, so a cycle blocked on a fetch cannot come back and
                 // rename a stage the operator has just asked to discard. Gate then monitor, always.
                 updateWorker = null;
@@ -1755,8 +1792,7 @@ public class UpdateManager {
 
     private void setState(UpdateState.State newState) {
         synchronized (this) {
-            state = withState(state, newState, "");
-            stateStore.write(state);
+            writeState(withState(state, newState, ""));
         }
     }
 
@@ -1777,11 +1813,35 @@ public class UpdateManager {
                 notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
                 return;
             }
-            state = UpdateState.failed(state, reason);
-            stateStore.write(state);
+            // writeState() also refuses a manager that recreation replaced, which is the case the
+            // install thread can reach this from: it is the right thread and the wrong manager.
+            if (!writeState(UpdateState.failed(state, reason))) {
+                return;
+            }
         }
         Log.e(TAG, "update FAILED: " + reason);
         notifyDebug("update FAILED: " + reason);
+    }
+
+    /**
+     * The one place persisted state is replaced. Callers hold the monitor; the ownership test that
+     * belongs next to the write lives here, so a new state writer cannot forget it — seven rounds of
+     * this file have been, in effect, a list of places that forgot.
+     *
+     * @return false when another manager owns the process's update work and nothing was written
+     */
+    private boolean writeState(UpdateState next) {
+        if (!ownsProcessWork()) {
+            supersededWriteDropped();
+            return false;
+        }
+        state = next;
+        stateStore.write(state);
+        return true;
+    }
+
+    private void supersededWriteDropped() {
+        notifyDebug("update: a replaced manager tried to write update state; ignored");
     }
 
     /** Whether the calling thread is still the one entitled to change update state or files. */
@@ -1837,10 +1897,8 @@ public class UpdateManager {
             if (!ownsUpdateWork()) {
                 return false;
             }
-            state = withState(state, next, "");
-            stateStore.write(state);
+            return writeState(withState(state, next, ""));
         }
-        return true;
     }
 
     /** A cycle's transition to IDLE, refused once another worker owns the update work. */
@@ -1849,8 +1907,9 @@ public class UpdateManager {
             if (!ownsUpdateWork()) {
                 return false;
             }
-            state = withState(state, UpdateState.State.IDLE, reason);
-            stateStore.write(state);
+            if (!writeState(withState(state, UpdateState.State.IDLE, reason))) {
+                return false;
+            }
         }
         notifyDebug("update: " + reason);
         return true;
@@ -2076,15 +2135,11 @@ public class UpdateManager {
         return UpdateState.SOURCE_MANIFEST.equals(stagedSource);
     }
 
-    private void persistInstallPending() {
+    private boolean persistInstallPending() {
         synchronized (this) {
-            if (!ownsProcessWork()) {
-                notifyDebug("install: a replaced manager tried to record a pending install; ignored");
-                return;
-            }
-            state = withState(state, UpdateState.State.INSTALL_PENDING, "");
-            state.installFiredAtMs = System.currentTimeMillis();
-            stateStore.write(state);
+            UpdateState next = withState(state, UpdateState.State.INSTALL_PENDING, "");
+            next.installFiredAtMs = System.currentTimeMillis();
+            return writeState(next);
         }
     }
 
@@ -2107,18 +2162,13 @@ public class UpdateManager {
             state.fetchSha256 = "";
             state.fetchSizeBytes = 0L;
             state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
-            state = withState(state, UpdateState.State.STAGED, "");
-            stateStore.write(state);
+            writeState(withState(state, UpdateState.State.STAGED, ""));
         }
     }
 
     private void setStaged(String lastError) {
         synchronized (this) {
-            if (!ownsProcessWork()) {
-                return;
-            }
-            state = withState(state, UpdateState.State.STAGED, lastError);
-            stateStore.write(state);
+            writeState(withState(state, UpdateState.State.STAGED, lastError));
         }
     }
 
@@ -2149,11 +2199,13 @@ public class UpdateManager {
     /** STAGED, retryable, but nothing on this frame can install it without a click. */
     private void setNeedsHuman() {
         synchronized (this) {
-            state = withState(state, UpdateState.State.STAGED, REASON_NEEDS_HUMAN);
-            state.needsHumanConfirmation = true;
+            UpdateState next = withState(state, UpdateState.State.STAGED, REASON_NEEDS_HUMAN);
+            next.needsHumanConfirmation = true;
             // Nothing was fired, so nothing is owed a settle window.
-            state.installFiredAtMs = 0L;
-            stateStore.write(state);
+            next.installFiredAtMs = 0L;
+            if (!writeState(next)) {
+                return;
+            }
         }
         notifyDebug("install: deferred — no silent transport on this frame;"
                 + " use \"Install on the frame\" in the web UI");

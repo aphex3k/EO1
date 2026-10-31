@@ -297,10 +297,18 @@ public class UpdateManagerTest {
         same.state = UpdateState.State.STAGED;
         assertTrue(UpdateManager.recoveredAlreadyRunning(same, 7));
 
+        // Strictly newer is the only thing worth restoring: runInstall() has no version gate, so a
+        // recovered stage at or below the running build is a downgrade attempt waiting for a tick.
         UpdateState newer = hostStage(SHA_A);
         newer.state = UpdateState.State.STAGED;
         newer.expectedVersionCode = 8;
         assertFalse(UpdateManager.recoveredAlreadyRunning(newer, 7));
+
+        UpdateState downgraded = hostStage(SHA_A);
+        downgraded.state = UpdateState.State.STAGED;
+        downgraded.expectedVersionCode = 7;
+        assertTrue("an interrupted check whose stage predates a sideload must not come back",
+                UpdateManager.recoveredAlreadyRunning(downgraded, 9));
 
         // A blank state at version 0 must not read as "equals a device at zero".
         UpdateState blank = UpdateState.idle();
