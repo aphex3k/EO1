@@ -113,6 +113,19 @@ public class UpdateManager {
             new java.util.concurrent.atomic.AtomicBoolean();
     /** Set by {@link #retire()}; a retired manager's threads may no longer mutate anything. */
     private volatile boolean retired;
+    /**
+     * The manager that owns the process's update work — the newest one constructed, which after an
+     * Activity recreation is the replacement rather than the instance whose Activity ended.
+     *
+     * <p>Thread identity cannot express this. Ownership by "is this the thread I handed the work to"
+     * covers the cycle, the upload and the install thread, but {@code packageInstalled} and
+     * {@code packageInstallFailed} arrive on a framework binder thread that was never handed
+     * anything — so the install's asynchronous result, and every file operation the install path
+     * makes, have to be attributed to the manager that started the install, not to a thread. Same
+     * reason the temp-name sequence had to be static: the resource being protected is per-process,
+     * so the guard has to be too.
+     */
+    private static volatile UpdateManager processOwner;
 
     /**
      * One unit of update work: the thread that owns it and the intermediate files that belong to it
@@ -182,6 +195,11 @@ public class UpdateManager {
         this.stagedPublic = new File(publicDir, "eo1-update.apk");
         this.stateStore = new UpdateStateStore(UpdateStateStore.defaultStateFile(this.context));
         this.state = this.stateStore.read();
+        // Taking ownership at construction, before anything this instance could schedule: a
+        // recreation destroys the old Activity first in the usual order, but the ordering is not
+        // something to rely on for correctness, and the replacement owns the staging directory the
+        // moment it exists.
+        processOwner = this;
     }
 
     /**
@@ -379,6 +397,21 @@ public class UpdateManager {
                     stagedIntactAs(reconciled.fetchSha256, reconciled.fetchSizeBytes));
             if (recovered != reconciled) {
                 reconciled = recovered;
+                if (recoveredAlreadyRunning(reconciled, BuildConfig.VERSION_CODE)) {
+                    // Recovered a stage that turns out to be the build already running — staged
+                    // before an operator sideloaded the same version underneath it. reconcileState's
+                    // own confirmation check had already run, against the interrupted state rather
+                    // than this restored one, and runInstall() has no newer-than-installed gate of
+                    // its own, so restoring it as installable would have the next tick reinstall the
+                    // version it is running. Same treatment the branch above gives a confirmed
+                    // update: drop the files, reset the identity, keep the clock.
+                    long checkedMs = reconciled.lastCheckedMs;
+                    reconciled = UpdateState.idle();
+                    reconciled.lastCheckedMs = checkedMs;
+                    deleteStagedFiles();
+                    notifyDebug("self-update " + BuildConfig.VERSION_CODE
+                            + " recovered already-installed; stage discarded");
+                }
             }
             if (reconciled.state == UpdateState.State.STAGED
                     && !stagedPublic.exists()
@@ -451,6 +484,22 @@ public class UpdateManager {
      * construction: {@link #reconcileState} news up a blank state for that, and a blank state has
      * no sha for either comparison to match.
      */
+    /**
+     * Package-visible for unit tests. Whether a stage recovered at startup is the build already
+     * running, which must never be handed back as installable: {@code runInstall()} has no
+     * newer-than-installed gate of its own — that gate lives in {@code runCycle} and in
+     * {@code stageUploadedApk} — so a {@code STAGED} state naming the running version means the next
+     * tick reinstalls it. {@code expectedVersionCode == 0} is the blank state
+     * {@link #reconcileState()} leaves on a confirmed install and must not read as equal to a device
+     * that happens to be at zero.
+     */
+    static boolean recoveredAlreadyRunning(UpdateState recovered, int installedVersionCode) {
+        return recovered != null
+                && recovered.state == UpdateState.State.STAGED
+                && recovered.expectedVersionCode > 0
+                && recovered.expectedVersionCode == installedVersionCode;
+    }
+
     static UpdateState recoverInterruptedStage(UpdateState reconciled, boolean masterIsStaged,
             boolean masterIsFetching) {
         if (reconciled == null || reconciled.state != UpdateState.State.IDLE) {
@@ -571,7 +620,7 @@ public class UpdateManager {
                     event = "install fired earlier did not settle; back to STAGED";
                 }
             }
-            if (state.state == UpdateState.State.STAGED) {
+            if (state.state == UpdateState.State.STAGED && ownsProcessWork()) {
                 installInFlight = true;
                 // The install owns the update work from here: a check thread still blocked on a
                 // fetch must not come back and rewrite the stage this install is reading. Naming a
@@ -909,14 +958,6 @@ public class UpdateManager {
      *         against the published release.
      */
     public ApkUploadResult stageUploadedApk(File apk) {
-        if (retired) {
-            // Same reasoning as installStaged: this instance's Activity is gone, and staging here
-            // would race the manager that owns the staging directory now.
-            if (apk != null) {
-                apk.delete();
-            }
-            return ApkUploadResult.reject("", 0, false, "manager-retired");
-        }
         if (apk == null || !apk.isFile() || apk.length() <= 0) {
             return ApkUploadResult.reject("", 0, false, "file-unavailable");
         }
@@ -930,6 +971,14 @@ public class UpdateManager {
         String previousLastError;
         final Worker uploadWorker;
         synchronized (this) {
+            if (!ownsProcessWork()) {
+                // The entry check can be followed by a recreation; reserving here would persist
+                // VERIFYING from a stale manager's in-memory state, and no later ownership check can
+                // take that write back.
+                apk.delete();
+                // No computed hash to report: the file was never read by this, the retired, manager.
+                return ApkUploadResult.reject("", size, false, "manager-retired");
+            }
             if (installInFlight) {
                 apk.delete();
                 return ApkUploadResult.reject("", size, false, "install-in-flight");
@@ -1103,12 +1152,14 @@ public class UpdateManager {
     // ---------------------------------------------------------------------- cycle
 
     private void startCycle() {
-        if (retired) {
-            // A runOnUiThread callback queued before onDestroy() can land after the manager that
-            // owns this instance's staging directory has been replaced.
-            return;
-        }
         synchronized (this) {
+            // Inside the monitor, not before it: a check at the door can be followed a moment later
+            // by a recreation, and this method then reserves CHECKING with a stale manager's
+            // in-memory state. Same reason stageUploadedApk re-checks here.
+            if (!ownsProcessWork()) {
+                notifyDebug("update: a replaced manager asked for a check; ignored");
+                return;
+            }
             UpdateState s = state;
             if (installInFlight) {
                 // The platform installer has stagedPublic open right now. A cycle that replaces
@@ -1756,8 +1807,22 @@ public class UpdateManager {
             synchronized (this) {
                 retired = true;
                 updateWorker = null;
+                if (processOwner == this) {
+                    // Only yield the process role if nobody newer has taken it; a replacement that
+                    // was constructed first must keep it.
+                    processOwner = null;
+                }
             }
         }
+    }
+
+    /**
+     * Whether this manager may still touch persisted state or the staged pair. Read it inside the
+     * monitor you are about to mutate under — checking it and then writing in a separate
+     * transaction is the gap this whole round of fixes keeps tripping over.
+     */
+    private boolean ownsProcessWork() {
+        return !retired && processOwner == this;
     }
 
     /** This thread's worker, or null when it has been superseded — never another's. */
@@ -1886,6 +1951,11 @@ public class UpdateManager {
     /** Deletes the staged pair under the same gate that protects the master swap. */
     private boolean discardStagedUnderGate() {
         synchronized (stageGate) {
+            if (!ownsProcessWork()) {
+                // The pair belongs to a newer manager; deleting it here would remove the
+                // replacement's staged APK while its own state still says it is there.
+                return false;
+            }
             return deleteStagedFiles();
         }
     }
@@ -2008,6 +2078,10 @@ public class UpdateManager {
 
     private void persistInstallPending() {
         synchronized (this) {
+            if (!ownsProcessWork()) {
+                notifyDebug("install: a replaced manager tried to record a pending install; ignored");
+                return;
+            }
             state = withState(state, UpdateState.State.INSTALL_PENDING, "");
             state.installFiredAtMs = System.currentTimeMillis();
             stateStore.write(state);
@@ -2040,6 +2114,9 @@ public class UpdateManager {
 
     private void setStaged(String lastError) {
         synchronized (this) {
+            if (!ownsProcessWork()) {
+                return;
+            }
             state = withState(state, UpdateState.State.STAGED, lastError);
             stateStore.write(state);
         }
@@ -2212,6 +2289,9 @@ public class UpdateManager {
         // way (the success path on startup handles both STAGED and INSTALL_PENDING).
         Log.i(TAG, "install observer: packageInstalled (user " + userId + ")");
         synchronized (UpdateManager.this) {
+            if (!ownsProcessWork()) {
+                return;
+            }
             installFiredInThisProcess = false;
             if (state.state == UpdateState.State.INSTALL_PENDING) {
                 state = withState(state, UpdateState.State.STAGED, "");
@@ -2223,6 +2303,12 @@ public class UpdateManager {
     private void onInstallFailed(String errorMsg, int userId) {
         Log.w(TAG, "install observer: packageInstallFailed (user " + userId + "): " + errorMsg);
         synchronized (UpdateManager.this) {
+            if (!ownsProcessWork()) {
+                // This callback belongs to an install started by a manager that no longer owns the
+                // process. It runs on a framework binder thread that was never handed the work, so
+                // thread ownership cannot speak for it and the manager has to.
+                return;
+            }
             installFiredInThisProcess = false;
             if (state.state == UpdateState.State.INSTALL_PENDING) {
                 state = withState(state, UpdateState.State.STAGED,

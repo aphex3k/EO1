@@ -285,6 +285,30 @@ public class UpdateManagerTest {
         assertSame(confirmed, UpdateManager.recoverInterruptedStage(confirmed, false, false));
     }
 
+    /**
+     * Recovery hands back a stage without consulting the installed version — that comparison is
+     * reconcileState's, and it ran against the interrupted state, not the restored one. An operator
+     * who sideloaded the very build that was staged would otherwise get it reinstalled by the next
+     * tick, because runInstall() has no newer-version gate of its own.
+     */
+    @Test
+    public void recoveredAlreadyRunning_isNotInstallable() {
+        UpdateState same = hostStage(SHA_A);
+        same.state = UpdateState.State.STAGED;
+        assertTrue(UpdateManager.recoveredAlreadyRunning(same, 7));
+
+        UpdateState newer = hostStage(SHA_A);
+        newer.state = UpdateState.State.STAGED;
+        newer.expectedVersionCode = 8;
+        assertFalse(UpdateManager.recoveredAlreadyRunning(newer, 7));
+
+        // A blank state at version 0 must not read as "equals a device at zero".
+        UpdateState blank = UpdateState.idle();
+        blank.state = UpdateState.State.STAGED;
+        assertFalse(UpdateManager.recoveredAlreadyRunning(blank, 0));
+        assertFalse(UpdateManager.recoveredAlreadyRunning(null, 7));
+    }
+
     @Test
     public void mayDiscardStage_onlyTheHostsOwnBuild() {
         assertTrue(UpdateManager.mayDiscardStage(UpdateState.SOURCE_MANIFEST));
