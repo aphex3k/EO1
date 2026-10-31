@@ -338,7 +338,13 @@ public class UpdateManager {
             // hands an uploaded stage back its stagedSource, which is the only thing protecting it
             // from the next check. Nothing here ever deletes: VERIFYING is also what POST /update
             // parks in while it swaps an uploaded APK, and those bytes are the operator's.
-            UpdateState recovered = recoverInterruptedStage(reconciled,
+            // Hash only when recovery could still apply. This runs synchronously from
+            // MainActivity.onCreate(), and an up-to-100 MiB SHA-256 on the UI thread of this hardware
+            // is seconds of launch time — while recoverInterruptedStage() returns its argument
+            // untouched for any state but IDLE, which is the case for a parked STAGED or
+            // INSTALL_PENDING update, i.e. the ordinary launch.
+            UpdateState recovered = reconciled.state != UpdateState.State.IDLE ? reconciled
+                    : recoverInterruptedStage(reconciled,
                     stagedIntactAs(reconciled.manifestSha256, reconciled.expectedSizeBytes),
                     stagedIntactAs(reconciled.fetchSha256, reconciled.fetchSizeBytes));
             if (recovered != reconciled) {
@@ -624,7 +630,14 @@ public class UpdateManager {
                 failState("staged-file-changed");
                 return;
             }
-            if (!repairPublicCopy(snapshot.expectedSizeBytes)) {
+            int repaired = repairPublicCopy(snapshot.expectedSizeBytes);
+            if (repaired < 0) {
+                // Superseded while we were hashing: whoever owns the stage now will decide about its
+                // public copy. Reporting public-copy-failed here would be a lie about the cause.
+                abandonedCycle();
+                return;
+            }
+            if (repaired == 0) {
                 // The master is intact and the destination is the problem — full, unmounted, or
                 // otherwise unwritable. Deleting the good master here would throw away the only
                 // installable APK the frame has because of a defect in its copy, and FAILED would
@@ -898,7 +911,10 @@ public class UpdateManager {
             stateStore.write(state);
         }
 
-        boolean oldStagedGone = false;
+        // Captured rather than re-read: if a reset revokes this upload partway, myWorker() returns
+        // null afterwards, and the temp it wrote its bytes into would never be deleted.
+        final Worker uploadWorker = myWorker();
+        final File publicPart = uploadWorker.publicPart;
         ApkManifestInfo manifest = null;
         String sha = "";
         try {
@@ -934,11 +950,19 @@ public class UpdateManager {
             // stage an upload rather than a licence to discard it.
             boolean claimed;
             synchronized (this) {
+                if (!ownsUpdateWork()) {
+                    // A reset or a newer upload owns the state now; writing our pending identity
+                    // into it would describe someone else's bytes as this file.
+                    return ApkUploadResult.reject(sha, size, true, "superseded-by-another-update");
+                }
                 state.fetchVersionCode = manifest.versionCode;
                 state.fetchVersionName = manifest.versionName == null ? "" : manifest.versionName;
                 state.fetchSha256 = sha;
                 state.fetchSizeBytes = size;
                 state.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+                // The upload used to stamp this at its commit; the commit is now inside the gate,
+                // where a clock read belongs even less than a stale write would.
+                state.lastCheckedMs = System.currentTimeMillis();
                 claimed = stateStore.write(state);
             }
             if (!claimed) {
@@ -946,61 +970,49 @@ public class UpdateManager {
                 // a plain rejection. Swapping anyway would put the operator's bytes on disk under a
                 // state that still describes some other build — and after a restart, under a source
                 // that licenses a check to delete them.
-                return failUpload(apk, replacingStaged && !oldStagedGone, previousLastError, sha,
+                return failUpload(apk, replacingStaged, previousLastError, sha,
                         size, true, "state-write-failed");
             }
-            // Swap: replace any previously staged update. Under the same gate the check cycle takes
-            // for its master rename, so the two can neither interleave nor leave one master half
-            // replaced by the other. Remember whether the old staged files are actually gone: a
-            // later failure may only restore the STAGED state when they are, or the state would
-            // claim an APK that no longer exists on disk.
-            synchronized (stageGate) {
-                oldStagedGone = deleteStagedFiles();
-                if (!apk.renameTo(stagedMaster)) {
-                    stagedMaster.delete();
-                    if (!apk.renameTo(stagedMaster)) {
-                        return failUpload(null, oldStagedGone, previousLastError, sha, size, true,
-                                "stage-rename-failed");
-                    }
-                }
-            }
+            // Publish exactly the way a check cycle does: copy into this upload's own name in the
+            // installer-readable directory, then one gated, ownership-checked section that renames
+            // the master, commits the identity, and renames the public copy. There is no longer a
+            // delete-then-rename here, which changes what a failed upload does to the frame: the
+            // previously staged APK used to be unlinked *before* the new file was moved in, so an
+            // upload rejected at the rename left the frame with nothing staged. Now a failed upload
+            // cannot disturb anything the frame already had, and `oldStagedGone` has no meaning left.
             if (!externalStorageWritable()) {
-                discardStagedUnderGate();
-                return failUpload(null, oldStagedGone, previousLastError, sha, size, true,
+                return failUpload(apk, replacingStaged, previousLastError, sha, size, true,
                         "external-storage-unavailable");
             }
-            if (!repairPublicCopy(size)) {
-                // The master is already the uploaded bytes, so this is not a reason to discard
-                // anything: runInstall() re-makes the public copy from it before it dispatches.
-                notifyDebug("update: uploaded APK staged privately; the installer-readable copy"
-                        + " will be re-made when this installs");
+            if (!copyFile(apk, publicPart) || publicPart.length() != size) {
+                apk.delete();
+                publicPart.delete();
+                return failUpload(null, replacingStaged, previousLastError, sha, size, true,
+                        "stage-copy-failed");
+            }
+            int published = publishStagedPair(apk, publicPart);
+            if (published < 0) {
+                // Superseded by a reset or a newer upload: its files and its state are untouched,
+                // and saying so is not a copy failure the caller could retry into.
+                apk.delete();
+                return ApkUploadResult.reject(sha, size, true, "superseded-by-another-update");
+            }
+            if (published == 0) {
+                return failUpload(null, replacingStaged, previousLastError, sha, size, true,
+                        "stage-rename-failed");
             }
         } catch (Exception e) {
             Log.e(TAG, "upload staging crashed", e);
-            // Best effort: the file may or may not still exist at its temp location. The
-            // previous STAGED state is restorable only while its files are still on disk.
-            return failUpload(apk, replacingStaged && !oldStagedGone, previousLastError, "", size,
+            // The previous stage was never unlinked, so it is always restorable from here.
+            apk.delete();
+            publicPart.delete();
+            return failUpload(null, replacingStaged, previousLastError, "", size,
                     false, "stage-crashed: " + e.getClass().getSimpleName());
         }
 
-        synchronized (this) {
-            state.expectedVersionCode = manifest.versionCode;
-            state.expectedVersionName = manifest.versionName;
-            state.manifestSha256 = sha;
-            state.expectedSizeBytes = size;
-            state.lastCheckedMs = System.currentTimeMillis();
-            // This stage is the operator's, not the update host's: judgeStaged must never displace
-            // it, whatever the manifest starts saying. And whatever a cycle was mid-fetch of is
-            // moot now — these bytes won.
-            state.stagedSource = UpdateState.SOURCE_UPLOAD;
-            state.fetchVersionCode = 0;
-            state.fetchVersionName = "";
-            state.fetchSha256 = "";
-            state.fetchSizeBytes = 0L;
-            state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
-            state = withState(state, UpdateState.State.STAGED, "");
-            stateStore.write(state);
-        }
+        // publishStagedPair() committed the identity already — expected* from the fetch* it wrote
+        // above, and stagedSource from fetchOrigin, which is why nothing here names the source a
+        // second time. Committing again below would race whatever took over in between.
         String stagedMsg = "staged uploaded APK " + manifest.versionName + " ("
                 + manifest.versionCode + ", " + size + " B)";
         Log.i(TAG, stagedMsg);
@@ -1014,8 +1026,16 @@ public class UpdateManager {
             apk.delete();
         }
         synchronized (this) {
+            if (!ownsUpdateWork()) {
+                // A rejected upload that has since been superseded has no say in the state at all:
+                // writing FAILED here would stop a newer worker's install retry over a file this
+                // upload never touched. The caller still gets its rejection reported.
+                Log.w(TAG, "uploaded APK rejected after being superseded: " + reason);
+                return ApkUploadResult.reject(sha, size, signatureValid, reason);
+            }
             if (restoringStaged) {
-                // The previously staged APK is still on disk with its original metadata.
+                // The previously staged APK is still on disk with its original metadata — a failed
+                // upload no longer unlinks it at any point.
                 state = withState(state, UpdateState.State.STAGED, previousLastError);
             } else {
                 state = withState(state, UpdateState.State.FAILED, reason);
@@ -1142,6 +1162,19 @@ public class UpdateManager {
             abandonedCycle();
             return;
         }
+        try {
+            runCycleBody(prior, worker);
+        } finally {
+            // Every exit, including the ones that abandon the cycle. Cleanup cannot go through
+            // myWorker(): once ownership is gone that returns null, and the revoked cycle's temps —
+            // named after its own sequence number, so deleting them touches nothing another worker
+            // owns — would survive across restarts on a device with about a gigabyte free.
+            worker.part.delete();
+            worker.publicPart.delete();
+        }
+    }
+
+    private void runCycleBody(UpdateState prior, Worker worker) {
         final File part = worker.part;
         final File publicPart = worker.publicPart;
         // CHECKING: fetch + validate the manifest.
@@ -1306,16 +1339,16 @@ public class UpdateManager {
             return;
         }
 
-        // STAGED. The two files are written in the opposite order to what looks natural — the
-        // installer-readable copy first, the private master last — because every rung that can
-        // still fail must leave the previous stage intact for failOrRestore's re-hash gate.
-        // Renaming over the master first made that rename the point of no return: rename(2)
-        // unlinks bytes_N there, and the three rungs after it all deleted the pair, so a build
-        // that had already passed all four gates could still leave a REPLACE frame with nothing
+        // STAGED. Nothing below writes to a shared name: the bytes are copied into this worker's own
+        // temp inside the installer-readable directory, and the two shared files are replaced only by
+        // rename from those temps, inside one gated section that also commits the state. The order
+        // inside that section is master, then state, then the public copy — the master is what
+        // runInstall() re-hashes against, so the state has to follow the master and never lead it.
+        //
+        // This replaces an earlier arrangement where renaming over the master was the point of no
+        // return (rename(2) unlinks the previous build there) and every rung after it deleted the
+        // pair, so a build that had cleared all four gates could still leave a frame with nothing
         // staged and its install retry dead.
-        // Last chance to back out cleanly: everything below this line changes files. The master
-        // rename re-checks inside the gate that reset and upload also take, because a check between
-        // here and there is exactly the gap that lets a revoked worker damage a new stage.
         if (!ownsUpdateWork()) {
             abandonedCycle();
             return;
@@ -1739,35 +1772,44 @@ public class UpdateManager {
      * then a gated rename. Copying straight into {@code stagedPublic} truncated the shared name
      * first, so an installer mid-read of it, or a stage published between the length check and the
      * copy, would see a half-written APK.
+     *
+     * @return {@code 1} replaced, {@code 0} the copy could not be made, {@code -1} superseded — which
+     *         is a cancellation, not a storage failure, and must not be reported as one
      */
-    private boolean repairPublicCopy(long expectedSize) {
+    private int repairPublicCopy(long expectedSize) {
         Worker w = myWorker();
         if (w == null) {
-            return false;
+            return -1;
         }
         w.publicPart.delete();
         if (!copyFile(stagedMaster, w.publicPart) || w.publicPart.length() != expectedSize) {
             w.publicPart.delete();
-            return false;
+            return 0;
         }
         synchronized (stageGate) {
             synchronized (this) {
-                if (!ownsUpdateWork() || !atomicReplace(w.publicPart, stagedPublic)) {
+                if (!ownsUpdateWork()) {
                     w.publicPart.delete();
-                    return false;
+                    return -1;
+                }
+                if (!atomicReplace(w.publicPart, stagedPublic)) {
+                    w.publicPart.delete();
+                    return 0;
                 }
             }
         }
-        return true;
+        return 1;
     }
 
-    /** rename(2) over an existing target, with the one retry that a stubborn target may need. */
+    /**
+     * One {@code rename(2)}, which on the same filesystem already replaces an existing regular file
+     * atomically. There is deliberately no delete-then-retry: a rename that fails is failing because
+     * the source is gone or the filesystem is unhappy, and in neither case does deleting the
+     * destination make the retry work — it only destroys the verified build that was there. That
+     * retry was inherited from the original staging code, and it is the reason a failed publish could
+     * cost a frame a stage it could otherwise still install.
+     */
     private boolean atomicReplace(File from, File to) {
-        if (from.renameTo(to)) {
-            return true;
-        }
-        // Same filesystem, so an unlinked-but-existing target is the only plausible reason.
-        to.delete();
         return from.renameTo(to);
     }
 
