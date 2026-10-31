@@ -99,7 +99,20 @@ public class UpdateManager {
     private final File publicDir;
     private final File stagedMaster;
     private final File stagedPublic;
-    private int workerSeq;
+    /**
+     * Process-wide, not per instance, because {@code MainActivity.onCreate()} constructs a new
+     * manager on every Activity recreation and the previous instance's cycle thread is still running
+     * until {@code onDestroy()} retires it. A per-instance counter restarts at one and hands two live
+     * managers the same temp names — which is the collision that per-worker temps were introduced to
+     * remove, reintroduced through a different door.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger WORKER_SEQ =
+            new java.util.concurrent.atomic.AtomicInteger();
+    /** The staging directory is swept once per process, not once per manager — see {@link #sweepOnce()}. */
+    private static final java.util.concurrent.atomic.AtomicBoolean TEMPS_SWEPT =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    /** Set by {@link #retire()}; a retired manager's threads may no longer mutate anything. */
+    private volatile boolean retired;
 
     /**
      * One unit of update work: the thread that owns it and the intermediate files that belong to it
@@ -191,7 +204,7 @@ public class UpdateManager {
      * silently overwritten by it.
      */
     private Worker newWorker(Thread thread) {
-        int seq = ++workerSeq;
+        int seq = WORKER_SEQ.incrementAndGet();
         return new Worker(thread,
                 new File(updatesDir, "eo1-update-" + seq + ".apk.part"),
                 new File(publicDir, "eo1-update-" + seq + ".apk.part"));
@@ -210,6 +223,24 @@ public class UpdateManager {
      * sweeping is right and deleting one specific path would be arbitrary: abandoned temps from a
      * killed process are otherwise permanent on a device with about a gigabyte free.
      */
+    /**
+     * Sweeps leftovers once per process, before any worker of this process starts. Once, not per
+     * manager: an Activity recreation constructs a replacement while the outgoing instance's cycle
+     * thread may still be mid-download, and sweeping again at that point would delete a temp file
+     * that a live worker is writing.
+     *
+     * <p>Unconditional, unlike the call inside {@link #reconcileOnStartup()}'s interrupted-state
+     * branch: a process killed inside {@code repairPublicCopy()} or just after
+     * {@code publishStagedPair()} committed its state leaves a public temp behind with the saved
+     * state reading {@code STAGED}, and that branch never runs — so a temp could survive every
+     * subsequent launch, each one up to 100 MiB on a device with about a gigabyte free.
+     */
+    private void sweepOnce() {
+        if (TEMPS_SWEPT.compareAndSet(false, true)) {
+            sweepStagingTemps();
+        }
+    }
+
     private void sweepStagingTemps() {
         for (File dir : new File[]{updatesDir, publicDir}) {
             File[] entries = dir.listFiles();
@@ -305,6 +336,8 @@ public class UpdateManager {
      */
     public void reconcileOnStartup() {
         boolean inheritedAdbWindow = false;
+        // Before anything this launch could start, and once per process rather than per manager.
+        sweepOnce();
         synchronized (this) {
             UpdateState current = state;
             UpdateState reconciled = reconcileState(current, BuildConfig.VERSION_CODE);
@@ -315,14 +348,11 @@ public class UpdateManager {
                 reconciled.armedTcpAdb = false;
             }
 
-            if (current.state == UpdateState.State.CHECKING
-                    || current.state == UpdateState.State.DOWNLOADING
-                    || current.state == UpdateState.State.VERIFYING) {
-                // The process died mid-cycle: drop the partial download, start clean. Sweep rather
-                // than delete one path — temps are per-worker now, and a killed process can have
-                // left more than one, which would otherwise be permanent on this device.
-                sweepStagingTemps();
-            }
+            // A process that died mid-cycle used to have its partial download removed here, by a
+            // branch keyed on the interrupted states. That is now sweepOnce()'s job, run before any
+            // worker of this process starts — and it covers the case this branch missed: a public
+            // temp orphaned under a state that reads STAGED, because the crash landed after
+            // publishStagedPair() committed the state but before the temp's rename.
             if ((current.state == UpdateState.State.STAGED
                     || current.state == UpdateState.State.INSTALL_PENDING)
                     && reconciled.state == UpdateState.State.IDLE) {
@@ -508,6 +538,11 @@ public class UpdateManager {
      *                       instead of showing a dialog to nobody.
      */
     public void installStaged(final boolean humanRequested) {
+        if (retired) {
+            // A tick or a queued button press outliving this manager's Activity must not start an
+            // install: the replacement manager owns the staging directory now.
+            return;
+        }
         String event = null; // a state change worth logging on an unattended tick too
         String note = null;  // a reply to a press; on a tick it would be noise every interval
         boolean dispatch = false;
@@ -874,6 +909,14 @@ public class UpdateManager {
      *         against the published release.
      */
     public ApkUploadResult stageUploadedApk(File apk) {
+        if (retired) {
+            // Same reasoning as installStaged: this instance's Activity is gone, and staging here
+            // would race the manager that owns the staging directory now.
+            if (apk != null) {
+                apk.delete();
+            }
+            return ApkUploadResult.reject("", 0, false, "manager-retired");
+        }
         if (apk == null || !apk.isFile() || apk.length() <= 0) {
             return ApkUploadResult.reject("", 0, false, "file-unavailable");
         }
@@ -885,6 +928,7 @@ public class UpdateManager {
 
         boolean replacingStaged;
         String previousLastError;
+        final Worker uploadWorker;
         synchronized (this) {
             if (installInFlight) {
                 apk.delete();
@@ -906,14 +950,17 @@ public class UpdateManager {
             // startCycle() reserves CHECKING: naming this thread as the worker revokes any check
             // still blocked on a fetch, whose snapshot of this stage is now the thing being
             // replaced, and gives the upload its own temp names.
-            updateWorker = newWorker(Thread.currentThread());
+            uploadWorker = newWorker(Thread.currentThread());
+            updateWorker = uploadWorker;
             state = withState(state, UpdateState.State.VERIFYING, "");
             stateStore.write(state);
         }
 
-        // Captured rather than re-read: if a reset revokes this upload partway, myWorker() returns
-        // null afterwards, and the temp it wrote its bytes into would never be deleted.
-        final Worker uploadWorker = myWorker();
+        // Bound here, inside the reservation, rather than re-read through myWorker() below: a reset
+        // that lands after the monitor is released makes myWorker() return null, and the dereference
+        // would throw out of the method rather than through its try — turning an ordinary
+        // "superseded" outcome into an HTTP 500 for the operator. The temps still get cleaned up,
+        // because this reference outlives the ownership that earned it.
         final File publicPart = uploadWorker.publicPart;
         ApkManifestInfo manifest = null;
         String sha = "";
@@ -1056,6 +1103,11 @@ public class UpdateManager {
     // ---------------------------------------------------------------------- cycle
 
     private void startCycle() {
+        if (retired) {
+            // A runOnUiThread callback queued before onDestroy() can land after the manager that
+            // owns this instance's staging directory has been replaced.
+            return;
+        }
         synchronized (this) {
             UpdateState s = state;
             if (installInFlight) {
@@ -1101,10 +1153,7 @@ public class UpdateManager {
             }, "EO1-update-cycle");
             // Hand the work to this thread in the same monitor transaction that wrote CHECKING —
             // naming it before it starts is what keeps a reset arriving in the gap the winner.
-            int seq = ++workerSeq;
-            updateWorker = new Worker(worker,
-                    new File(updatesDir, "eo1-update-" + seq + ".apk.part"),
-                    new File(publicDir, "eo1-update-" + seq + ".apk.part"));
+            updateWorker = newWorker(worker);
             worker.start();
         }
     }
@@ -1686,8 +1735,29 @@ public class UpdateManager {
 
     /** Whether the calling thread is still the one entitled to change update state or files. */
     private boolean ownsUpdateWork() {
+        if (retired) {
+            return false;
+        }
         Worker w = updateWorker;
         return w != null && w.thread == Thread.currentThread();
+    }
+
+    /**
+     * Called from {@code MainActivity.onDestroy()}, alongside the watchdog, the brightness manager,
+     * the WebView and the web server that this method already stops. A recreation replaces the
+     * manager immediately; without retiring the old one, its cycle thread keeps owning the same
+     * staging directory and the same {@code update-state.json}, and the two managers can overwrite
+     * each other's stage or delete each other's downloads. Retirement is permanent for this
+     * instance — its worker claims stop, its ownership checks fail, and its in-flight cycle exits
+     * through the abandon paths rather than the publish ones.
+     */
+    public void retire() {
+        synchronized (stageGate) {
+            synchronized (this) {
+                retired = true;
+                updateWorker = null;
+            }
+        }
     }
 
     /** This thread's worker, or null when it has been superseded — never another's. */
