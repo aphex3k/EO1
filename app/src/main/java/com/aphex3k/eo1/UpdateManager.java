@@ -62,7 +62,13 @@ import okhttp3.Response;
  * no other way (an OTG keyboard or mouse plugged into the frame).
  *
  * <p>Retries ride the rotation tick — {@code interval} minutes, and the tick stops with the
- * activity — so the settle window below is a floor, not a schedule.
+ * activity — so the settle window below is a floor, not a schedule. And a stage is not the end of
+ * the story: while the host's own build sits staged, the ordinary check interval still re-reads the
+ * manifest and {@link #judgeStaged} decides whether those bytes are still what is published. If the
+ * operator has since shipped something else, the published build is fetched and verified first and
+ * only then replaces the stage, so a superseded frame converges on the release that was meant for
+ * it instead of retrying a stale one forever. A stage an operator uploaded by hand is never
+ * displaced by that path — see {@link UpdateState#stagedSource}.
  *
  * <p>Recovery across process death: the installer kills this process on success, so success
  * is detected only by the new process's {@link #reconcileOnStartup()}. A +120 s relaunch alarm
@@ -90,11 +96,83 @@ public class UpdateManager {
     private final SettingsManager settingsManager;
     private final UpdateStateStore stateStore;
     private final File updatesDir;
-    private final File partFile;
+    private final File publicDir;
     private final File stagedMaster;
     private final File stagedPublic;
+    /**
+     * Process-wide, not per instance, because {@code MainActivity.onCreate()} constructs a new
+     * manager on every Activity recreation and the previous instance's cycle thread is still running
+     * until {@code onDestroy()} retires it. A per-instance counter restarts at one and hands two live
+     * managers the same temp names — which is the collision that per-worker temps were introduced to
+     * remove, reintroduced through a different door.
+     */
+    private static final java.util.concurrent.atomic.AtomicInteger WORKER_SEQ =
+            new java.util.concurrent.atomic.AtomicInteger();
+    /** The staging directory is swept once per process, not once per manager — see {@link #sweepOnce()}. */
+    private static final java.util.concurrent.atomic.AtomicBoolean TEMPS_SWEPT =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    /** Set by {@link #retire()}; a retired manager's threads may no longer mutate anything. */
+    private volatile boolean retired;
+    /**
+     * The manager that owns the process's update work — the newest one constructed, which after an
+     * Activity recreation is the replacement rather than the instance whose Activity ended.
+     *
+     * <p>Thread identity cannot express this. Ownership by "is this the thread I handed the work to"
+     * covers the cycle, the upload and the install thread, but {@code packageInstalled} and
+     * {@code packageInstallFailed} arrive on a framework binder thread that was never handed
+     * anything — so the install's asynchronous result, and every file operation the install path
+     * makes, have to be attributed to the manager that started the install, not to a thread. Same
+     * reason the temp-name sequence had to be static: the resource being protected is per-process,
+     * so the guard has to be too.
+     */
+    private static volatile UpdateManager processOwner;
+
+    /**
+     * One unit of update work: the thread that owns it and the intermediate files that belong to it
+     * alone. The two <em>shared</em> names — the private master and the installer-readable copy — are
+     * only ever replaced by an atomic rename out of a worker's own temp, under {@code stageGate} and
+     * after an ownership check. That distinction is the point: a blocked {@code read()} or a paused
+     * {@code FileOutputStream.open()} from a worker that has since been revoked can still land
+     * minutes later, and while it can only ever write into files nobody will read, "check ownership,
+     * then mutate" is sound. With a shared temp it was not — the late writer would truncate whatever
+     * the new owner had put at that path, which is what the previous round's checks could not see.
+     */
+    private static final class Worker {
+        final Thread thread;
+        final File part;
+        final File publicPart;
+
+        Worker(Thread thread, File part, File publicPart) {
+            this.thread = thread;
+            this.part = part;
+            this.publicPart = publicPart;
+        }
+    }
 
     private UpdateState state;
+    /**
+     * Whichever worker is entitled to change update state or touch the staged pair — the cycle while
+     * a check runs, the install thread once one is dispatched, the upload's web worker while it
+     * stages. A cycle blocks for seconds in {@code fetchManifest} and minutes in {@code download}
+     * while carrying a {@code prior} snapshot of the state as it started; without this, a reset plus
+     * a fresh upload completing in that window would let the old worker write the discarded stage's
+     * identity over the new one, and the next install would find a pair matching nothing and delete
+     * it. Checked under the monitor at every mutation, so a superseded worker discards itself rather
+     * than corrupting what replaced it.
+     */
+    private volatile Worker updateWorker;
+    /**
+     * Held across the operations that replace or destroy the <em>shared</em> staged pair — the two
+     * renames out of a worker's temps and {@code deleteStagedFiles()} — together with the ownership
+     * check that authorises them, so deciding and doing are one critical section rather than two
+     * instructions apart. Deliberately NOT held across a download or the bulk copy into a worker's
+     * own public temp: those take seconds on this hardware and would block the UI thread that
+     * dispatches {@code /control?action=update-reset}, which the kiosk watchdog reads as a main-loop
+     * stall. Holding a lock is only honest here because what it protects is atomic.
+     *
+     * <p>Order is always {@code stageGate} then {@code this}. Never the reverse.
+     */
+    private final Object stageGate = new Object();
     private boolean installInFlight;
     private boolean installFiredInThisProcess;
     private volatile String lastInstallAttempt = "none";
@@ -110,13 +188,91 @@ public class UpdateManager {
         if (!updatesDir.isDirectory() && !updatesDir.mkdirs()) {
             Log.w(TAG, "could not create " + updatesDir.getAbsolutePath());
         }
-        this.partFile = new File(updatesDir, "eo1-update.apk.part");
         this.stagedMaster = new File(updatesDir, "eo1-update.apk");
         File downloads = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
-        this.stagedPublic = new File(downloads != null ? downloads : new File(Environment.getExternalStorageDirectory(), "Download"),
-                "eo1-update.apk");
+        this.publicDir = downloads != null ? downloads
+                : new File(Environment.getExternalStorageDirectory(), "Download");
+        this.stagedPublic = new File(publicDir, "eo1-update.apk");
         this.stateStore = new UpdateStateStore(UpdateStateStore.defaultStateFile(this.context));
         this.state = this.stateStore.read();
+        // Taking ownership at construction, before anything this instance could schedule: a
+        // recreation destroys the old Activity first in the usual order, but the ordering is not
+        // something to rely on for correctness, and the replacement owns the staging directory the
+        // moment it exists.
+        processOwner = this;
+    }
+
+    /**
+     * Takes the update work for the calling thread, giving it private intermediate names. Any
+     * worker already running is thereby revoked — which is the whole mechanism: the loser keeps
+     * running briefly, but every path it can still write to is one it created for itself.
+     */
+    private Worker claimWork() {
+        synchronized (this) {
+            Worker w = newWorker(Thread.currentThread());
+            updateWorker = w;
+            return w;
+        }
+    }
+
+    /**
+     * Names a worker's temps. Callers must hold the monitor; assigning {@code updateWorker} to a
+     * thread that has not started yet is what lets {@code startCycle} hand over the work in the same
+     * transaction that writes {@code CHECKING}, so a reset arriving before the thread runs is not
+     * silently overwritten by it.
+     */
+    private Worker newWorker(Thread thread) {
+        int seq = WORKER_SEQ.incrementAndGet();
+        return new Worker(thread,
+                new File(updatesDir, "eo1-update-" + seq + ".apk.part"),
+                new File(publicDir, "eo1-update-" + seq + ".apk.part"));
+    }
+
+    /** Drops the calling worker's own temps. Never touches a name another worker may be using. */
+    private void discardMyTemps(Worker w) {
+        if (w != null) {
+            w.part.delete();
+            w.publicPart.delete();
+        }
+    }
+
+    /**
+     * Removes every worker's leftovers, named or legacy. Used by a reset and by start-up, where
+     * sweeping is right and deleting one specific path would be arbitrary: abandoned temps from a
+     * killed process are otherwise permanent on a device with about a gigabyte free.
+     */
+    /**
+     * Sweeps leftovers once per process, before any worker of this process starts. Once, not per
+     * manager: an Activity recreation constructs a replacement while the outgoing instance's cycle
+     * thread may still be mid-download, and sweeping again at that point would delete a temp file
+     * that a live worker is writing.
+     *
+     * <p>Unconditional, unlike the call inside {@link #reconcileOnStartup()}'s interrupted-state
+     * branch: a process killed inside {@code repairPublicCopy()} or just after
+     * {@code publishStagedPair()} committed its state leaves a public temp behind with the saved
+     * state reading {@code STAGED}, and that branch never runs — so a temp could survive every
+     * subsequent launch, each one up to 100 MiB on a device with about a gigabyte free.
+     */
+    private void sweepOnce() {
+        if (TEMPS_SWEPT.compareAndSet(false, true)) {
+            sweepStagingTemps();
+        }
+    }
+
+    private void sweepStagingTemps() {
+        for (File dir : new File[]{updatesDir, publicDir}) {
+            File[] entries = dir.listFiles();
+            if (entries == null) {
+                continue;
+            }
+            for (File entry : entries) {
+                String name = entry.getName();
+                if (name.startsWith("eo1-update") && name.endsWith(".part")
+                        && !entry.equals(stagedMaster) && !entry.equals(stagedPublic)) {
+                    entry.delete();
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------ triggering
@@ -149,8 +305,19 @@ public class UpdateManager {
     }
 
     /**
-     * Package-visible for unit tests. True when a new check cycle may start: no cycle in
-     * flight, nothing staged/pending, and the configured interval has elapsed.
+     * Package-visible for unit tests. True when a new check cycle may start: no cycle in flight,
+     * no install awaiting its settle window, and the configured interval has elapsed.
+     *
+     * <p>A {@code STAGED} update the host itself produced does <em>not</em> block a check. It used
+     * to, permanently, which is how a frame that staged build N and was then left waiting on a
+     * person — or on a transport that keeps refusing — kept re-installing a build the operator had
+     * since replaced, without ever learning. While such a stage exists the manifest is re-read on
+     * the ordinary interval and {@link #judgeStaged} decides whether the bytes on disk are still
+     * the bytes published.
+     *
+     * <p>A stage this code did not fetch stays blocked: an APK the operator uploaded by hand, and
+     * anything staged by a build older than {@link UpdateState#stagedSource}, are not this
+     * predicate's to displace.
      */
     static boolean checkDue(long nowMs, UpdateState state, int intervalMinutes) {
         if (state == null) {
@@ -159,10 +326,14 @@ public class UpdateManager {
         }
         if (state.state != null) {
             switch (state.state) {
+                case STAGED:
+                    if (!UpdateState.SOURCE_MANIFEST.equals(state.stagedSource)) {
+                        return false;
+                    }
+                    break;
                 case CHECKING:
                 case DOWNLOADING:
                 case VERIFYING:
-                case STAGED:
                 case INSTALL_PENDING:
                     return false;
                 default:
@@ -183,6 +354,8 @@ public class UpdateManager {
      */
     public void reconcileOnStartup() {
         boolean inheritedAdbWindow = false;
+        // Before anything this launch could start, and once per process rather than per manager.
+        sweepOnce();
         synchronized (this) {
             UpdateState current = state;
             UpdateState reconciled = reconcileState(current, BuildConfig.VERSION_CODE);
@@ -193,12 +366,11 @@ public class UpdateManager {
                 reconciled.armedTcpAdb = false;
             }
 
-            if (current.state == UpdateState.State.CHECKING
-                    || current.state == UpdateState.State.DOWNLOADING
-                    || current.state == UpdateState.State.VERIFYING) {
-                // The process died mid-cycle: drop the partial download, start clean.
-                partFile.delete();
-            }
+            // A process that died mid-cycle used to have its partial download removed here, by a
+            // branch keyed on the interrupted states. That is now sweepOnce()'s job, run before any
+            // worker of this process starts — and it covers the case this branch missed: a public
+            // temp orphaned under a state that reads STAGED, because the crash landed after
+            // publishStagedPair() committed the state but before the temp's rename.
             if ((current.state == UpdateState.State.STAGED
                     || current.state == UpdateState.State.INSTALL_PENDING)
                     && reconciled.state == UpdateState.State.IDLE) {
@@ -206,11 +378,47 @@ public class UpdateManager {
                 deleteStagedFiles();
                 notifyDebug("self-update " + current.expectedVersionCode + " confirmed installed; state reset");
             }
+            // A check killed anywhere between the manifest parse and the final rename leaves an
+            // IDLE state (reconcileState demotes a mid-cycle one) sitting on top of a complete APK
+            // that no state claims. Both identities survive — expected* names the stage that was
+            // installable when the cycle started, fetch* the build it was replacing — so whichever
+            // the bytes match decides what the frame owns again. Recovering the first one also
+            // hands an uploaded stage back its stagedSource, which is the only thing protecting it
+            // from the next check. Nothing here ever deletes: VERIFYING is also what POST /update
+            // parks in while it swaps an uploaded APK, and those bytes are the operator's.
+            // Hash only when recovery could still apply. This runs synchronously from
+            // MainActivity.onCreate(), and an up-to-100 MiB SHA-256 on the UI thread of this hardware
+            // is seconds of launch time — while recoverInterruptedStage() returns its argument
+            // untouched for any state but IDLE, which is the case for a parked STAGED or
+            // INSTALL_PENDING update, i.e. the ordinary launch.
+            UpdateState recovered = reconciled.state != UpdateState.State.IDLE ? reconciled
+                    : recoverInterruptedStage(reconciled,
+                    stagedIntactAs(reconciled.manifestSha256, reconciled.expectedSizeBytes),
+                    stagedIntactAs(reconciled.fetchSha256, reconciled.fetchSizeBytes));
+            if (recovered != reconciled) {
+                reconciled = recovered;
+                if (recoveredAlreadyRunning(reconciled, BuildConfig.VERSION_CODE)) {
+                    // Recovered a stage that turns out to be the build already running — staged
+                    // before an operator sideloaded the same version underneath it. reconcileState's
+                    // own confirmation check had already run, against the interrupted state rather
+                    // than this restored one, and runInstall() has no newer-than-installed gate of
+                    // its own, so restoring it as installable would have the next tick reinstall the
+                    // version it is running. Same treatment the branch above gives a confirmed
+                    // update: drop the files, reset the identity, keep the clock.
+                    long checkedMs = reconciled.lastCheckedMs;
+                    reconciled = UpdateState.idle();
+                    reconciled.lastCheckedMs = checkedMs;
+                    deleteStagedFiles();
+                    notifyDebug("self-update " + BuildConfig.VERSION_CODE
+                            + " recovered already-installed; stage discarded");
+                }
+            }
             if (reconciled.state == UpdateState.State.STAGED
                     && !stagedPublic.exists()
                     && !stagedMaster.exists()) {
                 // A staged state without its files can never install.
                 reconciled = withState(reconciled, UpdateState.State.IDLE, "staged-files-missing");
+                reconciled.stagedSource = UpdateState.SOURCE_UNKNOWN;
             }
             // Orphaned temp dirs from a process death mid POST /update (the web server's
             // finally-block cleanup never got to run).
@@ -265,6 +473,83 @@ public class UpdateManager {
     }
 
     /**
+     * Package-visible for unit tests. Pure half of the start-up recovery described at the call
+     * site: given an {@code IDLE} state a killed cycle left behind and what the private master
+     * turned out to be, return the state this launch should run with.
+     *
+     * <p>Either answer restores a {@code STAGED} state rather than inventing one — the first from
+     * the identity that was on disk when the cycle started (carrying its {@code stagedSource}, so
+     * an uploaded stage is protected again), the second by promoting the fetched identity, which
+     * is what the swap had just committed to the master. A confirmed install is excluded by
+     * construction: {@link #reconcileState} news up a blank state for that, and a blank state has
+     * no sha for either comparison to match.
+     */
+    /**
+    /**
+     * Package-visible for unit tests. Whether a stage recovered at startup could never install
+     * anyway, and must therefore not be handed back as installable.
+     *
+     * <p>{@code <=} rather than {@code ==}: {@code runInstall()} has no newer-than-installed gate of
+     * its own — that gate lives in {@code runCycle} and in {@code stageUploadedApk} — so a recovered
+     * stage at <em>or below</em> the running version is a tick away from an attempt to downgrade. The
+     * case is not exotic: an interrupted check whose staged build was 7, with the operator having
+     * sideloaded 9 since, restores 7 as though it were an upgrade. An uploaded or legacy stage left
+     * in that position is worse than useless, because it also blocks automatic update checks without
+     * ever being installable. {@code expectedVersionCode == 0} is the blank state
+     * {@link #reconcileState()} leaves on a confirmed install and must not be compared at all.
+     */
+    static boolean recoveredAlreadyRunning(UpdateState recovered, int installedVersionCode) {
+        return recovered != null
+                && recovered.state == UpdateState.State.STAGED
+                && recovered.expectedVersionCode > 0
+                && recovered.expectedVersionCode <= installedVersionCode;
+    }
+
+    static UpdateState recoverInterruptedStage(UpdateState reconciled, boolean masterIsStaged,
+            boolean masterIsFetching) {
+        if (reconciled == null || reconciled.state != UpdateState.State.IDLE) {
+            return reconciled;
+        }
+        // An operator who uploads the very APK already staged satisfies BOTH matches, and the
+        // pending upload's provenance has to win: manifest says replaceable, upload says hands off,
+        // and only one of those cannot end with the next check deleting someone's file.
+        boolean canPromote = masterIsFetching && reconciled.fetchVersionCode > 0
+                && reconciled.fetchSha256 != null && !reconciled.fetchSha256.isEmpty();
+        if (canPromote && (UpdateState.SOURCE_UPLOAD.equals(reconciled.fetchOrigin)
+                || !masterIsStaged)) {
+            UpdateState promoted = withState(reconciled, UpdateState.State.STAGED,
+                    "staged-recovered-after-restart");
+            promoted.expectedVersionCode = reconciled.fetchVersionCode;
+            promoted.expectedVersionName = reconciled.fetchVersionName;
+            promoted.manifestSha256 = reconciled.fetchSha256;
+            promoted.expectedSizeBytes = reconciled.fetchSizeBytes;
+            promoted.stagedSource = reconciled.fetchOrigin == null
+                    ? UpdateState.SOURCE_UNKNOWN : reconciled.fetchOrigin;
+            promoted.fetchVersionCode = 0;
+            promoted.fetchVersionName = "";
+            promoted.fetchSha256 = "";
+            promoted.fetchSizeBytes = 0L;
+            promoted.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
+            return promoted;
+        }
+        if (masterIsStaged) {
+            // The bytes on disk are the stage that was there before the check, so the build the
+            // check was fetching is simply not here and nothing is pending. Leaving fetch* set
+            // would have /state advertise a download that is not running, and let a later crash
+            // match these bytes against a hash that never described them.
+            UpdateState restored = withState(reconciled, UpdateState.State.STAGED,
+                    "staged-recovered-after-restart");
+            restored.fetchVersionCode = 0;
+            restored.fetchVersionName = "";
+            restored.fetchSha256 = "";
+            restored.fetchSizeBytes = 0L;
+            restored.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
+            return restored;
+        }
+        return reconciled;
+    }
+
+    /**
      * Called from {@code onResume}: if this process fired an install and is still alive on the old
      * version, it did not take effect — roll back to the retryable {@code STAGED}. Naming the reason
      * matters here: {@code canceled-or-refused} means a person dismissed the dialog we were shown,
@@ -307,9 +592,15 @@ public class UpdateManager {
      *                       instead of showing a dialog to nobody.
      */
     public void installStaged(final boolean humanRequested) {
+        if (retired) {
+            // A tick or a queued button press outliving this manager's Activity must not start an
+            // install: the replacement manager owns the staging directory now.
+            return;
+        }
         String event = null; // a state change worth logging on an unattended tick too
         String note = null;  // a reply to a press; on a tick it would be noise every interval
         boolean dispatch = false;
+        Thread installThread = null;
         synchronized (this) {
             if (installInFlight) {
                 return;
@@ -334,8 +625,28 @@ public class UpdateManager {
                     event = "install fired earlier did not settle; back to STAGED";
                 }
             }
-            if (state.state == UpdateState.State.STAGED) {
+            if (state.state == UpdateState.State.STAGED && ownsProcessWork()) {
                 installInFlight = true;
+                // The install owns the update work from here: a check thread still blocked on a
+                // fetch must not come back and rewrite the stage this install is reading. Naming a
+                // worker rather than clearing the field also gives the install thread somewhere of
+                // its own to rebuild a divergent public copy, instead of truncating the shared one.
+                installThread = new Thread(new Runnable() {
+                    @Override
+                    public void run() {
+                        try {
+                            runInstall(humanRequested);
+                        } catch (Throwable t) {
+                            Log.e(TAG, "install crashed", t);
+                            failState("install-crashed: " + t);
+                        } finally {
+                            synchronized (UpdateManager.this) {
+                                installInFlight = false;
+                            }
+                        }
+                    }
+                }, "EO1-update-install");
+                updateWorker = newWorker(installThread);
                 dispatch = true;
             } else if (note == null) {
                 note = "nothing staged (state=" + state.state + ")";
@@ -350,22 +661,7 @@ public class UpdateManager {
         if (!dispatch) {
             return;
         }
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    runInstall(humanRequested);
-                } catch (Throwable t) {
-                    Log.e(TAG, "install crashed", t);
-                    failState("install-crashed: " + t);
-                } finally {
-                    synchronized (UpdateManager.this) {
-                        installInFlight = false;
-                    }
-                }
-            }
-        }, "EO1-update-install");
-        thread.start();
+        installThread.start();
     }
 
     /** Which transport an install dispatch takes; see {@link #chooseInstallPath}. */
@@ -416,10 +712,28 @@ public class UpdateManager {
             Log.w(TAG, "staged public copy changed on disk; re-copying from private master");
             boolean masterOk = snapshot.manifestSha256.equals(sha256Safe(stagedMaster))
                     && stagedMaster.length() == snapshot.expectedSizeBytes;
-            if (!masterOk || !copyFile(stagedMaster, stagedPublic)
-                    || stagedPublic.length() != snapshot.expectedSizeBytes) {
-                deleteStagedFiles();
+            if (!masterOk) {
+                // The private master is the corrupt one, so nothing on disk is trustworthy and the
+                // pair goes. This is the only case that may delete.
+                discardStagedUnderGate();
                 failState("staged-file-changed");
+                return;
+            }
+            int repaired = repairPublicCopy(snapshot.expectedSizeBytes);
+            if (repaired < 0) {
+                // Superseded while we were hashing: whoever owns the stage now will decide about its
+                // public copy. Reporting public-copy-failed here would be a lie about the cause.
+                abandonedCycle();
+                return;
+            }
+            if (repaired == 0) {
+                // The master is intact and the destination is the problem — full, unmounted, or
+                // otherwise unwritable. Deleting the good master here would throw away the only
+                // installable APK the frame has because of a defect in its copy, and FAILED would
+                // stop the retry that is the one thing likely to succeed later. Stay staged.
+                setStaged("public-copy-failed");
+                notifyDebug("install: staged APK is sound but the installer-readable copy failed;"
+                        + " retrying on the next tick");
                 return;
             }
         }
@@ -438,7 +752,9 @@ public class UpdateManager {
 
         switch (chooseInstallPath(holdsPermission, adbdReachable, humanRequested)) {
             case HEADLESS:
-                armAndPersist("headless installPackage", snapshot.expectedVersionCode);
+                if (!armAndPersist("headless installPackage", snapshot.expectedVersionCode)) {
+                    return;
+                }
                 lastInstallAttempt = "headless";
                 try {
                     fireHeadlessInstall(Uri.fromFile(stagedPublic));
@@ -449,7 +765,12 @@ public class UpdateManager {
                 break;
 
             case ADBD: {
-                armAndPersist("adbd pm install", snapshot.expectedVersionCode);
+                if (!armAndPersist("adbd pm install", snapshot.expectedVersionCode)) {
+                    // Cancelled — but an adbd this call started is still this call's to close, and
+                    // the exposure is meant to be one action, never a boot.
+                    closeAdbIfWeOpenedIt(armedByUs);
+                    return;
+                }
                 // Record it before the attempt: a successful pm install kills this process, and the
                 // next one has to know it inherited a door the last one opened.
                 persistAdbArmed(armedByUs);
@@ -502,7 +823,9 @@ public class UpdateManager {
     private void persistAdbArmed(boolean armed) {
         synchronized (this) {
             state.armedTcpAdb = armed;
-            stateStore.write(state);
+            if (!writeState(state)) {
+                return;
+            }
         }
         if (armed) {
             notifyDebug("install: started adbd for this install; it will be closed again after");
@@ -520,11 +843,25 @@ public class UpdateManager {
     }
 
     /** Records that a silent install is being fired, and keeps the frame launchable if we die. */
-    private void armAndPersist(String how, int expectedVersionCode) {
+    /**
+     * Readies the process for an install and records it as pending.
+     *
+     * @return false when the install must not be dispatched because another manager owns the update
+     *         work now — the caller is on an install thread that resumed across an Activity
+     *         recreation, and firing would have the replacement's staged APK installed by a worker
+     *         whose snapshot of it is stale. The relaunch alarm armed before this point is the one
+     *         the crash handler already relies on and is left alone; adbd teardown stays in the
+     *         caller's {@code finally}, which is the whole reason cancellation happens here rather
+     *         than deeper in.
+     */
+    private boolean armAndPersist(String how, int expectedVersionCode) {
         armRelaunchAlarm();
-        persistInstallPending();
+        if (!persistInstallPending()) {
+            return false;
+        }
         installFiredInThisProcess = true;
         notifyDebug("install: " + how + " (version " + expectedVersionCode + ")");
+        return true;
     }
 
     private void fireInstallIntent(UpdateState snapshot) {
@@ -597,13 +934,36 @@ public class UpdateManager {
 
     /** Deletes the staged APKs and returns to {@code IDLE} (keeps the last-checked time). */
     public void resetUpdate() {
-        synchronized (this) {
-            deleteStagedFiles();
-            partFile.delete();
-            installFiredInThisProcess = false;
-            state = withState(state, UpdateState.State.IDLE, "");
-            state.attempts = 0;
-            stateStore.write(state);
+        synchronized (stageGate) {
+            synchronized (this) {
+                if (!ownsProcessWork()) {
+                    // MainActivity queues this on the UI thread, so a reset pressed before an
+                    // Activity recreation can run on the manager that recreation retired. Clearing
+                    // its own state would then delete the replacement's staged APK, sweep a temp its
+                    // worker is writing, and persist an IDLE that describes nobody.
+                    notifyDebug("update: a reset queued before the recreation ran on a retired"
+                            + " manager; ignored");
+                    return;
+                }
+                // Revoked before the files go, so a cycle blocked on a fetch cannot come back and
+                // rename a stage the operator has just asked to discard. Gate then monitor, always.
+                updateWorker = null;
+                deleteStagedFiles();
+                sweepStagingTemps();
+                installFiredInThisProcess = false;
+                state = withState(state, UpdateState.State.IDLE, "");
+                state.attempts = 0;
+                // withState carries stagedSource, and an IDLE state with no stage on disk must not
+                // keep naming the source of one — nor a build some earlier cycle was still fetching,
+                // which recovery would otherwise try to match against files that are about to be gone.
+                state.stagedSource = UpdateState.SOURCE_UNKNOWN;
+                state.fetchVersionCode = 0;
+                state.fetchVersionName = "";
+                state.fetchSha256 = "";
+                state.fetchSizeBytes = 0L;
+                state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
+                stateStore.write(state);
+            }
         }
         notifyDebug("update reset");
     }
@@ -646,7 +1006,16 @@ public class UpdateManager {
 
         boolean replacingStaged;
         String previousLastError;
+        final Worker uploadWorker;
         synchronized (this) {
+            if (!ownsProcessWork()) {
+                // The entry check can be followed by a recreation; reserving here would persist
+                // VERIFYING from a stale manager's in-memory state, and no later ownership check can
+                // take that write back.
+                apk.delete();
+                // No computed hash to report: the file was never read by this, the retired, manager.
+                return ApkUploadResult.reject("", size, false, "manager-retired");
+            }
             if (installInFlight) {
                 apk.delete();
                 return ApkUploadResult.reject("", size, false, "install-in-flight");
@@ -663,13 +1032,22 @@ public class UpdateManager {
             }
             replacingStaged = state.state == UpdateState.State.STAGED;
             previousLastError = state.lastError;
-            // Reserve the state as in-flight before the slow verification work, the same
-            // way startCycle() reserves CHECKING.
+            // Reserve the state as in-flight before the slow verification work, the same way
+            // startCycle() reserves CHECKING: naming this thread as the worker revokes any check
+            // still blocked on a fetch, whose snapshot of this stage is now the thing being
+            // replaced, and gives the upload its own temp names.
+            uploadWorker = newWorker(Thread.currentThread());
+            updateWorker = uploadWorker;
             state = withState(state, UpdateState.State.VERIFYING, "");
             stateStore.write(state);
         }
 
-        boolean oldStagedGone = false;
+        // Bound here, inside the reservation, rather than re-read through myWorker() below: a reset
+        // that lands after the monitor is released makes myWorker() return null, and the dereference
+        // would throw out of the method rather than through its try — turning an ordinary
+        // "superseded" outcome into an HTTP 500 for the operator. The temps still get cleaned up,
+        // because this reference outlives the ownership that earned it.
+        final File publicPart = uploadWorker.publicPart;
         ApkManifestInfo manifest = null;
         String sha = "";
         try {
@@ -698,45 +1076,76 @@ public class UpdateManager {
             if (freeBytes(updatesDir) < required || freeBytes(stagedPublic.getParentFile()) < required) {
                 return failUpload(apk, replacingStaged, previousLastError, sha, size, true, "insufficient-space");
             }
-            // Swap: replace any previously staged update. Remember whether the old staged
-            // files are actually gone: a later failure must only restore the STAGED state
-            // when they are, otherwise the state would claim a staged APK that no longer
-            // exists on disk.
-            oldStagedGone = deleteStagedFiles();
-            if (!apk.renameTo(stagedMaster)) {
-                stagedMaster.delete();
-                if (!apk.renameTo(stagedMaster)) {
-                    return failUpload(null, oldStagedGone, previousLastError, sha, size, true,
-                            "stage-rename-failed");
+            // Claim the bytes' identity BEFORE they replace anything on disk. A process killed
+            // between the rename below and the metadata write at the end would otherwise come back
+            // describing the stage it overwrote — and if that one was host-sourced, the next check
+            // would be free to delete the operator's APK. fetchOrigin is what makes the recovered
+            // stage an upload rather than a licence to discard it.
+            boolean claimed;
+            synchronized (this) {
+                if (!ownsUpdateWork()) {
+                    // A reset or a newer upload owns the state now; writing our pending identity
+                    // into it would describe someone else's bytes as this file.
+                    return ApkUploadResult.reject(sha, size, true, "superseded-by-another-update");
                 }
+                state.fetchVersionCode = manifest.versionCode;
+                state.fetchVersionName = manifest.versionName == null ? "" : manifest.versionName;
+                state.fetchSha256 = sha;
+                state.fetchSizeBytes = size;
+                state.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+                // The upload used to stamp this at its commit; the commit is now inside the gate,
+                // where a clock read belongs even less than a stale write would.
+                state.lastCheckedMs = System.currentTimeMillis();
+                claimed = stateStore.write(state);
             }
+            if (!claimed) {
+                // Nothing has been displaced yet, so the previous stage is fully intact and this is
+                // a plain rejection. Swapping anyway would put the operator's bytes on disk under a
+                // state that still describes some other build — and after a restart, under a source
+                // that licenses a check to delete them.
+                return failUpload(apk, replacingStaged, previousLastError, sha,
+                        size, true, "state-write-failed");
+            }
+            // Publish exactly the way a check cycle does: copy into this upload's own name in the
+            // installer-readable directory, then one gated, ownership-checked section that renames
+            // the master, commits the identity, and renames the public copy. There is no longer a
+            // delete-then-rename here, which changes what a failed upload does to the frame: the
+            // previously staged APK used to be unlinked *before* the new file was moved in, so an
+            // upload rejected at the rename left the frame with nothing staged. Now a failed upload
+            // cannot disturb anything the frame already had, and `oldStagedGone` has no meaning left.
             if (!externalStorageWritable()) {
-                deleteStagedFiles();
-                return failUpload(null, oldStagedGone, previousLastError, sha, size, true,
+                return failUpload(apk, replacingStaged, previousLastError, sha, size, true,
                         "external-storage-unavailable");
             }
-            if (!copyFile(stagedMaster, stagedPublic) || stagedPublic.length() != stagedMaster.length()) {
-                deleteStagedFiles();
-                return failUpload(null, oldStagedGone, previousLastError, sha, size, true,
+            if (!copyFile(apk, publicPart) || publicPart.length() != size) {
+                apk.delete();
+                publicPart.delete();
+                return failUpload(null, replacingStaged, previousLastError, sha, size, true,
                         "stage-copy-failed");
+            }
+            int published = publishStagedPair(apk, publicPart);
+            if (published < 0) {
+                // Superseded by a reset or a newer upload: its files and its state are untouched,
+                // and saying so is not a copy failure the caller could retry into.
+                apk.delete();
+                return ApkUploadResult.reject(sha, size, true, "superseded-by-another-update");
+            }
+            if (published == 0) {
+                return failUpload(null, replacingStaged, previousLastError, sha, size, true,
+                        "stage-rename-failed");
             }
         } catch (Exception e) {
             Log.e(TAG, "upload staging crashed", e);
-            // Best effort: the file may or may not still exist at its temp location. The
-            // previous STAGED state is restorable only while its files are still on disk.
-            return failUpload(apk, replacingStaged && !oldStagedGone, previousLastError, "", size,
+            // The previous stage was never unlinked, so it is always restorable from here.
+            apk.delete();
+            publicPart.delete();
+            return failUpload(null, replacingStaged, previousLastError, "", size,
                     false, "stage-crashed: " + e.getClass().getSimpleName());
         }
 
-        synchronized (this) {
-            state.expectedVersionCode = manifest.versionCode;
-            state.expectedVersionName = manifest.versionName;
-            state.manifestSha256 = sha;
-            state.expectedSizeBytes = size;
-            state.lastCheckedMs = System.currentTimeMillis();
-            state = withState(state, UpdateState.State.STAGED, "");
-            stateStore.write(state);
-        }
+        // publishStagedPair() committed the identity already — expected* from the fetch* it wrote
+        // above, and stagedSource from fetchOrigin, which is why nothing here names the source a
+        // second time. Committing again below would race whatever took over in between.
         String stagedMsg = "staged uploaded APK " + manifest.versionName + " ("
                 + manifest.versionCode + ", " + size + " B)";
         Log.i(TAG, stagedMsg);
@@ -750,12 +1159,26 @@ public class UpdateManager {
             apk.delete();
         }
         synchronized (this) {
+            if (!ownsUpdateWork()) {
+                // A rejected upload that has since been superseded has no say in the state at all:
+                // writing FAILED here would stop a newer worker's install retry over a file this
+                // upload never touched. The caller still gets its rejection reported.
+                Log.w(TAG, "uploaded APK rejected after being superseded: " + reason);
+                return ApkUploadResult.reject(sha, size, signatureValid, reason);
+            }
             if (restoringStaged) {
-                // The previously staged APK is still on disk with its original metadata.
+                // The previously staged APK is still on disk with its original metadata — a failed
+                // upload no longer unlinks it at any point.
                 state = withState(state, UpdateState.State.STAGED, previousLastError);
             } else {
                 state = withState(state, UpdateState.State.FAILED, reason);
             }
+            // The rejected upload is not pending anywhere; the identity claimed for it is void.
+            state.fetchVersionCode = 0;
+            state.fetchVersionName = "";
+            state.fetchSha256 = "";
+            state.fetchSizeBytes = 0L;
+            state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
             stateStore.write(state);
         }
         Log.w(TAG, "uploaded APK rejected: " + reason);
@@ -767,45 +1190,142 @@ public class UpdateManager {
 
     private void startCycle() {
         synchronized (this) {
+            // Inside the monitor, not before it: a check at the door can be followed a moment later
+            // by a recreation, and this method then reserves CHECKING with a stale manager's
+            // in-memory state. Same reason stageUploadedApk re-checks here.
+            if (!ownsProcessWork()) {
+                notifyDebug("update: a replaced manager asked for a check; ignored");
+                return;
+            }
             UpdateState s = state;
+            if (installInFlight) {
+                // The platform installer has stagedPublic open right now. A cycle that replaces
+                // that pair mid-install would have the installer read a file that is being
+                // rewritten under it, and runInstall's own re-hash gate would then throw away a
+                // stage that was about to land.
+                notifyDebug("update cycle refused (install in flight)");
+                return;
+            }
             switch (s.state) {
                 case CHECKING:
                 case DOWNLOADING:
                 case VERIFYING:
-                case STAGED:
                 case INSTALL_PENDING:
-                    // A cycle is already in flight, or a staged update is owned by
-                    // installStaged()/reconciliation — do not fight it.
+                    // A cycle is already in flight, or an install is inside its settle window.
                     notifyDebug("update cycle refused (state=" + s.state + ")");
                     return;
                 default:
                     break;
             }
+            // A STAGED update no longer stops a check: checkDue lets the timer re-read the host for
+            // a stage the host itself produced, and a forced check gets here for any stage. Either
+            // way runCycle consults judgeStaged before it overwrites anything, so a stage this app
+            // did not download is still untouched when the cycle decides what it may do.
+            final UpdateState prior = s;
             state = withState(s, UpdateState.State.CHECKING, "");
             state.attempts = s.attempts + 1;
             state.lastCheckedMs = System.currentTimeMillis();
             stateStore.write(state);
-        }
-        Thread thread = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                try {
-                    runCycle();
-                } catch (Throwable t) {
-                    Log.e(TAG, "update cycle crashed", t);
-                    failState("cycle-crashed: " + t);
+            Thread worker = new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        // Resolved from the field rather than captured: the Worker names this
+                        // thread, so it cannot exist until the Thread does.
+                        runCycle(prior, myWorker());
+                    } catch (Throwable t) {
+                        Log.e(TAG, "update cycle crashed", t);
+                        failOrRestore(prior, "cycle-crashed: " + t);
+                    }
                 }
-            }
-        }, "EO1-update-cycle");
-        thread.start();
+            }, "EO1-update-cycle");
+            // Hand the work to this thread in the same monitor transaction that wrote CHECKING —
+            // naming it before it starts is what keeps a reset arriving in the gap the winner.
+            updateWorker = newWorker(worker);
+            worker.start();
+        }
     }
 
-    private void runCycle() {
+    /** What the published manifest says about a build already staged on disk. */
+    enum StagedVerdict {
+        /** Not this code's stage to touch: an upload, a pre-{@code stagedSource} stage, no stage. */
+        SKIP,
+        /** What is staged is what is published, or the host cannot be believed about it. */
+        KEEP,
+        /** The host publishes different bytes — fetch them and replace the stage on verification. */
+        REPLACE,
+        /** The staged build is already running (or older than it): the stage is pointless. */
+        CLEAR
+    }
+
+    /**
+     * Package-visible for unit tests. Pure: does the manifest still describe what is staged?
+     *
+     * <p>The asymmetry is the whole point. An unreadable or invalid manifest answers {@code KEEP},
+     * never {@code REPLACE}: a host that hiccups must not cost a frame the installable build it
+     * already holds. And a stage this app did not download is not this app's to replace, whatever
+     * the host says.
+     */
+    static StagedVerdict judgeStaged(UpdateManifest manifest, UpdateState staged, int installedVersionCode) {
+        if (staged == null || staged.state != UpdateState.State.STAGED
+                || !UpdateState.SOURCE_MANIFEST.equals(staged.stagedSource)) {
+            return StagedVerdict.SKIP;
+        }
+        if (manifest == null || !manifest.isValid()) {
+            return StagedVerdict.KEEP;
+        }
+        if (manifest.versionCode <= installedVersionCode) {
+            return StagedVerdict.CLEAR;
+        }
+        if (manifest.versionCode == staged.expectedVersionCode
+                && staged.manifestSha256 != null
+                && manifest.sha256.trim().equalsIgnoreCase(staged.manifestSha256.trim())) {
+            return StagedVerdict.KEEP;
+        }
+        return StagedVerdict.REPLACE;
+    }
+
+    /**
+     * One check cycle, on the {@code EO1-update-cycle} thread.
+     *
+     * @param prior the state as it was before this cycle claimed {@code CHECKING} — the stage a
+     *              failure must go back to, if there was one.
+     * @param worker this cycle's own holder, or {@code null} if it was superseded before it ran;
+     *               every intermediate file this method writes is one of {@code worker}'s.
+     */
+    private void runCycle(UpdateState prior, Worker worker) {
+        if (worker == null) {
+            // Another worker took the update work between startCycle and this line.
+            abandonedCycle();
+            return;
+        }
+        try {
+            runCycleBody(prior, worker);
+        } finally {
+            // Every exit, including the ones that abandon the cycle. Cleanup cannot go through
+            // myWorker(): once ownership is gone that returns null, and the revoked cycle's temps —
+            // named after its own sequence number, so deleting them touches nothing another worker
+            // owns — would survive across restarts on a device with about a gigabyte free.
+            worker.part.delete();
+            worker.publicPart.delete();
+        }
+    }
+
+    private void runCycleBody(UpdateState prior, Worker worker) {
+        final File part = worker.part;
+        final File publicPart = worker.publicPart;
         // CHECKING: fetch + validate the manifest.
         Configuration config = settingsManager.getConfiguration();
         String manifestUrl = config != null ? config.updateManifestUrl : null;
         if (manifestUrl == null || manifestUrl.trim().isEmpty()) {
-            setIdle("manifest-url-not-configured");
+            // Nothing to compare against. A stage already on disk stays a stage — the host being
+            // unconfigured is not a verdict on it, and deleting it here would be an edit to the
+            // config silently becoming an uninstall.
+            if (prior.state == UpdateState.State.STAGED) {
+                restoreStaged(prior, "manifest-url-not-configured");
+            } else if (!cycleSetIdle("manifest-url-not-configured")) {
+                abandonedCycle();
+            }
             return;
         }
 
@@ -813,121 +1333,204 @@ public class UpdateManager {
         try {
             body = fetchManifest(manifestUrl.trim());
         } catch (ManifestHttpException e) {
-            failState("manifest-http-" + e.statusCode);
+            failOrRestore(prior, "manifest-http-" + e.statusCode);
             return;
         } catch (Exception e) {
-            failState("manifest-fetch: " + e + TrustCensus.gateNote(e));
+            failOrRestore(prior, "manifest-fetch: " + e + TrustCensus.gateNote(e));
             return;
         }
 
         UpdateManifest manifest = UpdateManifest.parse(body);
         if (manifest == null) {
-            failState("manifest-unparseable");
+            failOrRestore(prior, "manifest-unparseable");
             return;
         }
         String invalid = manifest.validationError();
         if (invalid != null) {
-            failState("manifest-invalid: " + invalid);
+            failOrRestore(prior, "manifest-invalid: " + invalid);
             return;
         }
+
+        // What the host says about a build already staged. A cycle only starts from STAGED when a
+        // person forced it — checkDue() gates the automatic one — so either way the answer decides
+        // whether anything below this line is allowed to touch the staged pair.
+        if (prior.state == UpdateState.State.STAGED) {
+            StagedVerdict verdict = judgeStaged(manifest, prior, BuildConfig.VERSION_CODE);
+            if (verdict == StagedVerdict.SKIP) {
+                restoreStaged(prior, UpdateState.SOURCE_UPLOAD.equals(prior.stagedSource)
+                        ? "staged-source-upload" : "staged-source-unknown");
+                return;
+            }
+            if (verdict == StagedVerdict.KEEP) {
+                restoreStaged(prior, "staged-still-current");
+                return;
+            }
+            if (verdict == StagedVerdict.REPLACE) {
+                notifyDebug("staged " + prior.expectedVersionName + " (" + prior.expectedVersionCode
+                        + ") is superseded by " + manifest.versionName + " (" + manifest.versionCode
+                        + (manifest.versionCode == prior.expectedVersionCode
+                                ? ", same code different bytes" : "") + "); fetching the published one");
+            }
+            // CLEAR falls through to the gate below, which now also discards the pointless stage.
+        }
+
         if (!manifest.isNewerThan(BuildConfig.VERSION_CODE)) {
+            // The host has nothing newer than what is running. Staged bytes under an IDLE state
+            // would have /state advertise a build no state owns, so the host's own go with it —
+            // but an APK the operator uploaded is never deleted on a manifest's say-so, however
+            // pointless the host thinks it has become. Local files only; nothing is ever installed
+            // that is not strictly newer than what is running.
+            // discardStageAndSettle() writes the IDLE transition itself: setIdle here afterwards
+            // would be the second, unguarded state write this call exists to eliminate.
             notifyUpdateChecked(false);
-            setIdle("up-to-date");
+            discardStageAndSettle();
             return;
         }
         notifyUpdateChecked(true);
 
+        // What the cycle is going to fetch — deliberately NOT written into the expected* fields,
+        // which keep describing the APK that is actually on disk until the swap commits below.
+        // Overwriting them here is what made an interrupted check unrecoverable.
+        boolean claimed;
         synchronized (this) {
-            state.expectedVersionCode = manifest.versionCode;
-            state.expectedVersionName = manifest.versionName == null ? "" : manifest.versionName;
-            state.manifestSha256 = manifest.sha256.trim().toLowerCase(Locale.US);
-            state.expectedSizeBytes = manifest.sizeBytes;
-            stateStore.write(state);
+            if (!ownsUpdateWork()) {
+                abandonedCycle();
+                return;
+            }
+            state.fetchVersionCode = manifest.versionCode;
+            state.fetchVersionName = manifest.versionName == null ? "" : manifest.versionName;
+            state.fetchSha256 = manifest.sha256.trim().toLowerCase(Locale.US);
+            state.fetchSizeBytes = manifest.sizeBytes;
+            // Whichever way these bytes land, a stage made of them is the host's to replace next.
+            state.fetchOrigin = UpdateState.SOURCE_MANIFEST;
+            claimed = stateStore.write(state);
+        }
+        if (!claimed) {
+            // The identity of the thing about to be downloaded never reached disk. Proceeding would
+            // mean a later swap could not be attributed after a restart, which is the exact failure
+            // this field exists to prevent — so stop while nothing has been disturbed.
+            failOrRestore(prior, "state-write-failed");
+            return;
         }
 
         // Space pre-check (advisory; the installer is the final authority).
         long required = manifest.sizeBytes + STAGING_HEADROOM_BYTES;
         if (freeBytes(updatesDir) < required || freeBytes(stagedPublic.getParentFile()) < required) {
-            failState("insufficient-space");
+            failOrRestore(prior, "insufficient-space");
             return;
         }
 
-        setState(UpdateState.State.DOWNLOADING);
+        if (!cycleTransition(UpdateState.State.DOWNLOADING)) {
+            abandonedCycle();
+            return;
+        }
 
         // DOWNLOADING: stream to the private .part (32 KB chunks, size-capped).
-        partFile.delete();
+        part.delete();
         try {
-            long total = download(manifest.apkUrl.trim(), manifest.sizeBytes);
+            long total = download(manifest.apkUrl.trim(), part, manifest.sizeBytes);
             if (total != manifest.sizeBytes) {
-                partFile.delete();
-                failState("size-mismatch");
+                part.delete();
+                failOrRestore(prior, "size-mismatch");
                 return;
             }
         } catch (Exception e) {
-            partFile.delete();
-            failState("download-failed: " + e + TrustCensus.gateNote(e));
+            part.delete();
+            failOrRestore(prior, "download-failed: " + e + TrustCensus.gateNote(e));
             return;
         }
 
-        setState(UpdateState.State.VERIFYING);
+        if (!cycleTransition(UpdateState.State.VERIFYING)) {
+            abandonedCycle();
+            return;
+        }
 
         // VERIFYING: SHA-256 → JAR signature (incl. signer-certificate match) → version gate.
         try {
-            String sha = sha256Safe(partFile);
-            if (!sha.equalsIgnoreCase(state.manifestSha256)) {
-                partFile.delete();
-                failState("sha256-mismatch");
+            String sha = sha256Safe(part);
+            if (!sha.equalsIgnoreCase(state.fetchSha256)) {
+                part.delete();
+                failOrRestore(prior, "sha256-mismatch");
                 return;
             }
             X509Certificate installed = installedCert();
             if (installed == null) {
-                partFile.delete();
-                failState("no-installed-cert");
+                part.delete();
+                failOrRestore(prior, "no-installed-cert");
                 return;
             }
-            ApkSignatureVerifier.Result result = ApkSignatureVerifier.verify(partFile, installed);
+            ApkSignatureVerifier.Result result = ApkSignatureVerifier.verify(part, installed);
             if (!result.valid) {
-                partFile.delete();
-                failState("signature-rejected: " + result.reason);
+                part.delete();
+                failOrRestore(prior, "signature-rejected: " + result.reason);
                 return;
             }
             if (!manifest.isNewerThan(BuildConfig.VERSION_CODE)) {
-                partFile.delete();
-                failState("not-newer");
+                part.delete();
+                failOrRestore(prior, "not-newer");
                 return;
             }
         } catch (Exception e) {
-            partFile.delete();
-            failState("verify-crashed: " + e);
+            part.delete();
+            failOrRestore(prior, "verify-crashed: " + e);
             return;
         }
 
-        // STAGED: private master + world-readable public copy.
+        // STAGED. Nothing below writes to a shared name: the bytes are copied into this worker's own
+        // temp inside the installer-readable directory, and the two shared files are replaced only by
+        // rename from those temps, inside one gated section that also commits the state. The order
+        // inside that section is master, then state, then the public copy — the master is what
+        // runInstall() re-hashes against, so the state has to follow the master and never lead it.
+        //
+        // This replaces an earlier arrangement where renaming over the master was the point of no
+        // return (rename(2) unlinks the previous build there) and every rung after it deleted the
+        // pair, so a build that had cleared all four gates could still leave a frame with nothing
+        // staged and its install retry dead.
+        if (!ownsUpdateWork()) {
+            abandonedCycle();
+            return;
+        }
         try {
-            if (!partFile.renameTo(stagedMaster)) {
-                stagedMaster.delete();
-                if (!partFile.renameTo(stagedMaster)) {
-                    failState("stage-rename-failed");
-                    return;
-                }
-            }
             if (!externalStorageWritable()) {
-                deleteStagedFiles();
-                failState("external-storage-unavailable");
+                // Nothing has been touched yet, so the stage this frame already holds survives.
+                failOrRestore(prior, "external-storage-unavailable");
                 return;
             }
-            if (!copyFile(stagedMaster, stagedPublic) || stagedPublic.length() != stagedMaster.length()) {
-                deleteStagedFiles();
-                failState("stage-copy-failed");
+            // Copy into this worker's own name inside the installer-readable directory. Copying into
+            // stagedPublic directly was the last shared write path: a worker paused inside copyFile()
+            // resumes to a file descriptor on an inode nobody else can reach, whereas opening the
+            // shared name late truncates whatever the new owner published there.
+            if (!copyFile(part, publicPart) || publicPart.length() != manifest.sizeBytes) {
+                // Nothing shared has been touched, so the previous stage survives intact.
+                failOrRestore(prior, "stage-copy-failed");
+                return;
+            }
+            // The last irreversible step, and the metadata that names it, in one critical section:
+            // a reset that landed between the two would leave the new bytes on disk under a state
+            // that says nothing is staged. The rename consumes the part file, so from here both
+            // halves are the verified new build.
+            int published = publishStagedPair(part, publicPart);
+            if (published < 0) {
+                // Superseded between the copy above and the gate: whoever took over owns the pair
+                // now, and everything we wrote is still in our own temps, harmlessly.
+                abandonedCycle();
+                return;
+            }
+            if (published == 0) {
+                // The master rename failed even after replacing the target. The old master is
+                // consumed and the shared public file was never touched, so there is nothing left
+                // to restore — but failOrRestore is still the honest reporter of that.
+                failOrRestore(prior, "stage-publish-failed");
                 return;
             }
         } catch (Exception e) {
-            deleteStagedFiles();
-            failState("stage-failed: " + e);
+            failOrRestore(prior, "stage-failed: " + e);
             return;
         }
 
-        setState(UpdateState.State.STAGED);
+        // commitFetchedStage() already ran, inside the gate and immediately after the rename that
+        // it describes. Calling it again here would promote from the fields it cleared, zeroing the
+        // stage's identity out from under the files that are now on disk.
         notifyDebug("staged update " + manifest.versionName + " (" + manifest.versionCode + ")");
 
         // Proceed straight to the install; if this process dies before firing, the next
@@ -965,8 +1568,8 @@ public class UpdateManager {
         }
     }
 
-    /** Streams {@code url} to {@link #partFile} in 32 KB chunks. @return total bytes written. */
-    private long download(String url, long sizeBytes) throws Exception {
+    /** Streams {@code url} to {@code dest} in 32 KB chunks. @return total bytes written. */
+    private long download(String url, File dest, long sizeBytes) throws Exception {
         Request request = new Request.Builder().url(url).build();
         Response response = client().newCall(request).execute();
         try {
@@ -974,7 +1577,7 @@ public class UpdateManager {
                 throw new java.io.IOException("http " + response.code());
             }
             InputStream in = response.body().byteStream();
-            FileOutputStream out = new FileOutputStream(partFile);
+            FileOutputStream out = new FileOutputStream(dest);
             try {
                 byte[] buf = new byte[BUFFER];
                 int n;
@@ -983,6 +1586,13 @@ public class UpdateManager {
                     total += n;
                     if (total > sizeBytes || total > UpdateManifest.MAX_APK_BYTES) {
                         throw new java.io.IOException("download exceeds expected size");
+                    }
+                    // A reset or an upload can arrive minutes into this loop. Correctness no longer
+                    // depends on noticing — dest is this worker's own path, so a late write corrupts
+                    // nothing — but continuing would burn radio time and bandwidth on a download
+                    // whose result is guaranteed to be discarded.
+                    if (!ownsUpdateWork()) {
+                        throw new java.io.IOException("update cycle superseded");
                     }
                     out.write(buf, 0, n);
                 }
@@ -1182,50 +1792,399 @@ public class UpdateManager {
 
     private void setState(UpdateState.State newState) {
         synchronized (this) {
-            state = withState(state, newState, "");
-            stateStore.write(state);
+            writeState(withState(state, newState, ""));
         }
-    }
-
-    private void setIdle(String lastError) {
-        synchronized (this) {
-            state = withState(state, UpdateState.State.IDLE, lastError);
-            stateStore.write(state);
-        }
-        notifyDebug("update: " + lastError);
     }
 
     private void failState(String reason) {
-        partFile.delete();
+        failState(reason, false);
+    }
+
+    /**
+     * @param cycleOwned true when the caller is a check cycle, which must still own the update work
+     *                   to record a failure: a {@code FAILED} written by an abandoned cycle over an
+     *                   upload that landed meanwhile would stop the install retry and hand the next
+     *                   check a state that no longer matches the stage on disk.
+     */
+    private void failState(String reason, boolean cycleOwned) {
+        discardMyTemps(myWorker());
         synchronized (this) {
-            state = UpdateState.failed(state, reason);
-            stateStore.write(state);
+            if (cycleOwned && !ownsUpdateWork()) {
+                notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
+                return;
+            }
+            // writeState() also refuses a manager that recreation replaced, which is the case the
+            // install thread can reach this from: it is the right thread and the wrong manager.
+            if (!writeState(UpdateState.failed(state, reason))) {
+                return;
+            }
         }
         Log.e(TAG, "update FAILED: " + reason);
         notifyDebug("update FAILED: " + reason);
     }
 
-    private void persistInstallPending() {
+    /**
+     * The one place persisted state is replaced. Callers hold the monitor; the ownership test that
+     * belongs next to the write lives here, so a new state writer cannot forget it — seven rounds of
+     * this file have been, in effect, a list of places that forgot.
+     *
+     * @return false when another manager owns the process's update work and nothing was written
+     */
+    private boolean writeState(UpdateState next) {
+        if (!ownsProcessWork()) {
+            supersededWriteDropped();
+            return false;
+        }
+        state = next;
+        stateStore.write(state);
+        return true;
+    }
+
+    private void supersededWriteDropped() {
+        notifyDebug("update: a replaced manager tried to write update state; ignored");
+    }
+
+    /** Whether the calling thread is still the one entitled to change update state or files. */
+    private boolean ownsUpdateWork() {
+        if (retired) {
+            return false;
+        }
+        Worker w = updateWorker;
+        return w != null && w.thread == Thread.currentThread();
+    }
+
+    /**
+     * Called from {@code MainActivity.onDestroy()}, alongside the watchdog, the brightness manager,
+     * the WebView and the web server that this method already stops. A recreation replaces the
+     * manager immediately; without retiring the old one, its cycle thread keeps owning the same
+     * staging directory and the same {@code update-state.json}, and the two managers can overwrite
+     * each other's stage or delete each other's downloads. Retirement is permanent for this
+     * instance — its worker claims stop, its ownership checks fail, and its in-flight cycle exits
+     * through the abandon paths rather than the publish ones.
+     */
+    public void retire() {
+        synchronized (stageGate) {
+            synchronized (this) {
+                retired = true;
+                updateWorker = null;
+                if (processOwner == this) {
+                    // Only yield the process role if nobody newer has taken it; a replacement that
+                    // was constructed first must keep it.
+                    processOwner = null;
+                }
+            }
+        }
+    }
+
+    /**
+     * Whether this manager may still touch persisted state or the staged pair. Read it inside the
+     * monitor you are about to mutate under — checking it and then writing in a separate
+     * transaction is the gap this whole round of fixes keeps tripping over.
+     */
+    private boolean ownsProcessWork() {
+        return !retired && processOwner == this;
+    }
+
+    /** This thread's worker, or null when it has been superseded — never another's. */
+    private Worker myWorker() {
+        Worker w = updateWorker;
+        return w != null && w.thread == Thread.currentThread() ? w : null;
+    }
+
+    /** The cycle's own state transition: refuses to advance a state it no longer owns. */
+    private boolean cycleTransition(UpdateState.State next) {
         synchronized (this) {
-            state = withState(state, UpdateState.State.INSTALL_PENDING, "");
-            state.installFiredAtMs = System.currentTimeMillis();
+            if (!ownsUpdateWork()) {
+                return false;
+            }
+            return writeState(withState(state, next, ""));
+        }
+    }
+
+    /** A cycle's transition to IDLE, refused once another worker owns the update work. */
+    private boolean cycleSetIdle(String reason) {
+        synchronized (this) {
+            if (!ownsUpdateWork()) {
+                return false;
+            }
+            if (!writeState(withState(state, UpdateState.State.IDLE, reason))) {
+                return false;
+            }
+        }
+        notifyDebug("update: " + reason);
+        return true;
+    }
+
+    private void abandonedCycle() {
+        notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
+    }
+
+    /**
+     * Publishes a worker's verified bytes into the two shared names by rename, and writes the state
+     * that names them, in one critical section. The gate is the same one {@code resetUpdate()} and
+     * an upload's swap take, and ownership is re-checked inside it, so a worker revoked while its
+     * download ran can neither overwrite the stage that replaced it nor leave the pair describing
+     * two different builds.
+     *
+     * <p>Master first, public second: a failure after the master is self-healing, because
+     * {@code runInstall()} re-makes a divergent public copy from the master, whereas the reverse
+     * order would leave the installer reading a new file whose private master is still the old one.
+     *
+     * @return {@code 1} published, {@code 0} a rename failed, {@code -1} no longer ours
+     */
+    private int publishStagedPair(File part, File publicPart) {
+        try {
+            synchronized (stageGate) {
+                synchronized (this) {
+                    if (!ownsUpdateWork()) {
+                        return -1;
+                    }
+                    if (!atomicReplace(part, stagedMaster)) {
+                        return 0;
+                    }
+                    // The state follows the master immediately: the master is what runInstall()
+                    // re-hashes against, so committing after the public copy could leave a new
+                    // master described by the old build's identity — which its re-hash gate would
+                    // then treat as corruption and delete.
+                    commitFetchedStage();
+                    if (!atomicReplace(publicPart, stagedPublic)) {
+                        notifyDebug("update: staged privately; the installer-readable copy will be"
+                                + " re-made from the master when this installs");
+                    }
+                }
+            }
+            return 1;
+        } finally {
+            // Whatever is left of our own temps goes; a rename that succeeded already consumed them.
+            part.delete();
+            publicPart.delete();
+        }
+    }
+
+    /**
+     * Rebuilds the installer-readable copy from the private master — into this worker's own temp,
+     * then a gated rename. Copying straight into {@code stagedPublic} truncated the shared name
+     * first, so an installer mid-read of it, or a stage published between the length check and the
+     * copy, would see a half-written APK.
+     *
+     * @return {@code 1} replaced, {@code 0} the copy could not be made, {@code -1} superseded — which
+     *         is a cancellation, not a storage failure, and must not be reported as one
+     */
+    private int repairPublicCopy(long expectedSize) {
+        Worker w = myWorker();
+        if (w == null) {
+            return -1;
+        }
+        w.publicPart.delete();
+        if (!copyFile(stagedMaster, w.publicPart) || w.publicPart.length() != expectedSize) {
+            w.publicPart.delete();
+            return 0;
+        }
+        synchronized (stageGate) {
+            synchronized (this) {
+                if (!ownsUpdateWork()) {
+                    w.publicPart.delete();
+                    return -1;
+                }
+                if (!atomicReplace(w.publicPart, stagedPublic)) {
+                    w.publicPart.delete();
+                    return 0;
+                }
+            }
+        }
+        return 1;
+    }
+
+    /**
+     * One {@code rename(2)}, which on the same filesystem already replaces an existing regular file
+     * atomically. There is deliberately no delete-then-retry: a rename that fails is failing because
+     * the source is gone or the filesystem is unhappy, and in neither case does deleting the
+     * destination make the retry work — it only destroys the verified build that was there. That
+     * retry was inherited from the original staging code, and it is the reason a failed publish could
+     * cost a frame a stage it could otherwise still install.
+     */
+    private boolean atomicReplace(File from, File to) {
+        return from.renameTo(to);
+    }
+
+    /** Deletes the staged pair under the same gate that protects the master swap. */
+    private boolean discardStagedUnderGate() {
+        synchronized (stageGate) {
+            if (!ownsProcessWork()) {
+                // The pair belongs to a newer manager; deleting it here would remove the
+                // replacement's staged APK while its own state still says it is there.
+                return false;
+            }
+            return deleteStagedFiles();
+        }
+    }
+
+    /**
+     * Discards the stage only if this worker still owns the update <em>and</em> the stage is the
+     * host's to discard — decision, deletion and the {@code IDLE} write in one critical section.
+     * Doing the deletion under a guard and the transition afterwards was the hole: a reset that
+     * landed in the gap left this worker demoting somebody else's freshly staged upload to
+     * {@code IDLE}, which stops its install retry and lets the next check bypass
+     * {@code judgeStaged()} and overwrite it.
+     */
+    private void discardStageAndSettle() {
+        synchronized (stageGate) {
+            synchronized (this) {
+                if (!ownsUpdateWork()) {
+                    return;
+                }
+                if (mayDiscardStage(state.stagedSource)) {
+                    deleteStagedFiles();
+                }
+                state = withState(state, UpdateState.State.IDLE, "up-to-date");
+                stateStore.write(state);
+            }
+        }
+        notifyDebug("update: up-to-date");
+    }
+
+    /**
+     * Puts back a stage that a cycle started and did not change: the same build, the same
+     * metadata, and the same debt to a human — {@link #withState} would otherwise drop
+     * {@code needsHumanConfirmation}, and a re-check that found nothing to do must not retire the
+     * claim that someone still owes this frame a click.
+     *
+     * <p>This cycle's check timestamp and attempt count are kept rather than restored, so
+     * re-checking a stage that is still current costs one manifest fetch per interval and not one
+     * per rotation tick.
+     */
+    private void restoreStaged(UpdateState prior, String reason) {
+        synchronized (this) {
+            // Ownership and mutation in one transaction: checked in a lock of its own, another
+            // thread could take the stage over in the gap between it and the write below.
+            if (!ownsUpdateWork()) {
+                // A reset or an upload took this stage over while the check was fetching. Its
+                // snapshot of the old identity is now fiction, and writing it would leave the new
+                // APK described as the discarded one.
+                notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
+                return;
+            }
+            long checkedMs = state.lastCheckedMs;
+            int att = state.attempts;
+            state = withState(prior, UpdateState.State.STAGED, reason);
+            // Nothing is pending any more — the cycle decided not to replace this stage.
+            state.fetchVersionCode = 0;
+            state.fetchVersionName = "";
+            state.fetchSha256 = "";
+            state.fetchSizeBytes = 0L;
+            state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
+            state.needsHumanConfirmation = prior.needsHumanConfirmation;
+            state.lastCheckedMs = checkedMs;
+            state.attempts = att;
             stateStore.write(state);
+        }
+        notifyDebug("update: " + reason);
+        // A tick that starts a re-check spends itself on the check: MainActivity's runOnTimer calls
+        // checkIfDue() and then installStaged(false), and while the cycle is in flight that second
+        // call sees CHECKING and dispatches nothing. With updateCheckIntervalMinutes at or below the
+        // rotation interval, every tick started a check and no tick ever installed — the stage sat
+        // there even after the transport recovered. The cycle that leaves a stage in place has to
+        // attempt the install the tick was going to.
+        installStaged(false);
+    }
+
+    /**
+     * Records a cycle failure that found a still-installable stage on disk by going back to
+     * {@code STAGED} instead of {@code FAILED}. A build the frame could not fetch must not leave
+     * it worse off than before it noticed: {@code FAILED} also stops the install retry, which is
+     * the only thing keeping an unattended frame current. The failure is still the
+     * {@code lastError}, so {@code /state} and {@code eo1-app.log} say why nothing landed.
+     */
+    private void failOrRestore(UpdateState prior, String reason) {
+        boolean ours;
+        synchronized (this) {
+            ours = ownsUpdateWork();
+        }
+        if (!ours) {
+            // Not even the partial download is ours to delete: another worker may own it now. Our
+            // own temps go with it, which is the only file we are still allowed to touch.
+            discardMyTemps(myWorker());
+            notifyDebug("update: a reset or upload took over mid-check; this check changed nothing");
+            return;
+        }
+        discardMyTemps(myWorker());
+        if (prior != null && prior.state == UpdateState.State.STAGED
+                && stagedIntactAs(prior.manifestSha256, prior.expectedSizeBytes)) {
+            restoreStaged(prior, reason);
+            notifyDebug("update cycle failed; keeping staged "
+                    + prior.expectedVersionName + " (" + prior.expectedVersionCode + ")");
+            return;
+        }
+        failState(reason, true);
+    }
+
+    /** True when the private master is byte-for-byte the build named by {@code sha}/{@code size}. */
+    private boolean stagedIntactAs(String sha, long size) {
+        return sha != null && !sha.isEmpty()
+                && sha.equals(sha256Safe(stagedMaster))
+                && stagedMaster.length() == size;
+    }
+
+    /**
+     * Whether a stage's bytes may be discarded because the update host has stopped wanting them.
+     * Only a stage the host produced. An uploaded APK is the operator's to keep or reset, and an
+     * unattributable one is left alone for the same reason — the same rule {@link #judgeStaged}
+     * applies to replacement, applied to deletion, so no path reaches deletion by accident.
+     */
+    static boolean mayDiscardStage(String stagedSource) {
+        return UpdateState.SOURCE_MANIFEST.equals(stagedSource);
+    }
+
+    private boolean persistInstallPending() {
+        synchronized (this) {
+            UpdateState next = withState(state, UpdateState.State.INSTALL_PENDING, "");
+            next.installFiredAtMs = System.currentTimeMillis();
+            return writeState(next);
+        }
+    }
+
+    /**
+     * Promotes the build a cycle fetched into the identity of the stage on disk. Called only after
+     * the swap committed, so up to this instant {@code expected*} and {@code stagedSource} still
+     * described the APK that was installable — which is what lets a killed check be recovered
+     * instead of lost, and keeps an uploaded stage marked as one while a replacement is in flight.
+     */
+    private void commitFetchedStage() {
+        synchronized (this) {
+            state.expectedVersionCode = state.fetchVersionCode;
+            state.expectedVersionName = state.fetchVersionName;
+            state.manifestSha256 = state.fetchSha256;
+            state.expectedSizeBytes = state.fetchSizeBytes;
+            // Whichever worker's bytes these are, that worker's source is what protects them next.
+            state.stagedSource = state.fetchOrigin;
+            state.fetchVersionCode = 0;
+            state.fetchVersionName = "";
+            state.fetchSha256 = "";
+            state.fetchSizeBytes = 0L;
+            state.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
+            writeState(withState(state, UpdateState.State.STAGED, ""));
         }
     }
 
     private void setStaged(String lastError) {
         synchronized (this) {
-            state = withState(state, UpdateState.State.STAGED, lastError);
-            stateStore.write(state);
+            writeState(withState(state, UpdateState.State.STAGED, lastError));
         }
     }
 
-    private static UpdateState withState(UpdateState s, UpdateState.State newState, String lastError) {
+    /** Package-visible for unit tests: every field a transition must survive is listed here. */
+    static UpdateState withState(UpdateState s, UpdateState.State newState, String lastError) {
         UpdateState c = new UpdateState();
         c.expectedVersionCode = s.expectedVersionCode;
         c.expectedVersionName = s.expectedVersionName;
         c.manifestSha256 = s.manifestSha256;
         c.expectedSizeBytes = s.expectedSizeBytes;
+        c.stagedSource = s.stagedSource;
+        c.fetchVersionCode = s.fetchVersionCode;
+        c.fetchVersionName = s.fetchVersionName;
+        c.fetchSha256 = s.fetchSha256;
+        c.fetchSizeBytes = s.fetchSizeBytes;
+        c.fetchOrigin = s.fetchOrigin;
         c.lastCheckedMs = s.lastCheckedMs;
         c.attempts = s.attempts;
         c.installFiredAtMs = s.installFiredAtMs;
@@ -1240,11 +2199,13 @@ public class UpdateManager {
     /** STAGED, retryable, but nothing on this frame can install it without a click. */
     private void setNeedsHuman() {
         synchronized (this) {
-            state = withState(state, UpdateState.State.STAGED, REASON_NEEDS_HUMAN);
-            state.needsHumanConfirmation = true;
+            UpdateState next = withState(state, UpdateState.State.STAGED, REASON_NEEDS_HUMAN);
+            next.needsHumanConfirmation = true;
             // Nothing was fired, so nothing is owed a settle window.
-            state.installFiredAtMs = 0L;
-            stateStore.write(state);
+            next.installFiredAtMs = 0L;
+            if (!writeState(next)) {
+                return;
+            }
         }
         notifyDebug("install: deferred — no silent transport on this frame;"
                 + " use \"Install on the frame\" in the web UI");
@@ -1276,9 +2237,34 @@ public class UpdateManager {
         o.addProperty("lastError", s.lastError);
         o.addProperty("attempts", s.attempts);
         o.addProperty("stagedSha256", s.manifestSha256);
+        // What the running cycle is fetching, when one is. During a supersede this names the new
+        // build while expectedVersionCode/stagedSha256 still describe the APK on disk, which is the
+        // point: those two are the stage, not a promise about it. Reported only while a cycle is
+        // actually running — the values stay on disk after a failure so a later launch can match
+        // them against the master, but a FAILED or STAGED frame that advertises a download has
+        // stopped describing this frame and started describing the last one it failed at.
+        boolean fetching = s.state == UpdateState.State.CHECKING
+                || s.state == UpdateState.State.DOWNLOADING
+                || s.state == UpdateState.State.VERIFYING;
+        o.addProperty("fetchingVersionCode", fetching ? s.fetchVersionCode : 0);
+        o.addProperty("fetchingSha256", fetching ? s.fetchSha256 : "");
+        // "manifest" — the host owns this stage and may replace it; "upload" — an operator put it
+        // here and nothing automatic will; "" — staged by a build older than this field, so the
+        // app cannot tell and leaves it alone.
+        o.addProperty("stagedSource", s.stagedSource);
         JsonObject staged = new JsonObject();
-        staged.addProperty("present", stagedPublic.exists() || stagedMaster.exists());
+        boolean present = stagedPublic.exists() || stagedMaster.exists();
+        staged.addProperty("present", present);
         staged.addProperty("bytes", stagedPublic.length());
+        // Bytes in the staging directory that no state owns. A cycle re-checking a stage runs
+        // through CHECKING/DOWNLOADING/VERIFYING while the parked APK is still on disk and still
+        // installable, so those states own it too — only IDLE (an interrupted swap that
+        // reconciled away) and FAILED (a cycle that gave up on these bytes) mean the file
+        // belongs to nothing and will not be installed. Deliberately not a re-hash: /state is
+        // polled, and hashing a 30 MB APK on the web thread to answer a question the state
+        // already answers is the wrong trade.
+        staged.addProperty("owned", present && s.state != UpdateState.State.IDLE
+                && s.state != UpdateState.State.FAILED);
         o.add("stagedApk", staged);
         o.addProperty("installPermissionHeld", headless);
         // "defer-to-human": the next automatic dispatch puts nothing on screen and waits. Pressing
@@ -1355,6 +2341,9 @@ public class UpdateManager {
         // way (the success path on startup handles both STAGED and INSTALL_PENDING).
         Log.i(TAG, "install observer: packageInstalled (user " + userId + ")");
         synchronized (UpdateManager.this) {
+            if (!ownsProcessWork()) {
+                return;
+            }
             installFiredInThisProcess = false;
             if (state.state == UpdateState.State.INSTALL_PENDING) {
                 state = withState(state, UpdateState.State.STAGED, "");
@@ -1366,6 +2355,12 @@ public class UpdateManager {
     private void onInstallFailed(String errorMsg, int userId) {
         Log.w(TAG, "install observer: packageInstallFailed (user " + userId + "): " + errorMsg);
         synchronized (UpdateManager.this) {
+            if (!ownsProcessWork()) {
+                // This callback belongs to an install started by a manager that no longer owns the
+                // process. It runs on a framework binder thread that was never handed the work, so
+                // thread ownership cannot speak for it and the manager has to.
+                return;
+            }
             installFiredInThisProcess = false;
             if (state.state == UpdateState.State.INSTALL_PENDING) {
                 state = withState(state, UpdateState.State.STAGED,

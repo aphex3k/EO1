@@ -3,16 +3,18 @@ package com.aphex3k.eo1;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
+import com.aphex3k.update.UpdateManifest;
 import com.aphex3k.update.UpdateState;
 
 import org.junit.Test;
 
 /**
- * JVM tests for {@link UpdateManager}'s pure statics ({@code checkDue}, {@code reconcileState}
- * and {@code chooseInstallPath}). No Android framework classes are exercised.
+ * JVM tests for {@link UpdateManager}'s pure statics ({@code checkDue}, {@code reconcileState},
+ * {@code judgeStaged} and {@code chooseInstallPath}). No Android framework classes are exercised.
  */
 public class UpdateManagerTest {
 
@@ -25,6 +27,37 @@ public class UpdateManagerTest {
         st.attempts = 3;
         return st;
     }
+
+    /** A stage the update host itself fetched: build 7, published as {@code sha}. */
+    private static UpdateState hostStage(String sha) {
+        UpdateState st = state(UpdateState.State.STAGED);
+        st.manifestSha256 = sha;
+        st.stagedSource = UpdateState.SOURCE_MANIFEST;
+        return st;
+    }
+
+    /** A manifest the host could have served: {@code code}, built from {@code sha}. */
+    private static UpdateManifest published(int code, String sha) {
+        UpdateManifest m = new UpdateManifest();
+        m.versionCode = code;
+        m.versionName = "1." + code + ".0";
+        m.apkUrl = "http://host/eo1.apk";
+        m.sha256 = sha;
+        m.sizeBytes = 1024L;
+        return m;
+    }
+
+    private static String sha64(char c) {
+        char[] hex = new char[64];
+        java.util.Arrays.fill(hex, c);
+        return new String(hex);
+    }
+
+    private static final String SHA_A = sha64('a');
+    private static final String SHA_B = sha64('b');
+
+    /** Build 7 staged, build 6 running: what {@link #hostStage} and {@link #published} describe. */
+    private static final int INSTALLED = 6;
 
     private static final long MINUTE = 60_000L;
 
@@ -55,12 +88,267 @@ public class UpdateManagerTest {
                 UpdateState.State.CHECKING,
                 UpdateState.State.DOWNLOADING,
                 UpdateState.State.VERIFYING,
-                UpdateState.State.STAGED,
                 UpdateState.State.INSTALL_PENDING}) {
             UpdateState st = state(s);
             st.lastCheckedMs = 0;
             assertFalse("expected " + s + " to block", UpdateManager.checkDue(10 * 365 * 24 * 60 * MINUTE, st, 120));
         }
+    }
+
+    /**
+     * A staged build the host produced no longer ends the story: the manifest gets re-read on the
+     * ordinary interval, so a frame left waiting on a person (or on a transport that keeps
+     * refusing) finds out when the operator ships something else.
+     */
+    @Test
+    public void checkDue_hostStagedUpdateIsRecheckedOnTheInterval() {
+        UpdateState st = hostStage(SHA_A);
+        st.lastCheckedMs = 1_000_000L;
+        assertFalse(UpdateManager.checkDue(st.lastCheckedMs + 1, st, 120));
+        assertTrue(UpdateManager.checkDue(st.lastCheckedMs + 120 * MINUTE, st, 120));
+    }
+
+    /** A stage this app did not download is not this app's to replace, however stale it gets. */
+    @Test
+    public void checkDue_stageNotFromTheHostStaysBlocked() {
+        UpdateState uploaded = state(UpdateState.State.STAGED);
+        uploaded.stagedSource = UpdateState.SOURCE_UPLOAD;
+        uploaded.lastCheckedMs = 0;
+        assertFalse(UpdateManager.checkDue(10 * 365 * 24 * 60 * MINUTE, uploaded, 120));
+
+        // A state file written before stagedSource existed: the app cannot tell where the stage
+        // came from, so it keeps today's behaviour rather than guessing.
+        UpdateState legacy = state(UpdateState.State.STAGED);
+        legacy.lastCheckedMs = 0;
+        assertEquals(UpdateState.SOURCE_UNKNOWN, legacy.stagedSource);
+        assertFalse(UpdateManager.checkDue(10 * 365 * 24 * 60 * MINUTE, legacy, 120));
+    }
+
+    // -------------------------------------------------------------- judgeStaged
+
+    @Test
+    public void judgeStaged_hostThatCannotAnswerKeepsTheStage() {
+        // An unparseable manifest is a hiccup, not a verdict: it must never cost a frame the
+        // installable build it already holds.
+        assertEquals(UpdateManager.StagedVerdict.KEEP,
+                UpdateManager.judgeStaged(null, hostStage(SHA_A), INSTALLED));
+        UpdateManifest junk = published(0, "");
+        assertFalse(junk.isValid());
+        assertEquals(UpdateManager.StagedVerdict.KEEP,
+                UpdateManager.judgeStaged(junk, hostStage(SHA_A), INSTALLED));
+    }
+
+    @Test
+    public void judgeStaged_sameBuildAndBytesKeepsTheStage() {
+        assertEquals(UpdateManager.StagedVerdict.KEEP,
+                UpdateManager.judgeStaged(published(7, SHA_A), hostStage(SHA_A), INSTALLED));
+        // Case is not part of the comparison; the manifest stores lowercase, the state may not.
+        assertEquals(UpdateManager.StagedVerdict.KEEP,
+                UpdateManager.judgeStaged(published(7, SHA_A.toUpperCase(java.util.Locale.US)),
+                        hostStage(SHA_A), INSTALLED));
+    }
+
+    @Test
+    public void judgeStaged_newerBuildReplacesTheStage() {
+        assertEquals(UpdateManager.StagedVerdict.REPLACE,
+                UpdateManager.judgeStaged(published(8, SHA_B), hostStage(SHA_A), INSTALLED));
+        // A higher code published from the same bytes is still a different release.
+        assertEquals(UpdateManager.StagedVerdict.REPLACE,
+                UpdateManager.judgeStaged(published(8, SHA_A), hostStage(SHA_A), INSTALLED));
+    }
+
+    /** The half of the request a versionCode comparison alone would miss. */
+    @Test
+    public void judgeStaged_sameCodeDifferentBytesReplacesTheStage() {
+        assertEquals(UpdateManager.StagedVerdict.REPLACE,
+                UpdateManager.judgeStaged(published(7, SHA_B), hostStage(SHA_A), INSTALLED));
+    }
+
+    @Test
+    public void judgeStaged_stagedBuildAlreadyRunningClearsIt() {
+        assertEquals(UpdateManager.StagedVerdict.CLEAR,
+                UpdateManager.judgeStaged(published(6, SHA_A), hostStage(SHA_A), 6));
+        assertEquals(UpdateManager.StagedVerdict.CLEAR,
+                UpdateManager.judgeStaged(published(5, SHA_A), hostStage(SHA_A), 6));
+    }
+
+    @Test
+    public void judgeStaged_onlyAHostStageIsEverTouched() {
+        UpdateState uploaded = hostStage(SHA_A);
+        uploaded.stagedSource = UpdateState.SOURCE_UPLOAD;
+        assertEquals(UpdateManager.StagedVerdict.SKIP,
+                UpdateManager.judgeStaged(published(8, SHA_B), uploaded, INSTALLED));
+
+        UpdateState legacy = hostStage(SHA_A);
+        legacy.stagedSource = UpdateState.SOURCE_UNKNOWN;
+        assertEquals(UpdateManager.StagedVerdict.SKIP,
+                UpdateManager.judgeStaged(published(8, SHA_B), legacy, INSTALLED));
+
+        // Not staged at all — a plain check from IDLE is not a verdict on a stage.
+        assertEquals(UpdateManager.StagedVerdict.SKIP,
+                UpdateManager.judgeStaged(published(8, SHA_B), state(UpdateState.State.IDLE), INSTALLED));
+        assertEquals(UpdateManager.StagedVerdict.SKIP,
+                UpdateManager.judgeStaged(published(8, SHA_B), null, INSTALLED));
+    }
+
+    /**
+     * The half of the start-up rule that may only ever add a stage back, never delete one: an
+     * {@code IDLE} state left by a killed check takes ownership of the bytes on disk if they match
+     * the stage that was there, or else the build the swap had just committed.
+     */
+    @Test
+    public void recoversWhicheverIdentityTheBytesMatch() {
+        UpdateState killed = hostStage(SHA_A);
+        killed.state = UpdateState.State.IDLE;
+        killed.fetchVersionCode = 8;
+        killed.fetchVersionName = "1.8.0";
+        killed.fetchSha256 = SHA_B;
+        killed.fetchSizeBytes = 4096L;
+        killed.fetchOrigin = UpdateState.SOURCE_MANIFEST;
+
+        // The master is still the stage that was here before the check: restore that identity,
+        // source included, so the next check still has to consult judgeStaged about it.
+        UpdateState restored = UpdateManager.recoverInterruptedStage(killed, true, false);
+        assertEquals(UpdateState.State.STAGED, restored.state);
+        assertEquals(7, restored.expectedVersionCode);
+        assertEquals(SHA_A, restored.manifestSha256);
+        assertEquals(UpdateState.SOURCE_MANIFEST, restored.stagedSource);
+        assertEquals("staged-recovered-after-restart", restored.lastError);
+        assertEquals("nothing is pending once a stage is recovered", 0, restored.fetchVersionCode);
+
+        // The master is the build the swap had just committed: promote the fetched identity, which
+        // is the only case where recovery may rewrite what the stage is called.
+        UpdateState promoted = UpdateManager.recoverInterruptedStage(killed, false, true);
+        assertEquals(UpdateState.State.STAGED, promoted.state);
+        assertEquals(8, promoted.expectedVersionCode);
+        assertEquals(SHA_B, promoted.manifestSha256);
+        assertEquals(UpdateState.SOURCE_MANIFEST, promoted.stagedSource);
+        assertEquals(0, promoted.fetchVersionCode);
+
+        // An uploaded stage comes back still marked as one, which is the whole point: without the
+        // source surviving the crash, the next automatic check would overwrite operator bytes.
+        UpdateState upload = hostStage(SHA_A);
+        upload.state = UpdateState.State.IDLE;
+        upload.stagedSource = UpdateState.SOURCE_UPLOAD;
+        UpdateState uploadBack = UpdateManager.recoverInterruptedStage(upload, true, false);
+        assertEquals(UpdateState.SOURCE_UPLOAD, uploadBack.stagedSource);
+        assertEquals(UpdateState.State.STAGED, uploadBack.state);
+        assertFalse("a recovered upload is still not the host's to discard",
+                UpdateManager.mayDiscardStage(uploadBack.stagedSource));
+
+        // An uploaded APK killed between its swap and its metadata write is recovered through the
+        // same promote branch — and must come back as an UPLOAD, or the next check reads it as the
+        // host's and is free to delete the operator's file.
+        UpdateState midUpload = hostStage(SHA_A);
+        midUpload.state = UpdateState.State.IDLE;
+        midUpload.stagedSource = UpdateState.SOURCE_MANIFEST;
+        midUpload.fetchVersionCode = 9;
+        midUpload.fetchSha256 = SHA_B;
+        midUpload.fetchSizeBytes = 4096L;
+        midUpload.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+        UpdateState uploaded = UpdateManager.recoverInterruptedStage(midUpload, false, true);
+        assertEquals(UpdateState.SOURCE_UPLOAD, uploaded.stagedSource);
+        assertEquals(9, uploaded.expectedVersionCode);
+        assertFalse("and it stays that way for the next check",
+                UpdateManager.mayDiscardStage(uploaded.stagedSource));
+
+        // Both matches true — the operator uploaded the very APK the host had already staged, and
+        // the process died between the swap and the metadata write. The pending upload's
+        // provenance has to win, because "manifest" is a licence for the next check to delete it.
+        UpdateState identical = hostStage(SHA_A);
+        identical.state = UpdateState.State.IDLE;
+        identical.fetchVersionCode = 7;
+        identical.fetchVersionName = "1.7.0";
+        identical.fetchSha256 = SHA_A;
+        identical.fetchSizeBytes = identical.expectedSizeBytes;
+        identical.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+        UpdateState both = UpdateManager.recoverInterruptedStage(identical, true, true);
+        assertEquals(UpdateState.State.STAGED, both.state);
+        assertEquals("the upload's provenance survives the ambiguity",
+                UpdateState.SOURCE_UPLOAD, both.stagedSource);
+        assertFalse(UpdateManager.mayDiscardStage(both.stagedSource));
+        // And with no upload pending, the same ambiguity is simply the stage that was already there.
+        identical.fetchOrigin = UpdateState.SOURCE_UNKNOWN;
+        assertEquals(UpdateState.SOURCE_MANIFEST,
+                UpdateManager.recoverInterruptedStage(identical, true, false).stagedSource);
+
+        // Neither identity matches the bytes: recovery adds nothing. It never deletes either.
+        assertSame(killed, UpdateManager.recoverInterruptedStage(killed, false, false));
+        assertNull(UpdateManager.recoverInterruptedStage(null, true, true));
+
+        // A state that still owns its stage needs no recovery, and a confirmed install — which
+        // reconcileState blanks, shas and all — has nothing for either match to succeed against.
+        UpdateState stillStaged = hostStage(SHA_A);
+        assertSame(stillStaged, UpdateManager.recoverInterruptedStage(stillStaged, true, false));
+        UpdateState confirmed = UpdateState.idle();
+        confirmed.state = UpdateState.State.IDLE;
+        assertSame(confirmed, UpdateManager.recoverInterruptedStage(confirmed, false, false));
+    }
+
+    /**
+     * Recovery hands back a stage without consulting the installed version — that comparison is
+     * reconcileState's, and it ran against the interrupted state, not the restored one. An operator
+     * who sideloaded the very build that was staged would otherwise get it reinstalled by the next
+     * tick, because runInstall() has no newer-version gate of its own.
+     */
+    @Test
+    public void recoveredAlreadyRunning_isNotInstallable() {
+        UpdateState same = hostStage(SHA_A);
+        same.state = UpdateState.State.STAGED;
+        assertTrue(UpdateManager.recoveredAlreadyRunning(same, 7));
+
+        // Strictly newer is the only thing worth restoring: runInstall() has no version gate, so a
+        // recovered stage at or below the running build is a downgrade attempt waiting for a tick.
+        UpdateState newer = hostStage(SHA_A);
+        newer.state = UpdateState.State.STAGED;
+        newer.expectedVersionCode = 8;
+        assertFalse(UpdateManager.recoveredAlreadyRunning(newer, 7));
+
+        UpdateState downgraded = hostStage(SHA_A);
+        downgraded.state = UpdateState.State.STAGED;
+        downgraded.expectedVersionCode = 7;
+        assertTrue("an interrupted check whose stage predates a sideload must not come back",
+                UpdateManager.recoveredAlreadyRunning(downgraded, 9));
+
+        // A blank state at version 0 must not read as "equals a device at zero".
+        UpdateState blank = UpdateState.idle();
+        blank.state = UpdateState.State.STAGED;
+        assertFalse(UpdateManager.recoveredAlreadyRunning(blank, 0));
+        assertFalse(UpdateManager.recoveredAlreadyRunning(null, 7));
+    }
+
+    @Test
+    public void mayDiscardStage_onlyTheHostsOwnBuild() {
+        assertTrue(UpdateManager.mayDiscardStage(UpdateState.SOURCE_MANIFEST));
+        assertFalse(UpdateManager.mayDiscardStage(UpdateState.SOURCE_UPLOAD));
+        assertFalse("an unattributable stage is left alone, not deleted on an assumption",
+                UpdateManager.mayDiscardStage(UpdateState.SOURCE_UNKNOWN));
+        assertFalse(UpdateManager.mayDiscardStage(null));
+    }
+
+    /** withState() lists its fields by hand, which is how a new one goes missing quietly. */
+    @Test
+    public void withState_carriesStagedSourceThroughATransition() {
+        UpdateState staged = hostStage(SHA_A);
+        staged.fetchVersionCode = 8;
+        staged.fetchVersionName = "1.8.0";
+        staged.fetchSha256 = SHA_B;
+        staged.fetchSizeBytes = 4096L;
+
+        UpdateState failed = UpdateManager.withState(staged, UpdateState.State.FAILED, "boom");
+        assertEquals(UpdateState.SOURCE_MANIFEST, failed.stagedSource);
+        assertEquals(SHA_A, failed.manifestSha256);
+        assertEquals(7, failed.expectedVersionCode);
+        // Both identities have to survive a transition: losing fetch* is how a killed check
+        // becomes an unrecoverable one, since the stage's own fields say nothing about it.
+        assertEquals(8, failed.fetchVersionCode);
+        assertEquals(SHA_B, failed.fetchSha256);
+        assertEquals(4096L, failed.fetchSizeBytes);
+        assertEquals("1.8.0", failed.fetchVersionName);
+
+        UpdateState fromFailed = UpdateState.failed(staged, "boom");
+        assertEquals(UpdateState.SOURCE_MANIFEST, fromFailed.stagedSource);
+        assertEquals(SHA_B, fromFailed.fetchSha256);
     }
 
     @Test

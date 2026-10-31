@@ -882,6 +882,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (this.kioskWatchdog != null) {
             this.kioskWatchdog.stop();
         }
+        if (this.updateManager != null) {
+            // Same reason as the watchdog and the sensor below: onCreate() builds a replacement
+            // manager on recreation, and two managers pointing at one staging directory can
+            // overwrite each other's staged APK or delete each other's in-flight download.
+            // Retirement stops this instance's worker from mutating anything further.
+            this.updateManager.retire();
+        }
         if (this.brightnessManager != null) {
             // Recreation would otherwise leave the old light-sensor listener firing for an Activity
             // that no longer exists.

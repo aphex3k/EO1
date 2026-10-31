@@ -135,6 +135,25 @@ public class UpdateStateStoreTest {
         assertEquals(0L, s.installFiredAtMs);
         assertFalse(s.needsHumanConfirmation);
         assertFalse("an old state file never claims an open adb window", s.armedTcpAdb);
+        // Same reasoning as installFiredAtMs: a stage of unknown origin is not the update host's to
+        // replace, so the absence of this field must read as "leave it alone", never as "manifest".
+        assertEquals(UpdateState.SOURCE_UNKNOWN, s.stagedSource);
+    }
+
+    @Test
+    public void stagedSourceRoundTrips() throws Exception {
+        File f = new File(folder.getRoot(), "update-state.json");
+        UpdateStateStore store = new UpdateStateStore(f);
+        UpdateState uploaded = stateIn(UpdateState.State.STAGED, "");
+        uploaded.stagedSource = UpdateState.SOURCE_UPLOAD;
+        assertTrue(store.write(uploaded));
+
+        assertEquals(UpdateState.SOURCE_UPLOAD, store.read().stagedSource);
+
+        UpdateState fromHost = stateIn(UpdateState.State.STAGED, "");
+        fromHost.stagedSource = UpdateState.SOURCE_MANIFEST;
+        assertTrue(store.write(fromHost));
+        assertEquals(UpdateState.SOURCE_MANIFEST, store.read().stagedSource);
     }
 
     @Test
@@ -153,6 +172,34 @@ public class UpdateStateStoreTest {
         assertTrue("the process that dies mid-install must leave the next one a note to close adb",
                 read.armedTcpAdb);
         assertEquals("needs-human-confirmation", read.lastError);
+    }
+
+    /**
+     * The fetched identity has to reach disk, because it is the only thing that tells a later
+     * process which of the two builds the bytes on disk are.
+     */
+    @Test
+    public void fetchedIdentityRoundTrips() throws Exception {
+        File f = new File(folder.getRoot(), "update-state.json");
+        UpdateStateStore store = new UpdateStateStore(f);
+        UpdateState s = stateIn(UpdateState.State.DOWNLOADING, "");
+        s.stagedSource = UpdateState.SOURCE_UPLOAD;
+        s.fetchVersionCode = 9;
+        s.fetchVersionName = "1.9.0";
+        s.fetchSha256 = "bb0009dcee21620b166f3abfecb5eff7a873be729d1c2d53822e7acc5f34eb9b";
+        s.fetchSizeBytes = 999L;
+        s.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+        assertTrue(store.write(s));
+
+        UpdateState read = store.read();
+        assertEquals(UpdateState.SOURCE_UPLOAD, read.stagedSource);
+        assertEquals(7, read.expectedVersionCode);
+        assertEquals(9, read.fetchVersionCode);
+        assertEquals("1.9.0", read.fetchVersionName);
+        assertEquals(s.fetchSha256, read.fetchSha256);
+        assertEquals(999L, read.fetchSizeBytes);
+        assertEquals("the pending stage's owner has to survive the swap, not just its bytes",
+                UpdateState.SOURCE_UPLOAD, read.fetchOrigin);
     }
 
     @Test
