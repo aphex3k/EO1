@@ -124,6 +124,40 @@ Install is a ladder, and a frame walks down it only as far as it can do the work
   a defect in its copy — a full or unmounted `/sdcard` is a condition that clears, and `FAILED`
   would have stopped the retry that outlives it.
 
+### One thread runs all of it
+
+A check, an install attempt, a reset, an uploaded APK and an install's asynchronous result are **one
+item each on one queue**, executed in order by a single thread that starts when the app first needs it
+and outlives every screen change. That is why an update can survive the frame being rotated, an
+Activity being recreated or a button being pressed twice: there is no second worker to interleave
+with, so nothing has to ask whether it is still the one allowed to write. What the ordering buys, and
+what it does not:
+
+- **Nothing is revoked, everything is sequenced.** A reset that arrives mid-download runs *after* it,
+  so whatever that download had already committed stays coherent and the later request is what the
+  frame ends up with. As a courtesy the running download is also asked to stop at its next chunk
+  rather than finish transferring bytes somebody has just discarded — that is timing, not correctness,
+  and a task parked in a call with no checkpoint (a manifest fetch, one APK's SHA-256) is simply
+  finished first. A forced *Check now* or *Install on the frame* pressed while a check is running
+  waits its turn, and two presses of the same button while the first is still queued are one request,
+  not two. `command` and `commandAgeMs` in `/state` say what is running and for how long.
+- **An upload blocks its web thread on purpose** and keeps the file it is answering about by renaming
+  it out of the web server's temp directory first. A slow answer, or a browser that gave up, cannot
+  lose the APK: `staging-queued` in the response means "still working", not "rejected".
+- **A task that throws is settled, not swallowed.** If one dies before it can record an outcome, the
+  worker's own failure handler moves a stranded `CHECKING`/`DOWNLOADING`/`VERIFYING` to `FAILED`,
+  because `checkDue` would otherwise refuse every later tick and the frame would quietly stop
+  updating. This replaced the per-Activity launch reconciliation that used to clean that up, so the
+  settlement has to stay in the drain loop.
+- **A stall is now a shared stall.** The failure mode this design trades away is that everything
+  update-related waits behind one item that will not end. That is why the update client bounds a
+  stalled socket to a minute of silence rather than ten, and why `queueDepth`/`workerRunning` are in
+  `/state`: they are the only way to see it.
+- **Two things serialization cannot fix, and does not claim to.** `INSTALL_PENDING` is refused for a
+  reason no thread controls — the platform installer holds the staged file open from another process —
+  and a process killed by its own successful install leaves a truth no ordering can reconstruct, which
+  is what the persisted dual identity above is for. Both stay guarded by state, not by threads.
+
 ### The choice that removes every caveat above
 
 An APK placed in `/system/app` is platform-signed, so it holds `INSTALL_PACKAGES`: silent installs,
@@ -140,6 +174,7 @@ the only install mode in which a frame truly updates itself unattended.
 | Stuck / looping on a bad APK | `/control?action=update-reset` (deletes staged files and state) |
 | Something staged, but you have shipped since | Nothing to do: the next check re-reads the manifest and replaces the stage once the new build verifies (`stagedSource: "manifest"` in `/state` is what makes that true). To do it now, `/control?action=check-updates`. If `stagedSource` is `upload` or empty, the frame will not displace it — press **Update reset** first |
 | Force a re-check now | `/control?action=check-updates` |
+| Pressed a button and nothing happened | `GET /state` → `update.command` names what the update thread is doing and `commandAgeMs` how long it has been doing it; `queueDepth` is what is waiting behind it. `workerRunning: false` with a non-empty `queueDepth` is the one broken state — restart the app |
 | Nothing ever arrives, and `lastError` says `manifest-fetch` or `download-failed` with an `SSLHandshakeException` | If the update host is HTTPS, this is a TLS gate, not a missing release: `lastError` carries a `[TLS gate: NAME]` note naming it. An empty note means the failure was never about certificates — the host is unreachable, not untrusted. See [docs/TRUST.md](TRUST.md) |
 
 The index page exposes **Check updates** / **Install on the frame** / **Update reset** buttons, and

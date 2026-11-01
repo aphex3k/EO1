@@ -108,9 +108,46 @@ public class UpdateState {
             s.fetchOrigin = previous.fetchOrigin;
             s.lastCheckedMs = previous.lastCheckedMs;
             s.attempts = previous.attempts;
+            // The debt, not the diagnosis: an install that threw after arming TCP adb leaves a door
+            // open on a root shell reachable from anywhere routable, and the only thing that closes it
+            // is the next process reading this field. withState() carries it; a FAILED that loses it
+            // strands the frame open until someone resets it by hand.
+            s.armedTcpAdb = previous.armedTcpAdb;
         }
         s.state = State.FAILED;
         s.lastError = reason == null ? "" : reason;
         return s;
+    }
+
+    /**
+     * An independent copy, for a reader that must not see the rest of a transition.
+     *
+     * <p>{@code UpdateManager} builds a transition by assigning fields on a state in place — clearing
+     * the five {@code fetch*} values is five assignments — and every writer doing that now runs on one
+     * thread, so they cannot race each other. {@code /state} is read on a web thread, and Gson visits
+     * fields one at a time, so without a copy a polled document can name the build a check was
+     * fetching alongside the stage it was replacing. That is a wrong answer about timing rather than
+     * about safety, which is precisely the kind an operator wastes an evening chasing.
+     */
+    public UpdateState copy() {
+        UpdateState c = new UpdateState();
+        c.state = state;
+        c.fetchVersionCode = fetchVersionCode;
+        c.fetchVersionName = fetchVersionName;
+        c.fetchSha256 = fetchSha256;
+        c.fetchSizeBytes = fetchSizeBytes;
+        c.fetchOrigin = fetchOrigin;
+        c.stagedSource = stagedSource;
+        c.expectedVersionCode = expectedVersionCode;
+        c.expectedVersionName = expectedVersionName;
+        c.manifestSha256 = manifestSha256;
+        c.expectedSizeBytes = expectedSizeBytes;
+        c.lastCheckedMs = lastCheckedMs;
+        c.lastError = lastError;
+        c.attempts = attempts;
+        c.needsHumanConfirmation = needsHumanConfirmation;
+        c.installFiredAtMs = installFiredAtMs;
+        c.armedTcpAdb = armedTcpAdb;
+        return c;
     }
 }

@@ -12,6 +12,9 @@ import com.aphex3k.update.UpdateState;
 
 import org.junit.Test;
 
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+
 /**
  * JVM tests for {@link UpdateManager}'s pure statics ({@code checkDue}, {@code reconcileState},
  * {@code judgeStaged} and {@code chooseInstallPath}). No Android framework classes are exercised.
@@ -479,5 +482,78 @@ public class UpdateManagerTest {
                 UpdateManager.chooseInstallPath(false, false, true));
         assertEquals(UpdateManager.InstallPath.DEFER,
                 UpdateManager.chooseInstallPath(false, false, false));
+    }
+
+    // ------------------------------------------------- what a transition must not forget
+
+    /**
+     * Five transitions clear the pending-build identity by hand. A field left behind makes {@code
+     * /state} advertise a download that is not running and, worse, lets a later start-up match
+     * unrelated bytes against a hash that never described them.
+     */
+    @Test
+    public void clearFetch_voidsEveryFieldThatNamesAPendingBuild() {
+        UpdateState st = hostStage(SHA_A);
+        st.fetchVersionCode = 9;
+        st.fetchVersionName = "1.9.0";
+        st.fetchSha256 = SHA_B;
+        st.fetchSizeBytes = 4096L;
+        st.fetchOrigin = UpdateState.SOURCE_UPLOAD;
+
+        UpdateManager.clearFetch(st);
+
+        assertEquals(0, st.fetchVersionCode);
+        assertEquals("", st.fetchVersionName);
+        assertEquals("", st.fetchSha256);
+        assertEquals(0L, st.fetchSizeBytes);
+        assertEquals(UpdateState.SOURCE_UNKNOWN, st.fetchOrigin);
+        // The stage's own identity is not "pending", and clearing it is how an uploaded stage gets
+        // deleted by the next check.
+        assertEquals(UpdateState.SOURCE_MANIFEST, st.stagedSource);
+        assertEquals(SHA_A, st.manifestSha256);
+    }
+
+    /**
+     * An install that threw after arming TCP adb must still leave the next process able to close it.
+     * {@code armedTcpAdb} is a debt, not a diagnosis, and it is the only one an operator cannot see.
+     */
+    @Test
+    public void failedState_carriesTheArmedAdbdDebt() {
+        UpdateState armed = state(UpdateState.State.VERIFYING);
+        armed.armedTcpAdb = true;
+        assertTrue(UpdateState.failed(armed, "install-crashed").armedTcpAdb);
+
+        UpdateState unarmed = state(UpdateState.State.VERIFYING);
+        unarmed.armedTcpAdb = false;
+        assertFalse(UpdateState.failed(unarmed, "sha256-mismatch").armedTcpAdb);
+    }
+
+    /**
+     * {@code /state} is read on a web thread and reports a copy, so a copy that forgets a field is a
+     * diagnostic that quietly stops describing the frame. Enumerated by reflection rather than by
+     * hand, so adding a field to {@link UpdateState} fails this instead of failing silently.
+     */
+    @Test
+    public void copy_isIndependentOfTheStateItWasTakenFrom() throws Exception {
+        UpdateState st = hostStage(SHA_A);
+        st.state = UpdateState.State.CHECKING;
+        st.fetchVersionCode = 9;
+        st.lastError = "transient";
+        st.needsHumanConfirmation = true;
+        st.armedTcpAdb = true;
+        st.installFiredAtMs = 55L;
+
+        UpdateState copy = st.copy();
+        for (Field f : UpdateState.class.getFields()) {
+            if (Modifier.isStatic(f.getModifiers())) {
+                continue;  // the SOURCE_* constants, not state
+            }
+            assertEquals("UpdateState.copy() does not carry " + f.getName(), f.get(st), f.get(copy));
+        }
+
+        copy.lastError = "changed";
+        assertEquals("transient", st.lastError);
+        copy.fetchVersionCode = 0;
+        assertEquals(9, st.fetchVersionCode);
     }
 }
