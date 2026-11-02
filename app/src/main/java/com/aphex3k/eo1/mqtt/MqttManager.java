@@ -14,8 +14,10 @@ import com.google.gson.TypeAdapter;
 import com.google.gson.TypeAdapterFactory;
 import com.google.gson.reflect.TypeToken;
 
+import com.google.gson.JsonObject;
+
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
-import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
 import org.eclipse.paho.client.mqttv3.MqttClient;
 import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
 import org.eclipse.paho.client.mqttv3.MqttException;
@@ -26,7 +28,14 @@ import java.util.Objects;
 import java.util.Arrays;
 
 /// https://www.hivemq.com/blog/mqtt-client-library-encyclopedia-eclipse-paho-java/
-public class MqttManager {
+///
+/// <b>Every method Paho calls on this class may throw nothing at all.</b> That is not defensive style, it is the
+/// contract: {@code CommsCallback} dispatches {@code connectComplete}, {@code connectionLost} and
+/// {@code messageArrived} inside one {@code catch (Throwable)} region whose handler calls
+/// {@code ClientComms.shutdownConnection()}. A single exception out of any of them is therefore a
+/// broker-visible disconnect with no DISCONNECT packet — which is what a frame that "keeps dropping MQTT" looks
+/// like from the server side, and it was the whole of that bug until this class reordered one null check.
+public class MqttManager implements MqttCallbackExtended {
 
     // No-op logger to keep Paho off java.util.logging on API 19. Must stay
     // public: Paho's LoggerFactory instantiates the setLogger() class from its
@@ -92,11 +101,48 @@ public class MqttManager {
     }
 
     public static final String PLAYING = "PLAYING";
-    public static final String GROUP_PLAYING = "PLAYING";
+    /**
+     * Distinct from {@link #PLAYING}, as every published coordinator payload and the AGENTS.md table say it is.
+     * This was the literal {@code "PLAYING"} for the life of the feature, which made {@code PLAY_STATES} a
+     * two-element array holding one value and meant a group coordinator reporting {@code GROUP_PLAYING} never
+     * drew a banner.
+     */
+    public static final String GROUP_PLAYING = "GROUP_PLAYING";
     public static final String STOPPED = "STOPPED";
     public static final String PAUSED_PLAYBACK = "PAUSED_PLAYBACK";
     public static final String GROUP_STOPPED = "GROUP_STOPPED";
     public static final String GROUP_PAUSED = "GROUP_PAUSED";
+
+    /** The only topic this client subscribes to. It publishes nothing. */
+    public static final String TOPIC = "sonos/+";
+
+    /**
+     * QoS 0. This is <em>state</em>, not events — the banner wants whatever the coordinator's current transport
+     * state is, and the next publish supersedes anything missed. QoS 1 additionally asked the broker to hold a
+     * message until this class acknowledged it, and the acknowledgment is only sent once
+     * {@code messageArrived} returns normally, so one unparseable payload became an outstanding redelivery.
+     */
+    static final int SUBSCRIBE_QOS = 0;
+
+    /** Named rather than inherited: the broker log's {@code k60} was Paho's default, not this app's decision. */
+    static final int KEEP_ALIVE_S = 60;
+
+    /**
+     * Bounds the one call on this path that blocks its caller — {@code connect()} runs on the UI thread when a
+     * resume or a settings save reaches it, and Paho's own default is 30 s. A stall that long is exactly the
+     * shape {@code KioskWatchdog} measures with {@code mainLoopAckAtMs}, so a dead broker must not be able to
+     * walk a frame up the ladder on the strength of a decorative feature.
+     */
+    static final int CONNECT_TIMEOUT_S = 10;
+
+    /**
+     * Ceiling on Paho's own retry ladder, which starts at 1 s and doubles. Paho's default is 128 s; a frame
+     * whose broker came back a moment ago should not wait two minutes to notice.
+     */
+    static final int MAX_RECONNECT_DELAY_MS = 60_000;
+
+    /** Quiesce given to an intentional disconnect, so a quiet-hours transition cannot stall the UI thread. */
+    private static final long DISCONNECT_QUIESCE_MS = 1_000L;
 
     public static String[] PLAY_STATES = {
             PLAYING,
@@ -110,12 +156,30 @@ public class MqttManager {
             GROUP_PAUSED
     };
 
+    /**
+     * App-defined, because API 19 has no {@code java.util.function}. One seam so this class can report into the
+     * durable record instead of onto stdout: the six {@code System.out}/{@code System.err} calls it used to make
+     * are the only stdout in product source, they land in logcat's <em>main</em> buffer, and
+     * {@code CrashSources} scrapes {@code -b system} — so an MQTT disconnect was invisible to both of the places
+     * anyone actually looks, and to {@code /logs}.
+     */
+    public interface Reporter {
+        void mqttEvent(String message, boolean severe);
+    }
+
     private final MqttClient client;
 
     // Custom TypeAdapterFactory to apply UPPERCASE mapping only to nested objects
     private static final Gson gson = new GsonBuilder().create();
 
     private final PlaybackListener playbackListener;
+    @Nullable
+    private final Reporter reporter;
+    private volatile String lastError = "";
+    private volatile long connectedAtMs;
+    private volatile long lastMessageAtMs;
+    private volatile int connectAttempts;
+    private volatile int reconnects;
     /**
      * Read only to answer one question at connect time: whether the root bundle is on. Paho builds its
      * own TLS, so it cannot inherit the decision every {@code OkHttpClient} gets — and a broker
@@ -124,67 +188,38 @@ public class MqttManager {
      */
     @Nullable
     private final Context context;
+    /** Dialled address, reported in {@code /state} so a reader can tell it from the configured host. */
     private final String uri;
+    private final String clientId;
 
     /// uri = "tcp://broker.mqttdashboard.com:1883"
-    public MqttManager (String uri, PlaybackListener playbackListener, @Nullable Context context)
+    /// clientId must be stable and unique per frame — see {@code SettingsManager.mqttClientId()}.
+    public MqttManager (String uri, String clientId, PlaybackListener playbackListener,
+                        @Nullable Context context, @Nullable Reporter reporter)
             throws MqttException {
 
         this.playbackListener = playbackListener;
         this.context = context;
+        this.reporter = reporter;
         this.uri = uri;
+        this.clientId = clientId;
 
         // Use no-op logger to avoid MissingResourceException on API 19
         org.eclipse.paho.client.mqttv3.logging.LoggerFactory.setLogger(MqttManager.NoOpLogger.class.getName());
 
         client = new MqttClient(
                 uri, //URI
-                MqttClient.generateClientId(), //ClientId
+                clientId, //ClientId
                 new MemoryPersistence()); //Persistence
 
-        client.setCallback(new MqttCallback() {
-            @Override
-            public void connectionLost(Throwable cause) {
-                System.out.println("Connection Lost: " + cause);
-            }
-
-            @Override
-            public void messageArrived(String topic, MqttMessage message) throws Exception {
-                var payload = new String(message.getPayload());
-                try {
-                    Payload payloadObj = gson.fromJson(payload, Payload.class);
-                    if (Arrays.asList(PLAY_STATES).contains(payloadObj.transportState)) {
-                        if (playbackListener != null) {
-                            playbackListener.onPlaybackStarted(payloadObj);
-                        }
-                    }
-                    else if (Arrays.asList(STOP_STATES).contains(payloadObj.transportState))
-                    {
-                        if (playbackListener != null) {
-                            playbackListener.onPlaybackStopped(payloadObj);
-                        }
-                    }
-                    if (payloadObj != null && payload.trim().startsWith("{")) {
-                        System.out.println("[MQTT] Topic: " + topic + " Payload (as object): " + gson.toJson(payloadObj));
-                    } else {
-                        System.out.println("[MQTT] Topic: " + topic + " Payload (raw): " + payload);
-                    }
-                } catch (JsonSyntaxException e) {
-                    System.out.println("[MQTT] Topic: " + topic + " Payload (raw, not JSON): " + payload);
-                }
-            }
-
-            @Override
-            public void deliveryComplete(IMqttDeliveryToken token) {
-                System.out.println("Delivery Complete: " + token);
-            }
-        });
+        // MqttCallbackExtended, not MqttCallback: connectComplete is the only place this client can learn that
+        // Paho brought the session back, and a clean-session reconnect with no re-subscribe is a frame that
+        // reports itself connected while hearing nothing at all.
+        client.setCallback(this);
     }
 
     public void connect(String username, String password) throws MqttException {
-        MqttConnectOptions options = new MqttConnectOptions();
-        options.setUserName(username);
-        options.setPassword(password.toCharArray());
+        MqttConnectOptions options = buildOptions(username, password);
 
         if (uri != null && uri.startsWith("ssl")) {
             try {
@@ -194,30 +229,240 @@ public class MqttManager {
                 // Paho would then fall back to the platform default, which is what happened before this
                 // line existed. Say so: a broker that authenticates against a 2013 store while the rest
                 // of the app does not is a difference an operator can only find by being surprised.
-                System.err.println("[MQTT] could not build the shared TLS context, using the device "
-                        + "default: " + e);
+                report("could not build the shared TLS context, using the device default: " + e, true);
             }
         }
 
-        client.connect(options);
-        // https://www.hivemq.com/blog/mqtt-essentials-part-5-mqtt-topics-best-practices/#heading-mqtt-topics-wildcards-best-practices-mqtt-essentials-part-5
-        subscribe("sonos/+");
-    }
-
-    public void disconnect() throws MqttException {
-        // paho throws MqttException(32101) when disconnecting a client that is
-        // not connected (never connected, connect still in flight, or broker
-        // connection already lost); skipping keeps onPause log-clean.
-        if (client.isConnected()) {
-            client.disconnect();
+        connectAttempts++;
+        try {
+            // No subscribe() follows this call on purpose. ConnectActionListener.onSuccess dispatches
+            // connectComplete — with reconnect=false for the very first session, confirmed at bytecode —
+            // and that is the one place the subscription is issued. Doing it here too would put two
+            // SUBSCRIBEs on the wire from two threads for every connect.
+            client.connect(options);
+        } catch (MqttException e) {
+            if (isAlreadyOnItsWay(e.getReasonCode())) {
+                // Paho is already doing the thing this call was asking for — connected, connecting, or
+                // standing down. It is not a failure and must not be recorded as one: a settings save reaches
+                // connect() on a live client through settingsChanged()'s cold-start branch, and a core-loop
+                // re-arm reaches it while Paho's own ladder is mid-backoff, so treating these as errors would
+                // put one line in /logs per retry on a frame whose broker is merely down.
+                return;
+            }
+            lastError = String.valueOf(e);
+            report("connect to " + uri + " refused: " + e, true);
+            throw e;
         }
     }
 
-    private void subscribe(String topic) throws MqttException {
-        client.subscribe(topic);
+    @Override
+    public void connectComplete(boolean reconnect, String serverURI) {
+        // Runs on Paho's callback thread, inside the catch(Throwable) region — so nothing here may throw, and
+        // nothing here may take long.
+        try {
+            connectedAtMs = System.currentTimeMillis();
+            if (reconnect) {
+                reconnects++;
+            }
+            // THE re-subscribe. Paho 1.2.5 has no resubscribe path of its own (no method in the jar even
+            // spells the word), and cleanSession=true means the broker forgot the subscription along with the
+            // session. connect() still calls this for the first session, so subscribe is issued once per
+            // CONNACK either way.
+            subscribe();
+            report((reconnect ? "reconnected" : "connected") + " to " + serverURI, false);
+        } catch (Throwable t) {
+            lastError = String.valueOf(t);
+            report("completed a connect it could not finish subscribing on: " + t, true);
+        }
     }
 
-    private void unsubscribe(String topic) throws MqttException {
-        client.unsubscribe(topic);
+    @Override
+    public void connectionLost(Throwable cause) {
+        try {
+            lastError = String.valueOf(cause);
+            // Paho reconnects from here — that is what setAutomaticReconnect bought. This line exists only so
+            // the event outlives logcat's ~13 minutes.
+            report("connection to " + uri + " lost, reconnecting without disturbing the Activity: " + cause,
+                    true);
+        } catch (Throwable t) {
+            // Reporting must not be the thing that closes the session.
+        }
+    }
+
+    @Override
+    public void deliveryComplete(IMqttDeliveryToken token) {
+        // This client publishes nothing, so Paho has nothing to report here.
+    }
+
+    @Override
+    public void messageArrived(String topic, MqttMessage message) {
+        // Cannot throw. Not "should not" — see the class comment: a throw from this method is a disconnect as
+        // far as the broker is concerned. Everything that can go wrong with a payload goes wrong in here.
+        String payload = "";
+        Payload payloadObj = null;
+        try {
+            byte[] raw = message.getPayload();
+            payload = raw == null ? "" : new String(raw);
+            // Gson returns null for an empty body rather than throwing — that is the shape a retained
+            // state-clear on a wildcard topic arrives as, and it is why this used to die.
+            payloadObj = gson.fromJson(payload, Payload.class);
+            lastMessageAtMs = System.currentTimeMillis();
+        } catch (Throwable t) {
+            lastError = "unreadable payload on " + topic + ": " + t;
+            report("dropped a " + topic + " message it could not read (" + t + ") — staying connected", true);
+            return;
+        }
+
+        try {
+            if (payloadObj != null && playbackListener != null) {
+                if (Arrays.asList(PLAY_STATES).contains(payloadObj.transportState)) {
+                    playbackListener.onPlaybackStarted(payloadObj);
+                } else if (Arrays.asList(STOP_STATES).contains(payloadObj.transportState)) {
+                    playbackListener.onPlaybackStopped(payloadObj);
+                }
+            }
+        } catch (Throwable t) {
+            lastError = "listener rejected a payload on " + topic + ": " + t;
+            // The banner is decorative: a listener that cannot handle a payload is a missed banner, never a
+            // dropped session.
+            report("a " + topic + " message drew no banner (" + t + ") — staying connected", true);
+        }
+    }
+
+    public boolean isConnected() {
+        try {
+            return client.isConnected();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * Stops the reconnect ladder on purpose — used when the panel goes off. An explicit {@code disconnect()} is
+     * the only thing that makes Paho stand down; a lost connection by itself never does.
+     */
+    public void disconnect() throws MqttException {
+        // paho throws MqttException(32101) when disconnecting a client that is
+        // not connected (never connected, connect still in flight, or broker
+        // connection already lost); skipping keeps the caller log-clean.
+        if (client.isConnected()) {
+            client.disconnect(DISCONNECT_QUIESCE_MS);
+        }
+    }
+
+    /**
+     * Releases the client's threads and persistence. Nothing in this repo ever called {@code close()} before,
+     * so every Activity recreation abandoned a live client; with {@code automaticReconnect} now on, an
+     * abandoned client would reconnect under the same id and the broker would close the new one. The
+     * {@code close()} goes in a {@code finally} because {@code disconnect()} throws on exactly the clients
+     * that most need closing.
+     */
+    public void closeQuietly() {
+        try {
+            if (client.isConnected()) {
+                client.disconnect(DISCONNECT_QUIESCE_MS);
+            }
+        } catch (Throwable t) {
+            // Expected on a client whose link was already lost. close() below is the part that matters.
+        } finally {
+            try {
+                client.close();
+            } catch (Throwable t) {
+                report("could not close the MQTT client: " + t, true);
+            }
+        }
+    }
+
+    /** What {@code /state} serves. Never a credential — the uri is host and port only. */
+    public JsonObject stateJson() {
+        JsonObject o = new JsonObject();
+        o.addProperty("connected", isConnected());
+        o.addProperty("uri", uri == null ? "" : uri);
+        o.addProperty("clientId", clientId == null ? "" : clientId);
+        o.addProperty("connectAttempts", connectAttempts);
+        o.addProperty("reconnects", reconnects);
+        o.addProperty("connectedAtMs", connectedAtMs);
+        o.addProperty("lastMessageAtMs", lastMessageAtMs);
+        o.addProperty("lastError", lastError);
+        return o;
+    }
+
+    /**
+     * One line for the durable record. Says "heard nothing for" separately from "not connected", because those
+     * are the two failures a frame can report identically and an operator has to tell apart: a dead link, and a
+     * live link whose subscription went missing.
+     */
+    public String describe() {
+        long now = System.currentTimeMillis();
+        StringBuilder sb = new StringBuilder();
+        sb.append(isConnected() ? "connected" : "down")
+                .append(" broker=").append(uri == null ? "(unset)" : uri)
+                .append(" id=").append(clientId == null ? "(unset)" : clientId)
+                .append(" attempts=").append(connectAttempts)
+                .append(" reconnects=").append(reconnects)
+                .append(" heard=").append(lastMessageAtMs == 0L ? "never"
+                        : ((now - lastMessageAtMs) / 1000L) + "s ago");
+        if (!lastError.isEmpty()) {
+            sb.append(" lastError=").append(lastError);
+        }
+        return sb.toString();
+    }
+
+    /**
+     * Every knob this client needs, in one place so the reconnect contract is readable and testable without a
+     * broker.
+     *
+     * <p>{@code automaticReconnect} is what lets this class be tied to the panel rather than to the Activity.
+     * Before it was set, {@code connectionLost} printed and gave up, and the only caller of {@code connect()}
+     * sat on {@code startCoreLoop}'s cold-start branch — which a resume cannot reach, because {@code onPause}
+     * deliberately leaves {@code coreLoopStarted} true. One dropped link was therefore terminal for the life of
+     * the process, and the frame stayed deaf until someone saved its settings or power-cycled it.
+     */
+    /** Reason codes that mean a session is arriving, not that a connect was refused. */
+    static boolean isAlreadyOnItsWay(int reasonCode) {
+        return reasonCode == MqttException.REASON_CODE_CLIENT_CONNECTED
+                || reasonCode == MqttException.REASON_CODE_CLIENT_DISCONNECTING
+                || reasonCode == MqttException.REASON_CODE_CONNECT_IN_PROGRESS;
+    }
+
+    static MqttConnectOptions buildOptions(@Nullable String username, @Nullable String password) {
+        MqttConnectOptions options = new MqttConnectOptions();
+        // An absent credential means that field is unset on the wire, never "use ours" — see AGENTS.md. This
+        // used to hand whatever was configured straight to setUserName(null), and to password.toCharArray(),
+        // which threw before a connection was ever attempted.
+        if (username != null && !username.isEmpty()) {
+            options.setUserName(username);
+        }
+        if (password != null && !password.isEmpty()) {
+            options.setPassword(password.toCharArray());
+        }
+        options.setAutomaticReconnect(true);
+        options.setCleanSession(true);
+        options.setKeepAliveInterval(KEEP_ALIVE_S);
+        options.setConnectionTimeout(CONNECT_TIMEOUT_S);
+        options.setMaxReconnectDelay(MAX_RECONNECT_DELAY_MS);
+        return options;
+    }
+
+    private void subscribe() {
+        try {
+            client.subscribe(TOPIC, SUBSCRIBE_QOS);
+        } catch (MqttException e) {
+            // A subscription the broker refused is reported, not retried: Paho's own ladder will issue it
+            // again on the next connectComplete, and a second subscribe for one topic filter is idempotent
+            // in MQTT, so nothing is lost by saying it out loud instead of building a retry path here.
+            lastError = String.valueOf(e);
+            report("connected but " + TOPIC + " was refused: " + e, true);
+        }
+    }
+
+    private void report(String message, boolean severe) {
+        try {
+            if (reporter != null) {
+                reporter.mqttEvent(message, severe);
+            }
+        } catch (Throwable t) {
+            // A reporter that throws is not allowed to become a disconnect.
+        }
     }
 }
