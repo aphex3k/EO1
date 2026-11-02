@@ -72,8 +72,11 @@ import okhttp3.Response;
  * displaced by that path — see {@link UpdateState#stagedSource}.
  *
  * <p><b>How to add work to this class.</b> Everything below runs on one thread, in the order it was
- * asked: an entry point posts an item, and the item's body is where the work happens. That is the
- * whole concurrency design, and it is load-bearing for the rules above — a stage is never displaced by
+ * asked — with one exception, and it is the constructor: {@code sweepStagingTemps()} and
+ * {@code reconcileOnStartup()} execute on whichever thread first needed an update manager, before the
+ * worker exists. That is sound only because nothing can be queued yet, which is also why the sweep must
+ * never be called from anywhere else in the mode that reaps upload slots. An entry point posts an item,
+ * and the item's body is where the work happens. That is the whole concurrency design, and it is load-bearing for the rules above — a stage is never displaced by
  * a second writer because there is never a second writer. So a new entry point must not touch
  * {@code state}, the staged pair, or an {@link java.io.File} under either staging directory on the
  * caller's thread; {@code MainActivity} calls these methods from the UI thread, from a rotation tick,
@@ -114,6 +117,9 @@ public class UpdateManager {
      * thread that does that, and it is nobody's to take away.
      */
     private volatile WeakReference<UpdateManagerListener> listener;
+    /** What {@link #detach(UpdateManagerListener)} installs: the field is never itself null. */
+    private static final WeakReference<UpdateManagerListener> NO_LISTENER =
+            new WeakReference<>(null);
     private final Context context;
     /**
      * Read at the top of each task rather than captured for the life of the manager, because
@@ -165,8 +171,16 @@ public class UpdateManager {
      * How long {@code POST /update} waits for its own staging task. A latency bound on the HTTP answer
      * and nothing else: the uploaded file is renamed into a queue-owned name before the wait starts,
      * so timing out costs the browser a response, never the operator's APK.
+     *
+     * <p>Set by what staging costs here, not by patience. An 18 MB APK measured 22 s end to end on an
+     * EO2 — SHA-256, the pure-Java signature pass, the copy and two renames — and that was with a
+     * whole check cycle queued ahead of it. Beyond about twice that, a timeout answer is better than
+     * the alternative, because {@code WebServer} runs on three threads and this one blocks: three
+     * uploads parked on a wedged queue would take {@code /state} and {@code update-reset} down with
+     * them, which are the two things you need when the queue is wedged. A slow answer is a bad
+     * experience; an unreachable frame is an outage.
      */
-    private static final long UPLOAD_HANDBACK_MS = 300_000L;
+    private static final long UPLOAD_HANDBACK_MS = 45_000L;
 
     /**
      * Returns the process's one update manager, building it on first call. Every later call is an
@@ -209,13 +223,13 @@ public class UpdateManager {
         }
         WeakReference<UpdateManagerListener> ref = m.listener;
         if (ref != null && ref.get() == gone) {
-            m.listener = null;
+            // A reference holding nothing, never the absence of one. Both readers dereference the
+            // field before testing its referent, which was sound while the field was final and
+            // would otherwise stop being sound right here — and the place it would surface is the
+            // line after a successful stage, where a throw unwinds into the cycle's own catch and
+            // records FAILED over bytes that just passed all four gates.
+            m.listener = NO_LISTENER;
         }
-    }
-
-    /** The manager {@code MainActivity} used to hold a reference to; null only before first acquire. */
-    public static UpdateManager instance() {
-        return instance;
     }
 
     private UpdateManager(UpdateManagerListener listener, Context context, SettingsManager settingsManager) {
@@ -251,8 +265,9 @@ public class UpdateManager {
                 settleStuckTask(description, error);
             }
         });
-        // Both before anything can be queued, so the worker's first task sees a settled world.
-        sweepStagingTemps();
+        // Both before anything can be queued, so the worker's first task sees a settled world. True
+        // here is safe only because nothing has been queued yet — see sweepStagingTemps().
+        sweepStagingTemps(true);
         reconcileOnStartup();
     }
 
@@ -270,11 +285,16 @@ public class UpdateManager {
      * temp behind under a state reading {@code STAGED}, and that branch never runs — so a temp worth
      * up to 100 MiB could survive every subsequent launch.
      *
-     * <p>{@code eo1-upload-} is the name {@code POST /update} renames an operator's APK into, and the
-     * {@code .part} suffix is gone: a fixed-name temp is only disposable by whoever is entitled to
-     * delete it, which the queue now decides by ordering rather than by attribution.
+     * <p>{@code eo1-upload-*} is the name {@code POST /update} renames an operator's APK into, and it
+     * is reaped only by the constructor. That distinction is the whole difference between a leftover
+     * and a queued request: a web thread that has renamed and is now blocked waiting for the worker
+     * owns a file at that name, and a reset queued ahead of it must not sweep the upload out from
+     * under the item that is about to verify it. An upload's own task deletes its slot when it runs;
+     * only a slot no task will ever reach — one left by a killed process — needs the start-up sweep,
+     * and at that moment nothing is queued, which is exactly why "once, at construction" can be the
+     * rule for it.
      */
-    private void sweepStagingTemps() {
+    private void sweepStagingTemps(boolean reapsQueuedUploadSlots) {
         for (File dir : new File[]{updatesDir, publicDir}) {
             File[] entries = dir.listFiles();
             if (entries == null) {
@@ -282,7 +302,8 @@ public class UpdateManager {
             }
             for (File entry : entries) {
                 String name = entry.getName();
-                if ((name.startsWith("eo1-update") || name.startsWith("eo1-upload"))
+                if ((name.startsWith("eo1-update")
+                        || (reapsQueuedUploadSlots && name.startsWith("eo1-upload")))
                         && !entry.equals(stagedMaster) && !entry.equals(stagedPublic)) {
                     if (entry.isDirectory()) {
                         deleteDirQuiet(entry);
@@ -797,6 +818,14 @@ public class UpdateManager {
                 break;
 
             case ADBD: {
+                if (armedByUs) {
+                    // The debt is recorded the moment the door opens, not on the way past the next
+                    // three calls. Everything between here and the install can throw — the relaunch
+                    // alarm reaches into AlarmManager — and a TCP adb listening as root with nothing
+                    // in the state file naming it is the one exposure no successor will ever close,
+                    // because closing it is driven by exactly that flag.
+                    persistAdbArmed(true);
+                }
                 if (!armAndPersist("adbd pm install", snapshot.expectedVersionCode)) {
                     // Nothing was dispatched — but an adbd this attempt started is still this attempt's
                     // to close, and the exposure is meant to be one action, never a boot. That is why
@@ -805,9 +834,6 @@ public class UpdateManager {
                     closeAdbIfWeOpenedIt(armedByUs);
                     return;
                 }
-                // Record it before the attempt: a successful pm install kills this process, and the
-                // next one has to know it inherited a door the last one opened.
-                persistAdbArmed(armedByUs);
                 boolean settled;
                 try {
                     settled = installViaAdbd(snapshot);
@@ -986,7 +1012,9 @@ public class UpdateManager {
     /** Worker thread. The files go first: they are what the state is about to stop claiming. */
     private void discardEverything() {
         deleteStagedFiles();
-        sweepStagingTemps();
+        // false: an upload queued behind this reset owns a live file under eo1-upload-, and a reset
+        // is a request to discard what the frame has, not what somebody is still handing over.
+        sweepStagingTemps(false);
         synchronized (this) {
             installFiredInThisProcess = false;
             state = withState(state, UpdateState.State.IDLE, "");
@@ -1057,10 +1085,18 @@ public class UpdateManager {
             apk.delete();
             return ApkUploadResult.reject("", size, false, "exceeds-size-cap");
         }
-        // Unique per request, because two uploads can be parsed on two web threads at once and only
-        // one of them can win a fixed name. Whatever this one leaves behind, sweepStagingTemps() reaps
-        // at the next launch.
-        final File slot = new File(updatesDir, "eo1-upload-" + System.nanoTime() + ".apk");
+        // Named after the request's own multipart directory, which the web server already made unique
+        // with System.nanoTime(). The source's *parent* rather than a fresh nanoTime, because
+        // rename(2) silently replaces an existing file: a collision would not fail, it would quietly
+        // stage one operator's bytes under another's answer. If even that name is taken, refuse.
+        String origin = apk.getParentFile() == null ? "" : apk.getParentFile().getName();
+        final File slot = new File(updatesDir,
+                "eo1-upload-" + (origin.isEmpty() ? Long.toString(System.nanoTime()) : origin)
+                        + ".apk");
+        if (slot.isFile()) {
+            apk.delete();
+            return ApkUploadResult.reject("", size, false, "upload-slot-taken");
+        }
         if (!apk.renameTo(slot)) {
             // Same filesystem by construction — the multipart directory sits inside filesDir/updates —
             // so a failure here means a full or unhappy volume, not a race.
@@ -2017,6 +2053,12 @@ public class UpdateManager {
                 && stagedIntactAs(prior.manifestSha256, prior.expectedSizeBytes)) {
             restoreStaged(prior, "superseded-by-a-later-request");
         } else {
+            synchronized (this) {
+                // Same rule every other exit from a check follows: nothing is pending any more, so
+                // stop naming the build that was. An IDLE state carrying fetch* is one the next
+                // crash-recovery would try to match against bytes that never arrived.
+                clearFetch(state);
+            }
             cycleSetIdle("superseded-by-a-later-request");
         }
     }
@@ -2304,34 +2346,46 @@ public class UpdateManager {
      * the message would reach logcat only, and on these frames logcat holds about thirteen minutes
      * while {@code eo1-app.log} survives. So: the listener when there is one, the log directly when
      * there is not.
+     *
+     * <p>It cannot throw, and that is not defensive padding. Several callers sit inside a cycle that
+     * wraps them in {@code catch (Throwable) → failOrRestore}, and the busiest of those calls is the
+     * one that runs <em>after</em> {@code publishStagedPair()} has committed verified bytes: a logging
+     * statement that escapes would then report a successful stage as a crashed cycle, put the state at
+     * {@code FAILED}, skip the install the same cycle was about to attempt, and re-download the whole
+     * APK on every interval after that. A report must never be able to decide an outcome.
      */
     private void notifyDebug(String value) {
-        UpdateManagerListener target = listener.get();
-        if (target != null) {
-            try {
+        try {
+            UpdateManagerListener target = listener.get();
+            if (target != null) {
                 target.debugInformationProvided(new DebugInformation("Update", value));
                 return;
-            } catch (Exception ignored) {
-                // Fall through to the log: a listener that threw must not cost the durable record.
             }
+        } catch (Throwable listenerFailed) {
+            // Fall through to the log: a listener that threw must not cost the durable record.
         }
-        AppLogger log = Eo1Application.loggerFor(context);
-        if (log != null) {
-            // Same body as the attached path, which writes "Update: <value>" under the activity's tag
-            // (MainActivity.debugInformationProvided). The tag differs because the activity is the one
-            // thing not here to write it, and a line that says which component spoke is the honest
-            // version of that.
-            log.info(TAG, "Update: " + value);
+        try {
+            AppLogger log = Eo1Application.loggerFor(context);
+            if (log != null) {
+                // Same body as the attached path, which writes "Update: <value>" under the activity's
+                // tag (MainActivity.debugInformationProvided). The tag differs because the activity is
+                // the one thing not here to write it, and a line that says which component spoke is
+                // the honest version of that.
+                log.info(TAG, "Update: " + value);
+            }
+        } catch (Throwable loggingFailed) {
+            Log.w(TAG, "could not report: " + value);
         }
     }
 
     private void notifyUpdateChecked(Boolean available) {
-        UpdateManagerListener target = listener.get();
-        if (target != null) {
-            try {
+        try {
+            UpdateManagerListener target = listener.get();
+            if (target != null) {
                 target.updateChecked(available);
-            } catch (Exception ignored) {
             }
+        } catch (Throwable ignored) {
+            // Same rule: whether the toast went through is not part of the update's verdict.
         }
     }
 

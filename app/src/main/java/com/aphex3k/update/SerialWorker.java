@@ -153,15 +153,11 @@ public final class SerialWorker {
     }
 
     /**
-     * Asks the running task to wrap up. Purely about latency: whichever way the running task goes, the
-     * item queued behind it runs afterwards and wins, so nothing correct depends on this flag. A task
-     * that never reads it merely takes longer to stand aside.
+     * Whether a running task has been asked to stand aside, clearing the request. Raised by an urgent
+     * {@link #post} and read by the one long-running loop that can honour it; purely about latency,
+     * because whichever way the running task goes, the item queued behind it runs afterwards and
+     * wins. A task that never reads it merely takes longer to stop.
      */
-    public void requestPreemption() {
-        preempt = true;
-    }
-
-    /** Clears and reports the request. Only the worker thread should call this. */
     public boolean preemptionRequested() {
         if (!preempt) {
             return false;
@@ -199,7 +195,14 @@ public final class SerialWorker {
                 try {
                     lock.wait(leftNs / 1000000L, (int) (leftNs % 1000000L));
                 } catch (InterruptedException e) {
+                    // Same contract as the timeout below, and it has to be: a caller deciding whether
+                    // it may clean up a resource the body needs must never be told "it did not run"
+                    // about an item still sitting in the queue, because that item will reach a file
+                    // the caller has just deleted.
                     Thread.currentThread().interrupt();
+                    if (!item.started && !item.finished) {
+                        drop(item);
+                    }
                     return false;
                 }
             }
@@ -256,9 +259,10 @@ public final class SerialWorker {
      * the process — and with nothing watching, a frame would simply stop updating while every button
      * still answered. So the loop catches what {@link #drainOne()} could not (an {@code Error} in its
      * own bookkeeping, a wake-up that arrives as an interrupt), reports it through the sink, and
-     * keeps going. Restarting from {@code post()} was tried and rejected: {@code threadStarted} is
-     * one-shot for the sake of never having two drainers, so a restart path that reads it can only
-     * ever start one thread, and a path that reads {@code alive} instead is a race that starts two.
+     * keeps going. The thread is therefore started once and expected never to stop: {@code post()}
+     * will start another only if the first was never created at all (see {@link #startIfNeeded()}),
+     * because a claim based on {@code alive} rather than on the start itself is a race that can
+     * produce two drainers, and two drainers is the whole point of this class.
      */
     public void run() {
         alive = true;
@@ -309,13 +313,25 @@ public final class SerialWorker {
         if (threadStarted) {
             return;
         }
+        // Claimed before starting, and under the lock, so two posts in the same microsecond cannot
+        // both decide to start one: two threads calling drainOne() would be the end of the only
+        // property this class has, and nothing later would detect it.
         threadStarted = true;
-        runner.start(new Runnable() {
-            @Override
-            public void run() {
-                SerialWorker.this.run();
-            }
-        });
+        try {
+            runner.start(new Runnable() {
+                @Override
+                public void run() {
+                    SerialWorker.this.run();
+                }
+            });
+        } catch (Throwable startFailed) {
+            // The claim is released only when no thread was ever created. This is the one path where
+            // the worker can be resurrected rather than kept alive, and it exists because a thread
+            // creation failure (an out-of-memory on a device with a few hundred MB free is not exotic
+            // here) must not permanently end updates for a process that could still make one later.
+            threadStarted = false;
+            report("worker start", startFailed);
+        }
     }
 
     /** True once the drain loop is executing. A false here with queued items means updates are stuck. */

@@ -155,20 +155,13 @@ public class SerialWorkerTest {
     // ------------------------------------------------------------- preemption
 
     @Test
-    public void preemptionRequestIsConsumedOnce() {
-        SerialWorker w = worker();
-        assertFalse(w.preemptionRequested());
-        w.requestPreemption();
-        assertTrue(w.preemptionRequested());
-        assertFalse("a read must clear it, or every later task aborts", w.preemptionRequested());
-    }
-
-    @Test
     public void anUrgentPostAsksTheRunningTaskToStandAside() {
         SerialWorker w = worker();
+        assertFalse(w.preemptionRequested());
         w.post(false, 1L, 0, "check", step("check"));
         w.post(true, 3L, 1, "reset", step("reset"));
         assertTrue(w.preemptionRequested());
+        assertFalse("a read must clear it, or every later task aborts", w.preemptionRequested());
         w.drainOne();
         assertFalse("the flag belongs to the task it was raised for", w.preemptionRequested());
     }
