@@ -110,32 +110,45 @@ public final class SerialWorker {
      * @return the item, which is the pending one when this call coalesced
      */
     public Item post(boolean urgent, long coalesceKey, int priority, String description, Task body) {
+        Item item;
         synchronized (lock) {
-            if (coalesceKey != NO_COALESCE) {
-                Item pending = findPending(coalesceKey);
-                if (pending != null) {
-                    if (pending.priority > priority) {
-                        // Strictly less demanding than what is already waiting: the pending item will
-                        // do everything this one wanted, so drop the arrival rather than reorder.
-                        return pending;
-                    }
-                    pending.priority = priority;
-                    pending.body = body;
-                    pending.description = description;
-                    lock.notifyAll();
-                    startIfNeeded();
+            item = enqueueLocked(urgent, coalesceKey, priority, description, body);
+            // Once, on every path — including the one that changes nothing. A post that merely
+            // discovers an item already waiting still leaves work in the queue, and if the drain
+            // thread was never created (a failed start, memory that has since come back) that tick
+            // <em>is</em> the retry. Written as three separate calls first, and the drop-the-arrival
+            // branch was the one that forgot: on a debug build, where checkIfDue posts nothing, a
+            // queued human install could sit undrained forever.
+            startIfNeeded();
+        }
+        return item;
+    }
+
+    /** Decide what to queue. Caller holds {@code lock}; {@link #post} starts the worker afterwards. */
+    private Item enqueueLocked(boolean urgent, long coalesceKey, int priority,
+            String description, Task body) {
+        if (coalesceKey != NO_COALESCE) {
+            Item pending = findPending(coalesceKey);
+            if (pending != null) {
+                if (pending.priority > priority) {
+                    // Strictly less demanding than what is already waiting: the pending item will
+                    // do everything this one wanted, so drop the arrival rather than reorder.
                     return pending;
                 }
+                pending.priority = priority;
+                pending.body = body;
+                pending.description = description;
+                lock.notifyAll();
+                return pending;
             }
-            Item item = new Item(urgent, coalesceKey, priority, description, body);
-            (urgent ? urgentItems : normalItems).addLast(item);
-            if (urgent) {
-                preempt = true;
-            }
-            lock.notifyAll();
-            startIfNeeded();
-            return item;
         }
+        Item item = new Item(urgent, coalesceKey, priority, description, body);
+        (urgent ? urgentItems : normalItems).addLast(item);
+        if (urgent) {
+            preempt = true;
+        }
+        lock.notifyAll();
+        return item;
     }
 
     /** Convenience for work that is never urgent and never merges: an install's result, a roll-back. */

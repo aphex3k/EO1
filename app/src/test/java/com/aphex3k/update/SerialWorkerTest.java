@@ -368,6 +368,46 @@ public class SerialWorkerTest {
         assertEquals("first,second", joined());
     }
 
+    /**
+     * The branch the test above cannot see: a post that changes nothing, because an item of higher
+     * priority is already waiting. It still leaves work in the queue, so it still has to count as a
+     * chance to start the thread — otherwise a rotation tick arriving behind a human's Install press
+     * quietly stops being the retry mechanism, and on a debug build, where {@code checkIfDue} posts
+     * nothing at all, nothing else would be.
+     */
+    @Test
+    public void aRetainedHigherPriorityItemStillRetriesAFailedStart() {
+        final boolean[] explode = {true};
+        final int[] starts = {0};
+        SerialWorker w = new SerialWorker(new SerialWorker.Runner() {
+            @Override
+            public void start(Runnable loop) {
+                starts[0]++;
+                if (explode[0]) {
+                    explode[0] = false;
+                    throw new OutOfMemoryError("no memory for another thread");
+                }
+            }
+        }, new SerialWorker.FailureSink() {
+            @Override
+            public void onTaskThrew(String description, Throwable error) {
+                failures.add(description + ": " + error);
+            }
+        });
+
+        w.post(true, 7L, 1, "install (requested)", step("human"));
+        assertEquals("the start failed and the item stayed queued", 1, w.queueDepth());
+        assertFalse(w.isAlive());
+
+        w.post(false, 7L, 0, "install", step("tick"));
+        assertEquals("a coalesced drop still asked to start the worker", 2, starts[0]);
+        assertEquals("without adding a second item", 1, w.queueDepth());
+
+        assertTrue(w.drainOne());
+        assertEquals("the human press is what runs, not the tick that arrived behind it",
+                "human", joined());
+    }
+
     @Test
     public void oneStartAttemptPerWorkerHoweverManyItemsArePosted() {
         SerialWorker w = worker();
