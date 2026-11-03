@@ -78,6 +78,7 @@ import com.google.gson.JsonPrimitive;
 import com.google.gson.stream.MalformedJsonException;
 
 import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttException;
 
 import java.io.File;
 import java.lang.ref.WeakReference;
@@ -96,6 +97,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.TimeZone;
 
 import okhttp3.HttpUrl;
@@ -910,9 +914,82 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // stop(), not disconnect(): with automaticReconnect on, a client whose link already dropped is
             // sitting in Paho's backoff timer in the DISCONNECTED state, where disconnect() throws 32101
             // without cancelling the timer — so quiet hours would have let it dial the broker again.
-            this.mqttManager.stop();
+            final MqttManager target = this.mqttManager;
+            mqttExec(new Runnable() {
+                @Override public void run() {
+                    target.stop();
+                }
+            });
         }
     }
+
+    /**
+     * One serial worker for every blocking Paho call.
+     *
+     * <p>Two reasons, and the second is the one that made this necessary. {@code connect()} and
+     * {@code stop()} block — for up to {@code connectionTimeout} and then {@code timeToWait} — and this is
+     * reached from key dispatch: {@code EventManager.onKeyDown} → {@link #adjustMinimumBrightness(String)} →
+     * {@link #turnScreenOn()} → here. A broker that is merely unreachable would otherwise stall the input
+     * thread past Android's ~5 s dispatch timeout and get the process ANR'd, which is precisely the signal
+     * {@code KioskWatchdog} escalates on, over a now-playing banner. A single serial queue rather than a
+     * thread-per-call also keeps the order: a dial queued before a quiet-hours stop still finishes before it,
+     * so the panel going dark cannot be overtaken by its own connect.
+     *
+     * <p>Every task is wrapped against {@code Throwable}. A throw on this thread would reach the one global
+     * {@code UncaughtExceptionHandler}, which calls {@code System.exit(2)} — so a background MQTT worker is
+     * the last place in the app that may be allowed to do that.
+     */
+    private void mqttExec(Runnable job) {
+        ExecutorService executor = mqttWorker;
+        if (executor == null) {
+            synchronized (this) {
+                executor = mqttWorker;
+                if (executor == null) {
+                    executor = Executors.newSingleThreadExecutor(new ThreadFactory() {
+                        @Override
+                        public Thread newThread(Runnable r) {
+                            Thread t = new Thread(r, "mqtt");
+                            // Daemon, because a hung connect must never be the reason a dying process
+                            // outlives the Activity that started it.
+                            t.setDaemon(true);
+                            t.setPriority(Thread.MIN_PRIORITY + 1);
+                            return t;
+                        }
+                    });
+                    mqttWorker = executor;
+                }
+            }
+        }
+        final Runnable guarded = new GuardedMqttTask(job);
+        try {
+            executor.execute(guarded);
+        } catch (Throwable rejected) {
+            // Shut down already, after onDestroy queued the final stop. Run it here rather than lose it:
+            // a client left unclosed would keep reconnecting under this frame's id.
+            guarded.run();
+        }
+    }
+
+    /** Runs one MQTT job and makes sure nothing it throws can reach the global handler. */
+    private final class GuardedMqttTask implements Runnable {
+        private final Runnable delegate;
+
+        GuardedMqttTask(Runnable delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void run() {
+            try {
+                delegate.run();
+            } catch (Throwable t) {
+                // An MqttException from connect() has already been reported by MqttManager itself.
+                reportMqttEvent("MQTT worker task threw: " + t, true);
+            }
+        }
+    }
+
+    @Nullable private volatile ExecutorService mqttWorker;
 
     private void connectMqttIfConfigured() {
         try {
@@ -957,7 +1034,26 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // settingsChanged() -> startCoreLoop()'s cold-start branch, and did so before this line existed,
             // which threw into handleException and left the existing session alone.
             if (!this.mqttManager.isConnected()) {
-                this.mqttManager.connect(mqttUser, mqttPassword);
+                final MqttManager target = this.mqttManager;
+                final String user = mqttUser;
+                final String password = mqttPassword;
+                mqttExec(new Runnable() {
+                    @Override public void run() {
+                        if (target.isSuspended()) {
+                            return;   // the panel went dark while this was queued
+                        }
+                        try {
+                            target.connect(user, password);
+                        } catch (MqttException e) {
+                            // A manager replaced between queueing and running is not a failure: it means the
+                            // panel toggled or the config changed, and the replacement's own dial is queued
+                            // behind this one. Anything else MqttManager has already reported.
+                            if (e.getReasonCode() != MqttException.REASON_CODE_CLIENT_CLOSED) {
+                                Log.i(TAG, "deferred MQTT connect ended early: " + e);
+                            }
+                        }
+                    }
+                });
             }
         } catch (Exception e) {
             handleException(e);
@@ -1024,8 +1120,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // threads — and an abandoned client that now reconnects on its own shows up under this frame's
             // stable id and makes the broker close the successor's session. Closing is also the only way to
             // release the MemoryPersistence those threads hold.
-            this.mqttManager.closeQuietly();
+            //
+            // Queued rather than called inline: shutdown() lets already-submitted work finish, so a dial still
+            // on the worker runs before this stop instead of after it. Calling closeQuietly() here directly
+            // would let that queued connect land afterwards and leave a reconnecting client with no owner.
+            final MqttManager dying = this.mqttManager;
             this.mqttManager = null;
+            mqttExec(new Runnable() {
+                @Override public void run() {
+                    dying.closeQuietly();
+                }
+            });
+            synchronized (this) {
+                if (mqttWorker != null) {
+                    mqttWorker.shutdown();
+                    mqttWorker = null;
+                }
+            }
         }
         // And the same for the display: this instance's window is going away with whatever flags it
         // holds, while the instance replacing it builds a fresh PhoneWindow that carries none. Held
