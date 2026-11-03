@@ -177,16 +177,22 @@ public class SerialWorkerTest {
         assertEquals("body", joined());
     }
 
+    /**
+     * Giving up on a wait is a statement about the caller's patience, not about whether the work is
+     * still wanted. An earlier revision pulled a not-yet-started item out of the queue here, which let
+     * one HTTP client's timeout cancel an upload — and the caller, believing the work abandoned,
+     * deleted the APK the item was queued to stage.
+     */
     @Test
-    public void awaitTimesOutForAnItemThatNeverStartedAndDropsIt() {
+    public void aTimedOutWaitCancelsNothingAndTheItemStillRuns() {
         SerialWorker w = worker();
         SerialWorker.Item item = w.post("upload", step("body"));
         assertFalse(w.await(item, 60L));
-        assertEquals(0, w.queueDepth());
+        assertEquals("the wait expired; the work is still queued", 1, w.queueDepth());
         assertEquals("", joined());
-        // A timed-out caller must not later find the body running anyway: it was never started, so
-        // dropping it is the only honest answer, and the queue has to be clean afterwards.
-        assertFalse(w.drainOne());
+        assertTrue("and the drain still finds it", w.drainOne());
+        assertEquals("body", joined());
+        assertTrue("reported done once it ran", w.await(item, 50L));
     }
 
     @Test

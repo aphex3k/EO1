@@ -73,15 +73,6 @@ public final class SerialWorker {
             return description;
         }
 
-        /**
-         * Whether this item has begun. Only decisive after {@link #await} has timed out: that call
-         * either finds this true and leaves the item alone, or takes it out of the queue under the same
-         * lock the worker would take it from, so afterwards "not started" means "will not start". A
-         * caller that owns a resource the body needs uses this to decide whether it may clean it up.
-         */
-        public boolean started() {
-            return started;
-        }
     }
 
     private final Object lock = new Object();
@@ -167,19 +158,23 @@ public final class SerialWorker {
     }
 
     /**
-     * Blocks until this item has run (or been dropped), so a caller that must answer synchronously —
-     * {@code POST /update}'s HTTP response — can hand its work over without pretending it is done.
+    /**
+     * Blocks until this item has run, so a caller that must answer synchronously — {@code POST
+     * /update}'s HTTP response — can hand its work over without pretending it is done.
      *
-     * <p>Timed out, the item is only removed if it never started. An item already running will finish
-     * whatever the caller does, and cancelling it is not on the table — so a caller that owns a
-     * resource the body needs must move that resource somewhere the body can still reach it before it
-     * waits, rather than assuming its own return ends the work.
+     * <p><b>Giving up is not cancelling, and never was meant to be.</b> Nothing here removes an item,
+     * started or not: a caller whose patience expired has said something about its own socket, not
+     * about whether the work is still wanted. An earlier revision pulled a not-yet-started item out of
+     * the queue on timeout, which silently turned a slow response into a cancelled upload — and the
+     * caller, believing the work was abandoned, then deleted the very file the item was queued to
+     * stage. So the contract is exactly two outcomes: true means it ran and there is an answer to
+     * report; false means it may still run, and the caller must leave everything it owns in place.
      *
-     * <p>A caller passes its answer back through a holder it shares with the body — one final
-     * array is enough, and the monitor below is what makes the write visible. Handing a result in
-     * through this class instead would let the drain overwrite it.
+     * <p>A caller passes its answer back through a holder it shares with the body — one final array is
+     * enough, and the monitor below is what makes the write visible. Handing a result in through this
+     * class instead would let the drain overwrite it.
      *
-     * @return true when the item ran
+     * @return true when the item ran before the deadline
      */
     public boolean await(Item item, long timeoutMs) {
         long deadlineNs = System.nanoTime() + timeoutMs * 1000000L;
@@ -187,22 +182,13 @@ public final class SerialWorker {
             while (!item.finished) {
                 long leftNs = deadlineNs - System.nanoTime();
                 if (leftNs <= 0L) {
-                    if (!item.started) {
-                        drop(item);
-                    }
                     return false;
                 }
                 try {
                     lock.wait(leftNs / 1000000L, (int) (leftNs % 1000000L));
                 } catch (InterruptedException e) {
-                    // Same contract as the timeout below, and it has to be: a caller deciding whether
-                    // it may clean up a resource the body needs must never be told "it did not run"
-                    // about an item still sitting in the queue, because that item will reach a file
-                    // the caller has just deleted.
-                    Thread.currentThread().interrupt();
-                    if (!item.started && !item.finished) {
-                        drop(item);
-                    }
+                    // Consumed, not preserved: see the note in run(). And no drop for the same reason
+                    // the timeout gives none — an interrupted waiter is not a cancelled task.
                     return false;
                 }
             }
@@ -377,11 +363,5 @@ public final class SerialWorker {
         return null;
     }
 
-    private void drop(Item item) {
-        if (!urgentItems.remove(item)) {
-            normalItems.remove(item);
-        }
-        item.finished = true;
-    }
 
 }

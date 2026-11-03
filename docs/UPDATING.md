@@ -143,7 +143,8 @@ what it does not:
   not two. `command` and `commandAgeMs` in `/state` say what is running and for how long.
 - **An upload blocks its web thread on purpose** and keeps the file it is answering about by renaming
   it out of the web server's temp directory first. A slow answer, or a browser that gave up, cannot
-  lose the APK: `staging-queued` in the response means "still working", not "rejected".
+  lose the APK: `staging-queued` in the response means "still queued, or still working" — the wait
+  ended, the upload did not.
 - **A task that throws is settled, not swallowed.** If one dies before it can record an outcome, the
   worker's own failure handler moves a stranded `CHECKING`/`DOWNLOADING`/`VERIFYING` to `FAILED`,
   because `checkDue` would otherwise refuse every later tick and the frame would quietly stop

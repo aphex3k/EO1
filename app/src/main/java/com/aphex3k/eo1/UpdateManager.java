@@ -1140,12 +1140,10 @@ public class UpdateManager {
                     ? answer[0]
                     : ApkUploadResult.reject("", size, false, "stage-crashed");
         }
-        if (!item.started()) {
-            // It never started and now cannot: the queue is done with it, so the bytes are this
-            // thread's to clean up again.
-            slot.delete();
-            return ApkUploadResult.reject("", size, false, "upload-dropped");
-        }
+        // Out of patience, not out of work: the item stays queued and will stage the file when the
+        // worker reaches it, so this thread deletes nothing it still owns. A browser that timed out
+        // must not be able to cancel an upload — that was the earlier behaviour here, and it turned a
+        // slow response into a discarded APK.
         return ApkUploadResult.reject("", size, false, "staging-queued");
     }
 
