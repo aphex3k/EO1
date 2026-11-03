@@ -487,6 +487,23 @@ public class UpdateManagerTest {
     // ------------------------------------------------- what a transition must not forget
 
     /**
+     * The tick and the resume used to answer this differently: a resume landing two seconds into an
+     * install that can run for minutes rolled {@code INSTALL_PENDING} back to {@code STAGED}, clearing
+     * the window that keeps a retry from replacing a file the installer still holds.
+     */
+    @Test
+    public void settleWindow_isTheSameQuestionWhoeverAsksIt() {
+        long settleMs = 90_000L;   // UpdateManager.INSTALL_SETTLE_MS
+        assertFalse(UpdateManager.settleWindowExpired(1000L + 2_000L, 1000L));
+        assertFalse(UpdateManager.settleWindowExpired(1000L + settleMs, 1000L));
+        assertTrue(UpdateManager.settleWindowExpired(1000L + settleMs + 1L, 1000L));
+        // A pending state with no timestamp predates the field; waiting for it would wait forever.
+        assertTrue(UpdateManager.settleWindowExpired(1000L, 0L));
+        assertTrue(UpdateManager.settleWindowExpired(1000L, -1L));
+    }
+
+
+    /**
      * Five transitions clear the pending-build identity by hand. A field left behind makes {@code
      * /state} advertise a download that is not running and, worse, lets a later start-up match
      * unrelated bytes against a hash that never described them.

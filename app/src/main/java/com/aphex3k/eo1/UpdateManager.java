@@ -630,6 +630,13 @@ public class UpdateManager {
                 installFiredInThisProcess = false;
                 return;
             }
+            if (!settleWindowExpired(System.currentTimeMillis(), state.installFiredAtMs)) {
+                // Coming back to the foreground is not evidence that an install failed, only that a
+                // screen came back — and pm install can run for minutes. Rolling back here would clear
+                // the settle window while the installer still holds the staged file, which is the one
+                // thing that lets a retry replace an APK somebody is reading. The next tick decides.
+                return;
+            }
             installFiredInThisProcess = false;
             // Naming the reason matters here: canceled-or-refused means a person dismissed the dialog
             // we were shown, and anything else means a silent transport that promised more than it
@@ -644,6 +651,23 @@ public class UpdateManager {
         if (rolledBack) {
             notifyDebug("install did not complete in-process; back to STAGED (retried on the next tick)");
         }
+    }
+
+    /**
+     * Whether an {@code INSTALL_PENDING} has earned the right to be called unfinished.
+     *
+     * <p>One predicate because the two callers of that question used to hold different answers: the
+     * rotation tick waited the settle window out and the Activity's resume rolled back on sight, so a
+     * resume landing two seconds into a {@code pm install} that can take minutes cleared the window
+     * that exists to keep a retry from replacing a file the installer still holds. A pending state
+     * with no timestamp is older than the field, so it counts as expired — the alternative is a frame
+     * that waits forever for an install that already happened.
+     *
+     * <p>Pure and package-visible for the same reason: "did this install settle?" must be answerable
+     * without an installer, an Activity, or a thread.
+     */
+    static boolean settleWindowExpired(long nowMs, long firedAtMs) {
+        return firedAtMs <= 0L || nowMs - firedAtMs > INSTALL_SETTLE_MS;
     }
 
     // ------------------------------------------------------------------- installing
@@ -684,7 +708,7 @@ public class UpdateManager {
             if (state.state == UpdateState.State.INSTALL_PENDING) {
                 long firedAt = state.installFiredAtMs;
                 long elapsedMs = System.currentTimeMillis() - firedAt;
-                if (firedAt > 0L && elapsedMs <= INSTALL_SETTLE_MS) {
+                if (!settleWindowExpired(System.currentTimeMillis(), firedAt)) {
                     // An install really is in flight — pm install can run for minutes. The old
                     // "no staged update" read as a broken state machine when it only meant
                     // "you pressed this a few seconds after it already fired".
