@@ -414,12 +414,21 @@ public class MqttManager implements MqttCallbackExtended {
             try {
                 if (c.isConnected()) {
                     c.disconnect(DISCONNECT_QUIESCE_MS);
-                } else {
-                    c.close(true);
                 }
             } catch (Throwable t) {
-                // A client already closed by its own teardown path is the outcome we wanted.
-                report("stopping the broker link left the client to be closed: " + t, false);
+                // The link can drop between the test and the call, and then disconnect() throws without
+                // cancelling the ladder — which is the whole reason close() is below rather than in an else.
+                report("disconnecting on the way down threw, closing instead: " + t, false);
+            } finally {
+                try {
+                    // Unconditional, and force: this is the only call that makes the object inert, so a client
+                    // abandoned here would reconnect under this frame's stable id and evict its replacement.
+                    // It also covers the clean path, where a successful disconnect leaves Paho's threads and
+                    // persistence allocated on an object nobody holds.
+                    c.close(true);
+                } catch (Throwable t) {
+                    report("could not close the MQTT client: " + t, true);
+                }
             }
         }
     }

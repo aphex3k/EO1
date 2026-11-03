@@ -898,12 +898,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * brightness-adjusted alike.
      */
     private void updateMqttForScreenState() {
-        if (this.mqttManager == null || brightnessManager == null) {
+        if (brightnessManager == null) {
             return;
         }
         if (brightnessManager.getShouldTheScreenBeOn()) {
+            // Deliberately no null test on mqttManager here: a manager that was dropped when the host was
+            // cleared has to be rebuilt by the code below, and returning early would leave the feature off
+            // until the Activity happened to be recreated.
             connectMqttIfConfigured();
-        } else {
+        } else if (this.mqttManager != null) {
             // stop(), not disconnect(): with automaticReconnect on, a client whose link already dropped is
             // sitting in Paho's backoff timer in the DISCONNECTED state, where disconnect() throws 32101
             // without cancelling the timer — so quiet hours would have let it dial the broker again.
@@ -912,9 +915,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     private void connectMqttIfConfigured() {
-        if (this.mqttManager == null) {
-            return;
-        }
         try {
             Configuration config = settingsManager.getConfiguration();
             String mqttUser = config.mqttUser;
@@ -930,14 +930,21 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 // MQTT stopped being configured while this client was live. Checking for an address change
                 // first would miss it — there is no address to differ from — and leave the frame dialling a
                 // broker the operator removed, so unset is handled on its own terms.
-                this.mqttManager.stop();
-                this.mqttManager = null;
+                if (this.mqttManager != null) {
+                    this.mqttManager.stop();
+                    this.mqttManager = null;
+                }
                 mqttBrokerUri = null;
                 return;
             }
-            if (!wanted.equals(mqttBrokerUri)) {
-                this.mqttManager.closeQuietly();
-                this.mqttManager = null;
+            // Either no client exists — because the host was cleared and this is its restoration — or the
+            // operator pointed at a different broker. The URI is fixed inside Paho at construction, so
+            // neither case can be served by connecting the object already in hand.
+            if (this.mqttManager == null || !wanted.equals(mqttBrokerUri)) {
+                if (this.mqttManager != null) {
+                    this.mqttManager.stop();
+                    this.mqttManager = null;
+                }
                 configureMqttManager();
                 if (this.mqttManager == null) {
                     return;
