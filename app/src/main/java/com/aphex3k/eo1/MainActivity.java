@@ -906,22 +906,46 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
         if (brightnessManager.getShouldTheScreenBeOn()) {
-            // Deliberately no null test on mqttManager here: a manager that was dropped when the host was
-            // cleared has to be rebuilt by the code below, and returning early would leave the feature off
-            // until the Activity happened to be recreated.
+            // Deliberately no null test on mqttManager here: a manager retired for quiet hours or for a
+            // cleared host has to be rebuilt by the code below, and returning early would leave the feature
+            // off until the Activity happened to be recreated.
+            mqttHeldForPanel = false;
             connectMqttIfConfigured();
-        } else if (this.mqttManager != null) {
-            // stop(), not disconnect(): with automaticReconnect on, a client whose link already dropped is
-            // sitting in Paho's backoff timer in the DISCONNECTED state, where disconnect() throws 32101
-            // without cancelling the timer — so quiet hours would have let it dial the broker again.
-            final MqttManager target = this.mqttManager;
+        } else {
+            // Reported as the reason a frame says "no client", so "quiet hours" and "never configured" are
+            // not the same sentence in /state.
+            mqttHeldForPanel = true;
+            retireMqttManager();
+        }
+    }
+
+    /**
+     * Hands over the current manager: the field is cleared first, and only then is its teardown queued.
+     *
+     * <p>The order is the whole point. A queued {@code stop()} runs whenever the worker gets to it, so if the
+     * field still named that manager, an off→on transition that lands before the worker drains would consult
+     * a manager that is still unsuspended and still connected — skip the connect as unnecessary, then get
+     * suspended by the stop behind it. MQTT would sit held with the panel lit until something else
+     * reconciled it. Retiring the reference first means that wake sees no manager and builds a fresh one,
+     * whose dial queues behind the stop rather than racing it.
+     *
+     * <p>{@code stop()} and not {@code disconnect()}: with automaticReconnect on, a client whose link already
+     * dropped is sitting in Paho's backoff timer in the DISCONNECTED state, where {@code disconnect()} throws
+     * 32101 without cancelling the timer.
+     */
+    private void retireMqttManager() {
+        final MqttManager retiring = this.mqttManager;
+        this.mqttManager = null;
+        if (retiring != null) {
             mqttExec(new Runnable() {
                 @Override public void run() {
-                    target.stop();
+                    retiring.stop();
                 }
             });
         }
     }
+
+    private volatile boolean mqttHeldForPanel;
 
     /**
      * One serial worker for every blocking Paho call.
@@ -1007,10 +1031,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 // MQTT stopped being configured while this client was live. Checking for an address change
                 // first would miss it — there is no address to differ from — and leave the frame dialling a
                 // broker the operator removed, so unset is handled on its own terms.
-                if (this.mqttManager != null) {
-                    this.mqttManager.stop();
-                    this.mqttManager = null;
-                }
+                retireMqttManager();
                 mqttBrokerUri = null;
                 return;
             }
@@ -1021,10 +1042,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // never revived, which is also what keeps a callback still in flight from the closed one from
             // ever reaching the client that took its place.
             if (this.mqttManager == null || this.mqttManager.isSuspended() || !wanted.equals(mqttBrokerUri)) {
-                if (this.mqttManager != null) {
-                    this.mqttManager.stop();
-                    this.mqttManager = null;
-                }
+                // Queued, not inline: stop() blocks on a quiesce, and this whole method is reachable from key
+                // dispatch by way of turnScreenOn.
+                retireMqttManager();
                 configureMqttManager();
                 if (this.mqttManager == null) {
                     return;
@@ -1131,11 +1151,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     dying.closeQuietly();
                 }
             });
-            synchronized (this) {
-                if (mqttWorker != null) {
-                    mqttWorker.shutdown();
-                    mqttWorker = null;
-                }
+        }
+        // Outside the manager guard, and after anything queued above. A frame whose host had already been
+        // cleared reaches onDestroy with mqttManager null, and shutting the worker down only inside that
+        // test would leave the idle thread alive for the rest of the process on every recreation.
+        synchronized (this) {
+            if (mqttWorker != null) {
+                mqttWorker.shutdown();
+                mqttWorker = null;
             }
         }
         // And the same for the display: this instance's window is going away with whatever flags it
@@ -3106,7 +3129,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (manager == null) {
             o.addProperty("configured", mqttBrokerUriFromConfig() != null);
             o.addProperty("connected", false);
-            o.addProperty("note", "no client for this configuration");
+            o.addProperty("heldForPanel", mqttHeldForPanel);
+            o.addProperty("note", mqttHeldForPanel
+                    ? "held for quiet hours" : "no client for this configuration");
             return o;
         }
         o.addProperty("configured", true);
