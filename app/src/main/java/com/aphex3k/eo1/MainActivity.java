@@ -566,11 +566,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
             if (mqttHost == null || mqttHost.isEmpty()) {
                 // MQTT stopped being configured — through the options dialog or a /config/import that dropped
-                // the host. Let the live client go rather than keep dialling a broker nobody named.
-                if (this.mqttManager != null) {
-                    this.mqttManager.closeQuietly();
-                    this.mqttManager = null;
-                }
+                // the host. Let the live client go rather than keep dialling a broker nobody named. Same
+                // helper as every other teardown, because closeQuietly() blocks and this runs on the caller's
+                // thread; connectMqttIfConfigured() already retired the manager before calling through here,
+                // so in that path this is a no-op.
+                retireMqttManager();
                 mqttBrokerUri = null;
             } else {
                 String mqttBroker = String.format("%s://%s:%d", mqttProtocol, mqttHost, mqttPort);
@@ -3025,8 +3025,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // One line for the broker link, in the record that outlives logcat. "connected=false" and "connected
         // but no message for hours" are different diagnoses, and before this class reported into AppLogger
         // neither was recoverable at all — the events went to stdout, into a buffer CrashSources never reads.
+        // Read once. mqttManager is volatile and retireMqttManager() clears it from another thread, so the
+        // null test and the call must not be two reads of the field: between them the manager can go away and
+        // describe() throws NPE on the diagnostics worker, where DiagnosticsReport replaces the section with
+        // a note that something failed — losing the whole liveness block, not just this line.
+        MqttManager liveManager = mqttManager;
         sb.append("mqtt                : ")
-                .append(mqttManager == null ? "no client" : mqttManager.describe())
+                .append(liveManager == null
+                        ? (mqttHeldForPanel ? "held (panel off)" : "no client")
+                        : liveManager.describe())
                 .append('\n');
         if (mediaManager != null) {
             MediaAsset current = mediaManager.getCurrentAsset();
