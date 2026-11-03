@@ -329,6 +329,45 @@ public class SerialWorkerTest {
         assertFalse(w.isAlive());
     }
 
+    /**
+     * A thread that could not be created is the one failure this class recovers from by asking again,
+     * and the asking has to be automatic — nothing else watches the queue. The bound is the rotation
+     * interval, because {@code installStaged} posts on every tick whatever else is configured; not a
+     * human noticing.
+     */
+    @Test
+    public void aFailedThreadStartIsRetriedByTheNextPost() {
+        final boolean[] explode = {true};
+        final int[] starts = {0};
+        SerialWorker w = new SerialWorker(new SerialWorker.Runner() {
+            @Override
+            public void start(Runnable loop) {
+                starts[0]++;
+                if (explode[0]) {
+                    explode[0] = false;
+                    throw new OutOfMemoryError("no memory for another thread");
+                }
+            }
+        }, new SerialWorker.FailureSink() {
+            @Override
+            public void onTaskThrew(String description, Throwable error) {
+                failures.add(description + ": " + error);
+            }
+        });
+
+        w.post("check", step("first"));
+        assertEquals("a failed start is reported, not swallowed", 1, failures.size());
+        assertTrue(failures.get(0), failures.get(0).startsWith("worker start: "));
+        assertEquals("the work outlives its creator failing to start", 1, w.queueDepth());
+        assertFalse("and nothing is draining it yet", w.isAlive());
+
+        w.post("install", step("second"));
+        assertEquals("the next post asked again", 2, starts[0]);
+        assertTrue(w.drainOne());
+        assertTrue(w.drainOne());
+        assertEquals("first,second", joined());
+    }
+
     @Test
     public void oneStartAttemptPerWorkerHoweverManyItemsArePosted() {
         SerialWorker w = worker();

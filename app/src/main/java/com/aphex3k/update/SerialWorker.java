@@ -316,10 +316,12 @@ public final class SerialWorker {
                 }
             });
         } catch (Throwable startFailed) {
-            // The claim is released only when no thread was ever created. This is the one path where
-            // the worker can be resurrected rather than kept alive, and it exists because a thread
-            // creation failure (an out-of-memory on a device with a few hundred MB free is not exotic
-            // here) must not permanently end updates for a process that could still make one later.
+            // The claim is released only when no thread was ever created — the one path where the
+            // worker is resurrected rather than kept alive, and it is retried by every subsequent
+            // post rather than by a monitor, because a thread creation failure (an out-of-memory on a
+            // device with a few hundred MB free is not exotic here) must not end updates for a process
+            // that could make a thread a minute later. The bound on that silence is the rotation
+            // interval: MainActivity's tick posts an install attempt unconditionally.
             threadStarted = false;
             report("worker start", startFailed);
         }
