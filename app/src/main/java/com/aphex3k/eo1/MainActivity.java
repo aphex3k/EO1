@@ -887,11 +887,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /**
      * Whether the broker link should exist right now: MQTT follows the <em>panel</em>, not the Activity.
      *
-     * <p>The distinction matters here because {@link #turnScreenOff()} hides views and releases the display hold
-     * without pausing anything, so a quiet-hours window is not an {@code onPause} — while an OS panel sleep
-     * eventually is one. Gating on the lifecycle instead of on this value gave the feature a lifetime nobody
-     * chose: {@code onPause} closed the session, and the resume path that reopens the rotation returns before it
-     * ever reaches a connect, so a frame that was paused once stayed deaf for the rest of the process.
+     * <p>The distinction matters here because a quiet-hours window is not an {@code onPause} — {@link
+     * #turnScreenOff()} hides views and releases the display hold without pausing anything, and it is the OS
+     * putting the panel to sleep afterwards that eventually does. Gating on the lifecycle instead of on this
+     * value gave the feature a lifetime nobody chose: {@code onPause} closed the session, and the resume path
+     * that reopens the rotation returns before it ever reaches a connect.
+     *
+     * <p>Called from {@link #turnScreenOn()} and {@link #turnScreenOff()} rather than from the schedule, because
+     * those two are where every panel transition converges — scheduled, toggled, power-button-reconciled and
+     * brightness-adjusted alike.
      */
     private void updateMqttForScreenState() {
         if (this.mqttManager == null || brightnessManager == null) {
@@ -900,12 +904,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (brightnessManager.getShouldTheScreenBeOn()) {
             connectMqttIfConfigured();
         } else {
-            try {
-                this.mqttManager.disconnect();
-            } catch (Exception e) {
-                // A session that was already gone is not an exception worth a toast about.
-                Log.i(TAG, "mqtt disconnect during quiet hours: " + e);
-            }
+            // stop(), not disconnect(): with automaticReconnect on, a client whose link already dropped is
+            // sitting in Paho's backoff timer in the DISCONNECTED state, where disconnect() throws 32101
+            // without cancelling the timer — so quiet hours would have let it dial the broker again.
+            this.mqttManager.stop();
         }
     }
 
@@ -924,7 +926,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // construction, inside Paho. Rebuild it — closing the old client first, because two live clients
             // under one id is precisely the mutual kick a stable id makes visible in the broker log.
             String wanted = mqttBrokerUriFromConfig();
-            if (wanted != null && !wanted.equals(mqttBrokerUri)) {
+            if (wanted == null) {
+                // MQTT stopped being configured while this client was live. Checking for an address change
+                // first would miss it — there is no address to differ from — and leave the frame dialling a
+                // broker the operator removed, so unset is handled on its own terms.
+                this.mqttManager.stop();
+                this.mqttManager = null;
+                mqttBrokerUri = null;
+                return;
+            }
+            if (!wanted.equals(mqttBrokerUri)) {
                 this.mqttManager.closeQuietly();
                 this.mqttManager = null;
                 configureMqttManager();
@@ -1226,6 +1237,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void turnScreenOff() {
         cancelVideoWatchdog();
         releaseDisplayHold();
+        // Reconciled here rather than in applyScheduledScreenState, because this and turnScreenOn are the
+        // chokepoint every path that changes the panel goes through — the schedule, the web and button
+        // toggle, the power-button reconcile, and the brightness adjust. Gated on the scheduled path alone,
+        // a frame whose quiet hours had closed the broker link would stay deaf after a Brightness+ woke it.
+        updateMqttForScreenState();
 
         videoPlayer.setVisibility(View.INVISIBLE);
         imageView.setVisibility(View.INVISIBLE);
@@ -1253,6 +1269,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // along with everything else, so the deadline resumes only once the panel can paint again.
         resumeVideoPaintPollIfPending();
         applyCurrentBrightness();
+        // The resume half of the pairing in turnScreenOff: this is how a frame that closed its broker link
+        // for quiet hours gets it back after a wake that never passed through applyScheduledScreenState.
+        updateMqttForScreenState();
     }
 
     @Override
@@ -1368,9 +1387,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // time the loop restarts.
             turnScreenOff();
         }
-        // MQTT on the same rule as everything else here — asserted, not edge-triggered — because it has to
-        // come back after a quiet window on a frame that never received a lifecycle callback in between.
-        updateMqttForScreenState();
         logScreenAndTimerState();
     }
 

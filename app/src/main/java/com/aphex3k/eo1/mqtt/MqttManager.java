@@ -167,7 +167,15 @@ public class MqttManager implements MqttCallbackExtended {
         void mqttEvent(String message, boolean severe);
     }
 
-    private final MqttClient client;
+    /**
+     * Not final: {@link #stop()} force-closes it, because that is the only operation a client in Paho's
+     * backoff timer cannot ignore, and a closed Paho client can never be re-opened. {@link #connect()} builds a
+     * replacement under the same uri and the same stable id when it finds this null.
+     */
+    private volatile MqttClient client;
+    /** Guards the swap, not the socket — nothing blocking happens inside it. */
+    private final Object lifecycle = new Object();
+    private volatile boolean suspended;
 
     // Custom TypeAdapterFactory to apply UPPERCASE mapping only to nested objects
     private static final Gson gson = new GsonBuilder().create();
@@ -207,18 +215,41 @@ public class MqttManager implements MqttCallbackExtended {
         // Use no-op logger to avoid MissingResourceException on API 19
         org.eclipse.paho.client.mqttv3.logging.LoggerFactory.setLogger(MqttManager.NoOpLogger.class.getName());
 
-        client = new MqttClient(
+        client = newClient();
+    }
+
+    /**
+     * A fresh Paho client for this manager's uri and id. Shared by the constructor and by the resume after a
+     * {@link #stop()}, because force-closing is terminal in Paho and the alternative — leaving a closed object
+     * where a live one is expected — would make every later connect a 32111.
+     */
+    private MqttClient newClient() throws MqttException {
+        MqttClient c = new MqttClient(
                 uri, //URI
                 clientId, //ClientId
                 new MemoryPersistence()); //Persistence
-
         // MqttCallbackExtended, not MqttCallback: connectComplete is the only place this client can learn that
         // Paho brought the session back, and a clean-session reconnect with no re-subscribe is a frame that
         // reports itself connected while hearing nothing at all.
-        client.setCallback(this);
+        c.setCallback(this);
+        return c;
     }
 
     public void connect(String username, String password) throws MqttException {
+        MqttClient c;
+        synchronized (lifecycle) {
+            // Reaching this method IS the resume signal: the caller has just decided the panel should be
+            // talking to a broker. A client left closed by stop() can never be re-opened, so it is replaced
+            // here rather than repaired.
+            suspended = false;
+            if (client == null) {
+                client = newClient();
+            }
+            c = client;
+        }
+        if (c.isConnected()) {
+            return;
+        }
         MqttConnectOptions options = buildOptions(username, password);
 
         if (uri != null && uri.startsWith("ssl")) {
@@ -239,7 +270,7 @@ public class MqttManager implements MqttCallbackExtended {
             // connectComplete — with reconnect=false for the very first session, confirmed at bytecode —
             // and that is the one place the subscription is issued. Doing it here too would put two
             // SUBSCRIBEs on the wire from two threads for every connect.
-            client.connect(options);
+            c.connect(options);
         } catch (MqttException e) {
             if (isAlreadyOnItsWay(e.getReasonCode())) {
                 // Paho is already doing the thing this call was asking for — connected, connecting, or
@@ -259,6 +290,19 @@ public class MqttManager implements MqttCallbackExtended {
     public void connectComplete(boolean reconnect, String serverURI) {
         // Runs on Paho's callback thread, inside the catch(Throwable) region — so nothing here may throw, and
         // nothing here may take long.
+        if (suspended) {
+            // The panel asked for this link to be down. stop() force-closed the client that was reconnecting,
+            // so a ladder that completes after it must do no session work at all: subscribing here would be
+            // a sonos/+ filter on a broker the frame has decided to go quiet on.
+            try {
+                MqttClient stale = client;
+                if (stale != null) {
+                    stale.close(true);
+                }
+            } catch (Throwable ignored) {
+            }
+            return;
+        }
         try {
             connectedAtMs = System.currentTimeMillis();
             if (reconnect) {
@@ -278,6 +322,9 @@ public class MqttManager implements MqttCallbackExtended {
 
     @Override
     public void connectionLost(Throwable cause) {
+        if (suspended) {
+            return;     // our own stop() caused this; reporting it as a loss would be a false alarm
+        }
         try {
             lastError = String.valueOf(cause);
             // Paho reconnects from here — that is what setAutomaticReconnect bought. This line exists only so
@@ -330,53 +377,74 @@ public class MqttManager implements MqttCallbackExtended {
     }
 
     public boolean isConnected() {
+        MqttClient c = client;
         try {
-            return client.isConnected();
+            return c != null && c.isConnected();
         } catch (Throwable t) {
             return false;
         }
     }
 
     /**
-     * Stops the reconnect ladder on purpose — used when the panel goes off. An explicit {@code disconnect()} is
-     * the only thing that makes Paho stand down; a lost connection by itself never does.
+     * Stands the connection down because the frame should not be talking to a broker right now — the panel went
+     * off, or MQTT stopped being configured.
+     *
+     * <p>This is not the same operation as {@code disconnect()}, and the difference is the reason it exists.
+     * With {@code automaticReconnect} on, a client whose link dropped sits in Paho's backoff timer in the
+     * <em>DISCONNECTED</em> state, and {@code ClientComms.disconnect()} is guarded on exactly that: it throws
+     * 32101 without cancelling the timer. So stopping a reconnecting client by disconnecting it is impossible —
+     * the ladder would bring the session back under this frame's stable id, in a quiet window, which is the
+     * behaviour this whole change is meant to remove.
+     *
+     * <p>So: disconnect when the link is live (that is the one path Paho stops the ladder on), and otherwise
+     * <b>force-close the object</b>. {@code ClientComms.close(force)} accepts a DISCONNECTED client, and CLOSED
+     * is terminal — every connect path out of it throws 32111 — so a timer that fires later has nothing it is
+     * allowed to do. The client is then dropped and rebuilt on resume, which is why the field is not final.
+     *
+     * <p>Never throws: it is called from a screen-state transition and from {@code onDestroy}.
      */
-    public void disconnect() throws MqttException {
-        // paho throws MqttException(32101) when disconnecting a client that is
-        // not connected (never connected, connect still in flight, or broker
-        // connection already lost); skipping keeps the caller log-clean.
-        if (client.isConnected()) {
-            client.disconnect(DISCONNECT_QUIESCE_MS);
+    public void stop() {
+        synchronized (lifecycle) {
+            suspended = true;
+            MqttClient c = client;
+            client = null;
+            if (c == null) {
+                return;
+            }
+            try {
+                if (c.isConnected()) {
+                    c.disconnect(DISCONNECT_QUIESCE_MS);
+                } else {
+                    c.close(true);
+                }
+            } catch (Throwable t) {
+                // A client already closed by its own teardown path is the outcome we wanted.
+                report("stopping the broker link left the client to be closed: " + t, false);
+            }
         }
     }
 
+    /** Whether the frame has deliberately stood the link down — {@code /state} says so rather than guessing. */
+    public boolean isSuspended() {
+        return suspended;
+    }
+
     /**
-     * Releases the client's threads and persistence. Nothing in this repo ever called {@code close()} before,
-     * so every Activity recreation abandoned a live client; with {@code automaticReconnect} now on, an
-     * abandoned client would reconnect under the same id and the broker would close the new one. The
-     * {@code close()} goes in a {@code finally} because {@code disconnect()} throws on exactly the clients
-     * that most need closing.
+     * Releases the client for good. Nothing in this repo ever called {@code close()} before, so every Activity
+     * recreation abandoned a live client; with {@code automaticReconnect} now on, an abandoned client would
+     * reconnect under the same id and the broker would close the successor's session.
      */
     public void closeQuietly() {
-        try {
-            if (client.isConnected()) {
-                client.disconnect(DISCONNECT_QUIESCE_MS);
-            }
-        } catch (Throwable t) {
-            // Expected on a client whose link was already lost. close() below is the part that matters.
-        } finally {
-            try {
-                client.close();
-            } catch (Throwable t) {
-                report("could not close the MQTT client: " + t, true);
-            }
-        }
+        stop();
     }
 
     /** What {@code /state} serves. Never a credential — the uri is host and port only. */
     public JsonObject stateJson() {
         JsonObject o = new JsonObject();
         o.addProperty("connected", isConnected());
+        // Distinguishes "the link is down" from "this frame is deliberately not dialling", which otherwise
+        // read identically for the whole of a quiet window.
+        o.addProperty("suspended", suspended);
         o.addProperty("uri", uri == null ? "" : uri);
         o.addProperty("clientId", clientId == null ? "" : clientId);
         o.addProperty("connectAttempts", connectAttempts);
@@ -395,8 +463,12 @@ public class MqttManager implements MqttCallbackExtended {
     public String describe() {
         long now = System.currentTimeMillis();
         StringBuilder sb = new StringBuilder();
-        sb.append(isConnected() ? "connected" : "down")
-                .append(" broker=").append(uri == null ? "(unset)" : uri)
+        if (suspended) {
+            sb.append("held (panel off)");
+        } else {
+            sb.append(isConnected() ? "connected" : "down");
+        }
+        sb.append(" broker=").append(uri == null ? "(unset)" : uri)
                 .append(" id=").append(clientId == null ? "(unset)" : clientId)
                 .append(" attempts=").append(connectAttempts)
                 .append(" reconnects=").append(reconnects)
@@ -444,9 +516,16 @@ public class MqttManager implements MqttCallbackExtended {
         return options;
     }
 
+    /**
+     * Called only from {@link #connectComplete}, after its {@code suspended} test — which is the single place
+     * that decides whether a session is live. {@code client} is non-null on that path: the constructor sets it
+     * and {@link #connect} rebuilds it after a {@link #stop()}. A second null test here would be a guard that
+     * no test can tell apart from the first.
+     */
     private void subscribe() {
+        MqttClient c = client;
         try {
-            client.subscribe(TOPIC, SUBSCRIBE_QOS);
+            c.subscribe(TOPIC, SUBSCRIBE_QOS);
         } catch (MqttException e) {
             // A subscription the broker refused is reported, not retried: Paho's own ladder will issue it
             // again on the next connectComplete, and a second subscribe for one topic filter is idempotent
