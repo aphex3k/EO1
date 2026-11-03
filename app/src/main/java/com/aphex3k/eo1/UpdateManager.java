@@ -828,18 +828,22 @@ public class UpdateManager {
         final boolean armedByUs = armed != null && armed.outcome == AdbdInstallClient.Outcome.ARMED;
 
         switch (chooseInstallPath(holdsPermission, adbdReachable, humanRequested)) {
-            case HEADLESS:
-                if (!armAndPersist("headless installPackage", snapshot.expectedVersionCode)) {
+            case HEADLESS: {
+                long attempt = armAndPersist("headless installPackage", snapshot.expectedVersionCode);
+                if (attempt == 0L) {
                     return;
                 }
                 lastInstallAttempt = "headless";
                 try {
-                    fireHeadlessInstall(Uri.fromFile(stagedPublic), snapshot.installFiredAtMs);
+                    // The stamp from the state just written, never snapshot.installFiredAtMs: that is
+                    // the previous attempt's timestamp, normally zero, and zero matched everything.
+                    fireHeadlessInstall(Uri.fromFile(stagedPublic), attempt);
                 } catch (Throwable t) {
                     Log.e(TAG, "installPackage threw", t);
                     setStaged("installPackage-threw: " + t);
                 }
                 break;
+            }
 
             case ADBD: {
                 if (armedByUs) {
@@ -850,7 +854,7 @@ public class UpdateManager {
                     // because closing it is driven by exactly that flag.
                     persistAdbArmed(true);
                 }
-                if (!armAndPersist("adbd pm install", snapshot.expectedVersionCode)) {
+                if (armAndPersist("adbd pm install", snapshot.expectedVersionCode) == 0L) {
                     // Nothing was dispatched — but an adbd this attempt started is still this attempt's
                     // to close, and the exposure is meant to be one action, never a boot. That is why
                     // the cancellation is handled here rather than inside armAndPersist: the teardown
@@ -934,22 +938,26 @@ public class UpdateManager {
      * what makes a later process able to tell a stalled install from a successful one, and an install
      * nobody can attribute is worse than one that never happened.
      *
-     * @return false when the pending state could not be written and the caller must not fire
+     * @return the attempt stamp the installer must be bound to, or {@code 0} when the pending state
+     *         could not be written and nothing may be dispatched
      */
-    private boolean armAndPersist(String how, int expectedVersionCode) {
+    private long armAndPersist(String how, int expectedVersionCode) {
         armRelaunchAlarm();
-        if (!persistInstallPending()) {
-            return false;
+        long attempt = persistInstallPending();
+        if (attempt == 0L) {
+            return 0L;
         }
         installFiredInThisProcess = true;
         notifyDebug("install: " + how + " (version " + expectedVersionCode + ")");
-        return true;
+        return attempt;
     }
 
     private void fireInstallIntent(UpdateState snapshot) {
         // A person asked for this install, so the dialog is wanted: it is how a bootstrap frame
         // finishes an update, via an OTG keyboard/mouse at the frame. No relaunch alarm here — it
         // used to fire MainActivity back over the pending confirmation 120 s into it.
+        // The stamp is not captured here because nothing can return it: the dialog path has no
+        // observer, and its outcome is decided by the settle window plus the next resume.
         persistInstallPending();
         installFiredInThisProcess = true;
         lastInstallAttempt = "intent";
@@ -2102,11 +2110,21 @@ public class UpdateManager {
         return UpdateState.SOURCE_MANIFEST.equals(stagedSource);
     }
 
-    private boolean persistInstallPending() {
+    /**
+     * Writes the pending state for this dispatch and returns the attempt stamp it just wrote.
+     *
+     * <p>Returns the value rather than a boolean because the caller has to hand <em>this</em> stamp to
+     * the installer and nothing else can identify the attempt: the state the caller is holding was
+     * captured before the dispatch, so its {@code installFiredAtMs} is the previous attempt's — or
+     * zero, which every pending attempt used to match.
+     *
+     * @return the stamp, or {@code 0} when the write failed and nothing may be dispatched
+     */
+    private long persistInstallPending() {
         synchronized (this) {
             UpdateState next = withState(state, UpdateState.State.INSTALL_PENDING, "");
             next.installFiredAtMs = System.currentTimeMillis();
-            return writeState(next);
+            return writeState(next) ? next.installFiredAtMs : 0L;
         }
     }
 
@@ -2365,10 +2383,14 @@ public class UpdateManager {
     private void recordInstallResult(long attempt, String reason) {
         boolean stale = false;
         synchronized (this) {
-            if (attempt != 0L && attempt != state.installFiredAtMs) {
+            if (attempt != state.installFiredAtMs) {
                 // A result for some earlier dispatch. The pending state now belongs to a newer
                 // attempt, whose settle window is the only thing stopping a re-stage from replacing
                 // an APK an installer still has open, so this event gets reported and dropped.
+                // The stamp the dispatch bound its observer to, compared against the pending state as
+                // written. Equality is the only thing that makes this event about <em>this</em>
+                // install, so there is deliberately no "zero matches anything" case: a dispatch that
+                // could not record a stamp does not fire at all.
                 stale = true;
             } else {
                 installFiredInThisProcess = false;
