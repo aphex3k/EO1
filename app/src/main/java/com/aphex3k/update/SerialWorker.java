@@ -232,7 +232,8 @@ public final class SerialWorker {
         try {
             item.body.run();
         } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+            // Consumed, not preserved — see the note in run(). Handing it back would leave the status
+            // set for the loop's next wait(), which is the spin that design avoids.
             failure = e;
         } catch (Throwable t) {
             failure = t;
@@ -277,9 +278,13 @@ public final class SerialWorker {
                         }
                     }
                 } catch (InterruptedException wake) {
-                    // Nothing interrupts this thread on purpose. If something ever does, that is a
-                    // reason to look again at the queue, not a reason to stop draining it.
-                    Thread.currentThread().interrupt();
+                    // Deliberately NOT re-asserted, which is the opposite of the usual advice and the
+                    // reason it is spelled out. A thread that keeps running must not keep the
+                    // interrupt status set: Object.wait() throws immediately while it is, so a single
+                    // preserved interrupt would turn this loop's idle wait into a throw it catches and
+                    // retries — an update worker spinning on a core of a frame that is otherwise
+                    // perfectly healthy, with nothing in the log to say so. Nothing in this app
+                    // interrupts this thread on purpose; if it ever is, that is a wake-up.
                 } catch (Throwable escaped) {
                     report("worker loop", escaped);
                 }

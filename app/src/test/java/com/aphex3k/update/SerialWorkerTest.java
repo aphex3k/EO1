@@ -221,6 +221,29 @@ public class SerialWorkerTest {
         assertEquals("next must still run: one bad task cannot end updates", "next", joined());
     }
 
+    /**
+     * The interrupt status must be consumed, not preserved. A loop that re-asserts it and then keeps
+     * running spends every later idle {@code wait()} throwing immediately — which is a worker spinning
+     * on a core on an otherwise healthy frame, with nothing in the log to say so.
+     */
+    @Test
+    public void anInterruptedTaskLeavesNoInterruptFlagBehind() {
+        SerialWorker w = worker();
+        w.post("check", new SerialWorker.Task() {
+            @Override
+            public void run() throws Exception {
+                throw new InterruptedException("simulated wake-up");
+            }
+        });
+        assertTrue(w.drainOne());
+        assertFalse("drainOne must not leave the interrupt set for the loop's next wait()",
+                Thread.interrupted());
+
+        w.post("next", step("next"));
+        assertTrue(w.drainOne());
+        assertEquals("next", joined());
+    }
+
     @Test
     public void aThrowingFailureSinkStillDoesNotEndTheLoop() {
         SerialWorker w = new SerialWorker(new SerialWorker.Runner() {

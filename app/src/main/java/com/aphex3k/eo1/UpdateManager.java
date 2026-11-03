@@ -810,7 +810,7 @@ public class UpdateManager {
                 }
                 lastInstallAttempt = "headless";
                 try {
-                    fireHeadlessInstall(Uri.fromFile(stagedPublic));
+                    fireHeadlessInstall(Uri.fromFile(stagedPublic), snapshot.installFiredAtMs);
                 } catch (Throwable t) {
                     Log.e(TAG, "installPackage threw", t);
                     setStaged("installPackage-threw: " + t);
@@ -978,13 +978,13 @@ public class UpdateManager {
      * but the device's framework has both at API 19. The proxy implements the real
      * framework interface, so the installer can call back into it.
      */
-    private void fireHeadlessInstall(Uri uri) throws Exception {
+    private void fireHeadlessInstall(Uri uri, long attempt) throws Exception {
         Class<?> observerClass =
                 Class.forName("android.content.pm.PackageManager$PackageInstallObserver");
         Object observer = Proxy.newProxyInstance(
                 context.getClassLoader(),
                 new Class<?>[]{observerClass},
-                installCallbackHandler);
+                new InstallObserver(attempt));
         Method installPackage = PackageManager.class.getMethod(
                 "installPackage", Uri.class, observerClass, String.class);
         installPackage.invoke(context.getPackageManager(), uri, observer, null);
@@ -2247,7 +2247,23 @@ public class UpdateManager {
      * {@code packageInstallFailed(String errorMsg, int userId)} — dispatched by method name
      * so the interface itself is never referenced at compile time.
      */
-    private final InvocationHandler installCallbackHandler = new InvocationHandler() {
+    /**
+     * The install observer, bound to the dispatch that created it.
+     *
+     * <p>One instance per {@code installPackage} call, carrying the {@code installFiredAtMs} of the
+     * attempt it was handed to. Without that, a result that arrives late — after a reset, a fresh
+     * stage and a second dispatch — would be indistinguishable from the second attempt's own result,
+     * and would roll a legitimate {@code INSTALL_PENDING} back to {@code STAGED}, clearing the settle
+     * window that keeps the frame from replacing a file the first installer may still be reading. A
+     * queue orders our own work; it cannot tell two events from the platform apart.
+     */
+    private final class InstallObserver implements InvocationHandler {
+        private final long attempt;
+
+        InstallObserver(long attempt) {
+            this.attempt = attempt;
+        }
+
         @Override
         public Object invoke(Object proxy, Method method, Object[] args) {
             // A stray exception must never escape to the global UncaughtExceptionHandler
@@ -2255,16 +2271,15 @@ public class UpdateManager {
             try {
                 String name = method.getName();
                 if ("packageInstalled".equals(name)) {
-                    onInstalled(observerIntArg(args, 0));
+                    onInstalled(attempt, observerIntArg(args, 0));
                     return null;
                 }
                 if ("packageInstallFailed".equals(name)) {
-                    String errorMsg = observerStringArg(args, 0);
-                    onInstallFailed(errorMsg, observerIntArg(args, 1));
+                    onInstallFailed(attempt, observerStringArg(args, 0), observerIntArg(args, 1));
                     return null;
                 }
                 if ("toString".equals(name)) {
-                    return "UpdateInstallObserver";
+                    return "UpdateInstallObserver/" + attempt;
                 }
                 if ("hashCode".equals(name)) {
                     return System.identityHashCode(proxy);
@@ -2278,7 +2293,7 @@ public class UpdateManager {
                 return null;
             }
         }
-    };
+    }
 
     private static int observerIntArg(Object[] args, int index) {
         return args != null && args.length > index && args[index] instanceof Number
@@ -2298,23 +2313,23 @@ public class UpdateManager {
      * the manager that started the install, so the manager had to. Now the callback's whole job is to
      * put the result on the queue, which any thread may do, and the answer is decided by ordering.
      */
-    private void onInstalled(int userId) {
+    private void onInstalled(final long attempt, int userId) {
         Log.i(TAG, "install observer: packageInstalled (user " + userId + ")");
         worker.post("install result", new SerialWorker.Task() {
             @Override
             public void run() {
-                recordInstallResult("");
+                recordInstallResult(attempt, "");
             }
         });
     }
 
-    private void onInstallFailed(String errorMsg, int userId) {
+    private void onInstallFailed(final long attempt, String errorMsg, int userId) {
         Log.w(TAG, "install observer: packageInstallFailed (user " + userId + "): " + errorMsg);
         final String reason = "install-failed: " + (errorMsg == null ? "" : errorMsg);
         worker.post("install result", new SerialWorker.Task() {
             @Override
             public void run() {
-                recordInstallResult(reason);
+                recordInstallResult(attempt, reason);
             }
         });
     }
@@ -2325,15 +2340,25 @@ public class UpdateManager {
      * because that path handles both states. A result that arrives with nothing pending is a stale
      * one — the settle window already rolled it back — and changing no state is the correct answer.
      */
-    private void recordInstallResult(String reason) {
+    private void recordInstallResult(long attempt, String reason) {
+        boolean stale = false;
         synchronized (this) {
-            installFiredInThisProcess = false;
-            if (state.state != UpdateState.State.INSTALL_PENDING) {
-                return;
+            if (attempt != 0L && attempt != state.installFiredAtMs) {
+                // A result for some earlier dispatch. The pending state now belongs to a newer
+                // attempt, whose settle window is the only thing stopping a re-stage from replacing
+                // an APK an installer still has open, so this event gets reported and dropped.
+                stale = true;
+            } else {
+                installFiredInThisProcess = false;
+                if (state.state == UpdateState.State.INSTALL_PENDING) {
+                    state = withState(state, UpdateState.State.STAGED, reason);
+                    state.installFiredAtMs = 0L;
+                    writeState(state);
+                }
             }
-            state = withState(state, UpdateState.State.STAGED, reason);
-            state.installFiredAtMs = 0L;
-            writeState(state);
+        }
+        if (stale) {
+            notifyDebug("install: a result for an earlier attempt arrived; current attempt untouched");
         }
     }
 
