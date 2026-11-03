@@ -144,6 +144,13 @@ public class MqttManager implements MqttCallbackExtended {
     /** Quiesce given to an intentional disconnect, so a quiet-hours transition cannot stall the UI thread. */
     private static final long DISCONNECT_QUIESCE_MS = 1_000L;
 
+    /**
+     * Ceiling on every synchronous wait Paho does on this client's behalf. Set above {@link #CONNECT_TIMEOUT_S}
+     * so the protocol timeout is the thing that normally fires, and this is only the backstop for a peer that
+     * accepts the socket and says nothing. Paho's own default is infinite.
+     */
+    static final long PROTOCOL_WAIT_MS = (CONNECT_TIMEOUT_S + 5L) * 1000L;
+
     public static String[] PLAY_STATES = {
             PLAYING,
             GROUP_PLAYING,
@@ -168,12 +175,14 @@ public class MqttManager implements MqttCallbackExtended {
     }
 
     /**
-     * Not final: {@link #stop()} force-closes it, because that is the only operation a client in Paho's
-     * backoff timer cannot ignore, and a closed Paho client can never be re-opened. {@link #connect()} builds a
-     * replacement under the same uri and the same stable id when it finds this null.
+     * One client per manager, and it never changes. That is the whole answer to the stale-callback race:
+     * {@link #stop()} ends this object's usefulness, and the caller builds a new manager rather than a new
+     * client, so a callback still in flight from the closed client lands on a manager whose {@code suspended}
+     * is already true and does nothing. It cannot reach — let alone close — whoever replaced it, because from
+     * its point of view it is still the only one there is.
      */
-    private volatile MqttClient client;
-    /** Guards the swap, not the socket — nothing blocking happens inside it. */
+    private final MqttClient client;
+    /** Guards teardown, not the socket — nothing blocking happens inside it. */
     private final Object lifecycle = new Object();
     private volatile boolean suspended;
 
@@ -215,39 +224,31 @@ public class MqttManager implements MqttCallbackExtended {
         // Use no-op logger to avoid MissingResourceException on API 19
         org.eclipse.paho.client.mqttv3.logging.LoggerFactory.setLogger(MqttManager.NoOpLogger.class.getName());
 
-        client = newClient();
-    }
+        client = new MqttClient(uri, clientId, new MemoryPersistence());
 
-    /**
-     * A fresh Paho client for this manager's uri and id. Shared by the constructor and by the resume after a
-     * {@link #stop()}, because force-closing is terminal in Paho and the alternative — leaving a closed object
-     * where a live one is expected — would make every later connect a 32111.
-     */
-    private MqttClient newClient() throws MqttException {
-        MqttClient c = new MqttClient(
-                uri, //URI
-                clientId, //ClientId
-                new MemoryPersistence()); //Persistence
+        // Bounds how long any synchronous Paho call waits for its protocol response. connectionTimeout does
+        // NOT do this: it covers the socket/CONNECT phase, while MqttClient.connect() finishes by waiting on
+        // this field — whose default is -1, i.e. forever (MqttClient.<init> stores 0xffffffffffffffff and
+        // getTimeToWait() hands it straight to waitForCompletion). So a broker that accepts the TCP
+        // connection and never answers CONNACK would hold the frame's main looper indefinitely, from a
+        // resume or a panel wake, which is exactly what KioskWatchdog measures when it escalates. subscribe()
+        // waits on the same field, so this one call bounds the SUBACK too.
+        client.setTimeToWait(PROTOCOL_WAIT_MS);
+
         // MqttCallbackExtended, not MqttCallback: connectComplete is the only place this client can learn that
         // Paho brought the session back, and a clean-session reconnect with no re-subscribe is a frame that
         // reports itself connected while hearing nothing at all.
-        c.setCallback(this);
-        return c;
+        client.setCallback(this);
     }
 
     public void connect(String username, String password) throws MqttException {
-        MqttClient c;
-        synchronized (lifecycle) {
-            // Reaching this method IS the resume signal: the caller has just decided the panel should be
-            // talking to a broker. A client left closed by stop() can never be re-opened, so it is replaced
-            // here rather than repaired.
-            suspended = false;
-            if (client == null) {
-                client = newClient();
-            }
-            c = client;
+        if (suspended) {
+            // A manager that has been stopped is not restarted; it is replaced. Reconnecting a closed Paho
+            // client is not possible (32111), so the only honest thing to do here is refuse and let the
+            // caller's rebuild branch construct a fresh one.
+            throw new MqttException(MqttException.REASON_CODE_CLIENT_CLOSED);
         }
-        if (c.isConnected()) {
+        if (client.isConnected()) {
             return;
         }
         MqttConnectOptions options = buildOptions(username, password);
@@ -270,7 +271,7 @@ public class MqttManager implements MqttCallbackExtended {
             // connectComplete — with reconnect=false for the very first session, confirmed at bytecode —
             // and that is the one place the subscription is issued. Doing it here too would put two
             // SUBSCRIBEs on the wire from two threads for every connect.
-            c.connect(options);
+            client.connect(options);
         } catch (MqttException e) {
             if (isAlreadyOnItsWay(e.getReasonCode())) {
                 // Paho is already doing the thing this call was asking for — connected, connecting, or
@@ -377,9 +378,8 @@ public class MqttManager implements MqttCallbackExtended {
     }
 
     public boolean isConnected() {
-        MqttClient c = client;
         try {
-            return c != null && c.isConnected();
+            return client.isConnected();
         } catch (Throwable t) {
             return false;
         }
@@ -399,18 +399,15 @@ public class MqttManager implements MqttCallbackExtended {
      * <p>So: disconnect when the link is live (that is the one path Paho stops the ladder on), and otherwise
      * <b>force-close the object</b>. {@code ClientComms.close(force)} accepts a DISCONNECTED client, and CLOSED
      * is terminal — every connect path out of it throws 32111 — so a timer that fires later has nothing it is
-     * allowed to do. The client is then dropped and rebuilt on resume, which is why the field is not final.
+     * allowed to do. This manager is finished after that: {@link #connect()} refuses, and the caller builds a
+     * replacement manager rather than reviving this one.
      *
      * <p>Never throws: it is called from a screen-state transition and from {@code onDestroy}.
      */
     public void stop() {
         synchronized (lifecycle) {
             suspended = true;
-            MqttClient c = client;
-            client = null;
-            if (c == null) {
-                return;
-            }
+            final MqttClient c = client;
             try {
                 if (c.isConnected()) {
                     c.disconnect(DISCONNECT_QUIESCE_MS);
@@ -525,16 +522,9 @@ public class MqttManager implements MqttCallbackExtended {
         return options;
     }
 
-    /**
-     * Called only from {@link #connectComplete}, after its {@code suspended} test — which is the single place
-     * that decides whether a session is live. {@code client} is non-null on that path: the constructor sets it
-     * and {@link #connect} rebuilds it after a {@link #stop()}. A second null test here would be a guard that
-     * no test can tell apart from the first.
-     */
     private void subscribe() {
-        MqttClient c = client;
         try {
-            c.subscribe(TOPIC, SUBSCRIBE_QOS);
+            client.subscribe(TOPIC, SUBSCRIBE_QOS);
         } catch (MqttException e) {
             // A subscription the broker refused is reported, not retried: Paho's own ladder will issue it
             // again on the next connectComplete, and a second subscribe for one topic filter is idempotent

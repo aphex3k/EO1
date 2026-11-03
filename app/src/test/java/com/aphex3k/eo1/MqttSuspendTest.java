@@ -94,6 +94,25 @@ public class MqttSuspendTest {
         assertTrue("standing down must not read as a dropped link: " + h.messages, h.messages.isEmpty());
     }
 
+    /**
+     * A stopped manager is replaced, never revived. That is what closes the stale-callback race: if
+     * {@code connect()} could resurrect a closed Paho client, the object a manager holds would change while an
+     * old client's callback was still in flight, and that callback's teardown would land on its successor.
+     */
+    @Test
+    public void aStoppedManagerRefusesToConnectRatherThanRevivingItself() throws Exception {
+        Harness h = new Harness();
+        h.manager.stop();
+        try {
+            h.manager.connect("eos1", "secret");
+            org.junit.Assert.fail("a stopped manager must not attempt a session");
+        } catch (org.eclipse.paho.client.mqttv3.MqttException e) {
+            assertEquals(org.eclipse.paho.client.mqttv3.MqttException.REASON_CODE_CLIENT_CLOSED,
+                    e.getReasonCode());
+        }
+        assertTrue(h.manager.isSuspended());
+    }
+
     @Test
     public void aConnectionLostThatWasNotOursStillReachesTheLog() throws Exception {
         Harness h = new Harness();

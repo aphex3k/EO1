@@ -67,6 +67,26 @@ public class MqttOptionsTest {
                 MqttException.REASON_CODE_INVALID_CLIENT_ID));
     }
 
+    /**
+     * The hazard, stated against Paho rather than against this app: {@code MqttClient} waits on
+     * {@code getTimeToWait()} for every synchronous call, and its constructor stores {@code -1}.
+     * {@code setConnectionTimeout} does not bound that wait, so a client built without an explicit
+     * {@code setTimeToWait} blocks forever on a peer that accepts the socket and never answers. This pins the
+     * default so the fix cannot be described away, and pins the value this app sets. It cannot read the field
+     * on the app's own client without a test-only seam, so that half is on the hardware checklist.
+     */
+    @Test
+    public void pahoDefaultsToAnInfiniteWaitAndThisAppDoesNot() throws Exception {
+        org.eclipse.paho.client.mqttv3.MqttClient raw =
+                new org.eclipse.paho.client.mqttv3.MqttClient("tcp://127.0.0.1:1883", "eo1-defaultprobe01",
+                        new org.eclipse.paho.client.mqttv3.persist.MemoryPersistence());
+        assertEquals("if Paho ever changes this default, the reasoning below it must be revisited",
+                -1L, raw.getTimeToWait());
+        assertTrue(MqttManager.PROTOCOL_WAIT_MS > 0L);
+        assertTrue(MqttManager.PROTOCOL_WAIT_MS >= MqttManager.CONNECT_TIMEOUT_S * 1000L);
+        raw.close();   // the constructor builds a ClientComms, and this suite should not accumulate them
+    }
+
     @Test
     public void subscriptionIsQosZero() {
         // QoS 1 asked the broker to hold a message until this client acknowledged it, and the acknowledgment

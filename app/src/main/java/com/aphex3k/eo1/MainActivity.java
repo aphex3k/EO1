@@ -938,9 +938,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return;
             }
             // Either no client exists — because the host was cleared and this is its restoration — or the
-            // operator pointed at a different broker. The URI is fixed inside Paho at construction, so
-            // neither case can be served by connecting the object already in hand.
-            if (this.mqttManager == null || !wanted.equals(mqttBrokerUri)) {
+            // operator pointed at a different broker, or the manager in hand has been stopped. The URI is
+            // fixed inside Paho at construction and a closed Paho client cannot be re-opened, so none of the
+            // three can be served by connecting the object already in hand: a stopped manager is replaced,
+            // never revived, which is also what keeps a callback still in flight from the closed one from
+            // ever reaching the client that took its place.
+            if (this.mqttManager == null || this.mqttManager.isSuspended() || !wanted.equals(mqttBrokerUri)) {
                 if (this.mqttManager != null) {
                     this.mqttManager.stop();
                     this.mqttManager = null;
