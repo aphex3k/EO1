@@ -158,6 +158,30 @@ public class MqttPoisonMessageTest {
                 !m.describe().contains("heard=never"));
     }
 
+    /**
+     * The reason the shape test scans rather than calls {@code String.trim()}: a padded state document has to
+     * still draw a banner. trim() would have handled that but allocates a copy, and on a heap this size an
+     * OutOfMemoryError raised outside the guards would make Paho close the connection over whitespace.
+     */
+    @Test
+    public void aPaddedStatePayloadStillDrawsABanner() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        Recorder r = new Recorder();
+        MqttManager m = manager(r, reports);
+        deliver(m, "  {\"transportState\":\"PLAYING\",\"currentTrack\":{\"title\":\"x\"}}\t\n");
+        assertEquals("padding must not cost the banner", 1, r.started.size());
+        assertTrue(reports.isEmpty());
+    }
+
+    @Test
+    public void whitespaceAloneIsNotAStateDocumentAndIsNotLogged() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        MqttManager m = manager(new Recorder(), reports);
+        deliver(m, "   ");
+        deliver(m, "\n\t ");
+        assertTrue("blank is nothing gone wrong: " + reports, reports.isEmpty());
+    }
+
     @Test
     public void connectCompleteNeverThrowsEvenWhenTheSubscribeFails() throws Exception {
         List<String> reports = new ArrayList<String>();

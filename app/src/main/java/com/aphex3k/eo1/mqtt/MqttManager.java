@@ -347,36 +347,50 @@ public class MqttManager implements MqttCallbackExtended {
         // Cannot throw. Not "should not" — see the class comment: a throw from this method is a disconnect as
         // far as the broker is concerned. Everything that can go wrong with a payload goes wrong in here.
         String payload = "";
+        int body = 0;
         try {
             byte[] raw = message.getPayload();
             payload = raw == null ? "" : new String(raw);
             // Stamped before anything decides whether this body is ours to read. lastMessageAtMs is what
             // answers the one question /state cannot otherwise resolve — a client that is connected and deaf,
             // which is the same failure this class shipped to fix — and it is answered by delivery, not by
-            // by successful parsing.
+            // successful parsing.
             lastMessageAtMs = System.currentTimeMillis();
+
+            // Anything that is not a JSON object is not a coordinator state payload, and nothing has gone
+            // wrong. `sonos/+` is one wildcard and the coordinator publishes other things underneath it:
+            // measured on a live frame on 2026-11-03, `sonos/connected` carries a bare number, which Gson
+            // answers with "Expected BEGIN_OBJECT but was NUMBER" — and up to this PR that became one severe
+            // report per publish, in files/eo1-app.log, the durable record every other failure here is meant
+            // to be readable from and which logcat's ~13 minutes cannot substitute for. An empty body is the
+            // shape a retained state-clear arrives as, and it is why this method used to disconnect.
+            //
+            // Filtered by shape rather than by topic name on purpose: naming `sonos/connected` would mean
+            // the next subtopic the coordinator invents re-opens the same log.
+            //
+            // Scanned instead of trimmed. `String.trim()` returns a new String whenever the payload has
+            // leading or trailing whitespace, and on a heap this size that allocation is a reachable
+            // OutOfMemoryError — which, outside a guard, would escape messageArrived and make Paho close the
+            // connection for a message that was merely padded. length(), charAt() and isWhitespace() allocate
+            // nothing and cannot throw for an index already known to be in range, but the test is kept inside
+            // the guard regardless: the rule for this method is that nothing in it may throw, not that some
+            // statements are expected not to.
+            final int n = payload.length();
+            while (body < n && Character.isWhitespace(payload.charAt(body))) {
+                body++;
+            }
+            if (body == n || payload.charAt(body) != '{') {
+                return;
+            }
         } catch (Throwable t) {
             lastError = "a delivery on " + topic + " could not even be read as bytes: " + t;
             report("dropped a " + topic + " message it could not read (" + t + ") — staying connected", true);
             return;
         }
 
-        // Anything that is not a JSON object is not a coordinator state payload, and nothing has gone wrong.
-        // `sonos/+` is one wildcard and the coordinator publishes other things underneath it: measured on a
-        // live frame on 2026-11-03, `sonos/connected` carries a bare number, which Gson answers with
-        // "Expected BEGIN_OBJECT but was NUMBER". Up to this line that became one severe report per
-        // publish, in files/eo1-app.log — the durable record every other failure in this app is supposed to
-        // be readable from, and which logcat's ~13 minutes cannot substitute for. A topic that will never
-        // hold a Payload is filtered by shape, not by name: naming it would mean the next subtopic the
-        // coordinator invents re-opens the same log.
-        String trimmed = payload.trim();
-        if (trimmed.isEmpty() || trimmed.charAt(0) != '{') {
-            return;
-        }
-
         Payload payloadObj;
         try {
-            payloadObj = gson.fromJson(trimmed, Payload.class);
+            payloadObj = gson.fromJson(payload.substring(body), Payload.class);
         } catch (Throwable t) {
             // An object that would not become a Payload is different: something on the wire claims to be a
             // state document and is not one this class can read. Worth the severe line.
