@@ -10,6 +10,8 @@ import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.Charset;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Tests {@link ApkManifestInfo} against hand-built binary-XML (AXML) fixtures: the file
@@ -104,18 +106,53 @@ public class ApkManifestInfoTest {
         assertEquals("1.7.0", info.versionName);
     }
 
+    /**
+     * Exercises the parser against a real aapt-produced APK when a local build is present; in CI
+     * (no build artifacts) the fixtures above cover the parser instead.
+     *
+     * <p>Compared against the APK's own {@code output-metadata.json}, which the packaging task
+     * writes beside it, and NOT against {@code BuildConfig} — that version of this test asserted the
+     * parser agreed with <em>whichever build last touched that path</em>, so any parameterized
+     * {@code assembleDebug -PVERSION_CODE=N} (which is exactly how {@code publish-update.sh} builds a
+     * release, and how the self-update path is tested on hardware) left the debug suite failing on a
+     * file it did not produce. Two products of one packaging run disagreeing is the real bug this
+     * can catch; a stale artifact is not a bug in the parser.
+     */
     @Test
-    public void realDebugApk_roundTrip() {
-        // Exercises the parser against a real aapt-produced APK when a local build is
-        // present; in CI (no build artifacts) the fixtures above cover the parser instead.
-        File apk = new File("build/outputs/apk/debug/app-debug.apk");
-        if (!apk.isFile()) {
+    public void realDebugApk_roundTrip() throws Exception {
+        File dir = new File("build/outputs/apk/debug");
+        File apk = new File(dir, "app-debug.apk");
+        File metadata = new File(dir, "output-metadata.json");
+        if (!apk.isFile() || !metadata.isFile()) {
             return;
         }
+        String json = slurp(metadata);
+        Matcher code = Pattern.compile("\"versionCode\":\\s*(\\d+)").matcher(json);
+        Matcher name = Pattern.compile("\"versionName\":\\s*\"([^\"]*)\"").matcher(json);
         ApkManifestInfo info = ApkManifestInfo.read(apk);
         assertNotNull(info);
-        assertEquals(Integer.valueOf(com.aphex3k.eo1.BuildConfig.VERSION_CODE), info.versionCode);
-        assertEquals(com.aphex3k.eo1.BuildConfig.VERSION_NAME, info.versionName);
+        if (code.find()) {
+            assertEquals("parser disagrees with aapt about " + apk.getName(),
+                    Integer.valueOf(code.group(1)), info.versionCode);
+        }
+        if (name.find()) {
+            assertEquals(name.group(1), info.versionName);
+        }
+    }
+
+    private static String slurp(File f) throws java.io.IOException {
+        StringBuilder sb = new StringBuilder();
+        java.io.Reader r = new java.io.FileReader(f);
+        try {
+            char[] buf = new char[4096];
+            int n;
+            while ((n = r.read(buf)) != -1) {
+                sb.append(buf, 0, n);
+            }
+        } finally {
+            r.close();
+        }
+        return sb.toString();
     }
 
     // ---------------------------------------------------------------- failure paths

@@ -453,7 +453,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // be the whole interval away: a frame that comes back dim is a frame that looks broken.
         applyCurrentBrightness();
         this.eventManager = new EventManager(this, capabilities);
-        this.updateManager = new UpdateManager(this, this, this.settingsManager);
         this.mediaManager = new MediaManager(this, this.settingsManager, this);
         // Before the first pool build, so the orientation gate is armed for the asset this frame
         // displays first rather than dark until the next tick.
@@ -468,6 +467,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // Only reachable if Eo1Application#onCreate itself failed.
             this.appLogger = new AppLogger(this);
         }
+        // Loaded before the update manager is acquired, not after. acquire() hands this Activity's
+        // SettingsManager to a worker that survived the recreation, and getConfiguration() is a bare
+        // field with no lazy read: any check already queued would otherwise see an empty
+        // updateManifestUrl, settle as `manifest-url-not-configured`, and — because that path stamps
+        // lastCheckedMs like any other — advance the check clock without ever contacting the host. A
+        // frame would then silently skip an interval after every rotation of the screen.
+        settingsManager.loadConfiguration();
+        // Acquired after the logger, not first among the managers: building the update manager
+        // reconciles the saved state against the staged files, and that work reports several lines.
+        // Before this point those lines had nowhere durable to go — the manager's own listener path
+        // writes through this activity's logger, which did not exist yet.
+        this.updateManager = UpdateManager.acquire(this, this, this.settingsManager);
         // Said out loud, and written to the log that survives, because this is the one fact about a
         // frame's video path that cannot be recovered afterwards: logcat on a device that has been up for
         // hours is gone, and a panel that lost its preferred engine looks from outside exactly like a
@@ -516,10 +527,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.webServer = new WebServer(this);
         this.webServer.start();
 
-        // Load config before the web server can answer /state and before startup update
-        // reconciliation; configureMqttManager() no longer owns the load.
-        settingsManager.loadConfiguration();
-        updateManager.reconcileOnStartup();
+        // The configuration was loaded above, before UpdateManager.acquire() — and so, incidentally,
+        // before the web server started below, which is the ordering this comment always claimed.
+        // configureMqttManager() no longer owns the load, and the update manager's startup
+        // reconciliation happens once inside acquire(), before it can be handed any work.
 
         pendingIntent = PendingIntent.getActivity(
                 getBaseContext(),
@@ -882,6 +893,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (this.kioskWatchdog != null) {
             this.kioskWatchdog.stop();
         }
+        // The update manager is not stopped, stopped only un-listened-to: it is the process's, and its
+        // worker outlives this Activity on purpose, because a download or an install does not pause
+        // politely for a configuration change. Everything it reports while nobody is attached still
+        // reaches files/eo1-app.log.
+        UpdateManager.detach(this);
         if (this.brightnessManager != null) {
             // Recreation would otherwise leave the old light-sensor listener firing for an Activity
             // that no longer exists.
