@@ -77,6 +77,9 @@ import com.google.gson.JsonObject;
 import com.google.gson.JsonPrimitive;
 import com.google.gson.stream.MalformedJsonException;
 
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttException;
+
 import java.io.File;
 import java.lang.ref.WeakReference;
 import java.text.DateFormat;
@@ -94,6 +97,9 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.TimeZone;
 
 import okhttp3.HttpUrl;
@@ -569,15 +575,42 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (mqttProtocol == null || mqttProtocol.isEmpty()) mqttProtocol = "tcp";
             if (mqttPort <= 0) mqttPort = 1883;
 
-            if (mqttHost != null && !mqttHost.isEmpty()) {
-
+            if (mqttHost == null || mqttHost.isEmpty()) {
+                // MQTT stopped being configured — through the options dialog or a /config/import that dropped
+                // the host. Let the live client go rather than keep dialling a broker nobody named. Same
+                // helper as every other teardown, because closeQuietly() blocks and this runs on the caller's
+                // thread; connectMqttIfConfigured() already retired the manager before calling through here,
+                // so in that path this is a no-op.
+                retireMqttManager();
+                mqttBrokerUri = null;
+            } else {
                 String mqttBroker = String.format("%s://%s:%d", mqttProtocol, mqttHost, mqttPort);
 
-                this.mqttManager = new MqttManager(mqttBroker, new PlaybackListener() {
+                // Stable and unique per frame, so the broker log names the box instead of minting a new
+                // pahoXXXX on every process start. An empty answer means the preferences store would not say,
+                // and Paho rejects an empty id outright — so fall back to a generated one, which degrades to
+                // "this frame is anonymous" rather than to "MQTT cannot start".
+                String clientId = settingsManager.mqttClientId();
+                if (clientId.isEmpty()) {
+                    clientId = MqttClient.generateClientId();
+                    debugInformationProvided(new DebugInformation("mqtt",
+                            "no stable client id (settings store unreadable); using " + clientId));
+                }
+                mqttBrokerUri = mqttBroker;
+
+                this.mqttManager = new MqttManager(mqttBroker, clientId, new PlaybackListener() {
 
                     @Override
                     public void onPlaybackStarted(Payload payload) {
                         runOnUiThread(() -> {
+                            // A transportState of PLAYING with no track is a payload this coordinator can
+                            // legitimately send, and onPlaybackStopped below already says so. Without the same
+                            // test here the read throws on the UI thread, which reaches CrashReporter and
+                            // System.exit(2) — so a broker message could reboot a frame, which AGENTS.md says
+                            // this feature may never do.
+                            if (payload == null || payload.currentTrack == null) {
+                                return;
+                            }
                             var duration = payload.currentTrack.duration;
                             var title = payload.currentTrack.title;
                             var artist = payload.currentTrack.artist;
@@ -639,7 +672,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                             var trackId = groupName + "_" + title + "_" + artist + "_" + duration; // crude unique id
 
                             // Cancel previous timer if track changed
-                            if (bannerFadeRunnable != null && currentTrackId.equals(trackId)) {
+                            // trackId.equals(), not the other way round: currentTrackId is null until the first
+                            // PLAYING banner, and a coordinator that sends a STOP before anything has ever
+                            // played threw here on the UI thread — the same System.exit(2) path the guard above
+                            // closes. trackId is a concatenation, so it is never null.
+                            if (bannerFadeRunnable != null && trackId.equals(currentTrackId)) {
                                 bannerHandler.removeCallbacks(bannerFadeRunnable);
                                 bannerHandler.post(bannerFadeRunnable);
                             }
@@ -647,13 +684,28 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     }
 
                     // `this` for the TLS context: an ssl:// broker builds its own, and must make the
-                    // same trust decision as every other connection on the frame.
-                }, this);
+                    // same trust decision as every other connection on the frame. The Reporter is this
+                    // activity too, because AppLogger is what writes files/eo1-app.log — and every event
+                    // Paho delivers lands there rather than on stdout, which reaches neither /logs nor the
+                    // buffer CrashSources scrapes.
+                }, this, (message, severe) -> reportMqttEvent(message, severe));
             }
         }
         catch (Exception e) {
             handleException(e);
         }
+    }
+
+    /** The broker address {@link #configureMqttManager()} dialled, to tell a re-apply from a rebuild. */
+    @Nullable private String mqttBrokerUri;
+
+    private void reportMqttEvent(String message, boolean severe) {
+        if (severe) {
+            Log.w("MQTT", message);
+        } else {
+            Log.i("MQTT", message);
+        }
+        debugInformationProvided(new DebugInformation("mqtt", message));
     }
 
     /**
@@ -821,8 +873,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         nextRotationAtMs = System.currentTimeMillis();
         timerStopped = false;
         setupQuietHours();
+        // Owns MQTT's lifetime by way of applyScheduledScreenState, which is the one place that decides whether
+        // this frame should be showing anything at all. connectMqttIfConfigured() used to be called here
+        // instead, on the cold-start branch only — which meant a resume never reached it, and the
+        // reconnect this method implies stopped happening the first time the Activity was paused.
         applyScheduledScreenState();
-        connectMqttIfConfigured();
     }
 
     /**
@@ -844,20 +899,216 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
     }
 
-    private void connectMqttIfConfigured() {
-        if (this.mqttManager == null) {
+    /**
+     * Whether the broker link should exist right now: MQTT follows the <em>panel</em>, not the Activity.
+     *
+     * <p>The distinction matters here because a quiet-hours window is not an {@code onPause} — {@link
+     * #turnScreenOff()} hides views and releases the display hold without pausing anything, and it is the OS
+     * putting the panel to sleep afterwards that eventually does. Gating on the lifecycle instead of on this
+     * value gave the feature a lifetime nobody chose: {@code onPause} closed the session, and the resume path
+     * that reopens the rotation returns before it ever reaches a connect.
+     *
+     * <p>Called from {@link #turnScreenOn()} and {@link #turnScreenOff()} rather than from the schedule, because
+     * those two are where every panel transition converges — scheduled, toggled, power-button-reconciled and
+     * brightness-adjusted alike.
+     */
+    private void updateMqttForScreenState() {
+        if (brightnessManager == null) {
             return;
         }
+        if (brightnessManager.getShouldTheScreenBeOn()) {
+            // Deliberately no null test on mqttManager here: a manager retired for quiet hours or for a
+            // cleared host has to be rebuilt by the code below, and returning early would leave the feature
+            // off until the Activity happened to be recreated.
+            mqttHeldForPanel = false;
+            connectMqttIfConfigured();
+        } else {
+            // Reported as the reason a frame says "no client", so "quiet hours" and "never configured" are
+            // not the same sentence in /state.
+            mqttHeldForPanel = true;
+            retireMqttManager();
+        }
+    }
+
+    /**
+     * Hands over the current manager: the field is cleared first, and only then is its teardown queued.
+     *
+     * <p>The order is the whole point. A queued {@code stop()} runs whenever the worker gets to it, so if the
+     * field still named that manager, an off→on transition that lands before the worker drains would consult
+     * a manager that is still unsuspended and still connected — skip the connect as unnecessary, then get
+     * suspended by the stop behind it. MQTT would sit held with the panel lit until something else
+     * reconciled it. Retiring the reference first means that wake sees no manager and builds a fresh one,
+     * whose dial queues behind the stop rather than racing it.
+     *
+     * <p>{@code stop()} and not {@code disconnect()}: with automaticReconnect on, a client whose link already
+     * dropped is sitting in Paho's backoff timer in the DISCONNECTED state, where {@code disconnect()} throws
+     * 32101 without cancelling the timer.
+     */
+    private void retireMqttManager() {
+        final MqttManager retiring = this.mqttManager;
+        this.mqttManager = null;
+        if (retiring != null) {
+            mqttExec(new Runnable() {
+                @Override public void run() {
+                    retiring.stop();
+                }
+            });
+        }
+    }
+
+    private volatile boolean mqttHeldForPanel;
+
+    /**
+     * One serial worker for every blocking Paho call.
+     *
+     * <p>Two reasons, and the second is the one that made this necessary. {@code connect()} and
+     * {@code stop()} block — for up to {@code connectionTimeout} and then {@code timeToWait} — and this is
+     * reached from key dispatch: {@code EventManager.onKeyDown} → {@link #adjustMinimumBrightness(String)} →
+     * {@link #turnScreenOn()} → here. A broker that is merely unreachable would otherwise stall the input
+     * thread past Android's ~5 s dispatch timeout and get the process ANR'd, which is precisely the signal
+     * {@code KioskWatchdog} escalates on, over a now-playing banner. A single serial queue rather than a
+     * thread-per-call also keeps the order: a dial queued before a quiet-hours stop still finishes before it,
+     * so the panel going dark cannot be overtaken by its own connect.
+     *
+     * <p>Every task is wrapped against {@code Throwable}. A throw on this thread would reach the one global
+     * {@code UncaughtExceptionHandler}, which calls {@code System.exit(2)} — so a background MQTT worker is
+     * the last place in the app that may be allowed to do that.
+     */
+    private void mqttExec(Runnable job) {
+        ExecutorService executor = mqttWorker;
+        if (executor == null) {
+            synchronized (this) {
+                executor = mqttWorker;
+                if (executor == null) {
+                    executor = Executors.newSingleThreadExecutor(new ThreadFactory() {
+                        @Override
+                        public Thread newThread(Runnable r) {
+                            Thread t = new Thread(r, "mqtt");
+                            // Daemon, because a hung connect must never be the reason a dying process
+                            // outlives the Activity that started it.
+                            t.setDaemon(true);
+                            t.setPriority(Thread.MIN_PRIORITY + 1);
+                            return t;
+                        }
+                    });
+                    mqttWorker = executor;
+                }
+            }
+        }
+        final Runnable guarded = new GuardedMqttTask(job);
         try {
-            String mqttUser = settingsManager.getConfiguration().mqttUser;
-            String mqttPassword = settingsManager.getConfiguration().mqttPassword;
+            executor.execute(guarded);
+        } catch (Throwable rejected) {
+            // Shut down already, after onDestroy queued the final stop. Run it here rather than lose it:
+            // a client left unclosed would keep reconnecting under this frame's id.
+            guarded.run();
+        }
+    }
+
+    /** Runs one MQTT job and makes sure nothing it throws can reach the global handler. */
+    private final class GuardedMqttTask implements Runnable {
+        private final Runnable delegate;
+
+        GuardedMqttTask(Runnable delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void run() {
+            try {
+                delegate.run();
+            } catch (Throwable t) {
+                // An MqttException from connect() has already been reported by MqttManager itself.
+                reportMqttEvent("MQTT worker task threw: " + t, true);
+            }
+        }
+    }
+
+    @Nullable private volatile ExecutorService mqttWorker;
+
+    private void connectMqttIfConfigured() {
+        try {
+            Configuration config = settingsManager.getConfiguration();
+            String mqttUser = config.mqttUser;
+            String mqttPassword = config.mqttPassword;
             if (mqttPassword == null) {
                 mqttPassword = "";
             }
-            this.mqttManager.connect(mqttUser, mqttPassword);
+            // A broker the operator changed is not a client this method can retarget: the URI is fixed at
+            // construction, inside Paho. Rebuild it — closing the old client first, because two live clients
+            // under one id is precisely the mutual kick a stable id makes visible in the broker log.
+            String wanted = mqttBrokerUriFromConfig();
+            if (wanted == null) {
+                // MQTT stopped being configured while this client was live. Checking for an address change
+                // first would miss it — there is no address to differ from — and leave the frame dialling a
+                // broker the operator removed, so unset is handled on its own terms.
+                retireMqttManager();
+                mqttBrokerUri = null;
+                return;
+            }
+            // Either no client exists — because the host was cleared and this is its restoration — or the
+            // operator pointed at a different broker, or the manager in hand has been stopped. The URI is
+            // fixed inside Paho at construction and a closed Paho client cannot be re-opened, so none of the
+            // three can be served by connecting the object already in hand: a stopped manager is replaced,
+            // never revived, which is also what keeps a callback still in flight from the closed one from
+            // ever reaching the client that took its place.
+            if (this.mqttManager == null || this.mqttManager.isSuspended() || !wanted.equals(mqttBrokerUri)) {
+                // Queued, not inline: stop() blocks on a quiesce, and this whole method is reachable from key
+                // dispatch by way of turnScreenOn.
+                retireMqttManager();
+                configureMqttManager();
+                if (this.mqttManager == null) {
+                    return;
+                }
+            }
+            // Guard rather than let Paho answer 32100. A settings save reaches here through
+            // settingsChanged() -> startCoreLoop()'s cold-start branch, and did so before this line existed,
+            // which threw into handleException and left the existing session alone.
+            if (!this.mqttManager.isConnected()) {
+                final MqttManager target = this.mqttManager;
+                final String user = mqttUser;
+                final String password = mqttPassword;
+                mqttExec(new Runnable() {
+                    @Override public void run() {
+                        if (target.isSuspended()) {
+                            return;   // the panel went dark while this was queued
+                        }
+                        try {
+                            target.connect(user, password);
+                        } catch (MqttException e) {
+                            // A manager replaced between queueing and running is not a failure: it means the
+                            // panel toggled or the config changed, and the replacement's own dial is queued
+                            // behind this one. Anything else MqttManager has already reported.
+                            if (e.getReasonCode() != MqttException.REASON_CODE_CLIENT_CLOSED) {
+                                Log.i(TAG, "deferred MQTT connect ended early: " + e);
+                            }
+                        }
+                    }
+                });
+            }
         } catch (Exception e) {
             handleException(e);
         }
+    }
+
+    /** The URI the current configuration asks for, in the same form {@link #configureMqttManager()} builds. */
+    @Nullable
+    private String mqttBrokerUriFromConfig() {
+        // Null-safe because /state reaches this through mqttStateJson, and a collector that throws abandons
+        // the section it is in — for a frame that has not finished starting, "no mqtt block" beats no report.
+        if (settingsManager == null) {
+            return null;
+        }
+        Configuration config = settingsManager.getConfiguration();
+        if (config == null || config.mqttHost == null || config.mqttHost.isEmpty()) {
+            return null;
+        }
+        String protocol = config.mqttProtocol;
+        if (protocol == null || protocol.isEmpty()) {
+            protocol = "tcp";
+        }
+        int port = config.mqttPort > 0 ? config.mqttPort : 1883;
+        return String.format("%s://%s:%d", protocol, config.mqttHost, port);
     }
 
     @Override
@@ -877,14 +1128,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         this.quietHoursTimer.cancel();
         this.quietHoursTimer.purge();
         this.connectionManager.unregisterListener(this);
-        try {
-            if (this.mqttManager != null) {
-                this.mqttManager.disconnect();
-            }
-        }
-        catch (Exception e) {
-            handleException(e);
-        }
+        // No MQTT here. This call used to close the broker session on every pause — including the pause the
+        // OS delivers when a released display hold lets the panel sleep, which is what a quiet-hour onset
+        // turns into — and nothing on the resume path could open it again. What owns that connection now is
+        // applyScheduledScreenState, which speaks in the same terms the schedule does.
         super.onPause();
     }
 
@@ -902,6 +1149,33 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // Recreation would otherwise leave the old light-sensor listener firing for an Activity
             // that no longer exists.
             this.brightnessManager.shutdown();
+        }
+        if (this.mqttManager != null) {
+            // Same reasoning, and it became load-bearing the moment Paho started reconnecting by itself:
+            // nothing in this repo ever called close(), so every recreation abandoned a live client and its
+            // threads — and an abandoned client that now reconnects on its own shows up under this frame's
+            // stable id and makes the broker close the successor's session. Closing is also the only way to
+            // release the MemoryPersistence those threads hold.
+            //
+            // Queued rather than called inline: shutdown() lets already-submitted work finish, so a dial still
+            // on the worker runs before this stop instead of after it. Calling closeQuietly() here directly
+            // would let that queued connect land afterwards and leave a reconnecting client with no owner.
+            final MqttManager dying = this.mqttManager;
+            this.mqttManager = null;
+            mqttExec(new Runnable() {
+                @Override public void run() {
+                    dying.closeQuietly();
+                }
+            });
+        }
+        // Outside the manager guard, and after anything queued above. A frame whose host had already been
+        // cleared reaches onDestroy with mqttManager null, and shutting the worker down only inside that
+        // test would leave the idle thread alive for the rest of the process on every recreation.
+        synchronized (this) {
+            if (mqttWorker != null) {
+                mqttWorker.shutdown();
+                mqttWorker = null;
+            }
         }
         // And the same for the display: this instance's window is going away with whatever flags it
         // holds, while the instance replacing it builds a fresh PhoneWindow that carries none. Held
@@ -1123,6 +1397,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void turnScreenOff() {
         cancelVideoWatchdog();
         releaseDisplayHold();
+        // Reconciled here rather than in applyScheduledScreenState, because this and turnScreenOn are the
+        // chokepoint every path that changes the panel goes through — the schedule, the web and button
+        // toggle, the power-button reconcile, and the brightness adjust. Gated on the scheduled path alone,
+        // a frame whose quiet hours had closed the broker link would stay deaf after a Brightness+ woke it.
+        updateMqttForScreenState();
 
         videoPlayer.setVisibility(View.INVISIBLE);
         imageView.setVisibility(View.INVISIBLE);
@@ -1150,6 +1429,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // along with everything else, so the deadline resumes only once the panel can paint again.
         resumeVideoPaintPollIfPending();
         applyCurrentBrightness();
+        // The resume half of the pairing in turnScreenOff: this is how a frame that closed its broker link
+        // for quiet hours gets it back after a wake that never passed through applyScheduledScreenState.
+        updateMqttForScreenState();
     }
 
     @Override
@@ -2756,6 +3038,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 .append('\n');
         sb.append("active video        : path=").append(activeVideoPath)
                 .append(" stage=").append(activeVideoStage).append('\n');
+        // One line for the broker link, in the record that outlives logcat. "connected=false" and "connected
+        // but no message for hours" are different diagnoses, and before this class reported into AppLogger
+        // neither was recoverable at all — the events went to stdout, into a buffer CrashSources never reads.
+        // Read once. mqttManager is volatile and retireMqttManager() clears it from another thread, so the
+        // null test and the call must not be two reads of the field: between them the manager can go away and
+        // describe() throws NPE on the diagnostics worker, where DiagnosticsReport replaces the section with
+        // a note that something failed — losing the whole liveness block, not just this line.
+        MqttManager liveManager = mqttManager;
+        sb.append("mqtt                : ")
+                .append(liveManager == null
+                        ? (mqttHeldForPanel ? "held (panel off)" : "no client")
+                        : liveManager.describe())
+                .append('\n');
         if (mediaManager != null) {
             MediaAsset current = mediaManager.getCurrentAsset();
             sb.append("pool                : keys=").append(mediaManager.poolKeyCount())
@@ -2843,6 +3138,30 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /** The watchdog's view of itself, for {@code /state}. */
+    /**
+     * The {@code mqtt} section of {@code /state}. It exists because everything this feature can report about
+     * itself used to be a {@code config.mqttHost} echo — what was <em>set</em>, never what was <em>dialled</em>
+     * or <em>live</em> — and the failure it ships to answer is exactly the one that distinction hides: a
+     * client that is connected and deaf, which a host name cannot tell apart from a session holding.
+     *
+     * <p>No credential appears here, and the URI is host and port only.
+     */
+    private JsonObject mqttStateJson() {
+        JsonObject o = new JsonObject();
+        MqttManager manager = this.mqttManager;
+        if (manager == null) {
+            o.addProperty("configured", mqttBrokerUriFromConfig() != null);
+            o.addProperty("connected", false);
+            o.addProperty("heldForPanel", mqttHeldForPanel);
+            o.addProperty("note", mqttHeldForPanel
+                    ? "held for quiet hours" : "no client for this configuration");
+            return o;
+        }
+        o.addProperty("configured", true);
+        o.add("client", manager.stateJson());
+        return o;
+    }
+
     private JsonObject watchdogStateJson() {
         JsonObject o = new JsonObject();
         long stale = kioskWatchdog != null ? kioskWatchdog.staleMsNow() : 0L;
@@ -3751,6 +4070,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.add("input", input);
 
         o.add("update", updateManager.stateJson());
+        o.add("mqtt", mqttStateJson());
         o.add("watchdog", watchdogStateJson());
         o.add("crash", crashBlockJson());
         o.add("trust", trustBlockJson());

@@ -361,6 +361,87 @@ public class SettingsManager {
         }
     }
 
+    /**
+     * SharedPreferences key for this frame's MQTT client id. Per-device state, so — like {@code device_name}
+     * and {@code min_brightness_step} — never part of {@code configuration.json} and never exported: an id that
+     * travelled to another frame through {@code /config/import} would put two boxes on one broker under one
+     * client id, and MQTT answers that by closing the older connection. Two frames pointed at the same broker
+     * would then kick each other off forever, which looks from the server side exactly like the bug this field
+     * exists to make readable.
+     */
+    private static final String PREF_MQTT_CLIENT_ID = "mqtt_client_id";
+    /**
+     * The longest client id MQTT 3.1.1 guarantees a broker will accept, and the reason the composed id below is
+     * checked rather than trusted.
+     */
+    static final int MQTT_CLIENT_ID_MAX_BYTES = 23;
+
+    /**
+     * This frame's permanent MQTT identity: {@code "eo1-"} plus 16 hex characters, 20 bytes, minted once with
+     * {@link SecureRandom} and re-read on every call so a broker log says which box connected instead of
+     * presenting a fresh {@code pahoXXXX} every time the app starts.
+     *
+     * <p>Persisted with {@code commit()}, not {@code apply()} — the same reason {@link
+     * #setMinimumBrightnessStep(int)} gives: a frame is routinely power-cycled moments after it writes, and an
+     * id that never reached disk comes back on the next boot as a <em>second</em> freshly minted value. With a
+     * generated id that is merely ugly; with a persisted one it means two frames restored from the same backup
+     * can end up sharing it, so the write has to be durable to be worth anything.
+     *
+     * @return the id, or {@code ""} when the store cannot be reached. Callers must fall back to a per-object
+     *         generated id rather than passing empty to Paho, which rejects it — "this frame is anonymous" is a
+     *         degraded answer, "MQTT cannot start" is not.
+     */
+    public synchronized String mqttClientId() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return "";
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs == null) {
+                return "";
+            }
+            String id = prefs.getString(PREF_MQTT_CLIENT_ID, "");
+            if (isClientIdSafe(id)) {
+                return id;
+            }
+            // Absent, or something out of band wrote a value Paho could not send. Re-mint rather than
+            // propagate it, and say so once.
+            if (!id.isEmpty()) {
+                Log.w(TAG, "stored MQTT client id is not usable, minting a new one: " + id);
+            }
+            id = "eo1-" + generateToken().substring(0, 16);
+            if (!isClientIdSafe(id)) {
+                return "";
+            }
+            if (!prefs.edit().putString(PREF_MQTT_CLIENT_ID, id).commit()) {
+                Log.e(TAG, "MQTT client id NOT persisted: the preferences write failed");
+                // Hand back the id anyway: a working anonymous session beats no session, and the next
+                // launch mints again.
+            }
+            return id;
+        } catch (Exception e) {
+            Log.w(TAG, "MQTT client id unreadable", e);
+            return "";
+        }
+    }
+
+    /** MQTT 3.1.1 server-restricted characters are {@code 0-9}, {@code a-z}, {@code -}, {@code _}; ≤{@value #MQTT_CLIENT_ID_MAX_BYTES} bytes. */
+    static boolean isClientIdSafe(String id) {
+        if (id == null || id.isEmpty()
+                || id.getBytes(java.nio.charset.StandardCharsets.UTF_8).length > MQTT_CLIENT_ID_MAX_BYTES) {
+            return false;
+        }
+        for (int i = 0; i < id.length(); i++) {
+            char c = id.charAt(i);
+            boolean ok = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || c == '-' || c == '_';
+            if (!ok) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     private static String generateToken() {
         byte[] random = new byte[16];
         new java.security.SecureRandom().nextBytes(random);
