@@ -138,6 +138,26 @@ public class MqttPoisonMessageTest {
         }
     }
 
+    /**
+     * The shape a live frame reported on 2026-11-03: `sonos/connected` carrying a bare number under the
+     * `sonos/+` wildcard. The session correctly survived it, but the read failure was logged as a severe
+     * event — one line in files/eo1-app.log per publish, which spends the durable record on a topic that
+     * was never going to hold a coordinator state payload. Silence here is the requirement; the timestamp
+     * still moving is what proves the subscription is alive, which is the failure this field exists to catch.
+     */
+    @Test
+    public void aNonObjectBodyIsNotAFailureAndIsNotLogged() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        Recorder r = new Recorder();
+        MqttManager m = manager(r, reports);
+        deliver(m, "1");
+        deliver(m, "0");
+        assertTrue("a liveness flag is not a read failure: " + reports, reports.isEmpty());
+        assertTrue(r.started.isEmpty() && r.stopped.isEmpty());
+        assertTrue("the delivery must still be counted as hearing something",
+                !m.describe().contains("heard=never"));
+    }
+
     @Test
     public void connectCompleteNeverThrowsEvenWhenTheSubscribeFails() throws Exception {
         List<String> reports = new ArrayList<String>();

@@ -347,16 +347,40 @@ public class MqttManager implements MqttCallbackExtended {
         // Cannot throw. Not "should not" — see the class comment: a throw from this method is a disconnect as
         // far as the broker is concerned. Everything that can go wrong with a payload goes wrong in here.
         String payload = "";
-        Payload payloadObj = null;
         try {
             byte[] raw = message.getPayload();
             payload = raw == null ? "" : new String(raw);
-            // Gson returns null for an empty body rather than throwing — that is the shape a retained
-            // state-clear on a wildcard topic arrives as, and it is why this used to die.
-            payloadObj = gson.fromJson(payload, Payload.class);
+            // Stamped before anything decides whether this body is ours to read. lastMessageAtMs is what
+            // answers the one question /state cannot otherwise resolve — a client that is connected and deaf,
+            // which is the same failure this class shipped to fix — and it is answered by delivery, not by
+            // by successful parsing.
             lastMessageAtMs = System.currentTimeMillis();
         } catch (Throwable t) {
-            lastError = "unreadable payload on " + topic + ": " + t;
+            lastError = "a delivery on " + topic + " could not even be read as bytes: " + t;
+            report("dropped a " + topic + " message it could not read (" + t + ") — staying connected", true);
+            return;
+        }
+
+        // Anything that is not a JSON object is not a coordinator state payload, and nothing has gone wrong.
+        // `sonos/+` is one wildcard and the coordinator publishes other things underneath it: measured on a
+        // live frame on 2026-11-03, `sonos/connected` carries a bare number, which Gson answers with
+        // "Expected BEGIN_OBJECT but was NUMBER". Up to this line that became one severe report per
+        // publish, in files/eo1-app.log — the durable record every other failure in this app is supposed to
+        // be readable from, and which logcat's ~13 minutes cannot substitute for. A topic that will never
+        // hold a Payload is filtered by shape, not by name: naming it would mean the next subtopic the
+        // coordinator invents re-opens the same log.
+        String trimmed = payload.trim();
+        if (trimmed.isEmpty() || trimmed.charAt(0) != '{') {
+            return;
+        }
+
+        Payload payloadObj;
+        try {
+            payloadObj = gson.fromJson(trimmed, Payload.class);
+        } catch (Throwable t) {
+            // An object that would not become a Payload is different: something on the wire claims to be a
+            // state document and is not one this class can read. Worth the severe line.
+            lastError = "unreadable state payload on " + topic + ": " + t;
             report("dropped a " + topic + " message it could not read (" + t + ") — staying connected", true);
             return;
         }
