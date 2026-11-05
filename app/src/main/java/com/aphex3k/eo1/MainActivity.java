@@ -183,6 +183,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String tsGateAxis = "model:denied";
     private boolean tsModelAllows;
     private boolean tsAllowed;
+    /**
+     * The native engine's own answers, read once and only ever inside the gate.
+     *
+     * <p>They are state rather than calls because Java evaluates a method's arguments before calling
+     * it: writing {@code TsPlayerNative.isAvailable()} inside a log line or a {@code /state} field
+     * initializes the class, and its static block runs {@code System.loadLibrary}. On a frame the gate
+     * denies, that puts back the exact warning the gate was added to keep off the log — and there are
+     * seven such reads here, so guarding one of them is not guarding the path.
+     */
+    private boolean tsLibraryLoaded;
+    private String tsLoadError;
     private String tsBoardPlatform;
     private int tsFallbackCount;
     /** Inputs of the last video routing decision, reported in the debug /state video block. */
@@ -444,14 +455,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         mediaPlayerController = new MediaPlayerController(mediaPlayerVideoView);
         tsPlayerController = new TsPlayerController(tsVideoView);
-        // Gated before the library, in that order: a board with no vendor player should say so rather
-        // than discover it through a linker error it would only be reasonable to go hunting for.
-        preferTsPlayer = BuildConfig.USE_TSPLAYER && tsAllowed && TsPlayerNative.isAvailable();
+        // The one place this class touches TsPlayerNative. Everything downstream reads the captured
+        // fields, so a denied frame never initializes it and never attempts the load.
+        if (tsAllowed) {
+            this.tsLibraryLoaded = TsPlayerNative.isAvailable();
+            this.tsLoadError = TsPlayerNative.getLoadError();
+        }
+        preferTsPlayer = BuildConfig.USE_TSPLAYER && tsAllowed && tsLibraryLoaded;
         videoPlayer = preferTsPlayer ? tsPlayerController : mediaPlayerController;
         Log.i(TAG, "video player: " + VideoEngineReport.engineWord(false, preferTsPlayer)
                 + " (" + VideoEngineReport.availability(tsAllowed,
-                        BuildConfig.USE_TSPLAYER, TsPlayerNative.isAvailable(),
-                        TsPlayerNative.getLoadError())
+                        BuildConfig.USE_TSPLAYER, tsLibraryLoaded, tsLoadError)
                 + " gate=" + tsGateAxis + " silicon=" + tsSilicon
                 + " profile=" + capabilities.platform() + ")");
 
@@ -521,12 +535,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // this frame booted choosing — so the three ways to end up on MediaPlayer (compiled out, wrong
         // silicon, library failed to load) would otherwise be indistinguishable after a reboot, and
         // only two of them are worth investigating.
-        String tsLoadError = TsPlayerNative.getLoadError();
         this.appLogger.info(TAG, "video engine: "
                 + (preferTsPlayer ? VideoEngineReport.TS_PLAYER : VideoEngineReport.MEDIA_PLAYER)
-                + " (" + VideoEngineReport.availability(
-                        VideoSilicon.allowsTsPlayer(tsSilicon, tsModelAllows),
-                        BuildConfig.USE_TSPLAYER, TsPlayerNative.isAvailable(), tsLoadError)
+                + " (" + VideoEngineReport.availability(tsAllowed,
+                        BuildConfig.USE_TSPLAYER, tsLibraryLoaded, tsLoadError)
                 + ", gate=" + tsGateAxis + ")");
         // What the backlight restore actually found, in the log that survives a reboot. A frame at
         // 0.3 has one of three histories and they are not the same report: a level that came off
@@ -4123,10 +4135,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // the class, and never triggers the dlopen it would fail. Quoting an UnsatisfiedLinkError as
         // the reason on such a frame would send an operator looking for a missing file that is not
         // what is missing.
-        // "usable here" rather than "the .so loaded": the platform question is answered first, so a
-        // board the player was not written for never touches the class, and never logs a linker error
-        // that would only send someone looking for a file that is not the reason.
-        boolean tsUsable = tsAllowed && TsPlayerNative.isAvailable();
+        // "usable here" rather than "the .so loaded", and read from the captured fields: a frame the
+        // gate denied never initialized the class, so it has no linker error to report and saying
+        // `tsAvailable: false` without `tsSupported: false` would imply the opposite.
+        boolean tsUsable = tsAllowed && tsLibraryLoaded;
         video.addProperty("tsSupported", tsAllowed);
         video.addProperty("tsAvailable", tsUsable);
         // Every input to the gate, so the decision can be rebuilt from the document instead of
@@ -4138,9 +4150,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         tsGate.addProperty("modelAllows", tsModelAllows);
         tsGate.addProperty("decidedBy", tsGateAxis);
         tsGate.addProperty("buildFlag", BuildConfig.USE_TSPLAYER);
-        tsGate.addProperty("libraryLoaded", TsPlayerNative.isAvailable());
+        tsGate.addProperty("libraryLoaded", tsLibraryLoaded);
         video.add("tsGate", tsGate);
-        String tsLoadError = tsAllowed ? TsPlayerNative.getLoadError() : null;
+
         if (tsLoadError != null) {
             video.addProperty("tsLoadError", tsLoadError);
         }

@@ -416,6 +416,15 @@ for video". So the gate is `VideoSilicon.allowsTsPlayer(silicon, modelProfile.su
   identification came from a die photograph and a teardown, not from that frame's properties. A
   classification invented from a photo would fail closed on hardware nobody has measured, so an
   unrecognised board defers to the model profile — and the EO1's model already says no.
+- **Gate before the class, not only before the call.** Java evaluates a method's arguments first, so
+  writing `TsPlayerNative.isAvailable()` inside a log line or a `/state` field initializes the class
+  and runs `System.loadLibrary` — on a denied frame that puts straight back the linker warning the
+  ordering was added to keep off the log. The native answers are read once, inside `if (tsAllowed)`,
+  and everything downstream reads the captured fields. No JVM test can tell "loaded and failed" from
+  "never attempted" — on a host with no ARM library both answer `false` — so the guarantee is carried by
+  structure: one startup/diagnostics call site in `MainActivity`, and `TsVideoView`'s own calls behind a
+  controller that is never selected when the gate denies. A third diagnostic read added casually is the
+  regression to watch for, and no test will catch it.
 - **Both inputs are reported.** `video.tsGate` carries `silicon`, `modelProfile`, `modelAllows`,
   `decidedBy`, `buildFlag` and `libraryLoaded`, and `device` carries `buildHardware`, `buildBoard`,
   `boardPlatform` and one line of `cpu`. A gate nobody can reconstruct from a report is a gate that
