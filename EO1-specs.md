@@ -6,9 +6,9 @@
 - expected lifetime of about 6.85 years
 - no Speakers or audio output
 
-## Software notes (Geniatech / API 19)
+## Software notes (API 19; EO1 and EO2 are different silicon)
 
-Do **not** use ExoPlayer (or Media3) for video on these frames. On Geniatech EO1/EO2 hardware running Android 4.4.2, ExoPlayer has been observed to lock up the MediaCodec/GPU driver — the whole device freezes and ADB stops responding until a power-cycle. Video playback in this APK uses platform `MediaPlayer` instead.
+Do **not** use ExoPlayer (or Media3) for video on these frames. On either frame running Android 4.4.2, ExoPlayer has been observed to lock up the MediaCodec/GPU driver — the whole device freezes and ADB stops responding until a power-cycle. Video playback in this APK uses platform `MediaPlayer` instead — and on the EO1 that is the *only* engine it has: TsPlayer is the EO2's Amlogic path, not a feature this board can offer ([docs/TSPLAYER.md](docs/TSPLAYER.md)).
 
 The above specs had been published on the [original support page from Electric Objects](https://support.electricobjects.com/articles/215474803.html).
 

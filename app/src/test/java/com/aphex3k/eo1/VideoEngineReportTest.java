@@ -9,15 +9,16 @@ import static org.junit.Assert.assertNull;
 /**
  * Which engine a frame will actually run, and what its linker error is allowed to claim.
  *
- * <p>The case that produced this: an EO1 whose native library never loaded logged
- * {@code player=TsPlayer} on every video, because routing names an engine from its own verdict and the
- * routing verdict is made before the engine question is asked. A log that reads like an EO2 on a frame
- * running MediaPlayer is the bug; whether the frame could run TsPlayer at all is a different question,
- * answered by {@code /state}'s {@code video.systemWrite} block and not by these two functions.
+ * <p>The case that produced this: an EO1 logged {@code player=TsPlayer} on every video, because
+ * routing named an engine from its own verdict and the routing verdict is made before the engine
+ * question is asked. A log that reads like an EO2 on a frame running MediaPlayer is the bug. Whether a
+ * frame can run TsPlayer at all is a separate question answered by {@link
+ * HardwareCapabilities#supportsTsPlayer()} — an EO1's silicon never could, and the linker error that
+ * used to be quoted as the reason is not reached on a correctly-detected board at all.
  */
 public class VideoEngineReportTest {
 
-    /** Verbatim, minus the timestamp, from a live EO1's {@code eo1-app.log}. */
+    /** Verbatim, minus the timestamp, from a live EO1's {@code eo1-app.log} before the gate. */
     private static final String EO1_LOAD_ERROR =
             "UnsatisfiedLinkError: dlopen failed: could not load library"
                     + " \"libsystemwriteservice.so\" needed by \"libTsPlayer-jni.so\"; caused by library"
@@ -25,8 +26,33 @@ public class VideoEngineReportTest {
 
     @Test
     public void aFrameWithoutTheNativeLibraryNeverReportsTsPlayer() {
-        assertEquals("routing said TsPlayer, but the .so is not here — the EO1 case",
+        assertEquals("routing said TsPlayer, but the engine is not available here",
                 "MediaPlayer", VideoEngineReport.engineWord(false, false));
+    }
+
+    /** Three ways onto MediaPlayer, and they must not share a sentence. */
+    @Test
+    public void availabilityNamesTheReasonAndNotJustTheSymptom() {
+        assertEquals("USE_TSPLAYER=true, not available on this board's silicon",
+                VideoEngineReport.availability(false, true, false, EO1_LOAD_ERROR));
+        assertEquals("USE_TSPLAYER=false, compiled out",
+                VideoEngineReport.availability(true, false, false, null));
+        assertEquals("USE_TSPLAYER=true, loaded",
+                VideoEngineReport.availability(true, true, true, null));
+        assertEquals("USE_TSPLAYER=true, failed: " + VideoEngineReport.loadSentence(EO1_LOAD_ERROR),
+                VideoEngineReport.availability(true, true, false, EO1_LOAD_ERROR));
+    }
+
+    /**
+     * A board that cannot run the engine must not be reported through the linker's mouth: the platform
+     * answer comes first, so the {@code UnsatisfiedLinkError} text never reaches an operator who would
+     * otherwise go looking for a missing file on hardware that never had one.
+     */
+    @Test
+    public void thePlatformAnswerOvershadowsALinkerError() {
+        String sentence = VideoEngineReport.availability(false, true, false, EO1_LOAD_ERROR);
+        assertFalse("no linker quote", sentence.contains("dlopen"));
+        assertFalse("no claim about a library path", sentence.contains("library path"));
     }
 
     @Test

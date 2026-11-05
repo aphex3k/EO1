@@ -54,6 +54,15 @@ Consequences worth acting on:
    prop file and the photo] [lead: that the EO1 ROM contains no Amlogic media stack - no EO1 filesystem
    dump exists in this repo, so this is inference from the silicon and needs one `ls /dev/amstream*` on a
    real EO1 to close.]
+
+   **Outcome, later the same day — superseded on the "scoped" half, still open on the lead.** The branch
+   table was not scoped to Amlogic frames, it was deleted: the decision taken was that TsPlayer is never
+   an option on an EO1, so there is no branch left to act on (`docs/TSPLAYER.md`, "TsPlayer on the EO1:
+   closed"). Item 3 below is implemented **for the engine gate only**: `VideoSilicon` is the second axis,
+   and `/state` now carries the silicon identity and every input to that gate. Its other half - stating
+   the routing table and the throughput/bitrate ceilings per silicon - is not done, which is why item 2
+   stays open. The `ls /dev/amstream*` confirmation is still worth one run, but it no longer gates a
+   decision: whatever it says, an EO1 does not get the vendor player.
 2. **The measured video ceilings are Amlogic numbers.** The 300 000 macroblocks/s and 15 Mbit/s gates were
    measured on EO2-class hardware (no datasheet for either figure turned up in this pass; they stay the
    repo's own measurements). The i.MX6Dual VPU is generally described as H.264 High Profile to Level 4.1
