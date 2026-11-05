@@ -316,13 +316,15 @@ read the gate instead (step 1) before doing 7-9, which matter **more** on the si
 Steps 7–9 are the parts of this branch that no JVM test can reach, because they are the wiring around a
 live Activity rather than the helpers:
 
-7. **The engine gate, on both frames.** `/state` → `video.tsSupported` must be `true` on an EO2 and
-   `false` on an EO1, and `device.platform` must say which the app thinks it is (`EO1`, `EO2`, or
-   `generic` when the `Build` strings matched nothing). On an EO1 there must be **no** `tsLoadError`
-   field and no `UnsatisfiedLinkError` in the durable log: a linker error on a frame whose platform
-   answer is `false` means detection failed, and the fix is a `Build` string in
-   `HardwareCapabilitiesFactory`, not a missing library. `generic` with `tsSupported: true` is the
-   correct answer for a box this repo has never seen — an unidentified frame keeps its engine.
+7. **The engine gate, on both frames.** `/state` → `video.tsGate` reports every input to the decision
+   plus `decidedBy`, and `device.buildHardware` / `buildBoard` / `boardPlatform` / `cpu` say what the
+   machine actually is. Expected: EO2 → `silicon: "amlogic"`, `decidedBy: "amlogic"`,
+   `tsSupported: true`; EO1 → `silicon: "unknown"`, `decidedBy: "model:denied"`,
+   `tsSupported: false`. On an EO1 there must be **no** `tsLoadError` field and no
+   `UnsatisfiedLinkError` in the durable log — a linker error on a frame whose gate resolved to false
+   means detection went wrong, and the fix is a property read, not a missing library.
+   `decidedBy: "model:allowed"` with `silicon: "unknown"` is the correct answer for a box this repo has
+   never seen: an unidentified frame keeps its engine, because nothing has established it lacks one.
 8. **A clip the frame cannot draw** (render-silent, not corrupt). Play something decodes-but-does-not-
    paint and confirm: `/state` shows `renderSilent: true`, the still preview appears on the *next*
    rotation, `eo1-app.log` says `noteRenderSilent`, and the Immich asset carries **no**
@@ -357,8 +359,10 @@ To force MediaPlayer only: set `buildConfigField "boolean", "USE_TSPLAYER", "fal
 ## TsPlayer on the EO1: closed
 
 **The EO1 has no TsPlayer, and never will.** The two frames' silicon turned out to be significantly
-different — established by operator research in 2026-11, not by anything in this file — and the Amlogic
-vendor player belongs to the EO2's board. Every video on an EO1 runs on platform `MediaPlayer`, by
+different — the EO1 is an NXP i.MX6Dual (`MCIMX6D5EYM10AC`, from the die marking in
+`_img/eo1-processor-fullwidth.jpg`), the EO2 is Amlogic (`ro.hardware=amlogic`, `ro.product.board=stvm8b`,
+`ro.board.platform=meson8`, from the prop dump in `EO2/`) — and the Amlogic vendor player belongs to the
+EO2's board. Full sourcing in [docs/RESEARCH.md](RESEARCH.md) §1. Every video on an EO1 runs on platform `MediaPlayer`, by
 hardware. `HardwareCapabilities.supportsTsPlayer()` is where that is stated in code, and
 `MainActivity` consults it before it ever touches `TsPlayerNative`, so a correctly-detected EO1 does
 not attempt the load and does not log a linker error.
@@ -398,8 +402,27 @@ For contrast, a *registered but deaf* service is harmless and is the normal stat
 is why) while its video paints fine. So the sysfs path is not load-bearing for playback; the
 unregistered case was the only dangerous one, and on EO1 it is moot.
 
-`/state` on an EO1 says `video.tsSupported: false` and `preferTsPlayer: false` with no
-`tsLoadError` — that combination is the hardware answer, and it is complete. An
+## Two axes, because a model name cannot answer a silicon question
+
+`docs/RESEARCH.md` §1.3 put it plainly: keying the engine on the model is "right for buttons and wrong
+for video". So the gate is `VideoSilicon.allowsTsPlayer(silicon, modelProfile.supportsTsPlayer())`:
+
+- **Silicon can only permit.** A confirmed Amlogic board (`Build.HARDWARE` contains `amlogic`,
+  `Build.BOARD` contains `stvm`, or `ro.board.platform` contains `meson` — all three read out of the
+  EO2's own prop dump) gets the engine whatever its model string says. That is the fix for real
+  hardware that does not identify itself: `stvm8b` / "Quad-Core Enjoy TV Box" *is* an EO2, from an EO2's
+  recovery log, and a model-only test hands it the wrong answer.
+- **Silicon never forbids.** There is no list of "known not-Amlogic" strings, because the EO1's i.MX6
+  identification came from a die photograph and a teardown, not from that frame's properties. A
+  classification invented from a photo would fail closed on hardware nobody has measured, so an
+  unrecognised board defers to the model profile — and the EO1's model already says no.
+- **Both inputs are reported.** `video.tsGate` carries `silicon`, `modelProfile`, `modelAllows`,
+  `decidedBy`, `buildFlag` and `libraryLoaded`, and `device` carries `buildHardware`, `buildBoard`,
+  `boardPlatform` and one line of `cpu`. A gate nobody can reconstruct from a report is a gate that
+  gets debugged by guessing.
+
+`/state` on an EO1 says `tsSupported: false`, `decidedBy: "model:denied"`, `preferTsPlayer: false`, and
+no `tsLoadError` — that combination is the hardware answer, and it is complete. An
 `UnsatisfiedLinkError` on a frame where it is not reached would mean detection went wrong; check
 `device.platform` and `HardwareCapabilitiesFactory` before looking for a missing library.
 

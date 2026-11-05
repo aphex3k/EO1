@@ -51,7 +51,9 @@ public interface HardwareCapabilities {
     int screenToggleKeyCode();
 
     /**
-     * Whether Amlogic TsPlayer is an engine this board can offer at all.
+     * Whether Amlogic TsPlayer is an engine this <em>model</em> can offer — the model axis only.
+     * {@link VideoSilicon} may override a false with a confirmed Amlogic board, never the reverse,
+     * and {@code /state}'s {@code video.tsGate} reports both inputs plus which one decided.
      *
      * <p>False on the EO1. That is a hardware fact, not a missing file: the EO1 and EO2 carry
      * significantly different silicon, and the vendor player belongs to the EO2's. It used to be
@@ -62,7 +64,9 @@ public interface HardwareCapabilities {
      *
      * <p>True on the EO2 and on hardware the factory does not recognise. Unknown devices keep the
      * full-feature profile on purpose: the alternative is a frame that could run TsPlayer losing it
-     * because a firmware update changed {@code Build.MODEL}.
+     * because a firmware update changed {@code Build.MODEL}. An Amlogic board is permitted by
+     * {@link VideoSilicon} regardless of what it is called, which is the case that makes this worth
+     * having a second axis at all.
      */
     boolean supportsTsPlayer();
 }

@@ -178,6 +178,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private MediaPlayerController mediaPlayerController;
     private TsPlayerController tsPlayerController;
     private boolean preferTsPlayer;
+    /** The three inputs to {@link #preferTsPlayer}, kept so /state can show how it was decided. */
+    private String tsSilicon = VideoSilicon.UNKNOWN;
+    private String tsGateAxis = "model:denied";
+    private boolean tsModelAllows;
+    private boolean tsAllowed;
+    private String tsBoardPlatform;
     private int tsFallbackCount;
     /** Inputs of the last video routing decision, reported in the debug /state video block. */
     private int lastVideoRotation = -1;
@@ -425,17 +431,29 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         Log.i(TAG, "hardware: " + capabilities.platform() + " (device=" + Build.DEVICE
                 + ", model=" + Build.MODEL + ")");
 
+        // Two axes, because they are two different questions: the model profile owns buttons and
+        // sensors, the silicon owns the video engine. An i.MX6 frame and an Amlogic one can report the
+        // same model string and need different answers, and the reverse is equally true — which is
+        // precisely how a working EO2 loses its player to a firmware that renames it. Amlogic silicon
+        // permits; anything unresolved defers to the model. See docs/RESEARCH.md §1.3.
+        this.tsModelAllows = capabilities.supportsTsPlayer();
+        this.tsBoardPlatform = VideoSilicon.boardPlatformProperty();
+        this.tsSilicon = VideoSilicon.classify(Build.HARDWARE, Build.BOARD, tsBoardPlatform);
+        this.tsAllowed = VideoSilicon.allowsTsPlayer(tsSilicon, tsModelAllows);
+        this.tsGateAxis = VideoSilicon.decidingAxis(tsSilicon, tsModelAllows);
+
         mediaPlayerController = new MediaPlayerController(mediaPlayerVideoView);
         tsPlayerController = new TsPlayerController(tsVideoView);
-        // Gated on the platform before the library, in that order: a board whose silicon has no
-        // vendor player should say so rather than discover it through a linker error.
-        preferTsPlayer = BuildConfig.USE_TSPLAYER && capabilities.supportsTsPlayer()
-                && TsPlayerNative.isAvailable();
+        // Gated before the library, in that order: a board with no vendor player should say so rather
+        // than discover it through a linker error it would only be reasonable to go hunting for.
+        preferTsPlayer = BuildConfig.USE_TSPLAYER && tsAllowed && TsPlayerNative.isAvailable();
         videoPlayer = preferTsPlayer ? tsPlayerController : mediaPlayerController;
         Log.i(TAG, "video player: " + VideoEngineReport.engineWord(false, preferTsPlayer)
-                + " (" + VideoEngineReport.availability(capabilities.supportsTsPlayer(),
+                + " (" + VideoEngineReport.availability(tsAllowed,
                         BuildConfig.USE_TSPLAYER, TsPlayerNative.isAvailable(),
-                        TsPlayerNative.getLoadError()) + ")");
+                        TsPlayerNative.getLoadError())
+                + " gate=" + tsGateAxis + " silicon=" + tsSilicon
+                + " profile=" + capabilities.platform() + ")");
 
         // Hide the inactive SurfaceView/TextureView so only one compositor path is live.
         if (preferTsPlayer) {
@@ -506,8 +524,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         String tsLoadError = TsPlayerNative.getLoadError();
         this.appLogger.info(TAG, "video engine: "
                 + (preferTsPlayer ? VideoEngineReport.TS_PLAYER : VideoEngineReport.MEDIA_PLAYER)
-                + " (" + VideoEngineReport.availability(capabilities.supportsTsPlayer(),
-                        BuildConfig.USE_TSPLAYER, TsPlayerNative.isAvailable(), tsLoadError) + ")");
+                + " (" + VideoEngineReport.availability(
+                        VideoSilicon.allowsTsPlayer(tsSilicon, tsModelAllows),
+                        BuildConfig.USE_TSPLAYER, TsPlayerNative.isAvailable(), tsLoadError)
+                + ", gate=" + tsGateAxis + ")");
         // What the backlight restore actually found, in the log that survives a reboot. A frame at
         // 0.3 has one of three histories and they are not the same report: a level that came off
         // disk, a level this process is guessing because the store would not answer, and a frame
@@ -3936,6 +3956,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         JsonObject device = new JsonObject();
         device.addProperty("manufacturer", Build.MANUFACTURER);
         device.addProperty("model", Build.MODEL);
+        device.addProperty("buildHardware", Build.HARDWARE);
+        device.addProperty("buildBoard", Build.BOARD);
+        device.addProperty("boardPlatform", tsBoardPlatform);
+        device.addProperty("cpu", VideoSilicon.cpuModelLine());
+        // Identity, not capability: which family this board belongs to is the first thing a video
+        // report needs and the last thing a model string can tell you, so all three published names
+        // are printed rather than one inferred (docs/RESEARCH.md §1.3).
         device.addProperty("android", Build.VERSION.RELEASE);
         device.addProperty("platform", capabilities.platform());
         // Omitted, not empty, when the frame was never named — a reader then falls back to
@@ -4096,10 +4123,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // the class, and never triggers the dlopen it would fail. Quoting an UnsatisfiedLinkError as
         // the reason on such a frame would send an operator looking for a missing file that is not
         // what is missing.
-        boolean tsUsable = capabilities.supportsTsPlayer() && TsPlayerNative.isAvailable();
-        video.addProperty("tsSupported", capabilities.supportsTsPlayer());
+        // "usable here" rather than "the .so loaded": the platform question is answered first, so a
+        // board the player was not written for never touches the class, and never logs a linker error
+        // that would only send someone looking for a file that is not the reason.
+        boolean tsUsable = tsAllowed && TsPlayerNative.isAvailable();
+        video.addProperty("tsSupported", tsAllowed);
         video.addProperty("tsAvailable", tsUsable);
-        String tsLoadError = capabilities.supportsTsPlayer() ? TsPlayerNative.getLoadError() : null;
+        // Every input to the gate, so the decision can be rebuilt from the document instead of
+        // inferred from its outcome: a frame that says only "MediaPlayer" cannot be distinguished from
+        // one that was never going to say anything else, and that difference is the whole report.
+        JsonObject tsGate = new JsonObject();
+        tsGate.addProperty("silicon", tsSilicon);
+        tsGate.addProperty("modelProfile", platform());
+        tsGate.addProperty("modelAllows", tsModelAllows);
+        tsGate.addProperty("decidedBy", tsGateAxis);
+        tsGate.addProperty("buildFlag", BuildConfig.USE_TSPLAYER);
+        tsGate.addProperty("libraryLoaded", TsPlayerNative.isAvailable());
+        video.add("tsGate", tsGate);
+        String tsLoadError = tsAllowed ? TsPlayerNative.getLoadError() : null;
         if (tsLoadError != null) {
             video.addProperty("tsLoadError", tsLoadError);
         }
