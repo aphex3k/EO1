@@ -464,6 +464,8 @@ no longer the premise. The frame carrying its own files is.
 1. [TsPlayer and Amlogic video](docs/TSPLAYER.md) — playback, the failure ladder, the watchdogs
 1. [EO2 capabilities investigation](docs/EO2-CAPABILITIES.md) — the evidence behind the parity table
 1. [EO1 Hardware specifications](EO1-specs.md)
+1. [External research log](docs/RESEARCH.md): what was read outside this repo in November 2026, what is
+   still only a lead, and the probes that would settle it
 1. [AGENTS.md](AGENTS.md) — repository map for AI coding agents
 
 ## Contribution

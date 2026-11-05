@@ -155,7 +155,9 @@ public interface WebController {
      *
      * @param action one of {@code next}, {@code show} (displays one asset by ID; debug builds only,
      *               reads {@code asset}), {@code screen}, {@code brightness}, {@code config},
-     *               {@code settings}, {@code update-site}, {@code check-updates},
+     *               {@code settings}, {@code update-site}, {@code check-updates} (re-reads the
+     *               manifest, and does so even while an update is staged — a host-sourced stage is
+     *               then replaced by whatever the host publishes once that build verifies),
      *               {@code install-staged} (installs a staged self-update, screen on),
      *               {@code update-reset} (drops staged update files and state),
      *               {@code watchdog} (forces one kiosk-watchdog rung, 1..5; debug builds only,
