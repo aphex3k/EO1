@@ -33,12 +33,35 @@ public final class VideoEngineReport {
     }
 
     /**
+     * Why this frame has the engine it has, in the fewest words that are true — and in the order the
+     * facts actually rule each other out. A board that has no vendor player at all has no reason to
+     * reach the linker, so a platform answer comes first and an {@code UnsatisfiedLinkError} is never
+     * quoted as the explanation for a limitation that is not one.
+     *
+     * <p>{@code USE_TSPLAYER} is carried along inside the platform answer rather than dropped: a build
+     * that compiled the engine out and a board that cannot run it are different reports, and on an EO1
+     * both are true at once.
+     */
+    public static String availability(boolean platformSupports, boolean buildFlag,
+                                      boolean libraryLoaded, String rawLoadError) {
+        if (!platformSupports) {
+            return "not available on this board's silicon (USE_TSPLAYER=" + buildFlag + ")";
+        }
+        if (!buildFlag) {
+            return "compiled out (USE_TSPLAYER=false)";
+        }
+        return libraryLoaded ? "loaded" : "failed: " + loadSentence(rawLoadError);
+    }
+
+    /**
      * What the dynamic linker proved, and nothing it did not prove.
      *
      * <p>A missing {@code DT_NEEDED} entry says one thing: a soname is not on this ROM's library path.
-     * It does not say the service that soname would have talked to is absent — that is a separate
-     * read, in {@code /state}'s {@code video.systemWrite} block — and conflating the two is how a
-     * frame gets reinstalled against the wrong problem.
+     * It does not say the service that soname would have talked to is absent, and it does not say the
+     * board is missing anything either — on hardware the player was never written for, the platform
+     * gate stops before this class is reached, so a linker sentence should never be the whole
+     * explanation an operator gets. Conflating the two is how a frame gets reinstalled against the
+     * wrong problem.
      *
      * <p>The wrapper form {@code could not load library "X" needed by "Y"} is also what the linker
      * prints when X <em>exists</em> and failed for another reason — an unresolved symbol, a bad ELF

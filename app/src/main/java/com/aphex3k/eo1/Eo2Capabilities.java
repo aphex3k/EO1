@@ -45,4 +45,10 @@ public final class Eo2Capabilities implements HardwareCapabilities {
     public int screenToggleKeyCode() {
         return android.view.KeyEvent.KEYCODE_POWER;
     }
+
+    /** The EO2 is the board the Amlogic player was written for; its .so loads here. */
+    @Override
+    public boolean supportsTsPlayer() {
+        return true;
+    }
 }

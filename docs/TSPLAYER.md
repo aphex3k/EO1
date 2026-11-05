@@ -1,6 +1,6 @@
 # TsPlayer playback — EO1 / EO2
 
-Amlogic/Geniatech **TsPlayer** (`libTsPlayer-jni.so`) is the original Electric Objects video path. This APK prefers it on matching hardware and falls back to platform `MediaPlayer` via `TextureVideoView`.
+Amlogic/Geniatech **TsPlayer** (`libTsPlayer-jni.so`) is the original Electric Objects video path. This APK prefers it **on the EO2 only** — the EO1's silicon is different and has no vendor player at all, see [TsPlayer on the EO1: closed](#tsplayer-on-the-eo1-closed) — and falls back to platform `MediaPlayer` via `TextureVideoView`.
 
 ## Scope
 
@@ -38,7 +38,7 @@ What the original and the fallback both fail on is tagged `EO1_INCOMPATIBLE` —
 
 `BuildConfig.USE_TSPLAYER` (default `true` in [`app/build.gradle`](../app/build.gradle)).
 
-Runtime still requires `TsPlayerNative.isAvailable()` (`System.loadLibrary("TsPlayer-jni")` success). Emulator / arm64 / missing system Amlogic libs → MediaPlayer only.
+Runtime still requires `capabilities.supportsTsPlayer()` **and** `TsPlayerNative.isAvailable()` (the platform test is first, so an unsupported board never attempts the load). Emulator / arm64 / missing system Amlogic libs / **any EO1** → MediaPlayer only.
 
 ## Playback flow
 
@@ -295,8 +295,8 @@ Client-side FFmpeg **re-encode is not used at all** (removed 2026-09). The EO CP
 
 ## On-device validation checklist
 
-On a physical EO2, and on an EO1 only if [Getting TsPlayer onto an EO1](#getting-tsplayer-onto-an-eo1)
-has landed — an EO1 on the stock ROM runs every video on the platform MediaPlayer and should:
+On a physical EO2 for steps 1-3 and 6; on an EO1, skip every step that expects the vendor engine and
+read the gate instead (step 1) before doing 7-9, which matter **more** on the single-engine frame:
 
 1. Logcat `EO1: video player: TsPlayer (USE_TSPLAYER=true native=true)`. On an EO1 expect
    `native=failed`. Two lines name the engine and they answer two different questions, so read the one
@@ -316,10 +316,13 @@ has landed — an EO1 on the stock ROM runs every video on the platform MediaPla
 Steps 7–9 are the parts of this branch that no JVM test can reach, because they are the wiring around a
 live Activity rather than the helpers:
 
-7. **The probe, on both frames.** `/state` → `video.systemWrite` must report `registrant: present` and a
-   `clientPath` on the EO2. On the EO1 either value is a finding in its own right — that field is what
-   Phase B of the table below waits on. `pending` after a minute means the reflective lookup did not
-   settle; `unreadable` means it answered a question about the framework, not about the service.
+7. **The engine gate, on both frames.** `/state` → `video.tsSupported` must be `true` on an EO2 and
+   `false` on an EO1, and `device.platform` must say which the app thinks it is (`EO1`, `EO2`, or
+   `generic` when the `Build` strings matched nothing). On an EO1 there must be **no** `tsLoadError`
+   field and no `UnsatisfiedLinkError` in the durable log: a linker error on a frame whose platform
+   answer is `false` means detection failed, and the fix is a `Build` string in
+   `HardwareCapabilitiesFactory`, not a missing library. `generic` with `tsSupported: true` is the
+   correct answer for a box this repo has never seen — an unidentified frame keeps its engine.
 8. **A clip the frame cannot draw** (render-silent, not corrupt). Play something decodes-but-does-not-
    paint and confirm: `/state` shows `renderSilent: true`, the still preview appears on the *next*
    rotation, `eo1-app.log` says `noteRenderSilent`, and the Immich asset carries **no**
@@ -340,86 +343,73 @@ To force MediaPlayer only: set `buildConfigField "boolean", "USE_TSPLAYER", "fal
 - ~9.7 MB LFS `.so` (same blob as EO2 `/system/lib/libTsPlayer-jni.so`)
 - ProGuard keeps `com.example.tsplayer.TsPlayerNative`
 - Depends on Amlogic system services (`libmedia`, `libsystemwriteservice`, `/dev/amstream*`) — will not work as primary on generic Android
-- **`libsystemwriteservice.so` is a `DT_NEEDED` of the `.so`, and it is not in an EO1's ROM.** Measured:
-  exactly one undefined symbol in `libTsPlayer-jni.so` resolves only to it
-  (`android::ISystemWriteService::asInterface(const sp<IBinder>&)`), so on an EO1 the whole player is
-  lost to one linker miss — `dlopen` refuses and `TsPlayerNative` correctly reports unavailable.
-- What is measured and what is not: the linker proves a soname is off the path. It does **not** say
-  whether this ROM registers the `system_write` service, and that is the fact that decides whether
-  supplying the soname fixes the frame or freezes it. `/state`'s `video.systemWrite` block answers it
-  (`SystemWriteServiceProbe`, read through the framework, never by loading the library that hangs), and
-  on the EO2 — where the client loads fine — the service is registered but deaf: `readSysfs could not
-  contact remote` about ten times a second, which is *why* the app keeps a durable on-disk log
-  ([WEBSERVER.md](WEBSERVER.md#logs--past-state)).
+- **Not on an EO1, and this is a hardware fact.** Until 2026-11 the EO1's absence of TsPlayer was
+  recorded as a linker miss — `libTsPlayer-jni.so` has a `DT_NEEDED` on `libsystemwriteservice.so`,
+  exactly one undefined symbol resolves only to it
+  (`android::ISystemWriteService::asInterface(const sp<IBinder>&)`), and that file is not in the EO1's
+  ROM. All true, and all it means now is that the loader was never the interesting part: the two
+  frames' silicon differs, and the gate is `supportsTsPlayer()`. See the closed section below.
+- On the EO2 the vendor service is registered but **deaf** — `readSysfs could not contact remote` about
+  ten times a second, which is *why* the app keeps a durable on-disk log
+  ([WEBSERVER.md](WEBSERVER.md#logs--past-state)) — and video still paints, so the sysfs path is not
+  load-bearing for playback.
 
-## Getting TsPlayer onto an EO1
+## TsPlayer on the EO1: closed
 
-TsPlayer is the better player on this hardware whenever the aspect ratio matches, and an EO1 does not
-get it: one linker miss costs the whole engine. The fix is not obviously "ship the missing file", and
-the reason is worth having written down before someone retries it.
+**The EO1 has no TsPlayer, and never will.** The two frames' silicon turned out to be significantly
+different — established by operator research in 2026-11, not by anything in this file — and the Amlogic
+vendor player belongs to the EO2's board. Every video on an EO1 runs on platform `MediaPlayer`, by
+hardware. `HardwareCapabilities.supportsTsPlayer()` is where that is stated in code, and
+`MainActivity` consults it before it ever touches `TsPlayerNative`, so a correctly-detected EO1 does
+not attempt the load and does not log a linker error.
 
-`getSystemWriteService()` inside the vendor `.so` (ARM, `0x787008`–`0x787118`) does this:
+What is closed, and should not be reopened:
+
+- **Shipping `libsystemwriteservice.so`.** `libTsPlayer-jni.so` carries a `DT_NEEDED` on it, the EO1
+  firmware never shipped it, and it is sitting in the EO2 dump at
+  `EO2/data/backup/system/lib/libsystemwriteservice.so` — 13 KB, one symbol wide
+  (`android::ISystemWriteService::asInterface`). That made "copy it in" look like a one-line fix. It is
+  not one, and now not even a possible one: the file is a dependency of a player this board cannot run.
+- **Loading it conditionally by absolute path**, with or without a runtime check for the ROM's copy.
+- **Patching the vendor blob** to bound the wait below.
+
+The wait is still worth knowing about, because it is the reason the naive fix is worse than doing
+nothing — the reasoning outlives the decision:
 
 ```
-pthread_mutex_lock
-  loop: defaultServiceManager()->getService("system_write")   @plt, vtable slot 16
-        if (result != null) break
-        __android_log_print(5, ..., "SystemWriteService not published, waiting...")
-        usleep(500000)                                        @ 0x7a120 us
-        goto loop
-pthread_mutex_unlock
+getSystemWriteService()   @ libTsPlayer-jni.so 0x787008-0x787118
+  pthread_mutex_lock
+    loop: defaultServiceManager()->getService("system_write")
+          if (result != null) break
+          __android_log_print(5, ..., "SystemWriteService not published, waiting...")
+          usleep(500000)
+          goto loop                       <- no counter, no timeout
+  pthread_mutex_unlock
 ```
 
-No retry counter, no timeout, and the mutex is a process-global held across the sleep. The call is
-reached from `TsVideoView.startOrRestartPlayer` → `TsPlayerNative.createPlayer`
-(`TsVideoView.java:330`) on a handler bound to the **main looper** (`TsVideoView.java:42`).
+Reached from `TsVideoView.startOrRestartPlayer` → `createPlayer` (`TsVideoView.java:330`) on a handler
+bound to the main looper (`TsVideoView.java:42`). On a ROM that never registers the service, supplying
+the client converts a frame that plays video into a frame with a dead UI needing a power cable. A
+self-written stub cannot rescue that either: the wait is upstream of the one symbol a stub could
+supply, and `defaultServiceManager` lives in the system's `libbinder`.
 
-So the outcome of supplying `libsystemwriteservice.so` to a frame depends entirely on one fact the
-linker error cannot tell you — and getting it wrong turns a frame that plays video into a frame with a
-dead UI that needs a power cable.
+For contrast, a *registered but deaf* service is harmless and is the normal state — the EO2's answers
+`readSysfs could not contact remote` about ten times a second ([WEBSERVER.md](WEBSERVER.md#logs--past-state)
+is why) while its video paints fine. So the sysfs path is not load-bearing for playback; the
+unregistered case was the only dangerous one, and on EO1 it is moot.
 
-| `video.systemWrite.registrant` | ROM client | What to do |
-|---|---|---|
-| `present` | absent | Ship the client. Put it in `app/src/main/jniLibs/armeabi-v7a/` as a **regular git object** (`.gitattributes`: `-filter -diff -merge -text`, following the `gradle-wrapper.jar` exemption — a build-required file must not depend on a fork's ability to serve LFS). Then, **in every build that bundles it**, resolve the client before touching TsPlayer: `System.load` the ROM path when the ROM has one, and the bundled path only when the ROM is confirmed not to — and `System.loadLibrary("TsPlayer-jni")` after that. `BIND_NOW` means the soname must be resolvable at load, and a library already loaded by absolute path satisfies the later `DT_NEEDED` lookup by basename, so whichever one is loaded first is the one TsPlayer talks through. Skipping the load when a ROM client exists does **not** achieve that on its own: the `DT_NEEDED` lookup still searches the bundled copy's directory, so the *choice* has to be made by loading, not by declining to. |
-| `present` | present | Nothing to ship: the linker would have found it. A miss with the file on disk is a search-path problem, so preload the path `video.systemWrite.clientPath` names. No blob in the repo. |
-| `absent` | absent | **Do not ship the client.** This is the row where loading it hangs the frame. See the bounded-wait option below. |
-| `unreadable` / `pending` | — | The probe did not answer. Re-measure over a cable; do not decide from this row. |
+`/state` on an EO1 says `video.tsSupported: false` and `preferTsPlayer: false` with no
+`tsLoadError` — that combination is the hardware answer, and it is complete. An
+`UnsatisfiedLinkError` on a frame where it is not reached would mean detection went wrong; check
+`device.platform` and `HardwareCapabilitiesFactory` before looking for a missing library.
 
-**Why the existence check is runtime, not build-time — and why it must load rather than merely skip.**
-A client shipped inside the APK can answer the `DT_NEEDED` lookup before the ROM's does, which would
-replace the framework-matched client **on the EO2 — the one frame where TsPlayer paints today** with
-ours. Whether it does depends on the linker's search order for a library loaded by a library, which
-varies across AOSP lines and **this repository has not measured it** — an earlier draft of this table
-asserted that the app's `nativeLibraryDir` precedes `/system/lib` on API 19 as though it were a fact,
-and that is exactly the kind of claim that has already cost this branch a correction once. The recipe
-must not depend on the answer: load the ROM client by absolute path when it exists, so the soname is
-already resolved by name before TsPlayer is dlopened, and load the bundled one only when the ROM has
-nothing. Whichever precedence the linker implements, the first loaded wins by lookup order, and the
-frame says which one it chose.
+### What being permanently single-engine costs an EO1
 
-If the two clients differ in transaction codes and ours wins anyway, EO2's sysfs pokes start returning
-defaults to a player that keeps drawing: a silent regression on the working frame, invisible to every
-signal the app has, and not the kind of thing the 10-minute logcat window would show. A SHA-256 of the
-in-tree dump against the APK proves nothing about EO2's live ROM copy. So the guard is a check the
-running frame makes, and the check is expressed as a load.
-
-**And the gate has to be in the build, not in the operator's judgment.** EO1 has no wireless adb and its
-ROM's adbd does not listen on TCP 5555, so a wrong guess there is a wall-mount trip with a keyboard, and
-rollback is a browser sideload of the previous APK.
-
-**If the answer is `absent`** — which a ROM that dropped the client library very probably is — the
-remaining route is to bound the wait in the vendor blob: change the loop-back branch at `0x787118`
-(`0affffd6  beq 787078`) so a null registrant gives up after a bounded number of tries and returns null
-rather than looping forever holding the mutex. Plausible, because the EO2 shows playback is not blocked
-on that service answering: its client loads, its service is deaf, and video still paints. But it means
-shipping a **modified** 9.7 MB vendor binary that no longer matches `/system/lib/libTsPlayer-jni.so` on
-either frame, one wrong byte from broken video everywhere, and it is only testable on hardware. Treat it
-as a deliberate escalation: patch the `armeabi-v7a` blob only, record the exact offset and instruction
-here, keep the pristine blob recoverable, and gate the release on both `.so` files being present in the
-APK's `lib/armeabi-v7a/`.
-
-**What is not true about any of this**, and should not be repeated: that the `.so` needs a *working*
-service to decode (it does not — the EO2's does not work), that a self-written stub could replace it (the
-wait is upstream of the one symbol a stub could supply, and `defaultServiceManager` lives in the system's
-`libbinder`), or that the current absence of TsPlayer on an EO1 is a bug in this app. It is a ROM that
-shipped a player without shipping one of its dependencies.
+One thing, and it is why the ladder is written the way it is: `ORIGINAL_REPLAY` — the rung that
+replays a cached original on the *other* engine — is gated on `preferTsPlayer` and never runs here
+(`MainActivity.java`, `playbackFallback`). A frame with one engine has one attempt at the original and
+then the degraded source, so the display-path guards carry more weight on an EO1 than on an EO2: a
+server with nothing transcoded answering `/video/playback` with the original's own bytes is a second
+copy of the same failure, and the render-silent verdict must never become a server-side tag. Those are
+checked in `MediaManagerFallbackSourceTest`; steps 8-9 of the validation checklist are the half no JVM
+test can reach.

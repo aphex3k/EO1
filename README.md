@@ -412,7 +412,7 @@ own — [docs/UPDATING.md](docs/UPDATING.md).
 - **Video:** 1080p30 is the practical ceiling, and on a portrait frame 1080p video has to actually *be*
   portrait — or carry a display matrix that says so; HEVC, AV1, VVC, Dolby-Vision, and every HEIF or AVIF
   still never decode. ExoPlayer and Media3 are forbidden here — they hang this SoC's media stack until
-  a power cycle, which is why playback runs on Amlogic's TsPlayer with a `MediaPlayer` fallback.
+  a power cycle, which is why playback runs on Amlogic's TsPlayer with a `MediaPlayer` fallback — on the EO2; the EO1's silicon has no TsPlayer and plays everything on `MediaPlayer`.
 - **Files you upload live inside the app.** A factory reset, an uninstall or *Clear data* erases them.
   Every one can also be downloaded back off the frame through the files route, if you want a second copy.
 - **The LAN server is unsecured plain HTTP with no login, by design.** Anything about this frame is

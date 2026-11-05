@@ -412,13 +412,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // dispatchKeyEvent, which silently kills C, Space and the soft buttons.
         findViewById(R.id.rootView).requestFocus();
 
+        // Detected before the video engine is chosen, not after: which board this is has become one of
+        // the inputs to that choice, and a frame that reports its hardware twenty lines too late to
+        // have used the answer is a report nobody can trust.
+        this.capabilities = HardwareCapabilitiesFactory.detect(Build.DEVICE, Build.MODEL);
+        Log.i(TAG, "hardware: " + capabilities.platform() + " (device=" + Build.DEVICE
+                + ", model=" + Build.MODEL + ")");
+
         mediaPlayerController = new MediaPlayerController(mediaPlayerVideoView);
         tsPlayerController = new TsPlayerController(tsVideoView);
-        preferTsPlayer = BuildConfig.USE_TSPLAYER && TsPlayerNative.isAvailable();
+        // Gated on the platform before the library, in that order: a board whose silicon has no
+        // vendor player should say so rather than discover it through a linker error.
+        preferTsPlayer = BuildConfig.USE_TSPLAYER && capabilities.supportsTsPlayer()
+                && TsPlayerNative.isAvailable();
         videoPlayer = preferTsPlayer ? tsPlayerController : mediaPlayerController;
-        Log.i(TAG, "video player: " + (preferTsPlayer ? "TsPlayer" : "MediaPlayer")
-                + " (USE_TSPLAYER=" + BuildConfig.USE_TSPLAYER
-                + " native=" + TsPlayerNative.isAvailable() + ")");
+        Log.i(TAG, "video player: " + VideoEngineReport.engineWord(false, preferTsPlayer)
+                + " (" + VideoEngineReport.availability(capabilities.supportsTsPlayer(),
+                        BuildConfig.USE_TSPLAYER, TsPlayerNative.isAvailable(),
+                        TsPlayerNative.getLoadError()) + ")");
 
         // Hide the inactive SurfaceView/TextureView so only one compositor path is live.
         if (preferTsPlayer) {
@@ -439,9 +450,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         sActivityCreateCount++;
-        this.capabilities = HardwareCapabilitiesFactory.detect(Build.DEVICE, Build.MODEL);
-        Log.i(TAG, "hardware: " + capabilities.platform() + " (device=" + Build.DEVICE
-                + ", model=" + Build.MODEL + ")");
         // Settings first: the brightness manager restores the user's level from its store, and a
         // frame that never restores it is a frame that dims itself after the next restart.
         this.settingsManager = new SettingsManager(this);
@@ -475,20 +483,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         //
         // Recorded on every launch rather than only on failure. An engine that loaded is a fact with
         // no other durable record — /state says which engine is active now, and nothing says which one
-        // this frame booted intending to use — so a build that ever fixed the load would delete the
-        // only line that distinguishes "MediaPlayer by choice" from "MediaPlayer because something
-        // broke".
+        // this frame booted choosing — so the three ways to end up on MediaPlayer (compiled out, wrong
+        // silicon, library failed to load) would otherwise be indistinguishable after a reboot, and
+        // only two of them are worth investigating.
         String tsLoadError = TsPlayerNative.getLoadError();
         this.appLogger.info(TAG, "video engine: "
                 + (preferTsPlayer ? VideoEngineReport.TS_PLAYER : VideoEngineReport.MEDIA_PLAYER)
-                + " (USE_TSPLAYER=" + BuildConfig.USE_TSPLAYER
-                + " native=" + (tsLoadError == null ? "loaded"
-                        : "failed: " + VideoEngineReport.loadSentence(tsLoadError)) + ")");
-        // Whether this ROM registers the service the native player waits on. Read here rather than
-        // at the line above, because that line is written synchronously and this answer is not: a
-        // verdict taken from a settled read belongs in /state, where it can be re-asked, not in a
-        // boot log that would print "pending" on every frame forever.
-        SystemWriteServiceProbe.refreshAsync();
+                + " (" + VideoEngineReport.availability(capabilities.supportsTsPlayer(),
+                        BuildConfig.USE_TSPLAYER, TsPlayerNative.isAvailable(), tsLoadError) + ")");
         // What the backlight restore actually found, in the log that survives a reboot. A frame at
         // 0.3 has one of three histories and they are not the same report: a level that came off
         // disk, a level this process is guessing because the store would not answer, and a frame
@@ -3507,7 +3509,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public String platform() {
-        return capabilities != null ? capabilities.platform() : "EO1";
+        // "EO1" was the fallback, and it no longer can be: that name now says something about the
+        // silicon ("no vendor player"), so answering it before detection has run would put a hardware
+        // claim on a page for a frame the app has not identified. "unknown" also matches what the
+        // neighbouring fields say when the answer is not there yet.
+        return capabilities != null ? capabilities.platform() : "unknown";
     }
 
     @Override
@@ -3749,15 +3755,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         JsonObject video = new JsonObject();
         video.addProperty("active", videoPlayer == tsPlayerController ? "TsPlayer" : "MediaPlayer");
         video.addProperty("preferTsPlayer", preferTsPlayer);
-        video.addProperty("tsAvailable", TsPlayerNative.isAvailable());
-        String tsLoadError = TsPlayerNative.getLoadError();
+        // "available" here means <em>usable on this frame</em>, not "the .so happened to load": the
+        // platform test is written first so a board whose silicon has no vendor player never reaches
+        // the class, and never triggers the dlopen it would fail. Quoting an UnsatisfiedLinkError as
+        // the reason on such a frame would send an operator looking for a missing file that is not
+        // what is missing.
+        boolean tsUsable = capabilities.supportsTsPlayer() && TsPlayerNative.isAvailable();
+        video.addProperty("tsSupported", capabilities.supportsTsPlayer());
+        video.addProperty("tsAvailable", tsUsable);
+        String tsLoadError = capabilities.supportsTsPlayer() ? TsPlayerNative.getLoadError() : null;
         if (tsLoadError != null) {
             video.addProperty("tsLoadError", tsLoadError);
         }
-        // tsLoadError says a soname was not on the path. This says whether the service behind it is
-        // registered, which is the fact that decides whether supplying that soname fixes the frame or
-        // freezes it — and it is read through the framework, never by loading the library that hangs.
-        video.add("systemWrite", SystemWriteServiceProbe.report());
         if (!activeVideoPath.isEmpty()) {
             video.addProperty("path", activeVideoPath);
             video.addProperty("stage", activeVideoStage);
