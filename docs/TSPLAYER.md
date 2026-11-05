@@ -38,7 +38,15 @@ What the original and the fallback both fail on is tagged `EO1_INCOMPATIBLE` —
 
 `BuildConfig.USE_TSPLAYER` (default `true` in [`app/build.gradle`](../app/build.gradle)).
 
-Runtime still requires `capabilities.supportsTsPlayer()` **and** `TsPlayerNative.isAvailable()` (the platform test is first, so an unsupported board never attempts the load). Emulator / arm64 / missing system Amlogic libs / **any EO1** → MediaPlayer only.
+Runtime still requires the **resolved** gate, `VideoSilicon.allowsTsPlayer(silicon,
+capabilities.supportsTsPlayer())`, **and** `TsPlayerNative.isAvailable()` — not the model flag on its
+own. The two axes are asymmetric on purpose: confirmed Amlogic silicon permits the engine even when the
+model profile says no, and nothing but a denial from both can forbid it. Requiring both flags here would
+erase the override this file documents.
+
+MediaPlayer only: an EO1 (model denies, no Amlogic marker), an emulator, arm64, a build with
+`USE_TSPLAYER=false`, or a board missing the system Amlogic libraries. What decides, on any given frame,
+is printed as `video.tsGate.decidedBy` in `/state` rather than left to be inferred.
 
 ## Playback flow
 
@@ -295,18 +303,20 @@ Client-side FFmpeg **re-encode is not used at all** (removed 2026-09). The EO CP
 
 ## On-device validation checklist
 
-On a physical EO2 for steps 1-3 and 6; on an EO1, skip every step that expects the vendor engine and
-read the gate instead (step 1) before doing 7-9, which matter **more** on the single-engine frame:
+Steps 1-3 and 6 assume the EO2. On an EO1, do step 7 first — the gate — and then 8 and 9, which matter
+**more** on a frame that permanently has one engine; steps 2, 3 and 6 describe behaviour it does not have.
 
-1. Logcat `EO1: video player: TsPlayer (USE_TSPLAYER=true native=true)`. On an EO1 expect
-   `native=failed`. Two lines name the engine and they answer two different questions, so read the one
-   that matches the question: the durable `video engine:` line, once per launch, is the frame's
-   **default** — the engine it will use for a clip nothing routes away, which is the only thing a
-   "does this frame have TsPlayer" check can mean. The per-clip `displayVideo routing: … player=` line
-   is the engine that will actually composite *that* file, and on a healthy EO2 a rotated or
-   wrong-aspect clip correctly says `MediaPlayer` there while the launch line says `TsPlayer`. Neither
-   line is more right than the other; a frame that says one thing at launch and the other per clip is
-   working, not contradicting itself.
+1. Startup logs one line, and it is the frame's **default** engine — what it will use for a clip nothing
+   routes away — so it answers "does this frame have TsPlayer" and nothing else:
+   - EO2: `EO1: video player: TsPlayer (USE_TSPLAYER=true, loaded, gate=amlogic, silicon=amlogic, profile=EO2)`
+   - EO1: `EO1: video player: MediaPlayer (USE_TSPLAYER=true, not available on this board's silicon, gate=model:denied, silicon=unknown, profile=EO1)`
+
+   Note what is **absent** from the EO1 line: no `failed:` and no `UnsatisfiedLinkError` anywhere in it.
+   The gate denies the engine before the class is initialized, so there is no load attempt to report.
+   An EO1 that logs a linker error has a broken gate, not a missing library — that is step 7.
+   The other engine line is per-clip: `displayVideo routing: … player=` names what will composite *that*
+   file. The two disagree on a healthy EO2 — launch says `TsPlayer`, a rotated or wrong-aspect clip says
+   `MediaPlayer` — and neither is more correct than the other.
 2. Play a known-good local H.264 from Immich cache full-screen
 3. Loop ≥2 minutes without surface loss **and without black flicker between passes** — `/state` shows `loopGen=0` and `lastRestartMethod=native-loop` (no Java recreate)
 4. Image ↔ video handoff and screen off/on

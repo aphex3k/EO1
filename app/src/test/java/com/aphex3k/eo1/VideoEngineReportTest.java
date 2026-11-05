@@ -33,12 +33,13 @@ public class VideoEngineReportTest {
     /** Three ways onto MediaPlayer, and they must not share a sentence. */
     @Test
     public void availabilityNamesTheReasonAndNotJustTheSymptom() {
-        assertEquals("not available on this board's silicon (USE_TSPLAYER=true)",
+        assertEquals("USE_TSPLAYER=true, not available on this board's silicon",
                 VideoEngineReport.availability(false, true, false, EO1_LOAD_ERROR));
-        assertEquals("compiled out (USE_TSPLAYER=false)",
+        assertEquals("USE_TSPLAYER=false, compiled out",
                 VideoEngineReport.availability(true, false, false, null));
-        assertEquals("loaded", VideoEngineReport.availability(true, true, true, null));
-        assertEquals("failed: " + VideoEngineReport.loadSentence(EO1_LOAD_ERROR),
+        assertEquals("USE_TSPLAYER=true, loaded",
+                VideoEngineReport.availability(true, true, true, null));
+        assertEquals("USE_TSPLAYER=true, failed: " + VideoEngineReport.loadSentence(EO1_LOAD_ERROR),
                 VideoEngineReport.availability(true, true, false, EO1_LOAD_ERROR));
     }
 

@@ -38,19 +38,17 @@ public final class VideoEngineReport {
      * reach the linker, so a platform answer comes first and an {@code UnsatisfiedLinkError} is never
      * quoted as the explanation for a limitation that is not one.
      *
-     * <p>{@code USE_TSPLAYER} is carried along inside the platform answer rather than dropped: a build
-     * that compiled the engine out and a board that cannot run it are different reports, and on an EO1
-     * both are true at once.
+     * <p>{@code USE_TSPLAYER} leads every answer rather than being nested inside one: a build that
+     * compiled the engine out and a board that cannot run it are different reports, on an EO1 both are
+     * true at once, and the two callers wrap this in their own parentheses.
      */
     public static String availability(boolean platformSupports, boolean buildFlag,
                                       boolean libraryLoaded, String rawLoadError) {
-        if (!platformSupports) {
-            return "not available on this board's silicon (USE_TSPLAYER=" + buildFlag + ")";
-        }
-        if (!buildFlag) {
-            return "compiled out (USE_TSPLAYER=false)";
-        }
-        return libraryLoaded ? "loaded" : "failed: " + loadSentence(rawLoadError);
+        return "USE_TSPLAYER=" + buildFlag + ", " + (
+                !platformSupports ? "not available on this board's silicon"
+                : !buildFlag      ? "compiled out"
+                : libraryLoaded   ? "loaded"
+                : "failed: " + loadSentence(rawLoadError));
     }
 
     /**
