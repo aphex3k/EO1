@@ -21,6 +21,7 @@ Android home-screen replacement APK for Electric Objects **EO1** and **EO2** dig
 | Root Gradle files, `publish-update.sh` | Build (local) & release publishing |
 | `update-roots.sh`, `gen-root-bundle.sh`, `certs/roots/` | The shipped CA roots — refresh, then generate; see [docs/TRUST.md](docs/TRUST.md) |
 | `docs/TSPLAYER.md` | Amlogic TsPlayer playback + MediaPlayer fallback |
+| `docs/RESEARCH.md` | External research log (2026-11): board identity per frame, vendor artefacts, open probes. **Read before repeating an EO1/EO2 hardware claim from `EO1-specs.md`**: it documents that the EO1 is i.MX6 and the EO2 is Amlogic meson8, so Amlogic-specific reasoning does not transfer to EO1 |
 | `configuration_example.json` | Config template (may drift; see below) |
 | `EO2/`, `ffmpeg/`, `.electric-objects/` | Local dumps / vendor reference — not app logic |
 | `_img/` | Images referenced by the markdown docs |
