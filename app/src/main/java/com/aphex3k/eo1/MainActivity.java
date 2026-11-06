@@ -237,13 +237,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** Attempts TsPlayer is allowed per asset before the ladder must move on. */
     private static final int MAX_ENGINE_ATTEMPTS = 2;
     /**
-     * Loop-seam telemetry for the MediaPlayer path, which has none otherwise. TsPlayer's loop numbers
-     * come from the {@code .so}; on the platform player the only observable is the restart this app
-     * issues, so these are stamped where that happens and reported under the same {@code loopPerf} key.
+     * Counts only the loop restarts <em>this app</em> issues on the platform player — from
+     * {@code onVideoEnd}, or from the position watchdog's loop seam when a clip never reports an end.
+     *
+     * <p>It is not a lap counter and cannot be one. {@code setLooping(true)} makes the platform player
+     * loop inside itself, and a clip looping that way produces no callback at all, so a perfectly
+     * healthy MediaPlayer lap leaves these at {@code 0} / {@code -1} forever. That is why the names
+     * carry {@code manual}: an earlier draft reported them as {@code loopRestarts} / {@code loopCycleMs}
+     * beside TsPlayer's genuine native timings under one key, which would have read as a stalled clip
+     * on every clip that was fine. Liveness on this engine is {@code painted} and
+     * {@code playbackRateX100}, not these.
      */
-    private long mediaLoopRestarts;
-    private long mediaLastLoopCycleMs = -1;
-    private long mediaLastLoopAtMs = -1;
+    private long mediaManualLoopRestarts;
+    private long mediaManualLoopCycleMs = -1;
+    private long mediaManualLoopAtMs = -1;
     /**
      * Throughput of the asset last routed. Held as one immutable reference rather than four fields
      * so the web-server thread reading /state cannot see stats from two different assets.
@@ -468,6 +475,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         setContentView(R.layout.activity_main);
 
         rootView = findViewById(R.id.rootView);
+        // The authority for "how big is this panel" is the layout pass, not a lifecycle callback.
+        // onConfigurationChanged runs BEFORE the view tree is re-measured, so reading bounds there
+        // can hand back the pre-rotation size, and a panel turned by the ROM post-processor need not
+        // produce another focus callback at all. Republishing on every real size change closes both:
+        // it is also the only path that survives displayVideo()'s same-path early return, which would
+        // otherwise let a one-video pool keep the shape it measured before the frame was moved.
+        rootView.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                       int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                int width = right - left;
+                int height = bottom - top;
+                if (width != oldRight - oldLeft || height != oldBottom - oldTop) {
+                    publishFrameShape();
+                }
+            }
+        });
         imageView = findViewById(R.id.imageView);
         mediaPlayerVideoView = findViewById(R.id.videoView);
         tsVideoView = findViewById(R.id.tsVideoView);
@@ -2454,7 +2478,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                             + " (" + (parked ? "parked" : "creeping")
                             + " player=" + reportedMs + " file=" + fileMs + ")"
                             + " rate=" + describePlaybackRate()));
-            noteMediaLoopRestart();
+            noteMediaManualLoopRestart();
             try {
                 videoPlayer.seekTo(0);
                 videoPlayer.play();
@@ -3341,9 +3365,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     // the bug this counter exists to stop. Kept inside the posted block with everything
                     // else that touches it, because displayVideo is reached from the rotation thread.
                     tsAttemptsForActiveAsset = 0;
-                    mediaLoopRestarts = 0;
-                    mediaLastLoopCycleMs = -1;
-                    mediaLastLoopAtMs = -1;
+                    mediaManualLoopRestarts = 0;
+                    mediaManualLoopCycleMs = -1;
+                    mediaManualLoopAtMs = -1;
                 }
                 // Re-read the wall before either decision below. Doing it here rather than only at the
                 // lifecycle callbacks is what makes it impossible for the engine choice and the source
@@ -3451,14 +3475,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * the gate is deciding against the right wall needs the value the gate actually holds, not the one
      * the last {@code displayVideo} happened to see.
      *
-     * <p>Called from {@code onCreate}, {@code onConfigurationChanged}, {@code onWindowFocusChanged} and
-     * {@link #displayVideo}. Each of those is load-bearing and only two of them are obvious:
-     * {@code onCreate} runs before the first layout, so on its own it publishes {@code null} and leaves
-     * the gate dark for the very first asset, which is precisely what the comment above its call site
-     * says this method exists to prevent; the manifest claims {@code orientation} in
-     * {@code configChanges}, so a frame that is physically turned is not recreated and needs the
-     * explicit callback; and the per-display call is what guarantees the engine decision and the source
-     * decision are judging the same panel rather than two readings taken at different moments.
+     * <p>Driven by a layout-change listener on the root view, which is the only source guaranteed to
+     * hold the current size, and called directly from {@code onCreate},
+     * {@code onConfigurationChanged} and {@code onWindowFocusChanged} so a value exists before the
+     * first asset rather than only after the first resize. Those callbacks are convenience, not
+     * correctness: {@code onConfigurationChanged} runs <em>before</em> the view tree is re-measured, so
+     * it can read the pre-rotation bounds — the listener publishes again once they are real — and a
+     * panel turned by the ROM post-processor need not produce another focus callback at all.
+     * {@code onCreate} on its own would publish {@code null} and leave the gate dark for the very first
+     * asset, which is precisely what the comment above its call site says this method exists to prevent.
+     *
+     * <p>Also called at the top of {@code displayVideo}'s posted block, so the engine decision and the
+     * source decision cannot be judging two different panels. That call is belt-and-braces, not the
+     * mechanism that keeps the value fresh: {@code displayVideo} returns early for an unchanged path,
+     * so a pool holding a single video would never reach it again after the frame was moved.
      */
     private void publishFrameShape() {
         MediaCompatibility.PanelShape shape = currentPanelShape();
@@ -3470,25 +3500,29 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
-     * Stamps one loop-seam restart on the platform player, so a clip composited by MediaPlayer has
-     * loop numbers at all.
+     * Stamps one <em>app-issued</em> restart on the platform player: either {@code onCompletion}
+     * arriving and {@code onVideoEnd} calling {@code play()}, or the position watchdog noticing a
+     * position parked past the duration the player reports — the case that never raises a callback at
+     * all. Both paths land here, so one count is one restart this process actually caused.
      *
-     * <p>TsPlayer's come out of the {@code .so}; the platform player has no equivalent, and its loop is
-     * this app's own doing — either {@code onCompletion} arriving, or the position watchdog noticing a
-     * position parked past the duration the player reports, which is the case that never raises a
-     * callback at all. Both paths land here, so one lap measured here is one lap actually restarted.
+     * <p>It does not count laps, and adding a wraparound observer to make it do so would be the wrong
+     * fix. {@code setLooping(true)} loops inside the platform player without any callback, so the
+     * ordinary case is genuinely invisible from here and the interesting cases — a seam that needed
+     * rescuing, or one that fired twice — are exactly the ones that DO come through this method. Its
+     * value is diagnostic, not statistical: {@code manualLoopRestarts} climbing while
+     * {@code manualLoopCycleMs} stays well under the clip's duration is the seam double-firing, which
+     * is the failure this change makes likely by moving most of an EO2's library onto this engine.
      *
-     * <p>Worth having because this class of clip is about to become the majority of an EO2's library:
-     * every non-native aspect now composites here, and without these two numbers the operator's only
-     * loop instrumentation would describe an engine that is not running.
+     * <p>Before this existed the operator's only loop numbers came from {@code tsVideoView}, so a
+     * MediaPlayer clip reported an engine that was not running.
      */
-    private void noteMediaLoopRestart() {
+    private void noteMediaManualLoopRestart() {
         long now = System.currentTimeMillis();
-        if (mediaLastLoopAtMs > 0) {
-            mediaLastLoopCycleMs = now - mediaLastLoopAtMs;
+        if (mediaManualLoopAtMs > 0) {
+            mediaManualLoopCycleMs = now - mediaManualLoopAtMs;
         }
-        mediaLastLoopAtMs = now;
-        mediaLoopRestarts++;
+        mediaManualLoopAtMs = now;
+        mediaManualLoopRestarts++;
     }
 
     /** Sample-table facts in one line, each part omitted when the file did not give it. */
@@ -3656,7 +3690,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 }
                 debugInformationProvided(new DebugInformation("video", "restart after end"));
                 if (controller != tsPlayerController) {
-                    noteMediaLoopRestart();
+                    noteMediaManualLoopRestart();
                 }
                 controller.play();
                 videoWatchdogLastPosition = -1;
@@ -4348,14 +4382,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 loopPerf.addProperty("restartMethod", tsVideoView.getLastRestartMethod());
                 video.add("loopPerf", loopPerf);
             } else if (!tsActive) {
-                // The platform player's own lap. It has no native equivalent of the .so's timings —
-                // its loop is this app calling play() or seekTo(0) — so the honest report is the
-                // restart count and the wall-clock span between the last two, under the same key so
-                // one field name never means two engines' numbers.
+                // NOT the same measurement as the TsPlayer block above, and deliberately not given
+                // the same key. With setLooping(true) the platform player loops inside itself and
+                // never reports an end of stream, so a clip that is looping perfectly produces no
+                // event here at all: these two fields count only the restarts this app issues, from
+                // onVideoEnd or the position watchdog's seam. A healthy MediaPlayer lap therefore
+                // reads manualLoopRestarts=0 and manualLoopCycleMs=-1 — which is the design, not a
+                // stall. Absence of a number is not evidence of a stopped clip; `painted` and
+                // `playbackRate*` are the liveness fields on this engine.
                 JsonObject loopPerf = new JsonObject();
                 loopPerf.addProperty("engine", VideoEngineReport.MEDIA_PLAYER);
-                loopPerf.addProperty("loopRestarts", mediaLoopRestarts);
-                loopPerf.addProperty("loopCycleMs", mediaLastLoopCycleMs);
+                loopPerf.addProperty("manualLoopRestarts", mediaManualLoopRestarts);
+                loopPerf.addProperty("manualLoopCycleMs", mediaManualLoopCycleMs);
                 video.add("loopPerf", loopPerf);
             }
         }

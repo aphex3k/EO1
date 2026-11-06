@@ -487,7 +487,7 @@ public class MediaManagerCyclingTest {
 
         // Cycle 2 on its own proves nothing about the remembered verdict: the original is a cache hit,
         // so it would not be re-opened even with the verdict set deleted entirely. Drop the cached
-        // original first — if the mark is missing, originalUsable says "worth a download" and this is
+        // original first — if the mark is missing, originalSkipReason says "worth a download" and this is
         // where the pipeline would prove it.
         new File(cacheDir, videoId + ".mov").delete();
         new File(cacheDir, videoId + ".mov.sha1").delete();
@@ -624,6 +624,73 @@ public class MediaManagerCyclingTest {
         mm.publishPanel(MediaCompatibility.PanelShape.of(1088, 1920), true);
         assertTrue("a different portrait shape is a different panel: " + mm.verdictCounts(),
                 mm.verdictCounts().contains("needsUpscale=0"));
+    }
+
+    // COVERAGE GAP, stated rather than left silent: the mirror case of this test — an original
+    // skipped as UNUSABLE (undecodable / oversized / over the byte cap) where the only transcode is
+    // LARGER, and must therefore still be taken — is fixed in acquireResolvedFallback but is NOT
+    // pinned here. A first attempt at it asserted that an oversized catalog asset is routed before
+    // download, and that premise is false in this harness: the asset reaches
+    // originalSkipReason() without the catalog dimensions that would trigger it, so the original was
+    // fetched either way and the test proved nothing. Seeding knownIncompatibleKeys or the
+    // resolution verdict through a reachable seam is the way to cover it.
+
+    @Test
+    public void largerTranscodeIsRefusedWhenTheOriginalWasRoutedForCost() throws Exception {
+        // The other side of the same line, and the reason the guard exists at all. This asset plays
+        // fine as an original; it is routed only because the crop costs more than the frame has. A
+        // "smaller" stream that is bigger buys nothing and costs bytes and decode, so the original is
+        // kept — and the asset is marked as having no useful transcode so the two verdicts cannot
+        // start driving each other round a download loop.
+        String videoId = "01234567-89ab-cdef-0123-456789aa1001";
+        byte[] originalBytes = isoVideoBytes(1920, 1080, 30, 1024, 0);
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, (long) originalBytes.length, null, 1920, 1080);
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        return new ByteArrayInputStream(originalBytes);
+                    }
+                }, null, (long) originalBytes.length);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(
+                                isoVideoBytes(1280, 720, 30, 4096, 0));
+                    }
+                }, (long) originalBytes.length * 4);   // "degraded" answer that is not degraded
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.publishPanel(PANEL_PORTRAIT, true);   // 1920x1080 on a 1080x1920 panel -> needs a crop
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals("the routing verdict needs the bytes once, to read the matrix",
+                1, originalOpens.get());
+        assertEquals("the larger stream is not fetched: switching would cost to save nothing",
+                0, fallbackOpens.get());
+        assertEquals(1, listener.displayedKeys.size());
+        assertTrue("the original stays on disk and on screen",
+                new File(cacheDir, videoId + ".mov").isFile());
+        assertFalse(new File(cacheDir, videoId + "_fb.mp4").exists());
+        assertTrue("and it is remembered, so the next cycle does not re-probe: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=1"));
     }
 
     /**

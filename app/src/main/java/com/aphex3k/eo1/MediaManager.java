@@ -142,7 +142,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * <p>Kept apart from {@link #tooDemandingVideoKeys} because it is a different kind of fact. A
      * byte budget is a property of the file, and holds however the frame is hung; this is a property
      * of the file <em>and</em> the panel. So each entry carries the panel shape it was decided under,
-     * and {@link #originalUsable} honors it only while that is still the published one — which is what
+     * and {@link #originalSkipReason} honors it only while that is still the published one — which is what
      * makes a verdict retire itself when a frame is turned without anything having to clear it first.
      * A set plus a clear would not: the acquisition and prefetch threads read the shape and then write
      * the verdict, so a {@code clear()} racing between the two could leave a stale entry that
@@ -958,8 +958,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             // tolerating a duplicate left on disk by the run that worked that out.
             discardByteIdenticalFallback(asset, cacheDir);
         }
-        if (!originalUsable(asset)) {
-            return acquireResolvedFallback(asset, backend, cacheDir, reportProgress);
+        OriginalSkip skip = originalSkipReason(asset);
+        if (skip != OriginalSkip.NONE) {
+            return acquireResolvedFallback(asset, backend, cacheDir, reportProgress, skip);
         }
         MediaSource source = backend.resolveOriginal(asset);
         if (source == null) {
@@ -988,59 +989,84 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return acquireFallbackSource(asset, fallback, cacheDir, reportProgress);
         }
         if (original == null) {
-            return acquireResolvedFallback(asset, backend, cacheDir, reportProgress);
+            // A null here is not a failed download — that throws. It is the verdict taken once the
+            // bytes were on disk and the moov could be read, i.e. this asset plays but costs more
+            // than the frame has. Which is exactly the budget group, not the undecodable one.
+            return acquireResolvedFallback(asset, backend, cacheDir, reportProgress,
+                    OriginalSkip.OVER_BUDGET);
         }
         return original;
     }
 
     /**
-     * Whether an original is worth a download attempt at all. What this can settle without the
-     * bytes: more of them than the cache can hold, a video with a coded side beyond the panel, or
-     * a verdict already reached on this asset's bytes since the last restart — which for a video
-     * is the only pre-download codec knowledge the pipeline ever gets, since no backend reports a
-     * codec and a container extension is a claim rather than a fact. Everything else gets
+     * Why the pipeline is about to use the fallback rather than the original.
+     *
+     * <p>The distinction is not cosmetic. Every one of these paths ends in the same place — the
+     * degraded source — but only the budget group is there because the original <em>costs</em> too
+     * much. For a budget route, a "smaller" stream that is not actually smaller buys nothing, so it
+     * is refused; for a decodability or resolution route the original is a dead end whatever its
+     * size, and a bigger transcode is often the only playable artifact in existence (an H.264
+     * transcode of a small HEVC original is routinely larger than the file it replaced). Refusing
+     * that one would re-download undecodable bytes and skip the asset on every cycle, which is a
+     * worse outcome than the duplicate the check exists to prevent.
+     */
+    private enum OriginalSkip {
+        /** No skip: download and display the original. */
+        NONE,
+        /** The original cannot be shown at all — undecodable, oversized, or beyond the byte cap. */
+        ORIGINAL_UNUSABLE,
+        /** The original would play, but costs more to decode or crop than the frame has. */
+        OVER_BUDGET
+    }
+
+    /**
+     * Whether an original is worth a download attempt at all, and if not, why. What this can settle
+     * without the bytes: more of them than the cache can hold, a video with a coded side beyond the
+     * panel, or a verdict already reached on this asset's bytes since the last restart — which for a
+     * video is the only pre-download codec knowledge the pipeline ever gets, since no backend reports
+     * a codec and a container extension is a claim rather than a fact. Everything else gets
      * displayed and judged by the decoder, which is the only thing that can be right.
      */
-    private boolean originalUsable(MediaAsset asset) {
+    private OriginalSkip originalSkipReason(MediaAsset asset) {
         String key = asset.key();
         if (knownIncompatibleKeys.contains(key)) {
             Log.i(TAG, "acquireAsset: " + key + " original verified undecodable earlier this"
                     + " run; going straight to the fallback source");
-            return false;
+            return OriginalSkip.ORIGINAL_UNUSABLE;
         }
         if (asset.localPath != null) {
             // Already on disk: no download to avoid and no cache to overflow, so the decoder gets
             // the bytes and decides. Its verdict is filed as a sidecar report, not a silent skip.
             // No routing verdict is consulted here — throughput, bitrate or crop: a local upload
             // has no degraded source to be routed to, so rerouting it would mean not showing it at all.
-            return true;
+            return OriginalSkip.NONE;
         }
         if (tooDemandingVideoKeys.contains(key) && !noTranscodeVideoKeys.contains(key)) {
             Log.i(TAG, "acquireAsset: " + key + " exceeds this device's decode budget;"
                     + " starting at the fallback source");
-            return false;
+            return OriginalSkip.OVER_BUDGET;
         }
         MediaCompatibility.PanelShape routedForPanel = upscaledVideoKeys.get(key);
         if (routedForPanel != null && routedForPanel.equals(frameShape)
                 && !noTranscodeVideoKeys.contains(key)) {
             Log.i(TAG, "acquireAsset: " + key + " needs a center-crop fill on this "
                     + frameShape + " panel; starting at the fallback source");
-            return false;
+            return OriginalSkip.OVER_BUDGET;
         }
         if (asset.sizeBytes != null && asset.sizeBytes > MAX_ASSET_BYTES) {
             Log.w(TAG, "acquireAsset: " + key + " original is " + asset.sizeBytes
                     + " bytes, beyond this device's " + MAX_ASSET_BYTES
                     + " byte ceiling; routing to the fallback source");
-            return false;
+            return OriginalSkip.ORIGINAL_UNUSABLE;
         }
         String oversized = MediaCompatibility.incompatibleVideoResolution(
                 asset.type, asset.width, asset.height);
         if (oversized != null) {
             Log.w(TAG, "acquireAsset: " + key + " - " + oversized
                     + "; routing to the fallback source");
-            return false;
+            return OriginalSkip.ORIGINAL_UNUSABLE;
         }
-        return true;
+        return OriginalSkip.NONE;
     }
 
     /**
@@ -1234,7 +1260,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     /** The backend's degraded source for an asset, or a quiet skip when it has none. */
     @Nullable
     private File acquireResolvedFallback(MediaAsset asset, MediaBackend backend, File cacheDir,
-                                         boolean reportProgress) throws Exception {
+                                         boolean reportProgress, OriginalSkip skip) throws Exception {
         MediaSource fallback = backend.resolveThumbnailFallback(asset);
         if (fallback == null || fallback.opener == null) {
             Log.w(TAG, "acquireAsset: " + asset.key() + " - no fallback source, skipping");
@@ -1249,23 +1275,38 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         // which is also what stops the routing verdicts and this probe from driving each other round
         // and round.
         //
-        // "Own size" is generalised to "not smaller than the original", because the crop gate now fires
-        // on clips well below a server's transcode ladder. A 480p original routed to a 720p playback
-        // stream would download more bytes and decode more pixels than the file it was sent away from:
-        // the saving the routing exists to make would come out negative, silently, on exactly the small
-        // clips that were never a problem. Equality alone could not see that case. This is scoped to
-        // the routing path by construction — an asset whose original genuinely failed arrives through
-        // acquireFallbackSource instead, and must still take whatever the server has, however large.
+        // Two comparisons, deliberately different widths, because the reason for the skip decides
+        // whether a big transcode is a waste or the only hope.
+        //
+        // EQUALITY applies whatever the reason: if the "degraded" answer is the original byte for
+        // byte, the server has nothing transcoded, and fetching it would hold the same bytes under
+        // two names — measured on an EO2 as a 158 MB asset cached twice, still playing at 0.18x.
+        //
+        // "NOT SMALLER" applies only to an OVER_BUDGET skip. The crop gate now fires far below a
+        // server's transcode ladder, and a 480p original routed to a 720p stream would download more
+        // bytes and decode more pixels than the file it was sent away from — a negative saving, on
+        // exactly the small clips that were never a problem.
+        //
+        // It must NOT apply to ORIGINAL_UNUSABLE. An asset skipped for codec, resolution or byte cap
+        // has a dead end where the original is, so a larger transcode is often the only playable
+        // artifact that exists — an H.264 encode of a small HEVC original is routinely bigger than
+        // the file it replaced. Refusing it would re-download undecodable bytes and skip the asset
+        // every cycle, which is far worse than the duplicate this guard prevents.
         if (fallback.isVideoPlayback() && fallback.expectedBytes != null
-                && asset.sizeBytes != null
-                && fallback.expectedBytes.longValue() >= asset.sizeBytes.longValue()) {
-            return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
-                    fallback.expectedBytes.longValue() == asset.sizeBytes.longValue()
-                            ? "the degraded source is the original byte for byte (" + asset.sizeBytes
-                                    + " B); no transcode exists"
-                            : "the degraded source (" + fallback.expectedBytes + " B) is not smaller"
-                                    + " than the original (" + asset.sizeBytes
-                                    + " B); routing would cost bytes to save nothing");
+                && asset.sizeBytes != null) {
+            long advertised = fallback.expectedBytes.longValue();
+            long originalBytes = asset.sizeBytes.longValue();
+            if (advertised == originalBytes) {
+                return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
+                        "the degraded source is the original byte for byte (" + originalBytes
+                                + " B); no transcode exists");
+            }
+            if (skip == OriginalSkip.OVER_BUDGET && advertised > originalBytes) {
+                return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
+                        "the degraded source (" + advertised + " B) is larger than the original ("
+                                + originalBytes + " B) and this asset was only routed for cost,"
+                                + " so switching streams would buy nothing");
+            }
         }
         return acquireFallbackSource(asset, fallback, cacheDir, reportProgress);
     }
