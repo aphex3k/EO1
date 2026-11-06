@@ -695,8 +695,19 @@ public class MediaManagerCyclingTest {
         assertTrue("the original stays on disk and on screen",
                 new File(cacheDir, videoId + ".mov").isFile());
         assertFalse(new File(cacheDir, videoId + "_fb.mp4").exists());
-        assertTrue("and it is remembered, so the next cycle does not re-probe: " + mm.verdictCounts(),
+        assertTrue("and the crop verdict is remembered: " + mm.verdictCounts(),
                 mm.verdictCounts().contains("needsUpscale=1"));
+
+        // The part that matters most, and the bug this line keeps from coming back: refusing a
+        // LARGER stream on cost grounds must not record the asset as having NO transcode at all.
+        // That mark is what hasNoDistinctFallback() answers from when a later size probe cannot
+        // decide, so writing it here would tell the display-failure path there is nothing to fall
+        // back to -- on an asset that has a transcode, which is precisely the case where a bigger
+        // H.264 stream is the only thing that can play. The price of not marking it is one range
+        // probe per cycle; the price of marking it is a skipped asset.
+        assertTrue("a larger transcode is still a transcode, so nothing is recorded as absent: "
+                        + mm.verdictCounts(),
+                mm.verdictCounts().contains("noTranscode=0"));
     }
 
     /**

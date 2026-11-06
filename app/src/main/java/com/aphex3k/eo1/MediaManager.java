@@ -176,6 +176,25 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     private volatile boolean secondEngine;
     /**
+     * Video assets that DO have a distinct transcode, which is simply not smaller than the original,
+     * on an asset routed away from that original for cost alone. Recorded so that decision survives
+     * the cycle without asserting anything about whether a transcode exists.
+     *
+     * <p>Kept apart from {@link #noTranscodeVideoKeys} deliberately, and that separation is the whole
+     * point. The absence set means "nothing is transcoded here" and is read as that twice over:
+     * {@link #hasNoDistinctFallback} answers from it whenever a size probe cannot decide, and
+     * {@code originalSkipReason} lets it cancel a budget verdict. Reusing it to break the loop below
+     * would tell the display-failure path there is nothing to fall back to — on the one asset shape
+     * where a larger H.264 stream is precisely the thing that can play, namely an original that
+     * failed to display.
+     *
+     * <p>It cannot be omitted either. With no record the cycle re-applies the same budget verdict,
+     * comes back to the same branch, and declines the same stream forever, and the asset never
+     * displays at all. So a marker is load-bearing for termination; only its identity was wrong.
+     */
+    private final Set<String> transcodeNotSmallerKeys =
+            Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
+    /**
      * Video assets whose degraded source turns out to be the original file itself, because the
      * server has nothing transcoded for them. Remembered so the two verdicts cannot chase each other:
      * a routing check wants to route away from the original, and this says there is nowhere to
@@ -1106,7 +1125,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     private boolean noteVideoOverDecodeBudget(MediaAsset asset,
                                               @Nullable VideoHeaderProbe.Probe probe) {
-        if (asset.type != MediaType.VIDEO || probe == null || noTranscodeVideoKeys.contains(asset.key())) {
+        // The transcodeNotSmallerKeys term breaks a loop, not a redundant probe: once the stream
+        // this verdict pointed at has been declined for being larger, re-applying the verdict sends
+        // the acquisition straight back to the branch that declined it.
+        if (asset.type != MediaType.VIDEO || probe == null
+                || noTranscodeVideoKeys.contains(asset.key())
+                || transcodeNotSmallerKeys.contains(asset.key())) {
             return false;
         }
         String throughput = MediaCompatibility.incompatibleVideoThroughput(
@@ -1158,7 +1182,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     private boolean noteVideoNeedsUpscale(MediaAsset asset,
                                           @Nullable VideoHeaderProbe.Probe probe) {
-        if (asset.type != MediaType.VIDEO || probe == null || noTranscodeVideoKeys.contains(asset.key())) {
+        // Third term: see noteVideoOverDecodeBudget. A crop verdict already acted on, whose stream
+        // turned out to be larger than the file it replaces, must not be re-applied every cycle.
+        if (asset.type != MediaType.VIDEO || probe == null
+                || noTranscodeVideoKeys.contains(asset.key())
+                || transcodeNotSmallerKeys.contains(asset.key())) {
             return false;
         }
         // One read, and the same value stamped onto the verdict, so what is remembered is the panel
@@ -1233,9 +1261,18 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     @Nullable
     private File useOriginalWithoutTranscode(MediaAsset asset, MediaBackend backend, File cacheDir,
-                                             boolean reportProgress, @Nullable String why)
-            throws Exception {
-        noTranscodeVideoKeys.add(asset.key());
+                                             boolean reportProgress, @Nullable String why,
+                                             boolean transcodeIsAbsent) throws Exception {
+        // The mark means "this server has nothing transcoded for this asset", and it is read later
+        // as exactly that: hasNoDistinctFallback() answers from it whenever the size probe cannot
+        // decide, and originalSkipReason() lets it cancel a budget verdict. Recording an asset
+        // whose transcode merely happens to be bigger under that claim would tell the display
+        // path there is nothing to fall back to, and the one case where a larger stream is
+        // precisely the answer is an original that failed to play. So the mark belongs to the
+        // finding, not to the decision to keep showing the original.
+        if (transcodeIsAbsent) {
+            noTranscodeVideoKeys.add(asset.key());
+        }
         discardByteIdenticalFallback(asset, cacheDir);
         if (why != null) {
             Log.i(TAG, "acquireAsset: " + asset.key() + " - " + why);
@@ -1316,13 +1353,17 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             if (advertised == originalBytes) {
                 return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
                         "the degraded source is the original byte for byte (" + originalBytes
-                                + " B); no transcode exists");
+                                + " B); no transcode exists", true);
             }
             if (skip == OriginalSkip.OVER_BUDGET && advertised > originalBytes) {
+                // Records transcodeNotSmallerKeys, never noTranscodeVideoKeys: a larger transcode is
+                // still a transcode, and the absence mark is what the display-failure path reads as
+                // "nothing to fall back to". See the field.
+                transcodeNotSmallerKeys.add(asset.key());
                 return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
                         "the degraded source (" + advertised + " B) is larger than the original ("
                                 + originalBytes + " B) and this asset was only routed for cost,"
-                                + " so switching streams would buy nothing");
+                                + " so switching streams would buy nothing", false);
             }
         }
         return acquireFallbackSource(asset, fallback, cacheDir, reportProgress);
@@ -1355,7 +1396,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 }
                 return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
                         "the fetched degraded source is the original byte for byte ("
-                                + artifact.length() + " B); discarding the duplicate");
+                                + artifact.length() + " B); discarding the duplicate", true);
             }
             // A server with nothing transcoded answers the degraded request with the original
             // bytes, so this rung can be exactly as undecodable as the first one. Handing it to a
@@ -2153,6 +2194,10 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return "incompatible=" + knownIncompatibleKeys.size()
                 + " tooDemanding=" + tooDemandingVideoKeys.size()
                 + " needsUpscale=" + upscaledVideoKeys.size()
+                // Distinct from noTranscode below, and the difference is the whole point: this one
+                // says a transcode exists and was declined for being bigger, the other says none was
+                // found. An operator comparing two frames must not read them as the same state.
+                + " transcodeNotSmaller=" + transcodeNotSmallerKeys.size()
                 + " noTranscode=" + noTranscodeVideoKeys.size()
                 + " renderSilent=" + renderSilentVideoKeys.size();
     }
