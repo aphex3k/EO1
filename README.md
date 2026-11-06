@@ -75,21 +75,25 @@ which is what catches the everyday iPhone file. That is deliberate — a name th
 codec is never treated as proof that it does.
 
 **Encode targets.** JPEG or PNG for a still. For video: H.264 in `mp4`/`mov`/`m4v`, longest side
-**at most 1920 px**, **1080p30 or below**, and **under 15 Mbit/s** — and, if the frame is hung portrait,
-be portrait itself. There are three independent ceilings, and a clip has to clear all three:
+**at most 1920 px**, **1080p30 or below**, and **under 15 Mbit/s** — and shaped like the panel it is going
+to hang on: a portrait frame wants 9:16 specifically, not merely "portrait". There are three independent
+ceilings, and a clip has to clear all three:
 - **Sustained throughput** — 300 000 macroblocks a second: 1080p29.97 is 244 555 and plays at 1.00x,
   while 1080p59.97 is 489 355 and runs at **0.13x** — slow motion, forever, with no error raised. 720p60
   fits where 1080p60 does not.
 - **Sustained bitrate** — 15 Mbit/s (the average the video track carries): 14.4 measured buttery, 15.6
   measured choppy on the same hardware. This one catches files that pass every size and frame-rate rule —
   a 1080p30 encode at 20 Mbit/s is fine on throughput and still rerouted.
-- **Orientation** — a 1080p clip whose *displayed* aspect is opposite the panel's can only be drawn by the
+- **Shape** — a clip whose *displayed* aspect is not the panel's own shape can only be drawn by the
   platform MediaPlayer (TsPlayer cannot turn or scale anything), and that pairing runs below realtime here,
-  so the clip is shown from the server's smaller stream instead. A 1920x1080 file that its own display matrix
-  turns to 1080x1920 is already aligned on a portrait frame and is untouched. The crop's cost follows the
-  clip's *shape*, not its size, so this ceiling is drawn where the measurement is rather than where the
-  arithmetic ends — if a 720p landscape clip starts stuttering on a portrait frame, the rule is too narrow
-  rather than wrong.
+  so the clip is shown from the server's smaller stream instead. "Not the panel's shape" is broader than
+  "hung the wrong way round": a square, a 3:4 and a 2.4:1 letterbox all fail it on a 9:16 panel, and each
+  is then center-cropped to fill — which keeps 56% of a square's width, so compose for the crop. A 1920x1080
+  file that its own display matrix turns to 1080x1920 matches a portrait frame and is untouched, and so is
+  macroblock padding: a 1920x1088 encode counts as native, within the 3% band that exists for exactly that.
+  Because the crop's cost follows the clip's *shape* rather than its size, this ceiling now applies at
+  640x640 as much as at 1080p — on a frame that has both engines. An EO1 only ever has one, so it keeps the
+  older 1080p-only treatment and will still play a small non-native clip as its original.
 
 A clip over any of these is not refused, it is shown from the server's lower-bitrate playback stream —
 but only where such a stream exists; if the server has nothing transcoded, the clip plays as it arrived.
@@ -97,7 +101,9 @@ Files above 1 GiB are never fetched.
 
 Three things people get wrong:
 
-- A still is **center-cropped to fill** a portrait 1080x1920 panel, never letterboxed. Compose for that.
+- A still is **center-cropped to fill** a portrait 1080x1920 panel, never letterboxed. Video behaves the
+  same way now: anything not already the panel's own shape is cropped to fill rather than shown whole with
+  bars. Compose for that — if the edges matter, make it 9:16.
 - A video holds the whole interval and loops inside it, **muted** — and an EO1 has no audio output at all.
 - An upload cap you exceed lands **zero** files, not a partial batch: 32 files, 512 MB each, 2 GB per
   request. Everything is parsed into a staging area before any file is renamed.

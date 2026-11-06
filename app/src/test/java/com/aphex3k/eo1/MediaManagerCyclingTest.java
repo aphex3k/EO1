@@ -44,6 +44,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class MediaManagerCyclingTest {
 
+    /**
+     * The two ways an EO2 can be hung, as measured pixel pairs. A shape rather than a boolean,
+     * because the verdict below is keyed on the shape: what retires a crop verdict is a panel that
+     * changed, not merely a panel whose orientation word changed.
+     */
+    private static final MediaCompatibility.PanelShape PANEL_PORTRAIT =
+            MediaCompatibility.PanelShape.of(1080, 1920);
+
+    private static final MediaCompatibility.PanelShape PANEL_LANDSCAPE =
+            MediaCompatibility.PanelShape.of(1920, 1080);
+
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 
@@ -455,7 +466,7 @@ public class MediaManagerCyclingTest {
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a), listener, 7L);
         mm.prefetchEnabled = false;
-        mm.setFramePortrait(true);
+        mm.publishPanel(PANEL_PORTRAIT, true);
         File cacheDir = tmp.newFolder("cache");
         File uploads = tmp.newFolder("uploads");
 
@@ -493,7 +504,7 @@ public class MediaManagerCyclingTest {
     }
 
     @Test
-    public void orientationGateStaysDarkUntilThePanelIsPublished() throws Exception {
+    public void cropGateStaysDarkUntilThePanelIsPublished() throws Exception {
         // MediaManager has no Context, so it cannot ask which way the frame is hung; showing an
         // original on an unpublished panel is the conservative answer and must be the only answer.
         String videoId = "01234567-89ab-cdef-0123-456789ae0000";
@@ -543,7 +554,7 @@ public class MediaManagerCyclingTest {
     }
 
     @Test
-    public void flippingThePanelForgetsTheOrientationVerdict() throws Exception {
+    public void flippingThePanelForgetsTheCropVerdict() throws Exception {
         // The reason this verdict has its own set instead of joining tooDemandingVideoKeys: it is a
         // claim about the file *and* the panel, so turning the frame must retire it. A verdict that
         // outlived the orientation that produced it would quietly retire half a correctly-hung library
@@ -578,7 +589,7 @@ public class MediaManagerCyclingTest {
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a), listener, 7L);
         mm.prefetchEnabled = false;
-        mm.setFramePortrait(true);
+        mm.publishPanel(PANEL_PORTRAIT, true);
         File cacheDir = tmp.newFolder("cache");
         File uploads = tmp.newFolder("uploads");
 
@@ -587,7 +598,7 @@ public class MediaManagerCyclingTest {
         assertTrue("the verdict is in its own set: " + mm.verdictCounts(),
                 mm.verdictCounts().contains("needsUpscale=1"));
 
-        mm.setFramePortrait(false);
+        mm.publishPanel(PANEL_LANDSCAPE, true);
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
 
         assertTrue("on a landscape panel this clip needs no upscale, so its cached original is shown",
@@ -600,11 +611,19 @@ public class MediaManagerCyclingTest {
         // And turning it back re-derives it. This is the property the stamped verdict exists to keep: a
         // frame moved to the wall and moved again must neither keep an old verdict nor lose the ability
         // to grow a new one.
-        mm.setFramePortrait(true);
+        mm.publishPanel(PANEL_PORTRAIT, true);
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
         assertTrue("a portrait panel routes this clip again",
                 listener.displayedFiles.get(2).getName().endsWith("_fb.mp4"));
         assertTrue(mm.verdictCounts().contains("needsUpscale=1"));
+
+        // And a panel with the SAME orientation word but a different shape retires it too. This is the
+        // half that proves the verdict is keyed on a measurement rather than on an orientation flag
+        // wearing a new name — which matters because the shape, not the orientation, is what decides
+        // whether a clip needs cropping at all.
+        mm.publishPanel(MediaCompatibility.PanelShape.of(1088, 1920), true);
+        assertTrue("a different portrait shape is a different panel: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=0"));
     }
 
     /**

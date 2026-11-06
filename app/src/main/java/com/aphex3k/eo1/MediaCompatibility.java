@@ -148,9 +148,15 @@ public final class MediaCompatibility {
     public static final long MAX_VIDEO_BIT_RATE_BPS = 15_000_000L;
 
     /**
-     * Displayed long side that makes a clip "1080p" for {@link #incompatibleVideoUpscale}. It is
-     * {@link #MAX_VIDEO_SIDE_PX} by reference, not by repetition, so the resolution gate and the
-     * orientation gate cannot disagree about where 1080p ends.
+     * Displayed long side that marks a clip as "1080p" for the size pair in
+     * {@link #incompatibleVideoUpscale}. It is {@link #MAX_VIDEO_SIDE_PX} by reference, not by
+     * repetition, so the resolution gate and the aspect gate cannot disagree about where 1080p ends.
+     *
+     * <p>The size pair no longer bounds the gate on a frame that has two engines — there the crop
+     * alone is the reason to take the smaller stream, and it costs the same at any size. It remains
+     * the limiter on a one-engine frame, where the gate's scope is deliberately left exactly where
+     * its measurement is, and where widening it would change what a device downloads without
+     * changing how it displays anything.
      */
     public static final int VIDEO_1080P_LONG_SIDE_PX = MAX_VIDEO_SIDE_PX;
 
@@ -160,10 +166,23 @@ public final class MediaCompatibility {
     /**
      * How far above {@link #VIDEO_1080P_SHORT_SIDE_PX} a short side may read and still be 1080p.
      * H.264 codes in 16-pixel macroblock rows, so a 1080-line file can report a padded height of
-     * 1088 in {@code stsd}. Tested for equality alone, {@link #incompatibleVideoUpscale} would
-     * silently never fire on exactly the padded encodes it exists for.
+     * 1088 in {@code stsd}. Tested for equality alone, the size pair would silently never fire on
+     * exactly the padded encodes it exists for.
      */
     public static final int VIDEO_1080P_SHORT_SIDE_SLACK_PX = 8;
+
+    /**
+     * How far a clip's displayed aspect may sit from the panel's own shape and still be called
+     * <em>native</em> — that is, still be drawn correctly by an engine whose scaling is fixed.
+     * 300 basis points is 3.00%.
+     *
+     * <p>Sized to swallow H.264 macroblock padding and nothing real: a padded 1920x1088 is 0.74%
+     * off a 1920x1080 panel, while the nearest common video ratio to 16:9 is 16:10 at 10% away.
+     * Every value between 2% and 5% therefore selects the identical set of clips on this fleet, so
+     * this number is a margin, not a measurement — do not read a hardware fact into it or tune it
+     * to make one particular file behave.
+     */
+    public static final int VIDEO_NATIVE_ASPECT_TOLERANCE_BP = 300;
 
     private MediaCompatibility() {
     }
@@ -320,43 +339,133 @@ public final class MediaCompatibility {
     }
 
     /**
-     * True when the clip <em>displays</em> with the aspect opposite the panel it will be shown on —
-     * a landscape video on a portrait frame or the reverse. The one place this arithmetic lives:
-     * {@code MainActivity.routingAllowsTsPlayer} uses it to pick the engine, and
-     * {@link #incompatibleVideoUpscale} uses it to pick the source, so the two can never disagree
-     * about what "opposite" means.
+     * The panel's own shape, in the live layout pixels the compositor will be handed.
      *
-     * <p>The display matrix is applied before the comparison, which is what makes a turned clip
-     * pass: a 1920x1080 file carrying a 90-degree {@code tkhd} matrix shows 1080x1920, so it is
-     * portrait material and needs no magnification on a portrait frame. A square clip is never
-     * opposite. Unknown dimensions yield {@code false} — the conservative direction, because a
-     * wrong {@code true} here would reroute healthy video to a lower-quality source.
+     * <p>It carries orientation, and that is load-bearing: the question this answers is whether a
+     * clip's shape matches the panel's <em>in the way the panel is hung</em>, so 1920x1080 and
+     * 1080x1920 are different shapes and a landscape clip on a portrait panel is a mismatch rather
+     * than a match-by-ratio. Comparing long side against short side would have been wrong here.
      *
-     * @param codedWidth {@code stsd} width in pixels, or {@code <= 0} when unknown
-     * @param codedHeight {@code stsd} height in pixels, or {@code <= 0} when unknown
-     * @param rotationDeg display-matrix angle, 0/90/180/270, or any negative value for unknown
-     *                    (only 90 and 270 turn the aspect; 180 leaves it as it is)
-     * @param framePortrait the panel's own orientation, true for portrait
+     * <p>It is deliberately the measured viewport and not a spec figure. This class has no Android
+     * imports so it runs on the JVM, which is the reason the value arrives as a parameter rather
+     * than being read here.
      */
-    public static boolean videoAspectOppositeFrame(int codedWidth, int codedHeight,
-                                                   int rotationDeg, boolean framePortrait) {
-        if (codedWidth <= 0 || codedHeight <= 0) {
-            return false;
+    public static final class PanelShape {
+
+        public final int width;
+        public final int height;
+
+        private PanelShape(int width, int height) {
+            this.width = width;
+            this.height = height;
         }
-        boolean turned = rotationDeg == 90 || rotationDeg == 270;
-        int displayWidth = turned ? codedHeight : codedWidth;
-        int displayHeight = turned ? codedWidth : codedHeight;
-        return (displayWidth > displayHeight && framePortrait)
-                || (displayHeight > displayWidth && !framePortrait);
+
+        /**
+         * @return the shape, or {@code null} when either side is not a real measurement — which
+         *         every caller reads as "cannot judge", the direction that never takes a healthy
+         *         clip off its default engine or away from its original
+         */
+        @Nullable
+        public static PanelShape of(int width, int height) {
+            return (width <= 0 || height <= 0) ? null : new PanelShape(width, height);
+        }
+
+        @Override
+        public boolean equals(@Nullable Object other) {
+            if (this == other) {
+                return true;
+            }
+            if (!(other instanceof PanelShape)) {
+                return false;
+            }
+            PanelShape that = (PanelShape) other;
+            return width == that.width && height == that.height;
+        }
+
+        @Override
+        public int hashCode() {
+            return 31 * width + height;
+        }
+
+        @Override
+        public String toString() {
+            return width + "x" + height;
+        }
     }
 
     /**
-     * Upscale check for 1080p video that will have to be magnified to fill this panel.
+     * The clip's size after its own display matrix has been applied — the size the panel is asked
+     * to draw, as opposed to the size the bitstream codes. A 1920x1080 file carrying a 90-degree
+     * {@code tkhd} matrix displays 1080x1920, and it is the 1080x1920 that has to match the panel.
+     *
+     * <p>Exposed because both callers need the same transform and nothing else: routing needs it to
+     * ask the aspect question, {@link #incompatibleVideoUpscale} needs it to size the crop.
+     *
+     * @param rotationDeg display-matrix angle, 0/90/180/270, or a negative value for unknown
+     *                    (only 90 and 270 turn the aspect; 180 leaves it as it is)
+     */
+    public static int displayedWidth(int codedWidth, int codedHeight, int rotationDeg) {
+        return (rotationDeg == 90 || rotationDeg == 270) ? codedHeight : codedWidth;
+    }
+
+    /** Companion to {@link #displayedWidth(int, int, int)}. */
+    public static int displayedHeight(int codedWidth, int codedHeight, int rotationDeg) {
+        return (rotationDeg == 90 || rotationDeg == 270) ? codedWidth : codedHeight;
+    }
+
+    /**
+     * True only when a crop mismatch is <em>positively established</em>: the clip's dimensions are
+     * known, the panel's shape is known, and the clip's displayed aspect lies further from the
+     * panel's own shape than {@link #VIDEO_NATIVE_ASPECT_TOLERANCE_BP} allows. The one place that
+     * arithmetic lives — {@code MainActivity.routingAllowsTsPlayer} uses it to pick the engine and
+     * {@link #incompatibleVideoUpscale} uses it to pick the source, so the two can never drift into
+     * two definitions of what "native" means.
+     *
+     * <p>This replaced a test for the aspect being <em>opposite</em> the panel's, which compared the
+     * clip's two sides against each other and never looked at the panel at all. That predicate could
+     * only be answered by a clip with a long axis, so a square fell through to the default engine and
+     * was letterboxed, and the comparison doubled as an unannounced threshold: 1088x1080 flipped
+     * engines while 1080x1080 and 1080x1088 did not. Comparing against the panel fixes both, because
+     * "opposite" is simply the largest case of "differs" and survives as a subset.
+     *
+     * <p>Every unknown yields {@code false}, which is the conservative direction for both callers: a
+     * clip nobody can judge keeps its default engine and its original. An unknown display matrix is
+     * not refused here but treated as unturned, exactly as the predicate this replaced did — routing
+     * can afford that because a wrong engine answer only costs a crop, while the source gate applies
+     * its own stricter guard and refuses to decide at all.
+     *
+     * <p>Compared by cross-multiplication in {@code long}: no division, no floating point, no
+     * epsilon to tune. The relative distance from the panel's ratio is
+     * {@code |dw*ph - pw*dh| / (dh*pw)}, so the test is that against {@code BP/10000}.
+     *
+     * @param codedWidth {@code stsd} width in pixels, or {@code <= 0} when unknown
+     * @param codedHeight {@code stsd} height in pixels, or {@code <= 0} when unknown
+     * @param rotationDeg display-matrix angle from the file, or a negative value when unknown
+     * @param panel the panel's shape, or {@code null} when it has not been measured yet
+     */
+    public static boolean videoAspectDiffersFromPanel(int codedWidth, int codedHeight,
+                                                      int rotationDeg,
+                                                      @Nullable PanelShape panel) {
+        if (panel == null || codedWidth <= 0 || codedHeight <= 0) {
+            return false;
+        }
+        long displayWidth = displayedWidth(codedWidth, codedHeight, rotationDeg);
+        long displayHeight = displayedHeight(codedWidth, codedHeight, rotationDeg);
+        long cross = displayWidth * panel.height - (long) panel.width * displayHeight;
+        long difference = cross >= 0 ? cross : -cross;
+        return 10000L * difference
+                > (long) VIDEO_NATIVE_ASPECT_TOLERANCE_BP * panel.width * displayHeight;
+    }
+
+    /**
+     * Crop check for video whose aspect is not the panel's, and which therefore has to be magnified
+     * and center-cropped to fill the screen.
      *
      * <p>Two of this device's known slow paths meet on exactly this clip. It is always drawn by the
-     * platform MediaPlayer, because {@code routingAllowsTsPlayer} hands every aspect-opposite clip over
-     * (TsPlayer's {@code .so} has no scale or rotation control at all), and it is always drawn with a
-     * center-crop fill term above 1 — and {@code TextureVideoView.cropScaleFactors} records what that
+     * platform MediaPlayer, because {@code routingAllowsTsPlayer} hands every non-native clip over —
+     * TsPlayer's {@code .so} exposes no scale or rotation control, which is precisely why a clip whose
+     * shape differs from the panel's cannot be drawn correctly by it — and it is always drawn with a
+     * center-crop fill term above 1. {@code TextureVideoView.cropScaleFactors} records what that
      * magnification costs here: reached through a double axis-swap rather than through a mismatched
      * aspect, it "looked like a framerate problem, not a zoom one".
      *
@@ -366,27 +475,35 @@ public final class MediaCompatibility {
      * {@code (3.16, 1.0)} — so the fallback is composited over the same region and merely asks less of
      * the decoder and of the source read. That is the honest boundary of this gate's claim: a clip that
      * still runs slow once routed is paying for the composite, and the lever from there is
-     * fill-versus-letterbox in {@code TextureVideoView}, not the source.
+     * fill-versus-letterbox in {@code TextureVideoView}, not the source. It is also why the gate no
+     * longer needs a size pair on a two-engine frame: if the crop is viewport-bounded, the clip's own
+     * size never set that bound, and the reason to take the lighter encode applies at 640x640 as much
+     * as at 1080p.
      *
-     * <p>Scope is 1080p alone because that is where the datapoint is, not because the arithmetic stops
-     * there. By the model above a 720p clip of the same aspect costs the same composite and passes here,
-     * and a wider-than-16:9 one (1920x800, or a 2048x858 letterbox) costs <em>more</em> and passes too;
-     * below 1080p there are fewer source pixels and fewer macroblocks, which is the only reason to
-     * believe it stays inside the margin. Expressing the predicate as a fill term instead of as a size
-     * pair would make the boundary match the mechanism, and is the follow-up this note exists to
-     * propose; above 1080p the coded-side gate has already routed the asset.
+     * <p>On a frame with only one engine — an EO1, or any board whose native library never loaded —
+     * the size pair is still required, so this gate keeps firing on exactly the population it always
+     * has and nothing about what such a frame downloads changes. That is a deliberate limit on the
+     * widening, not a second rule: both routes ask the <em>same</em> aspect question of the same
+     * {@link #videoAspectDiffersFromPanel}, and the only thing the engine count decides is whether the
+     * crop alone is evidence enough to spend a different download. The cost of the choice is honest
+     * and should stay stated: a one-engine frame goes on compositing non-native originals below
+     * realtime, which is what it does today.
      *
      * <p>Routing only, like {@link #incompatibleVideoThroughput} and {@link #incompatibleVideoBitrate}
      * — the clip plays, merely too slowly, so this must never reach
      * {@code tagAssetAsIncompatible} or {@code knownIncompatibleKeys}, and it is deliberately absent
      * from {@link #incompatibleReasonForFile}, whose callers read a non-null answer as "undecodable".
+     * This is the constraint a broadened aspect predicate is most likely to break, because it now fires
+     * on a far larger set of clips; the two are kept apart in {@code MediaManager}, not here.
      *
      * <p>Conservative on every unknown: unknown dimensions, an unknown display matrix
      * ({@code rotationDeg < 0}, which includes every non-ISOBMFF container — an {@code .mkv} keeps its
-     * angle in a Matroska element this probe does not read), and a panel orientation the app has not
-     * published yet all yield {@code null}. The last one is why this gate is dark until
-     * {@code MediaManager.setFramePortrait} is called — a frame that cannot say which way it is hung
-     * shows originals, as it does today.
+     * angle in a Matroska element this probe does not read), and a panel shape the app has not measured
+     * yet all yield {@code null}. The last one is why this gate is dark until {@code
+     * MediaManager.setFrameShape} is called — a frame that cannot say its own shape shows originals,
+     * as it does today. A clip over {@link #MAX_VIDEO_SIDE_PX} is also skipped, not because it is safe
+     * but because {@link #incompatibleVideoResolution} already owns it, and the two gates claiming one
+     * file would make the reason string a lie about which one acted.
      *
      * <p>Like its two byte-budget siblings it helps only where a smaller encode exists to route to, and
      * on a server that answers {@code /video/playback} with the original bytes it does nothing at all:
@@ -397,41 +514,54 @@ public final class MediaCompatibility {
      * @param codedWidth {@code stsd} width in pixels, or {@code <= 0} when unknown
      * @param codedHeight {@code stsd} height in pixels, or {@code <= 0} when unknown
      * @param rotationDeg display-matrix angle from the file, or a negative value when unknown
-     * @param framePortrait the panel's orientation, or {@code null} when unpublished
-     * @return a human-readable reason when this is 1080p video hung the wrong way round for this panel,
-     *         or {@code null} when it is not or cannot be judged
+     * @param panel the panel's measured shape, or {@code null} when it is not known yet
+     * @param twoEngines whether this frame actually has a second engine to route to, i.e.
+     *                   {@code preferTsPlayer} — see the scope note above
+     * @return a human-readable reason when this video must be cropped to fill this panel, or
+     *         {@code null} when it need not be or cannot be judged
      */
     @Nullable
     public static String incompatibleVideoUpscale(@Nullable MediaType type, int codedWidth,
                                                   int codedHeight, int rotationDeg,
-                                                  @Nullable Boolean framePortrait) {
-        if (type != MediaType.VIDEO || framePortrait == null || codedWidth <= 0 || codedHeight <= 0
+                                                  @Nullable PanelShape panel, boolean twoEngines) {
+        if (type != MediaType.VIDEO || panel == null || codedWidth <= 0 || codedHeight <= 0
                 || rotationDeg < 0) {
             return null;
         }
-        if (!videoAspectOppositeFrame(codedWidth, codedHeight, rotationDeg, framePortrait)) {
+        int displayWidth = displayedWidth(codedWidth, codedHeight, rotationDeg);
+        int displayHeight = displayedHeight(codedWidth, codedHeight, rotationDeg);
+        if (Math.max(displayWidth, displayHeight) > MAX_VIDEO_SIDE_PX) {
             return null;
         }
-        boolean turned = rotationDeg == 90 || rotationDeg == 270;
-        int displayWidth = turned ? codedHeight : codedWidth;
-        int displayHeight = turned ? codedWidth : codedHeight;
+        if (!videoAspectDiffersFromPanel(codedWidth, codedHeight, rotationDeg, panel)) {
+            return null;
+        }
+        if (!twoEngines && !isPadded1080pSize(displayWidth, displayHeight)) {
+            return null;
+        }
+        // The fill factor itself, which is the number TextureVideoView.aspectScale will compute for
+        // this clip-and-panel pair. The gate used to print the clip's own ratio instead, because it
+        // did not read the panel; now that it does, the crop is what the claim should name.
+        double fillScale = Math.max((double) panel.width / displayWidth,
+                (double) panel.height / displayHeight);
+        return "video coded " + codedWidth + "x" + codedHeight
+                + (rotationDeg > 0 ? " (matrix " + rotationDeg + " degrees)" : "")
+                + " displays " + displayWidth + "x" + displayHeight + " on a " + panel
+                + " panel and needs a " + String.format(Locale.ROOT, "%.2fx", fillScale)
+                + " center-crop fill, which only MediaPlayer draws, and the crop costs the same at"
+                + " any size so the smaller stream is worth taking";
+    }
+
+    /**
+     * Whether a displayed size is 1080p including macroblock padding — the scope the crop gate held
+     * before it could read the panel, and still the scope on a frame with one engine.
+     */
+    private static boolean isPadded1080pSize(int displayWidth, int displayHeight) {
         int longSide = Math.max(displayWidth, displayHeight);
         int shortSide = Math.min(displayWidth, displayHeight);
-        if (longSide != VIDEO_1080P_LONG_SIDE_PX
-                || shortSide < VIDEO_1080P_SHORT_SIDE_PX
-                || shortSide > VIDEO_1080P_SHORT_SIDE_PX + VIDEO_1080P_SHORT_SIDE_SLACK_PX) {
-            return null;
-        }
-        // The clip's own display aspect, deliberately not a fill factor: what a center-crop multiplies
-        // by depends on the panel's shape too, which this class does not read, and printing the clip's
-        // ratio under the name "upscale" would claim a number this predicate never measured.
-        double displayAspect = (double) longSide / (double) shortSide;
-        return "1080p video coded " + codedWidth + "x" + codedHeight
-                + (rotationDeg > 0 ? " (matrix " + rotationDeg + " degrees)" : "")
-                + " displays " + displayWidth + "x" + displayHeight + " ("
-                + String.format(Locale.ROOT, "%.2f:1", displayAspect) + ") on a "
-                + (framePortrait ? "portrait" : "landscape")
-                + " panel, which only MediaPlayer draws, and below realtime";
+        return longSide == VIDEO_1080P_LONG_SIDE_PX
+                && shortSide >= VIDEO_1080P_SHORT_SIDE_PX
+                && shortSide <= VIDEO_1080P_SHORT_SIDE_PX + VIDEO_1080P_SHORT_SIDE_SLACK_PX;
     }
 
     /**

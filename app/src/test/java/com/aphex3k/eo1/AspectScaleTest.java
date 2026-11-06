@@ -1,6 +1,7 @@
 package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
 
 import com.dd.crop.TextureVideoView;
 
@@ -67,5 +68,47 @@ public class AspectScaleTest {
         assertEquals(1.0f, alreadyAligned[1], 0.0001);
 
         assertEquals(1.0f, TextureVideoView.aspectScale(1080, 1920, 1080, 1920), 0.0001);
+    }
+
+    @Test
+    public void aspectFillNeverLetterboxesOnEitherPanelOrientation() {
+        // The product rule this pins, stated as the arithmetic that expresses it. A TextureView first
+        // stretches whatever buffer it holds into the view bounds, and the transform is applied on top
+        // of that — so a factor of 1.0 on an axis means the content exactly reaches both edges, and
+        // anything BELOW 1.0 would pull the content in from the edges, which is a bar. There is no
+        // other way to read these numbers: "no axis below 1.0, with at least one exactly 1.0" is
+        // precisely "fills the viewport, crops exactly the one axis that overflows, never bars".
+        //
+        // It holds today because aspectScale takes Math.max, and a fit choice would take Math.min.
+        // That is why this test is worth having: the rule is now load-bearing, because routing sends
+        // every clip whose aspect is not the panel's here, and a clip that arrived with bars would have
+        // nowhere left to go — TsPlayer, the only alternative, is the engine that bars things.
+        int[][] portraitViewportClips = {
+                {1920, 1080},   // opposite orientation: the case that has always come here
+                {1080, 1080},   // square: why the rule was broadened
+                {640, 640},
+                {1080, 1440},   // same orientation, wrong ratio
+                {1920, 1088},   // macroblock-padded 1080p
+                {1280, 720},
+                {854, 480},
+        };
+        for (int[] clip : portraitViewportClips) {
+            assertCoversWithoutBars(1080, 1920, clip[0], clip[1]);
+        }
+        // The mirror, so the property cannot be an accident of a portrait wall.
+        for (int[] clip : new int[][] {{1080, 1920}, {1080, 1080}, {1920, 800}, {720, 1280}}) {
+            assertCoversWithoutBars(1920, 1080, clip[0], clip[1]);
+        }
+    }
+
+    private static void assertCoversWithoutBars(int viewWidth, int viewHeight,
+                                                int clipWidth, int clipHeight) {
+        float[] factors = TextureVideoView.cropScaleFactors(
+                viewWidth, viewHeight, clipWidth, clipHeight);
+        String what = clipWidth + "x" + clipHeight + " in " + viewWidth + "x" + viewHeight;
+        assertTrue(what + " would leave a bar on the horizontal edges", factors[0] >= 1.0f - 1e-4);
+        assertTrue(what + " would leave a bar on the vertical edges", factors[1] >= 1.0f - 1e-4);
+        assertTrue(what + " over-crops both axes; one axis must land exactly on the edges",
+                Math.min(factors[0], factors[1]) <= 1.0f + 1e-4);
     }
 }

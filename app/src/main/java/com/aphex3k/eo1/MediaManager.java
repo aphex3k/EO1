@@ -134,32 +134,47 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private final Set<String> tooDemandingVideoKeys =
             Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
     /**
-     * Asset keys whose 1080p video would have to be magnified to fill this frame's panel, because it
-     * displays with the aspect opposite the panel's — see
+     * Asset keys whose video would have to be center-cropped to fill this frame's panel, because its
+     * displayed aspect is not the panel's own — see
      * {@link MediaCompatibility#incompatibleVideoUpscale}. Routed rather than tagged, for the reason
      * every budget has: the clip is decodable, it only runs slow.
      *
      * <p>Kept apart from {@link #tooDemandingVideoKeys} because it is a different kind of fact. A
      * byte budget is a property of the file, and holds however the frame is hung; this is a property
-     * of the file <em>and</em> the panel. So each entry carries the orientation it was decided under,
+     * of the file <em>and</em> the panel. So each entry carries the panel shape it was decided under,
      * and {@link #originalUsable} honors it only while that is still the published one — which is what
      * makes a verdict retire itself when a frame is turned without anything having to clear it first.
-     * A set plus a clear would not: the acquisition and prefetch threads read the orientation and then
-     * write the verdict, so a {@code clear()} racing between the two could leave a stale entry that
-     * outlived the orientation which produced it. Merging this into the byte-budget set would have
+     * A set plus a clear would not: the acquisition and prefetch threads read the shape and then write
+     * the verdict, so a {@code clear()} racing between the two could leave a stale entry that
+     * outlived the panel which produced it. Merging this into the byte-budget set would have
      * the same problem, and would additionally force a throughput verdict to be re-earned every time
      * a frame is moved.
      */
-    private final ConcurrentHashMap<String, Boolean> upscaledVideoKeys =
-            new ConcurrentHashMap<String, Boolean>();
+    private final ConcurrentHashMap<String, MediaCompatibility.PanelShape> upscaledVideoKeys =
+            new ConcurrentHashMap<String, MediaCompatibility.PanelShape>();
     /**
-     * Which way this frame's panel is hung: true portrait, false landscape, {@code null} when the
-     * activity has not published one yet. Read by {@link #noteVideoNeedsUpscale} when a verdict is
-     * taken and by {@link #originalUsable} when one is honored; a
-     * {@code null} keeps that gate dark, which is the conservative direction — an unpublished panel
-     * shows originals, exactly as every build before this gate did.
+     * The frame's own measured shape — the live viewport in layout pixels, not an orientation flag and
+     * not a spec figure. {@code null} until the activity publishes one, which keeps the crop gate
+     * dark; that is the conservative direction — an unpublished panel shows originals and keeps its
+     * default engine, exactly as every build before this gate did.
+     *
+     * <p>This replaced a {@code Boolean} for portrait-versus-landscape. A shape is strictly more
+     * information and it subsumes the orientation: a panel you can measure is a panel you can say the
+     * orientation of, and the reverse is not true — the crop question needs the ratio, which an
+     * orientation bit cannot answer.
      */
-    private volatile Boolean framePortrait;
+    private volatile MediaCompatibility.PanelShape frameShape;
+    /**
+     * Whether this frame has a second video engine to route to, i.e. {@code preferTsPlayer}. It scopes
+     * the crop gate as {@link MediaCompatibility#incompatibleVideoUpscale} describes: on a frame where
+     * the engine choice is already settled by hardware, the gate keeps its original 1080p-only reach so
+     * nothing about what such a frame downloads changes.
+     *
+     * <p>Written once from {@code MainActivity.onCreate} before any acquisition, and deliberately not
+     * part of the verdict key above: it cannot change within a process, so a verdict taken under one
+     * answer can never be judged against the other.
+     */
+    private volatile boolean secondEngine;
     /**
      * Video assets whose degraded source turns out to be the original file itself, because the
      * server has nothing transcoded for them. Remembered so the two verdicts cannot chase each other:
@@ -996,7 +1011,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         if (asset.localPath != null) {
             // Already on disk: no download to avoid and no cache to overflow, so the decoder gets
             // the bytes and decides. Its verdict is filed as a sidecar report, not a silent skip.
-            // No routing verdict is consulted here — throughput, bitrate or orientation: a local upload
+            // No routing verdict is consulted here — throughput, bitrate or crop: a local upload
             // has no degraded source to be routed to, so rerouting it would mean not showing it at all.
             return true;
         }
@@ -1005,11 +1020,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     + " starting at the fallback source");
             return false;
         }
-        Boolean routedForPortrait = upscaledVideoKeys.get(key);
-        if (routedForPortrait != null && routedForPortrait.equals(framePortrait)
+        MediaCompatibility.PanelShape routedForPanel = upscaledVideoKeys.get(key);
+        if (routedForPanel != null && routedForPanel.equals(frameShape)
                 && !noTranscodeVideoKeys.contains(key)) {
-            Log.i(TAG, "acquireAsset: " + key + " is 1080p against a panel turned the other way;"
-                    + " starting at the fallback source");
+            Log.i(TAG, "acquireAsset: " + key + " needs a center-crop fill on this "
+                    + frameShape + " panel; starting at the fallback source");
             return false;
         }
         if (asset.sizeBytes != null && asset.sizeBytes > MAX_ASSET_BYTES) {
@@ -1074,9 +1089,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
-     * Notes that an asset's 1080p video displays with the aspect opposite <em>this</em> frame's panel, so
-     * it is the platform MediaPlayer — never TsPlayer, whose {@code .so} cannot turn or scale — that has
-     * to composite it, and this hardware has not kept up with that. Same treatment as
+     * Notes that an asset's video displays with an aspect that is not <em>this</em> frame's panel shape,
+     * so it is the platform MediaPlayer — never TsPlayer, whose {@code .so} cannot turn or scale — that
+     * has to composite it, and this hardware has not kept up with that. Same treatment as
      * {@link #noteVideoOverDecodeBudget}: descend to the fallback now, remember the key so every later
      * acquisition starts there, keep the original cached.
      *
@@ -1086,7 +1101,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * transcode is composited over the same region as the 1080p original and asks only less decode and
      * fewer source pixels of the pipeline. That is the whole claim this verdict can make from the code:
      * if a routed clip still plays slowly on the wall, the cost is the composite rather than the stream,
-     * and the lever is {@code TextureVideoView}'s fill-not-letterbox choice, not the source.
+     * and the lever is {@code TextureVideoView}'s fill-not-letterbox choice, not the source. It is also
+     * why the verdict is no longer limited to 1080p on a two-engine frame: the viewport sets the crop,
+     * so the clip's own size was never what put it over the margin.
      *
      * <p>Decided from the file rather than the catalog for the same reason the frame rate is: no
      * backend reports a display matrix, and without it a portrait-coded clip cannot be told apart from
@@ -1103,9 +1120,10 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
         // One read, and the same value stamped onto the verdict, so what is remembered is the panel
         // this was decided against rather than whatever is published by the time the write lands.
-        Boolean panel = framePortrait;
+        MediaCompatibility.PanelShape panel = frameShape;
         String reason = MediaCompatibility.incompatibleVideoUpscale(
-                asset.type, probe.codedWidth, probe.codedHeight, probe.rotationDeg, panel);
+                asset.type, probe.codedWidth, probe.codedHeight, probe.rotationDeg, panel,
+                secondEngine);
         if (reason == null) {
             return false;
         }
@@ -1113,35 +1131,44 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         Log.w(TAG, "acquireRemoteFile: " + asset.key() + " - " + reason
                 + "; starting it at the fallback source, original kept cached");
         // Durable record, as above: /state's video block will describe the fallback this verdict put
-        // on screen, so the coded size, matrix and panel orientation that decided it exist nowhere
+        // on screen, so the coded size, matrix and panel shape that decided it exist nowhere
         // else once logcat has rolled over.
         postDebugInformation("videoBudget", asset.key() + " - " + reason);
         return true;
     }
 
     /**
-     * Publishes which way this frame's panel is hung, so {@link #noteVideoNeedsUpscale} can judge a
-     * clip against it. {@code MainActivity} is the only holder of a {@code Resources} object; this
-     * class has no {@code Context}, so the value is handed over rather than read.
+     * Publishes what this frame's display pipeline looks like, so {@link #noteVideoNeedsUpscale} can
+     * judge a clip against it: the panel's measured shape, and whether there is a second engine to
+     * route to. {@code MainActivity} is the only holder of a {@code Context} and of the engine
+     * decision; this class has neither, so both values are handed over rather than read.
      *
-     * <p>What keeps an orientation verdict correctable is that each entry is <em>stamped</em> with the
-     * panel it was decided against (see {@link #upscaledVideoKeys}) and is ignored once a different
-     * panel is published. The clear here is only housekeeping — it bounds the map on a frame that gets
-     * moved often, and it deliberately carries no correctness. Re-deriving a forgotten verdict costs a
+     * <p>One method rather than two setters because the two facts must never be published apart. A
+     * shape without the engine count would widen the gate on a frame that has nothing to widen it
+     * for; an engine count without a shape would be read against a stale panel. Neither mistake is
+     * possible when there is one call to make.
+     *
+     * <p>What keeps a crop verdict correctable is that each entry is <em>stamped</em> with the panel
+     * it was decided against (see {@link #upscaledVideoKeys}) and is ignored once a different panel is
+     * published. The clear here is only housekeeping — it bounds the map on a frame that gets moved
+     * often, and it deliberately carries no correctness. Re-deriving a forgotten verdict costs a
      * cache hit plus a {@code moov} read, except on a frame whose cache has since evicted that original
      * for room, where it costs a download again on the tick that asks for it. The byte budgets need
      * neither: nothing about how a frame is hung changes what a file asks of its decoder.
      *
-     * @param portrait true for a portrait panel, false for landscape, {@code null} to leave the
-     *                 orientation gate dark
+     * @param shape the panel's live viewport in layout pixels, or {@code null} while it cannot be
+     *              measured — which leaves the crop gate dark rather than guessing
+     * @param secondEngine {@code preferTsPlayer}: whether this frame has two engines, which is what
+     *                     decides the gate's scope as
+     *                     {@link MediaCompatibility#incompatibleVideoUpscale} explains
      */
-    void setFramePortrait(@Nullable Boolean portrait) {
-        Boolean previous = framePortrait;
-        framePortrait = portrait;
-        if (previous != null && !previous.equals(portrait) && !upscaledVideoKeys.isEmpty()) {
-            Log.i(TAG, "setFramePortrait: panel is now " + (portrait != null && portrait
-                    ? "portrait" : "landscape") + ", forgetting " + upscaledVideoKeys.size()
-                    + " orientation verdict(s)");
+    void publishPanel(@Nullable MediaCompatibility.PanelShape shape, boolean secondEngine) {
+        MediaCompatibility.PanelShape previous = frameShape;
+        frameShape = shape;
+        this.secondEngine = secondEngine;
+        if (previous != null && !previous.equals(shape) && !upscaledVideoKeys.isEmpty()) {
+            Log.i(TAG, "publishPanel: panel is now " + shape + " (was " + previous
+                    + "), forgetting " + upscaledVideoKeys.size() + " crop verdict(s)");
             upscaledVideoKeys.clear();
         }
     }
@@ -1213,20 +1240,32 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             Log.w(TAG, "acquireAsset: " + asset.key() + " - no fallback source, skipping");
             return null;
         }
-        // Every video gate — throughput, bitrate, orientation — routes here assuming the degraded
-        // source is the smaller one. A server with
-        // nothing transcoded answers /video/playback with the ORIGINAL file, so that assumption is
-        // simply false, and paying it off means fetching 158 MB twice to display the same slow clip
-        // twice — measured on an EO2, where the cache ended up holding the asset's bytes under two
-        // names. When the endpoint reports its answer is the asset's own size there is nothing to
-        // degrade to, so take the original and remember that, which is also what stops the
-        // routing verdicts and this probe from driving each other round and round.
+        // Every video gate — throughput, bitrate, crop — routes here assuming the degraded
+        // source is the SMALLER one. A server with nothing transcoded answers /video/playback with the
+        // ORIGINAL file, so that assumption is simply false, and paying it off means fetching 158 MB
+        // twice to display the same slow clip twice — measured on an EO2, where the cache ended up
+        // holding the asset's bytes under two names. When the endpoint reports its answer is the
+        // asset's own size there is nothing to degrade to, so take the original and remember that,
+        // which is also what stops the routing verdicts and this probe from driving each other round
+        // and round.
+        //
+        // "Own size" is generalised to "not smaller than the original", because the crop gate now fires
+        // on clips well below a server's transcode ladder. A 480p original routed to a 720p playback
+        // stream would download more bytes and decode more pixels than the file it was sent away from:
+        // the saving the routing exists to make would come out negative, silently, on exactly the small
+        // clips that were never a problem. Equality alone could not see that case. This is scoped to
+        // the routing path by construction — an asset whose original genuinely failed arrives through
+        // acquireFallbackSource instead, and must still take whatever the server has, however large.
         if (fallback.isVideoPlayback() && fallback.expectedBytes != null
                 && asset.sizeBytes != null
-                && fallback.expectedBytes.longValue() == asset.sizeBytes.longValue()) {
+                && fallback.expectedBytes.longValue() >= asset.sizeBytes.longValue()) {
             return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
-                    "the degraded source is the original byte for byte (" + asset.sizeBytes
-                            + " B); no transcode exists");
+                    fallback.expectedBytes.longValue() == asset.sizeBytes.longValue()
+                            ? "the degraded source is the original byte for byte (" + asset.sizeBytes
+                                    + " B); no transcode exists"
+                            : "the degraded source (" + fallback.expectedBytes + " B) is not smaller"
+                                    + " than the original (" + asset.sizeBytes
+                                    + " B); routing would cost bytes to save nothing");
         }
         return acquireFallbackSource(asset, fallback, cacheDir, reportProgress);
     }
@@ -1347,7 +1386,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 String reason = MediaCompatibility.incompatibleReasonForFile(
                         asset.type, cacheFile, probe);
                 if (reason == null) {
-                    // Two statements, not one || : a clip over a byte budget *and* the orientation
+                    // Two statements, not one || : a clip over a byte budget *and* the crop
                     // gate should leave both records behind, not just the first one checked.
                     boolean descend = noteVideoOverDecodeBudget(asset, probe);
                     descend |= noteVideoNeedsUpscale(asset, probe);
@@ -2049,7 +2088,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * The five verdict sets, as counts. Keys are deliberately withheld: a library of 40 000 assets
      * would otherwise spend half a report's budget listing uuids, and the number is what answers
      * "has this frame quietly given up on a slice of the library". Counts only is also what keeps a
-     * throughput, bitrate or orientation verdict — a statement about this decoder, or about this
+     * throughput, bitrate or crop verdict — a statement about this decoder, or about this
      * panel, never about the user's files — from reading like one.
      */
     public String verdictCounts() {
