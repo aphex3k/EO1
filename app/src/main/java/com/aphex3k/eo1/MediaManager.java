@@ -175,32 +175,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * answer can never be judged against the other.
      */
     private volatile boolean secondEngine;
-    /**
-     * Video assets that DO have a distinct transcode, which is simply not smaller than the original,
-     * on an asset routed away from that original for cost alone. Recorded so that decision survives
-     * the cycle without asserting anything about whether a transcode exists.
-     *
-     * <p>Kept apart from {@link #noTranscodeVideoKeys} deliberately, and that separation is the whole
-     * point. The absence set means "nothing is transcoded here" and is read as that twice over:
-     * {@link #hasNoDistinctFallback} answers from it whenever a size probe cannot decide, and
-     * {@code originalSkipReason} lets it cancel a budget verdict. Reusing it to break the loop below
-     * would tell the display-failure path there is nothing to fall back to — on the one asset shape
-     * where a larger H.264 stream is precisely the thing that can play, namely an original that
-     * failed to display.
-     *
-     * <p>It cannot be omitted either. With no record the cycle re-applies the same budget verdict,
-     * comes back to the same branch, and declines the same stream forever, and the asset never
-     * displays at all. So a marker is load-bearing for termination; only its identity was wrong.
-     */
-    private final Set<String> transcodeNotSmallerKeys =
-            Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
-    /**
-     * Video assets whose degraded source turns out to be the original file itself, because the
-     * server has nothing transcoded for them. Remembered so the two verdicts cannot chase each other:
-     * a routing check wants to route away from the original, and this says there is nowhere to
-     * route to. Without it every cycle would re-probe the endpoint, re-add the verdict,
-     * re-probe, and download the same 158 MB in a circle.
-     */
+    /** How many times this process declined a transcode for being no smaller. A total, not a set:
+     *  per-asset membership is exactly what would go stale. */
+    private int declinedLargerTranscodes;
     private final Set<String> noTranscodeVideoKeys =
             Collections.newSetFromMap(new ConcurrentHashMap<String,Boolean>());
     /**
@@ -1125,12 +1102,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     private boolean noteVideoOverDecodeBudget(MediaAsset asset,
                                               @Nullable VideoHeaderProbe.Probe probe) {
-        // The transcodeNotSmallerKeys term breaks a loop, not a redundant probe: once the stream
-        // this verdict pointed at has been declined for being larger, re-applying the verdict sends
-        // the acquisition straight back to the branch that declined it.
         if (asset.type != MediaType.VIDEO || probe == null
-                || noTranscodeVideoKeys.contains(asset.key())
-                || transcodeNotSmallerKeys.contains(asset.key())) {
+                || noTranscodeVideoKeys.contains(asset.key())) {
             return false;
         }
         String throughput = MediaCompatibility.incompatibleVideoThroughput(
@@ -1182,11 +1155,8 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      */
     private boolean noteVideoNeedsUpscale(MediaAsset asset,
                                           @Nullable VideoHeaderProbe.Probe probe) {
-        // Third term: see noteVideoOverDecodeBudget. A crop verdict already acted on, whose stream
-        // turned out to be larger than the file it replaces, must not be re-applied every cycle.
         if (asset.type != MediaType.VIDEO || probe == null
-                || noTranscodeVideoKeys.contains(asset.key())
-                || transcodeNotSmallerKeys.contains(asset.key())) {
+                || noTranscodeVideoKeys.contains(asset.key())) {
             return false;
         }
         // One read, and the same value stamped onto the verdict, so what is remembered is the panel
@@ -1282,7 +1252,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return null;
         }
         return original.isLocal() ? original.localFile
-                : acquireRemoteFile(asset, original, cacheDir, reportProgress);
+                // Hard-coded rather than passed in from the caller. Whatever branch arrived here,
+                // everything this method does next IS the immediate original retry. Threading a
+                // second flag through here would make that rest on the statement order above (the
+                // absence mark happens to suppress the verdicts today), and reordering those two
+                // lines would silently restore the display-nothing behaviour this flag prevents.
+                : acquireRemoteFile(asset, original, cacheDir, reportProgress, true);
     }
 
     /**
@@ -1356,10 +1331,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                                 + " B); no transcode exists", true);
             }
             if (skip == OriginalSkip.OVER_BUDGET && advertised > originalBytes) {
-                // Records transcodeNotSmallerKeys, never noTranscodeVideoKeys: a larger transcode is
-                // still a transcode, and the absence mark is what the display-failure path reads as
-                // "nothing to fall back to". See the field.
-                transcodeNotSmallerKeys.add(asset.key());
+                // Counted, never marked. A larger transcode is still a transcode, and the only
+                // persistent mark in this family means "nothing is transcoded", which the display
+                // path reads as "nowhere to fall back to" -- writing it here would hide a playable
+                // stream behind a false claim. A counter cannot go stale, so nothing downstream has
+                // to remember to invalidate it when the panel is turned or the server re-encodes.
+                declinedLargerTranscodes++;
                 return useOriginalWithoutTranscode(asset, backend, cacheDir, reportProgress,
                         "the degraded source (" + advertised + " B) is larger than the original ("
                                 + originalBytes + " B) and this asset was only routed for cost,"
@@ -1470,6 +1447,27 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     private File acquireRemoteFile(MediaAsset asset, MediaSource source, File cacheDir,
                                    boolean reportProgress)
             throws MediaDownloadFailedException, IOException {
+        return acquireRemoteFile(asset, source, cacheDir, reportProgress, false);
+    }
+
+    /**
+     * @param declinedOriginal true ONLY for the call that already IS the decision to play this asset
+     *                         as its original. The budget verdicts below answer "fetch the degraded
+     *                         stream instead", and when the caller is on its way to hand back the
+     *                         original anyway, obeying that answer sends the acquisition straight
+     *                         back through the branch that just declined the stream. That is how an
+     *                         asset whose only transcode is larger came to display nothing at all,
+     *                         every cycle, before this flag existed.
+     *
+     *                         Carried as an argument rather than a field or a ThreadLocal because
+     *                         acquisition runs on both the rotation thread and a fresh prefetch
+     *                         thread, so instance state would leak between them, and because a
+     *                         parameter puts the guarantee in the signature where a reader can see
+     *                         it instead of in a finally block three methods away.
+     */
+    private File acquireRemoteFile(MediaAsset asset, MediaSource source, File cacheDir,
+                                   boolean reportProgress, boolean declinedOriginal)
+            throws MediaDownloadFailedException, IOException {
         boolean fallback = source.isFallback();
         ImmichType type = asset.type == MediaType.VIDEO ? ImmichType.VIDEO : ImmichType.IMAGE;
         File cacheFile = new File(cacheDir,
@@ -1487,10 +1485,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 if (reason == null) {
                     // Two statements, not one || : a clip over a byte budget *and* the crop
                     // gate should leave both records behind, not just the first one checked.
-                    boolean descend = noteVideoOverDecodeBudget(asset, probe);
-                    descend |= noteVideoNeedsUpscale(asset, probe);
-                    if (descend) {
-                        return null;
+                    if (!declinedOriginal) {
+                        boolean descend = noteVideoOverDecodeBudget(asset, probe);
+                        descend |= noteVideoNeedsUpscale(asset, probe);
+                        if (descend) {
+                            return null;
+                        }
                     }
                     return cacheFile;
                 }
@@ -1585,10 +1585,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                             knownIncompatibleKeys.add(asset.key());
                             return null;
                         }
-                        boolean descend = noteVideoOverDecodeBudget(asset, probe);
-                        descend |= noteVideoNeedsUpscale(asset, probe);
-                        if (descend) {
-                            return null;
+                        if (!declinedOriginal) {
+                            boolean descend = noteVideoOverDecodeBudget(asset, probe);
+                            descend |= noteVideoNeedsUpscale(asset, probe);
+                            if (descend) {
+                                return null;
+                            }
                         }
                     }
                     return cacheFile;
@@ -2197,7 +2199,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 // Distinct from noTranscode below, and the difference is the whole point: this one
                 // says a transcode exists and was declined for being bigger, the other says none was
                 // found. An operator comparing two frames must not read them as the same state.
-                + " transcodeNotSmaller=" + transcodeNotSmallerKeys.size()
+                + " declinedLarger=" + declinedLargerTranscodes
                 + " noTranscode=" + noTranscodeVideoKeys.size()
                 + " renderSilent=" + renderSilentVideoKeys.size();
     }

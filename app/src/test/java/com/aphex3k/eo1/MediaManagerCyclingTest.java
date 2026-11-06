@@ -626,6 +626,89 @@ public class MediaManagerCyclingTest {
                 mm.verdictCounts().contains("needsUpscale=0"));
     }
 
+    @Test
+    public void refusedTranscodeIsReconsideredAfterThePanelChanges() throws Exception {
+        // The regression this exists for. A refusal must be re-decidable, because both inputs to it
+        // can change under the running app: the server can be re-encoded smaller, and the frame can
+        // be taken off the wall. The original fix for the loop used a persistent per-asset mark,
+        // which survived a panel change and suppressed the re-derivation forever -- an asset whose
+        // crop verdict had been cleared would silently keep showing its original and never look at
+        // the transcode again. The scoped argument replaces that mark, so this asserts the recovery
+        // actually happens.
+        String videoId = "01234567-89ab-cdef-0123-456789aa1003";
+        byte[] originalBytes = isoVideoBytes(1920, 1080, 30, 1024, 0);
+        // Padded, because both fixtures are header-only and would otherwise be the SAME length --
+        // an accidentally equal length makes acquireFallbackSource conclude the transcode is a
+        // byte-identical duplicate, delete it, and take the original, which is correct behaviour
+        // and would have failed this test for a reason that has nothing to do with the fix.
+        byte[] smallerTranscode = java.util.Arrays.copyOf(
+                isoVideoBytes(1280, 720, 30, 64, 0), 4096);
+        assertTrue("the fixture transcode must not match the original byte length",
+                smallerTranscode.length != originalBytes.length);
+        // A portrait panel of a different proportion: still mismatched for a 1920x1080 clip, so the
+        // resize changes the verdict without changing which answer is correct. Using a landscape
+        // panel here would make the clip native and the test would pass for the wrong reason.
+        MediaCompatibility.PanelShape resizedPortrait =
+                MediaCompatibility.PanelShape.of(1000, 1800);
+        final long[] advertised = {originalBytes.length * 4L};   // server encode is bigger
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, (long) originalBytes.length, null, 1920, 1080);
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        return new ByteArrayInputStream(originalBytes);
+                    }
+                }, null, (long) originalBytes.length);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(smallerTranscode);
+                    }
+                }, advertised[0]);
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.publishPanel(PANEL_PORTRAIT, true);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        // Step 1 -- establish that the refusal genuinely happened. Without this the test would pass
+        // vacuously on any fixture that never declined at all.
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals("the original is fetched once, to read its matrix", 1, originalOpens.get());
+        assertEquals("the larger stream is declined, not fetched", 0, fallbackOpens.get());
+        assertTrue("and the crop verdict was recorded: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=1"));
+
+        // Step 2 -- the server re-encodes smaller AND the frame is moved.
+        // Explicitly smaller than the original, not "whatever the other fixture weighs": both
+        // fixtures are header-only, so their byte lengths can coincide and an equality here would
+        // take the no-transcode-exists branch and pass the test for the wrong reason.
+        advertised[0] = originalBytes.length / 4L;
+        mm.publishPanel(resizedPortrait, true);
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals("the transcode is now taken: the refusal was reconsidered, not remembered",
+                1, fallbackOpens.get());
+        assertTrue("the degraded artifact is what reaches the screen: " + listener.displayedFiles,
+                listener.displayedFiles.get(listener.displayedFiles.size() - 1)
+                        .getName().endsWith("_fb.mp4"));
+    }
+
     // COVERAGE GAP, stated rather than papered over: the codec-rejection half of
     // acquireAsset()'s post-download classification is NOT pinned by a test. A regression test was
     // written for it — an HEVC (stsd "hvc1") original whose only H.264 transcode is larger, which
