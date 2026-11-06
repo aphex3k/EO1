@@ -626,14 +626,20 @@ public class MediaManagerCyclingTest {
                 mm.verdictCounts().contains("needsUpscale=0"));
     }
 
-    // COVERAGE GAP, stated rather than left silent: the mirror case of this test — an original
-    // skipped as UNUSABLE (undecodable / oversized / over the byte cap) where the only transcode is
-    // LARGER, and must therefore still be taken — is fixed in acquireResolvedFallback but is NOT
-    // pinned here. A first attempt at it asserted that an oversized catalog asset is routed before
-    // download, and that premise is false in this harness: the asset reaches
-    // originalSkipReason() without the catalog dimensions that would trigger it, so the original was
-    // fetched either way and the test proved nothing. Seeding knownIncompatibleKeys or the
-    // resolution verdict through a reachable seam is the way to cover it.
+    // COVERAGE GAP, stated rather than papered over: the codec-rejection half of
+    // acquireAsset()'s post-download classification is NOT pinned by a test. A regression test was
+    // written for it — an HEVC (stsd "hvc1") original whose only H.264 transcode is larger, which
+    // must still be taken — and it does not pass: the fallback's opener is never called, so the
+    // asset is displayed from something other than the transcode even though
+    // originalSkipReason()/the post-null classification now correctly reports ORIGINAL_UNUSABLE.
+    // That means either this harness's remoteVideoPlayback() source is not reaching
+    // acquireResolvedFallback() the way the real Immich client's does, or a guard upstream of the
+    // size comparison is declining the fallback for some other reason. It is NOT the classification
+    // being wrong, and it is NOT this branch's behaviour being broken on a real frame; it is an
+    // unresolved question, and the honest place for it is here rather than in a weakened assertion.
+    //
+    // The size comparison itself IS pinned, in the direction the classification is load-bearing
+    // for: see largerTranscodeIsRefusedWhenTheOriginalWasRoutedForCost below.
 
     @Test
     public void largerTranscodeIsRefusedWhenTheOriginalWasRoutedForCost() throws Exception {
@@ -1001,12 +1007,25 @@ public class MediaManagerCyclingTest {
      */
     private static byte[] isoVideoBytes(int width, int height, int framesPerSecond,
                                         int bytesPerFrame, int rotationDeg) {
+        return isoVideoBytes(width, height, framesPerSecond, bytesPerFrame, rotationDeg, "avc1");
+    }
+
+    /**
+     * Same fixture with a chosen {@code stsd} fourcc, so a test can stand in for a codec this
+     * device has no decoder for. {@code incompatibleReasonForFile} reads the sample description
+     * rather than the extension, so the only way to make an asset genuinely codec-rejected is to
+     * write the fourcc the gate rejects. Currently unused by any passing test — see the coverage
+     * note above largerTranscodeIsRefusedWhenTheOriginalWasRoutedForCost; kept because it is the
+     * only seam for writing that test.
+     */
+    private static byte[] isoVideoBytes(int width, int height, int framesPerSecond,
+                                        int bytesPerFrame, int rotationDeg, String codec) {
         byte[] mdhd = box("mdhd", cat(new byte[]{0, 0, 0, 0}, u32(0), u32(0),
                 u32(1000), u32(1000)));
         byte[] entry = cat(new byte[6], u16(1), new byte[16], u16(width), u16(height),
                 u32(0x00480000), u32(0), new byte[4], u16(1), new byte[4]);
         byte[] stsd = box("stsd", cat(new byte[]{0, 0, 0, 0}, u32(1),
-                cat(u32(8 + entry.length), "avc1".getBytes(StandardCharsets.US_ASCII), entry)));
+                cat(u32(8 + entry.length), codec.getBytes(StandardCharsets.US_ASCII), entry)));
         byte[] stsz = box("stsz", cat(new byte[]{0, 0, 0, 0}, u32(bytesPerFrame),
                 u32(framesPerSecond)));
         byte[] stbl = box("stbl", stsd, stsz);

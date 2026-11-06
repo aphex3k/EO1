@@ -989,11 +989,28 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             return acquireFallbackSource(asset, fallback, cacheDir, reportProgress);
         }
         if (original == null) {
-            // A null here is not a failed download — that throws. It is the verdict taken once the
-            // bytes were on disk and the moov could be read, i.e. this asset plays but costs more
-            // than the frame has. Which is exactly the budget group, not the undecodable one.
-            return acquireResolvedFallback(asset, backend, cacheDir, reportProgress,
-                    OriginalSkip.OVER_BUDGET);
+            // A null here is not a failed download — that throws. It is a verdict taken once the
+            // bytes were on disk, and there are two of them, on opposite sides of the question the
+            // fallback-size check asks:
+            //
+            //   the codec is wrong   -> the original is a dead end, so a larger transcode is often
+            //                           the only playable artifact and must be taken
+            //   the cost is wrong    -> the original would play, so a stream that is not smaller is
+            //                           no improvement and the original is kept
+            //
+            // Assuming the second for both re-introduces, through this door, the exact bug the
+            // classification was introduced to fix: the first acquisition of an HEVC video whose
+            // H.264 transcode is bigger would reject that transcode, re-fetch the rejected original,
+            // and skip the asset.
+            //
+            // Membership distinguishes them because both codec-rejection paths add the key
+            // immediately before returning null, and neither budget path does. A key that was
+            // already here would have been caught by originalSkipReason() before the download, so
+            // finding it now means this acquisition is what put it here.
+            OriginalSkip postDownload = knownIncompatibleKeys.contains(asset.key())
+                    ? OriginalSkip.ORIGINAL_UNUSABLE
+                    : OriginalSkip.OVER_BUDGET;
+            return acquireResolvedFallback(asset, backend, cacheDir, reportProgress, postDownload);
         }
         return original;
     }
