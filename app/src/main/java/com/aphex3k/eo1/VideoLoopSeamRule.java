@@ -120,9 +120,23 @@ public final class VideoLoopSeamRule {
         public final Tail tail;
 
         /**
-         * The boundary this decision was taken against, in milliseconds: the file's length for
-         * {@link Tail#PARKED} and {@link Tail#CREEPING}, the player's duration for
-         * {@link Tail#REWOUNDED}. Zero when nothing fired.
+         * The end this decision was taken against, in milliseconds — and the number the caller prints
+         * as {@code end=} in the durable seam line, so an operator reading a frame's history infers the
+         * clip's shape from this. It is <em>not</em> always the file's length:
+         *
+         * <ul>
+         *   <li>{@link Tail#PARKED} and {@link Tail#REWOUNDED}: the player's duration. A reading that
+         *       has stopped moving, or stepped backwards, is at the end as far as the player is
+         *       concerned, and demanding the probe's number there would skip the branch and leave the
+         *       lap to the 8 s threshold.</li>
+         *   <li>{@link Tail#CREEPING}: the greater of the two. That is the file's length only when the
+         *       probe read a <em>longer</em> one — the {@code 55855} file against a {@code 55000}
+         *       player. Where the player's number is the longer one, as measured on the EO2's square
+         *       clip ({@code 15000} reported for a {@code 14114} file), a creeping tail restarts
+         *       against the player's duration and this field says so.</li>
+         * </ul>
+         *
+         * Zero when nothing fired.
          */
         public final long boundaryMs;
 

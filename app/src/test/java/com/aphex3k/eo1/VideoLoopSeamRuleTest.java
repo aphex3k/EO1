@@ -151,6 +151,24 @@ public class VideoLoopSeamRuleTest {
     }
 
     @Test
+    public void aCreepingTailIsJudgedAgainstTheLongerOfTheTwoEnds() {
+        // The boundary the seam line prints as end= is the greater of the two identities, not the
+        // file's length. Measured on the EO2's 640x640 clip, where the player says 15000 for a 14114
+        // ms file: here the player's number IS the end, and a rule that asked for the file's length
+        // would be waiting for a position the media never reaches.
+        VideoLoopSeamRule.Decision creep =
+                VideoLoopSeamRule.evaluate(15049, 15000, POLL_MS, 15000, 14114L);
+        assertTrue(creep.restarts());
+        assertEquals(VideoLoopSeamRule.Tail.CREEPING, creep.tail);
+        assertEquals("the player's own duration is the end when it is the longer one",
+                15000L, creep.boundaryMs);
+
+        // And the other direction, from the dump's clip: the file is longer, so the file is the end.
+        assertEquals(EO2_FILE_MS,
+                VideoLoopSeamRule.evaluate(56011, 55023, POLL_MS, EO2_PLAYER_MS, EO2_FILE_MS).boundaryMs);
+    }
+
+    @Test
     public void anImplausiblePreviousReadingIsNotEvidenceOfABackwardsStep() {
         // The caller stores whatever the position getter returned, whether or not this rule believed it,
         // so one epoch-scale reading stays in the history. Un-guarded, that makes the next legitimate
