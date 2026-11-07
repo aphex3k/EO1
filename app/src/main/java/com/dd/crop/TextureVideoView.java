@@ -634,17 +634,40 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
      * this view for quiet hours and on pause, and an {@code INVISIBLE} TextureView composites no frames
      * at all. Without this, the first frame after the panel comes back would record the whole dark
      * window as the clip's worst gap and keep it there for the rest of the source.
+     *
+     * <p><b>Why the null test stays.</b> This view is declared {@code android:visibility="invisible"}
+     * in {@code activity_main.xml}, and {@code View}'s {@code (Context, AttributeSet)} constructor does
+     * route that through {@code setFlags()}, which can reach this callback — so the question of whether
+     * it fires before field initializers run is a real one, and a wrong answer here is an NPE inside
+     * {@code LayoutInflater.inflate} on an unattended frame.
+     *
+     * <p>Measured, not assumed: disassembling this ROM's {@code framework.jar} shows {@code View.setFlags}
+     * branching to {@code if (mParent instanceof ViewGroup)} <em>before</em> its
+     * {@code dispatchVisibilityChanged} call, and {@code mParent} is necessarily null while the
+     * constructor runs because {@code LayoutInflater} builds children before attaching them. So on
+     * API 19 as shipped here, the constructor cannot reach it. The guard is kept anyway because that
+     * ordering is a private implementation detail of one vendor build, not a documented framework
+     * contract, and this APK is expected to run on boards nobody has measured; skipping is also the
+     * semantically right answer where it does fire pre-initialisation, since nothing has been recorded
+     * yet and there is no stamp to drop.
      */
     @Override
     protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
         super.onVisibilityChanged(changedView, visibility);
-        mFrameGaps.suspendSampling();
+        if (mFrameGaps != null) {
+            mFrameGaps.suspendSampling();
+        }
     }
 
     @Override
     protected void onWindowVisibilityChanged(int visibility) {
         super.onWindowVisibilityChanged(visibility);
-        mFrameGaps.suspendSampling();
+        // In this ROM's framework the only callers are the window-visibility paths, which run on
+        // attach, so this cannot precede field initialisation either. Same reasoning as above: keep the
+        // test, because the guarantee belongs to a vendor build rather than to this class.
+        if (mFrameGaps != null) {
+            mFrameGaps.suspendSampling();
+        }
     }
 
     /**
