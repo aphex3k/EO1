@@ -15,6 +15,7 @@ import android.view.TextureView;
 import androidx.annotation.NonNull;
 
 import com.aphex3k.eo1.BuildConfig;
+import com.aphex3k.eo1.FrameGapWindow;
 
 import java.io.IOException;
 
@@ -68,6 +69,11 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     // evidence the app can get that pixels reached the screen: a player that reports a position and an
     // error-free prepare while painting nothing leaves every other signal looking healthy.
     private volatile long mLastFrameAtMs;
+
+    // Spacing between the frames behind that stamp. The stamp alone says when the last picture
+    // arrived, which cannot tell a six-second hold at the end of a lap from a clip that merely
+    // stopped painting — and the media clock advances at 1.00x through both.
+    private final FrameGapWindow mFrameGaps = new FrameGapWindow();
 
     private State mState;
 
@@ -201,6 +207,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         mVideoWidth = 0;
         mVideoHeight = 0;
         mLastFrameAtMs = 0L;
+        mFrameGaps.reset();
         mState = State.UNINITIALIZED;
     }
 
@@ -602,12 +609,18 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
             mVideoSurface = null;
         }
         mIsViewAvailable = false;
+        // The surface is gone, so any interval measured across this point belongs to whichever
+        // surface replaces it rather than to the clip in hand.
+        mFrameGaps.reset();
         return false;
     }
 
     @Override
     public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surface) {
-        mLastFrameAtMs = System.currentTimeMillis();
+        // Runs on every composited frame: no allocation, nothing that can throw, no lock.
+        long now = System.currentTimeMillis();
+        mLastFrameAtMs = now;
+        mFrameGaps.recordFrame(now);
     }
 
     /**
@@ -616,5 +629,21 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
      */
     public long getLastFrameAtMs() {
         return mLastFrameAtMs;
+    }
+
+    /**
+     * @return the longest gap between two successive composited frames since this view was pointed at
+     *         its current data source, or {@link FrameGapWindow#NO_GAP} until two frames have arrived
+     */
+    public int getMaxFrameGapMs() {
+        return mFrameGaps.getMaxGapMs();
+    }
+
+    /**
+     * @return spacing of the two most recently composited frames, or {@link
+     *         FrameGapWindow#NO_GAP} until two frames have arrived
+     */
+    public int getLastFrameGapMs() {
+        return mFrameGaps.getLastGapMs();
     }
 }

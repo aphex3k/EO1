@@ -406,6 +406,22 @@ To force MediaPlayer only: set `buildConfigField "boolean", "USE_TSPLAYER", "fal
   ten times a second, which is *why* the app keeps a durable on-disk log
   ([WEBSERVER.md](WEBSERVER.md#logs--past-state)) — and video still paints, so the sysfs path is not
   load-bearing for playback.
+- A live 2026-11 EO2 dump shows a **second** state of that service, and it is the opposite one: the
+  service answers and denies itself. `E/SystemWriteService(  589): java.io.FileNotFoundException:
+  /sys/class/tv/policy_fr_auto: open failed: EACCES` from `SystemWriteService.writeSysfs`, four times
+  per video lap, clustered at player lifecycle edges (`play()`, a `seekTo(0)`, `disconnect`,
+  `release`) rather than per frame, and always in system_server's pid.
+  **This app is not the client.** That node's string is in the ROM's own `libamplayer.so`, reached via
+  `libamavutils.so`'s `amSystemWriteWriteSysfs`; the shipped `libTsPlayer-jni.so` contains no `policy`
+  substring and no `/sys/class/tv` path among its 43 `/sys/*` strings (it does import
+  `amSystemWriteWriteSysfs` for other nodes, so the exoneration is path-specific, not blanket), and
+  `EO2/data/backup/init.amlogic.board.rc:45` writes `policy_fr_auto` as root at boot while no `.rc` in
+  the dump grants anyone else write.
+  It is therefore benign and unreachable from here — a denied `open()` changes no per-frame work — but
+  it is the line an operator will point at when a stutter report says "the log files show exceptions",
+  and it is not the stutter. The stutter on that frame was this app's own loop seam
+  (`VideoLoopSeamRule`), which held one frozen picture for ~5.9 s per lap while the media clock kept
+  reporting 1.00x. Do not revive the closed section below over it.
 
 ## TsPlayer on the EO1: closed
 
@@ -452,6 +468,14 @@ For contrast, a *registered but deaf* service is harmless and is the normal stat
 `readSysfs could not contact remote` about ten times a second ([WEBSERVER.md](WEBSERVER.md#logs--past-state)
 is why) while its video paints fine. So the sysfs path is not load-bearing for playback; the
 unregistered case was the only dangerous one, and on EO1 it is moot.
+
+Note that "deaf" is not the only non-fatal answer on offer. The same service on a 2026-11 EO2 is
+registered, reachable, and **self-denying** — it accepts the Binder call and then cannot open
+`/sys/class/tv/policy_fr_auto` for itself, printing a full Java stack trace from `writeSysfs` in
+system_server several times a lap. That string belongs to the ROM's `libamplayer.so`, not to this
+app's blob (see the inventory above), and it is a third state to recognise rather than a new failure to
+fix: `readSysfs could not contact remote` is the *client-side* complaint and appears zero times in that
+dump, so reading one log line as proof of the other's state is how a frame gets misdiagnosed.
 
 ## Two axes, because a model name cannot answer a silicon question
 

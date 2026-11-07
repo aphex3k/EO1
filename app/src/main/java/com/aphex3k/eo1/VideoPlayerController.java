@@ -61,6 +61,22 @@ public interface VideoPlayerController {
      */
     long getLastFrameAtMs();
 
+    /**
+     * The longest interval between two successive composited frames since this controller was pointed
+     * at its current source, or {@link FrameGapWindow#NO_GAP} when there is no such record — which
+     * covers both "fewer than two frames have arrived" and an engine that reports none.
+     *
+     * <p>Where {@link #getLastFrameAtMs()} says when the last picture arrived, this says whether
+     * pictures arrived <em>evenly</em>. A clip held at end of file while its media clock keeps
+     * advancing shows up here and nowhere else, because every other signal in the process is a clock.
+     */
+    int getMaxFrameGapMs();
+
+    /**
+     * Spacing of the two most recently composited frames, or {@link FrameGapWindow#NO_GAP}.
+     */
+    int getLastFrameGapMs();
+
     void seekTo(int positionMs);
 
     /**

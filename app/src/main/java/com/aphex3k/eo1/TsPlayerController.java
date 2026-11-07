@@ -88,6 +88,11 @@ public class TsPlayerController implements VideoPlayerController {
      * TsPlayer renders through a SurfaceView the .so owns: there is no per-frame callback to hook, and
      * its reported position falls back to wall-clock elapsed time when the native clock is unusable
      * (TsVideoView), so anything measured against it would be measuring a timer rather than a decoder.
+     *
+     * <p>The frame-gap answers are {@code NO_GAP} for the same reason rather than a guess: "this
+     * engine cannot see its own spacing" and "this engine's spacing has always been fine" must not
+     * become the same reported number, and TsPlayer clips have the native loop and none of the
+     * platform player's end-of-file hold to be measured for in the first place.
      */
     @Override
     public boolean supportsPaintSignal() {
@@ -97,6 +102,16 @@ public class TsPlayerController implements VideoPlayerController {
     @Override
     public long getLastFrameAtMs() {
         return 0L;
+    }
+
+    @Override
+    public int getMaxFrameGapMs() {
+        return FrameGapWindow.NO_GAP;
+    }
+
+    @Override
+    public int getLastFrameGapMs() {
+        return FrameGapWindow.NO_GAP;
     }
 
     @Override

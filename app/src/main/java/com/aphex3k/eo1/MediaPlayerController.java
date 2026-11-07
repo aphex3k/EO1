@@ -121,6 +121,16 @@ public class MediaPlayerController implements VideoPlayerController {
     }
 
     @Override
+    public int getMaxFrameGapMs() {
+        return videoView.getMaxFrameGapMs();
+    }
+
+    @Override
+    public int getLastFrameGapMs() {
+        return videoView.getLastFrameGapMs();
+    }
+
+    @Override
     public void seekTo(int positionMs) {
         videoView.seekTo(positionMs);
     }

@@ -118,18 +118,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * it is misread as stalled.
      */
     private static final long VIDEO_RATE_WINDOW_MS = 5000L;
-    /**
-     * Media progress below this (x100) counts as making no headway. Past the end of a clip the
-     * position inches rather than stopping — measured at 0.00x to 0.02x — so anything above this is
-     * still genuinely playing and must not be cut short.
-     */
-    private static final int LOOP_TAIL_RATE_X100 = 50;
-    /**
-     * How far past the end a position may sit and still be believed. Measured restarts land 5 to
-     * 375 ms past the file's own length; anything orders of magnitude beyond that is a bogus read
-     * from a player that has not settled, not a clip that has finished.
-     */
-    private static final int LOOP_END_SLACK_MS = 30000;
+    // The seam's own thresholds (a tail's headway bound and how far past the end a reading is still
+    // believed) moved to VideoLoopSeamRule with the decision they tune.
     /**
      * How long a video may take to put its first frame on screen. A clip whose bytes are accepted but
      * never composited raises no error and stops no clock, so a deadline on the picture is the only way
@@ -2436,48 +2426,35 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         long sincePreviousMs = now - videoWatchdogPrevPollMs;
         videoWatchdogPrevPollMs = now;
 
-        boolean parked = position == previousPositionMs;
-        // Media advanced less than half as fast as the clock across one poll interval. Measured per
-        // poll rather than from the rate window, which needs VIDEO_RATE_WINDOW_MS to fill and so
-        // left the seam open for seconds even after the crawl had begun.
-        boolean creeping = !parked && previousPositionMs >= 0 && sincePreviousMs > 0
-                && (position - previousPositionMs) * 100L < sincePreviousMs * LOOP_TAIL_RATE_X100;
+        // The seam decision, its thresholds and the measured position series that shaped them live in
+        // VideoLoopSeamRule — which is also the only place they can be tested.
+        int reportedMs = videoPlayer.getDuration();
+        long fileMs = lastVideoDurationMs;
+        VideoLoopSeamRule.Decision seam = VideoLoopSeamRule.evaluate(
+                position, previousPositionMs, sincePreviousMs, reportedMs, fileMs);
 
-        if (!parked) {
+        // Any movement at all re-arms the stall clock, so the 8 s threshold below can only ever be
+        // reached by a position that is exactly equal across polls. That is why the seam rule has to
+        // notice a tail that creeps or steps backwards: for those there is no backstop behind it.
+        if (position != previousPositionMs) {
             videoWatchdogLastPosition = position;
             videoWatchdogLastProgressMs = now;
             videoWatchdogRecoverAttempted = false;
         }
 
-        // The end of the cycle, announced here because nothing else announces it. A clip whose last
-        // frames sit past the duration the player reports never raises onCompletion, so
-        // setLooping(true) has no end-of-stream to loop on and play() is a no-op while the player
-        // still believes it is PLAY — on an EO2 that read as a decoder hung for 8.4 s every lap.
-        //
-        // Two things hide that boundary. The player's duration is shorter than the media it is
-        // holding (23000 ms reported for a 23621 ms file, because the QuickTime mvhd timescale of
-        // 600 cannot divide the frame period evenly), so ending on the player's number truncates
-        // frames still running. And past that point the position does not freeze, it creeps
-        // (23011, 23169, 23374, 23879 ms) — so "did not move between polls" is never true either,
-        // and every change-based test re-arms the stall threshold instead of firing. Hence the
-        // file's own length where the probe could read one, and no headway meaning stopped OR
-        // creeping. Which end to demand depends on which of the two was seen: a position that has
-        // not moved at all is at the end as far as the player is concerned, and some files stop dead
-        // at the shortened number without ever passing it, so demanding the file's length there
-        // would skip this branch and leave the 8 s threshold to notice.
-        int reportedMs = videoPlayer.getDuration();
-        long fileMs = lastVideoDurationMs;
-        int cycleEndMs = parked ? reportedMs : (int) Math.max((long) reportedMs, fileMs);
-        // A position absurdly far past the end is a bad reading rather than a finished clip: a
-        // freshly created player has been observed reporting values near the epoch, and acting on
-        // one every poll would turn the loop into a restart storm.
-        if (cycleEndMs > 0 && position >= cycleEndMs
-                && position - cycleEndMs <= LOOP_END_SLACK_MS && (parked || creeping)) {
+        // The end of the cycle, announced here because nothing else announces it: this is the one line
+        // that says the app, not the player, decided to wrap the lap. The gap pair is what turns the
+        // hold from an inference into a reading — it is stamped where pixels reach the surface, so it
+        // survives the media clock that ran at exactly 1.00x across the entire freeze this line used to
+        // report as healthy.
+        if (seam.restarts()) {
             debugInformationProvided(new DebugInformation("video",
-                    "loop restart pos=" + position + " end=" + cycleEndMs
-                            + " (" + (parked ? "parked" : "creeping")
+                    "loop restart pos=" + position + " end=" + seam.boundaryMs
+                            + " (" + seam.reasonWord()
                             + " player=" + reportedMs + " file=" + fileMs + ")"
-                            + " rate=" + describePlaybackRate()));
+                            + " rate=" + describePlaybackRate()
+                            + " gap=" + videoPlayer.getLastFrameGapMs() + "/"
+                            + videoPlayer.getMaxFrameGapMs()));
             noteMediaManualLoopRestart();
             try {
                 videoPlayer.seekTo(0);
@@ -2492,7 +2469,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
-        if (!parked) {
+        // Reached only by a reading that is exactly equal to the last one: anything else returned
+        // above, and anything the seam rule calls a tail was already restarted there.
+        if (position != previousPositionMs) {
             scheduleVideoWatchdogCheck();
             return;
         }
@@ -3138,6 +3117,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         sb.append("window              : focused=").append(windowFocused)
                 .append(" view=").append(focusedView)
                 .append(" lastKey=").append(lastKeyEventCode).append('\n');
+        // Read once: the writer is the compositor callback on another thread, and the value only ever
+        // rises within a clip, so testing one read and printing another would print a number that is
+        // not the one that was classified.
+        int maxFrameGapMs = videoPlayer.getMaxFrameGapMs();
         sb.append("video engine        : ").append(preferTsPlayer ? "TsPlayer" : "MediaPlayer")
                 // The panel the aspect rule compares every clip against, in the record that survives a
                 // reboot. /state carries it too, but /state is gone by the time anyone asks about a
@@ -3149,6 +3132,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 .append(" lastFrame=")
                 .append(videoPlayer.getLastFrameAtMs() == 0L ? "never"
                         : ((now - videoPlayer.getLastFrameAtMs()) / 1000L) + "s ago")
+                // Worst frame spacing this engine has reported for the clip in hand. It is in the
+                // durable line because it is the one number that survives to say a wall was held
+                // while every clock in the process insisted the clip was playing at 1.00x.
+                .append(" maxFrameGap=")
+                .append(maxFrameGapMs < 0 ? "none" : maxFrameGapMs + "ms")
                 .append('\n');
         sb.append("active video        : path=").append(activeVideoPath)
                 .append(" stage=").append(activeVideoStage).append('\n');
@@ -4312,6 +4300,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             long lastFrameAtMs = videoPlayer.getLastFrameAtMs();
             video.addProperty("lastFrameAgeMs", lastFrameAtMs > 0L
                     ? (System.currentTimeMillis() - lastFrameAtMs) : -1L);
+            // Frame SPACING, which the age above is not. A six second hold at the end of a lap and a
+            // clip that stopped painting are the same age at the moment of reading, and the media
+            // clock advances at 1.00x through the hold — so before these two fields the only way to
+            // show a held frame was to reconstruct it from the position series in logcat, which holds
+            // about thirteen minutes and keeps no record of the surface.
+            //
+            // Deliberately outside the BuildConfig.DEBUG gate that hides playbackRate* and loopPerf:
+            // the class of fault this reports happens on shipped builds, where "manualLoopRestarts is
+            // climbing" is not a sentence release can even say. -1 means "no record", never "smooth".
+            video.addProperty("frameGapMs", videoPlayer.getLastFrameGapMs());
+            video.addProperty("frameGapMaxMs", videoPlayer.getMaxFrameGapMs());
         }
         if (currentAsset != null && currentAsset.type == MediaType.VIDEO) {
             video.addProperty("renderSilent", mediaManager.isRenderSilent(currentAsset.key()));
