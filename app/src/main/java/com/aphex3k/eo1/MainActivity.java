@@ -4309,6 +4309,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // Deliberately outside the BuildConfig.DEBUG gate that hides playbackRate* and loopPerf:
             // the class of fault this reports happens on shipped builds, where "manualLoopRestarts is
             // climbing" is not a sentence release can even say. -1 means "no record", never "smooth".
+            //
+            // And they describe video.path, not necessarily the screen: a high-water mark survives the
+            // painting it measured, so with a photo up these still quote the last clip. Cross-check
+            // lastFrameAgeMs above (video frames only, so already large for any photo) and
+            // media.current.type before believing one.
             video.addProperty("frameGapMs", videoPlayer.getLastFrameGapMs());
             video.addProperty("frameGapMaxMs", videoPlayer.getMaxFrameGapMs());
         }

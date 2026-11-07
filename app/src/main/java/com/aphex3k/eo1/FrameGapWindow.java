@@ -22,6 +22,16 @@ package com.aphex3k.eo1;
  * window would be unreadable for most of that lap — the interesting gap has scrolled out by the time
  * anyone asks about it.
  *
+ * <p><b>The price of that choice, and it is a real one:</b> a high-water mark outlives the painting it
+ * describes. Once the surface stops receiving frames the numbers stay exactly where they were, so
+ * these fields belong to the clip named by {@code video.path}, which is not necessarily the thing on
+ * the wall — a frame gap read while a photo is displayed is a report about the last video, and
+ * measured this way it looks like a live reading. Read them together with {@code lastFrameAgeMs} (which
+ * counts video frames only, and so is already large for any photo) and with {@code media.current.type}.
+ * Nothing else in the {@code video} block advertises that it is stale, and a retained pair of ordinary
+ * spacings is indistinguishable from a live one, so a poller that reads only these two fields can watch
+ * a still image for minutes and believe it is timing laps.
+ *
  * <p><b>Thread note.</b> Written on the UI thread from {@code onSurfaceTextureUpdated}, read on the
  * web server's threads and the diagnostics collector. The gap fields are {@code int} specifically so
  * they are single-copy: the JVM guarantees an unpadded {@code int} read sees a whole value, while a
