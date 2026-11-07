@@ -91,10 +91,45 @@ public class FrameGapWindowTest {
     }
 
     @Test
+    public void aHiddenWindowIsNotAFreeze() {
+        // The reason suspendSampling exists. turnScreenOff() sets this view INVISIBLE for quiet hours
+        // and an INVISIBLE TextureView composites nothing at all, so without suspension the first frame
+        // after the panel returns reports the entire dark window as the clip's worst gap -- and a
+        // high-water mark keeps it there for the rest of the source. That is the difference between
+        // measuring a six second hold and measuring three hours.
+        window.recordFrame(0L);
+        window.recordFrame(33L);
+        window.recordFrame(6033L);                     // a real hold during playback
+        assertEquals(6000, window.getMaxGapMs());
+
+        window.suspendSampling();
+        long afterAnHourInTheDark = 6033L + 3_600_000L;
+        window.recordFrame(afterAnHourInTheDark);
+        assertEquals("the hidden interval must not become the worst gap", 6000, window.getMaxGapMs());
+        assertEquals("nor the most recent one", 6000, window.getLastGapMs());
+
+        window.recordFrame(afterAnHourInTheDark + FRAME_MS);
+        assertEquals("playback resumes without a phantom gap", (int) FRAME_MS, window.getLastGapMs());
+        assertEquals("and the real hold survives it", 6000, window.getMaxGapMs());
+    }
+
+    @Test
+    public void suspensionBeforeTwoFramesIsStillNoOpinion() {
+        // Suspension must not manufacture a record where none existed -- "no record" and "smooth" are
+        // different answers and both have to stay expressible.
+        window.recordFrame(0L);
+        window.suspendSampling();
+        window.recordFrame(5000L);
+        assertEquals(FrameGapWindow.NO_GAP, window.getMaxGapMs());
+        assertEquals(FrameGapWindow.NO_GAP, window.getLastGapMs());
+    }
+
+    @Test
     public void aClockSteppingBackwardsIsACorrectionNotAFreeze() {
-        // These frames do not run time sync and are power-cycled routinely, so wall time can jump.
-        // The correction is recorded as a zero gap — skipping the sample instead would leave the NEXT
-        // frame measured from the pre-correction stamp and invent a gap out of nothing.
+        // Callers owe FrameGapWindow a monotonic stamp, so a backwards delta should be unreachable;
+        // the guard stays because the stamp is a caller-supplied number. It is recorded as a zero gap
+        // rather than skipped, because skipping would leave the NEXT frame measured from the older
+        // stamp and invent the very gap the branch refuses.
         window.recordFrame(10000L);
         window.recordFrame(10033L);
         assertEquals(33, window.getMaxGapMs());

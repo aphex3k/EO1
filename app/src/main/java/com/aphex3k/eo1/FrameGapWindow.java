@@ -32,14 +32,27 @@ package com.aphex3k.eo1;
  * spacings is indistinguishable from a live one, so a poller that reads only these two fields can watch
  * a still image for minutes and believe it is timing laps.
  *
+ * <p><b>Clock contract.</b> {@code nowMs} must come from a <em>monotonic</em> clock —
+ * {@code SystemClock.elapsedRealtime()}, not the wall clock. These frames are power-cycled routinely
+ * and run no time sync (gate 4 of {@code docs/TRUST.md}), so a correction can step the wall clock
+ * forward by minutes between two smoothly presented frames, and a high-water mark would keep that
+ * number for the rest of the source: an invented stutter that cannot be told from a real one. The
+ * caller keeps a separate wall-clock stamp for {@code lastFrameAgeMs}, which genuinely wants the date.
+ *
+ * <p><b>Suspension.</b> A frame that never arrived because the app took the surface away is not a
+ * stall the decoder caused, so {@link #suspendSampling()} must be called whenever the view stops being
+ * able to paint. Without it, one trip through quiet hours would record hours of hidden interval as the
+ * clip's worst gap — the exact phantom this class exists to avoid producing.
+ *
  * <p><b>Thread note.</b> Written on the UI thread from {@code onSurfaceTextureUpdated}, read on the
- * web server's threads and the diagnostics collector. The gap fields are {@code int} specifically so
- * they are single-copy: the JVM guarantees an unpadded {@code int} read sees a whole value, while a
- * non-volatile {@code long} may be read as a mix of two halves, and a torn gap would surface as an
- * enormous one — a phantom freeze on a frame that is fine. {@code lastAtMs} and {@code haveStamp} are
- * only ever touched by the writer, and a reader that catches the two mid-update sees a gap without its
- * stamp rather than the reverse, which costs one sample and invents nothing. Nothing here allocates
- * and nothing here can throw, because it runs inside the compositor callback.
+ * web server's threads and the diagnostics collector. The two exported fields are {@code volatile}:
+ * without that, a reader on another thread is permitted to keep seeing a stale gap after a hold has
+ * been recorded, or to report {@code NO_GAP} forever on a clip that has stuttered. They are {@code int}
+ * rather than {@code long} so a read is single-copy on this 32-bit platform and cannot surface as a
+ * value that is neither the old gap nor the new one. {@code lastAtMs} and {@code haveStamp} are
+ * writer-only and stay plain, and a reader that catches the two mid-update sees a gap without its stamp
+ * rather than the reverse, which costs one sample and invents nothing. Nothing here allocates and
+ * nothing here can throw, because it runs inside the compositor callback.
  */
 public final class FrameGapWindow {
 
@@ -51,21 +64,21 @@ public final class FrameGapWindow {
     // reads epoch. It also made the first two frames of a clip unreproducible in a test.
     private boolean haveStamp;
     private long lastAtMs;
-    private int lastGapMs = NO_GAP;
-    private int maxGapMs = NO_GAP;
+    private volatile int lastGapMs = NO_GAP;
+    private volatile int maxGapMs = NO_GAP;
 
     /**
-     * Record that a frame reached the surface at {@code nowMs}.
+     * Record that a frame reached the surface at {@code nowMs}, on the caller's monotonic clock.
      *
-     * <p>The first frame after a {@link #reset()} records no interval: the time since the previous
-     * source ended is the gap between two clips, not a stall inside this one, and reporting it would
-     * make every clip's first poll look like a freeze.
+     * <p>The first frame after a {@link #reset()} or a {@link #suspendSampling()} records no interval:
+     * the time since the surface was last painting belongs to whatever the app was doing in between,
+     * not to a stall inside this clip, and reporting it would make every clip's first poll look like a
+     * freeze.
      *
-     * <p>A {@code nowMs} earlier than the previous one is clamped to a zero gap rather than recorded
-     * as a negative one or skipped. These frames are routinely power-cycled and do not run time sync
-     * (gate 4 of {@code docs/TRUST.md}), so a backwards clock step is a correction, not a stall — and
-     * skipping it would leave the <em>next</em> frame measuring from the pre-correction stamp and
-     * invent a gap instead.
+     * <p>A {@code nowMs} at or before the previous one is clamped to a zero gap rather than recorded as
+     * a negative one or skipped. It should be unreachable on a monotonic clock; it stays because the
+     * stamp is a caller-supplied number, and skipping the sample would leave the <em>next</em> frame
+     * measured from the older stamp, inventing the very gap this method exists to refuse.
      */
     public void recordFrame(long nowMs) {
         long previous = lastAtMs;
@@ -92,6 +105,23 @@ public final class FrameGapWindow {
         lastAtMs = 0L;
         lastGapMs = NO_GAP;
         maxGapMs = NO_GAP;
+    }
+
+    /**
+     * Drop the timestamp and keep the record.
+     *
+     * <p>Call it whenever the view stops being able to paint for a reason of the app's own — the panel
+     * was hidden for quiet hours, the activity paused, the window went away — so that the first frame
+     * after the surface comes back measures nothing and simply re-establishes a stamp. The whole
+     * retained maximum is left alone, because a gap that happened during real playback is exactly what
+     * the caller is asking about; it is only the interval <em>across</em> the suspension that means
+     * nothing.
+     *
+     * <p>This is the difference between reporting a six second held frame and reporting the three hours
+     * the frame spent dark.
+     */
+    public void suspendSampling() {
+        haveStamp = false;
     }
 
     /**

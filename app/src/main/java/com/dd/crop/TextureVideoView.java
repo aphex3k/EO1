@@ -7,10 +7,12 @@ import android.graphics.SurfaceTexture;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.os.SystemClock;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.Surface;
 import android.view.TextureView;
+import android.view.View;
 
 import androidx.annotation.NonNull;
 
@@ -618,9 +620,31 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     @Override
     public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surface) {
         // Runs on every composited frame: no allocation, nothing that can throw, no lock.
-        long now = System.currentTimeMillis();
-        mLastFrameAtMs = now;
-        mFrameGaps.recordFrame(now);
+        //
+        // Two clocks on purpose. The age stamp wants the wall clock, because /state and the diagnostics
+        // report compare it against other wall-clock times; the spacing wants a monotonic one, because
+        // these frames run no time sync and a forward correction would land in the retained maximum as
+        // a stutter that never happened. See FrameGapWindow's clock contract.
+        mLastFrameAtMs = System.currentTimeMillis();
+        mFrameGaps.recordFrame(SystemClock.elapsedRealtime());
+    }
+
+    /**
+     * Any change of visibility means the interval across it says nothing about the clip: the app hides
+     * this view for quiet hours and on pause, and an {@code INVISIBLE} TextureView composites no frames
+     * at all. Without this, the first frame after the panel comes back would record the whole dark
+     * window as the clip's worst gap and keep it there for the rest of the source.
+     */
+    @Override
+    protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        mFrameGaps.suspendSampling();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        mFrameGaps.suspendSampling();
     }
 
     /**
