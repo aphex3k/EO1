@@ -151,6 +151,29 @@ public class VideoLoopSeamRuleTest {
     }
 
     @Test
+    public void anImplausiblePreviousReadingIsNotEvidenceOfABackwardsStep() {
+        // The caller stores whatever the position getter returned, whether or not this rule believed it,
+        // so one epoch-scale reading stays in the history. Un-guarded, that makes the next legitimate
+        // reading look like a 2.1-billion-millisecond rewind and cuts a still-playing tail short --
+        // 572 ms early here, and REWOUNDED is the branch that introduced the exposure.
+        assertFalse("MAX_VALUE then a still-playing tail must not restart",
+                VideoLoopSeamRule.evaluate(23049, Integer.MAX_VALUE, POLL_MS, CRAWL_PLAYER_MS, CRAWL_FILE_MS)
+                        .restarts());
+
+        // The same reading after an ordinary previous IS the seam, so the guard costs nothing real.
+        assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
+                VideoLoopSeamRule.evaluate(23049, 23110, POLL_MS, CRAWL_PLAYER_MS, CRAWL_FILE_MS).tail);
+
+        // And the guard is the same slack bound the current reading faces, boundary included: a
+        // previous 30 s past the end is still believed, one ms further is not.
+        int believable = EO2_PLAYER_MS + VideoLoopSeamRule.END_SLACK_MS;
+        assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
+                VideoLoopSeamRule.evaluate(55049, believable, POLL_MS, EO2_PLAYER_MS, EO2_FILE_MS).tail);
+        assertFalse(VideoLoopSeamRule
+                .evaluate(55049, believable + 1, POLL_MS, EO2_PLAYER_MS, EO2_FILE_MS).restarts());
+    }
+
+    @Test
     public void thePollAfterARestartIsQuiet() {
         // The caller writes -1 after a restart precisely so the next poll cannot re-fire off the
         // reading it is about to make. Neither tail test may accept a missing previous reading.

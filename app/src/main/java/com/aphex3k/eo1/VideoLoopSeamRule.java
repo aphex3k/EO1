@@ -89,7 +89,8 @@ public final class VideoLoopSeamRule {
      * from a player that has not settled, not a clip that has finished. A freshly created player has
      * been observed reporting values near the epoch, and acting on one every poll would turn the loop
      * into a restart storm — so this bound is applied to every tail test, including
-     * {@link Tail#REWOUNDED}.
+     * {@link Tail#REWOUNDED}, <em>and to both readings of it</em>: a previous position the caller
+     * recorded but this rule never believed is not evidence that the current one moved backwards.
      */
     public static final int END_SLACK_MS = 30000;
 
@@ -190,8 +191,16 @@ public final class VideoLoopSeamRule {
         // The tail that never gets to the file's length because it went backwards instead. It still
         // has to be past the player's own duration, so a wrap (a natively-looping clip whose position
         // returns to 0) cannot be read as one, and inside the same slack bound as the other tests.
+        //
+        // The bound is applied to the PREVIOUS reading as well, and that is not symmetry for its own
+        // sake: the caller stores whatever the position getter returned, whether or not this rule
+        // believed it. A single epoch-scale reading would otherwise make the next legitimate one look
+        // like a step backwards and cut a tail that is still playing -- 23049 following MAX_VALUE is a
+        // 2.1-billion-millisecond "rewind" that never happened. CREEPING needs no such guard because
+        // it cannot fire without the current reading already being past an end.
         if (reportedDurationMs > 0
                 && previousPositionMs >= 0
+                && previousPositionMs - (long) reportedDurationMs <= END_SLACK_MS
                 && positionMs >= reportedDurationMs
                 && positionMs - (long) reportedDurationMs <= END_SLACK_MS
                 && positionMs < previousPositionMs) {
