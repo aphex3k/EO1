@@ -7,6 +7,7 @@ import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import com.aphex3k.media.MediaType;
+import com.dd.crop.TextureVideoView;
 
 import org.junit.Rule;
 import org.junit.Test;
@@ -15,6 +16,7 @@ import org.junit.rules.TemporaryFolder;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.Locale;
 
 /**
  * JVM tests of the device codec gate: the name-based pre-download check, and the byte checks for
@@ -22,6 +24,19 @@ import java.nio.file.Files;
  * description for clips.
  */
 public class MediaCompatibilityTest {
+
+    /**
+     * The EO2's portrait viewport, as that frame logged it ({@code view=1080x1920} in
+     * docs/TSPLAYER.md). These fixtures deliberately use measured pixel pairs rather than words like
+     * "portrait", because the rule under test is about a shape and an orientation flag cannot express
+     * the difference between a 16:9 panel and a 16:10 one.
+     */
+    private static final MediaCompatibility.PanelShape PORTRAIT =
+            MediaCompatibility.PanelShape.of(1080, 1920);
+
+    /** The same panel unrotated — the figure {@code docs/EO2-CAPABILITIES.md} read off dumpsys. */
+    private static final MediaCompatibility.PanelShape LANDSCAPE =
+            MediaCompatibility.PanelShape.of(1920, 1080);
 
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
@@ -186,12 +201,12 @@ public class MediaCompatibilityTest {
                 MediaType.VIDEO, 1920, 1080, 59970));
         assertNotNull(MediaCompatibility.incompatibleVideoBitrate(
                 MediaType.VIDEO, overBudget.stats.bitRateBps));
-        // The orientation verdict belongs in the same exclusion. This fixture's 270-degree matrix makes
+        // The crop verdict belongs in the same exclusion. This fixture's 270-degree matrix makes
         // it display 1080x1920, so it trips the gate against a landscape panel — and a fill the panel
         // happens to be turned the wrong way for is still not a file this device cannot decode.
         assertNotNull(MediaCompatibility.incompatibleVideoUpscale(
                 MediaType.VIDEO, overBudget.codedWidth, overBudget.codedHeight,
-                overBudget.rotationDeg, false));
+                overBudget.rotationDeg, LANDSCAPE, true));
     }
 
     @Test
@@ -240,130 +255,213 @@ public class MediaCompatibilityTest {
     }
 
     @Test
-    public void upscaleGateAcceptsWhatThePanelCanBeFilledWith() {
-        // A landscape 1080p on a landscape panel needs no magnification at all.
-        assertUpscaleAccepted(1920, 1080, 0, false);
-        // The load-bearing pair: a 1920x1080 clip turned to 1080x1920 by its own display matrix is
-        // portrait material, so on a portrait frame it is aligned. Keying the gate on
-        // "rotation != 0" instead of on the displayed aspect would reroute every iPhone clip that is
-        // hung the right way — and TextureVideoView's cropScaleFactors comment records that turning
-        // the axes a second time is what produced the 1.78x this gate exists to avoid.
-        assertUpscaleAccepted(1920, 1080, 90, true);
-        assertUpscaleAccepted(1920, 1080, 270, true);
-        assertUpscaleAccepted(1080, 1920, 0, true);
-        // Square is never opposite either way.
-        assertUpscaleAccepted(1080, 1080, 0, true);
-        assertUpscaleAccepted(1080, 1080, 0, false);
+    public void nativeAspectIsWhatThePanelCanBeFilledWithout() {
+        assertFalse(differs(1920, 1080, 0, LANDSCAPE));
+        assertFalse(differs(1080, 1920, 0, PORTRAIT));
+        // The load-bearing pair: a clip turned by its own display matrix INTO alignment is native
+        // material. Keying the rule on "rotation != 0" instead of on the displayed aspect would
+        // reroute every phone clip that is hung the right way.
+        assertFalse(differs(1920, 1080, 90, PORTRAIT));
+        assertFalse(differs(1080, 1920, 270, LANDSCAPE));
+        // Native is a shape, not a resolution: 720p and 640x360 are as native as 1080p.
+        assertFalse(differs(1280, 720, 0, LANDSCAPE));
+        assertFalse(differs(640, 360, 0, LANDSCAPE));
     }
 
     @Test
-    public void upscaleGateRejectsWhatNeedsAnUpscale() {
-        assertUpscaleRejected(1920, 1080, 0, true);
-        // 180 degrees keeps the aspect, so a landscape clip turned upside down is still a landscape
-        // clip: opposite a portrait panel, and it still needs the fill upscale.
-        assertUpscaleRejected(1920, 1080, 180, true);
-        // Coded portrait, matrix turns it landscape, panel is portrait.
-        assertUpscaleRejected(1080, 1920, 90, true);
-        // The mirror case, so the gate cannot be an accident of "portrait panel" alone.
-        assertUpscaleRejected(1080, 1920, 0, false);
-        assertUpscaleRejected(1920, 1080, 270, false);
+    public void everyOtherShapeDiffersFromThePanel() {
+        // The reported bug. The old predicate compared a clip's two sides against each other, so a
+        // square — which has no long side — could never be "opposite" anything and kept TsPlayer,
+        // whose fixed scaling letterboxes it.
+        assertTrue(differs(640, 640, 0, PORTRAIT));
+        assertTrue(differs(1080, 1080, 0, PORTRAIT));
+        assertTrue(differs(1080, 1080, 0, LANDSCAPE));
+        // Same orientation as the panel and still not its shape: fixed scaling cannot fill this
+        // either, which is the case the old test for "opposite" could not express at all.
+        assertTrue(differs(1080, 1440, 0, PORTRAIT));
+        assertTrue(differs(1920, 800, 0, LANDSCAPE));
+        assertTrue(differs(1280, 720, 0, PORTRAIT));
+        // Opposite is simply the largest case of differs, so everything the old rule caught stays.
+        assertTrue(differs(1920, 1080, 0, PORTRAIT));
+        assertTrue(differs(1080, 1920, 0, LANDSCAPE));
+        // 180 degrees keeps the aspect: upside-down and still the wrong shape for this panel.
+        assertTrue(differs(1920, 1080, 180, PORTRAIT));
+        // Turned by its matrix INTO the opposite shape, so the matrix does not rescue it.
+        assertTrue(differs(1080, 1920, 90, PORTRAIT));
     }
 
     @Test
-    public void upscaleGateFiresOnMacroblockPaddedHeights() {
-        // H.264 codes in 16px rows, so stsd can report 1088 for a 1080-line file. Tested on equality
-        // alone, the gate would silently never fire on exactly these encodes — this row is what keeps
-        // VIDEO_1080P_SHORT_SIDE_SLACK_PX from being deleted as unused.
-        assertUpscaleRejected(1920, 1088, 0, true);
-        assertUpscaleRejected(1088, 1920, 90, true);
-        // One row past the slack, and it is not 1080p by this definition.
-        assertUpscaleAccepted(1920, 1096, 0, true);
+    public void macroblockPaddingIsNativeAndNoLongerACliff() {
+        // H.264 codes in 16px rows, so stsd reports 1088 for a 1080-line file. That is 0.74% off the
+        // panel's shape and must read as native, or every ordinary 1080p encode is sent away from its
+        // preferred engine. The tolerance is what carries this now, in place of a padded-height window
+        // that could only ever see a padded height.
+        assertFalse(differs(1920, 1088, 0, LANDSCAPE));
+        assertFalse(differs(1088, 1920, 0, PORTRAIT));
+        // Near-square material used to straddle an engine boundary: 1088x1080 was "opposite" a
+        // landscape panel while 1080x1080 was not, so 0.7% of aspect flipped both the engine and the
+        // composite. They now answer alike, because neither is anywhere near a 16:9 panel.
+        assertTrue(differs(1080, 1080, 0, LANDSCAPE));
+        assertTrue(differs(1088, 1080, 0, LANDSCAPE));
+        assertTrue(differs(1080, 1088, 0, LANDSCAPE));
+        // The band pinned from both sides: 1.46% is still native, 3.57% is not.
+        assertFalse(differs(1920, 1096, 0, LANDSCAPE));
+        assertTrue(differs(1920, 1120, 0, LANDSCAPE));
     }
 
     @Test
-    public void upscaleGateIsScopedTo1080p() {
-        // Below 1080p the same mismatch decodes and samples fewer pixels — but crops the identical
-        // composited region, since cropScaleFactors reads the aspect and the viewport alone. So this is
-        // a scope line drawn at the measurement, not at the end of the mechanism, and rows like
-        // 1920x800 (a 2.4:1 letterbox, which needs a bigger crop than anything rejected here) pass on
-        // purpose. Pinned so widening the predicate to the fill term is a decision, not a drift.
-        assertUpscaleAccepted(1280, 720, 0, true);
-        assertUpscaleAccepted(854, 480, 0, true);
-        assertUpscaleAccepted(1440, 1080, 0, true);
-        // Above it, incompatibleVideoResolution has already routed the asset; longSide != 1920 here,
-        // so the two gates never both claim the same file.
-        assertUpscaleAccepted(3840, 2160, 0, true);
+    public void anUnknowablePanelOrClipIsNeverEvidenceOfAMismatch() {
+        // Every unknown answers "does not differ", which is the direction that costs nothing: the clip
+        // keeps its default engine and its original. A frame whose layout has not settled must not
+        // lose its preferred engine on a guess, since the only alternative this reaches is the slower
+        // compositor.
+        assertFalse(differs(0, 1080, 0, PORTRAIT));
+        assertFalse(differs(1920, 0, 0, PORTRAIT));
+        assertFalse(differs(1920, 1080, 0, null));
+        assertFalse(differs(640, 640, 0, null));
+        // An unreadable matrix is read as unturned here rather than refused — the asymmetry
+        // docs/TSPLAYER.md records, and which cropGateRejectsKeepsUnknownMatrixDark pins from the
+        // other side.
+        assertTrue(differs(1920, 1080, -1, PORTRAIT));
+    }
+
+    @Test
+    public void cropGateAcceptsWhatThePanelCanBeFilledWithout() {
+        assertCropAccepted(1920, 1080, 0, LANDSCAPE, true);
+        assertCropAccepted(1080, 1920, 0, PORTRAIT, true);
+        // Turned by its own matrix into alignment: still native, still the original.
+        assertCropAccepted(1920, 1080, 90, PORTRAIT, true);
+        assertCropAccepted(1920, 1080, 270, PORTRAIT, true);
+        assertCropAccepted(1920, 1088, 0, LANDSCAPE, true);
+        // Above 1080p, incompatibleVideoResolution has already routed the asset; the two gates must
+        // never both claim one file, or the reason string lies about which one acted.
+        assertCropAccepted(3840, 2160, 0, PORTRAIT, true);
         assertTrue(MediaCompatibility.incompatibleVideoResolution(MediaType.VIDEO, 3840, 2160) != null);
     }
 
     @Test
-    public void unknownUpscaleInputsPass() {
-        // An unpublished panel orientation keeps the gate dark: a frame that cannot say which way it
-        // is hung shows originals, as every build before this gate did.
+    public void cropGateRejectsEverythingThatNeedsCenterCrop() {
+        assertCropRejected(1080, 1080, 0, PORTRAIT, true);
+        assertCropRejected(1080, 1440, 0, PORTRAIT, true);
+        assertCropRejected(1920, 800, 0, LANDSCAPE, true);
+        assertCropRejected(1920, 1080, 0, PORTRAIT, true);
+        assertCropRejected(1080, 1920, 90, PORTRAIT, true);
+        // Below 1080p now fires too, which is the widening: the crop is bounded by the viewport, not
+        // by the clip, so a 720p mismatch costs the same composite as a 1080p one.
+        assertCropRejected(1280, 720, 0, PORTRAIT, true);
+        assertCropRejected(854, 480, 0, PORTRAIT, true);
+    }
+
+    @Test
+    public void cropGateKeepsItsOriginalScopeOnAFrameWithOneEngine() {
+        // The widening is scoped to frames whose engine assignment this rule actually changes. An EO1
+        // has always been all-MediaPlayer, so nothing about what it downloads should move — and the
+        // size pair is what holds that line. Both halves matter: the gate must narrow back to its old
+        // reach, and must not switch off entirely.
+        assertCropAccepted(1080, 1080, 0, PORTRAIT, false);
+        assertCropAccepted(1280, 720, 0, PORTRAIT, false);
+        assertCropAccepted(854, 480, 0, PORTRAIT, false);
+        assertCropRejected(1920, 1080, 0, PORTRAIT, false);
+        // Padded heights are still 1080p on this path, which is what keeps the slack constant live.
+        assertCropRejected(1920, 1088, 0, PORTRAIT, false);
+        assertCropRejected(1088, 1920, 90, PORTRAIT, false);
+        // One row past the slack is not 1080p by the size pair's definition.
+        assertCropAccepted(1920, 1096, 0, PORTRAIT, false);
+    }
+
+    @Test
+    public void cropGateReasonNamesTheCompositorsOwnCoverScale() {
+        // The reason reaches /logs and eo1-app.log, and it is what an operator reads at 3 a.m. It has
+        // to name the magnification the compositor will actually apply — a property of the clip AND
+        // the panel. The older text printed the clip's own display ratio, because the gate could not
+        // read the panel, and that number was not what anyone was about to pay.
+        //
+        // Asserted against TextureVideoView.aspectScale rather than a literal, because the point is
+        // that the two agree: a report that drifts from the compositor's arithmetic is worse than no
+        // report, since it is the thing that decides whether a slow clip gets re-encoded.
+        String reason = MediaCompatibility.incompatibleVideoUpscale(
+                MediaType.VIDEO, 640, 640, 0, PORTRAIT, true);
+        assertNotNull(reason);
+        String expected = String.format(Locale.ROOT, "%.2fx",
+                TextureVideoView.aspectScale(1080, 1920, 640, 640));
+        assertTrue(reason + " should name the cover scale " + expected, reason.contains(expected));
+        assertTrue(reason, reason.contains("1080x1920"));
+        // The same clip against a panel it does match names no scale at all.
         assertNull(MediaCompatibility.incompatibleVideoUpscale(
-                MediaType.VIDEO, 1920, 1080, 0, null));
+                MediaType.VIDEO, 640, 640, 0,
+                MediaCompatibility.PanelShape.of(640, 640), true));
+    }
+
+    @Test
+    public void unknownCropInputsPass() {
+        // An unmeasured panel keeps the gate dark: a frame that cannot say its own shape shows
+        // originals, as every build before this gate did.
+        assertNull(MediaCompatibility.incompatibleVideoUpscale(
+                MediaType.VIDEO, 1920, 1080, 0, null, true));
         // -1 is VideoHeaderProbe's "no readable matrix" answer (a non-ISOBMFF container, or a tkhd
-        // whose matrix is not an angle this reader recognises).
+        // whose matrix is not an angle this reader recognises). The source gate refuses to decide on
+        // it even though the engine rule above will judge the coded dimensions.
         assertNull(MediaCompatibility.incompatibleVideoUpscale(
-                MediaType.VIDEO, 1920, 1080, -1, true));
+                MediaType.VIDEO, 1920, 1080, -1, PORTRAIT, true));
         assertNull(MediaCompatibility.incompatibleVideoUpscale(
-                MediaType.VIDEO, 0, 1080, 0, true));
+                MediaType.VIDEO, 0, 1080, 0, PORTRAIT, true));
         assertNull(MediaCompatibility.incompatibleVideoUpscale(
-                MediaType.VIDEO, 1920, -1, 0, true));
+                MediaType.VIDEO, 1920, -1, 0, PORTRAIT, true));
     }
 
     @Test
-    public void upscaleGateAppliesToVideoOnly() {
+    public void cropGateAppliesToVideoOnly() {
         assertNull(MediaCompatibility.incompatibleVideoUpscale(
-                MediaType.IMAGE, 1920, 1080, 0, true));
+                MediaType.IMAGE, 1920, 1080, 0, PORTRAIT, true));
         assertNull(MediaCompatibility.incompatibleVideoUpscale(
-                MediaType.WEB, 1920, 1080, 0, true));
+                MediaType.WEB, 1920, 1080, 0, PORTRAIT, true));
         assertNull(MediaCompatibility.incompatibleVideoUpscale(
-                null, 1920, 1080, 0, true));
+                null, 1920, 1080, 0, PORTRAIT, true));
     }
 
     @Test
-    public void orientationGateAddsCoverageTheThroughputGateMisses() {
+    public void cropGateAddsCoverageTheThroughputGateMisses() {
         // The reason this gate is not just another number on the same axis: a 1920x1080 clip with a
         // 90-degree matrix turned to display 1080x1920 on a LANDSCAPE panel is the same 1.78x fill,
         // while its macroblock rate (244 555/s) sits comfortably inside the throughput budget. Only
-        // the orientation gate sees it.
+        // the crop gate sees it.
         assertNull(MediaCompatibility.incompatibleVideoThroughput(
                 MediaType.VIDEO, 1920, 1080, 29970));
-        assertUpscaleRejected(1920, 1080, 90, false);
+        assertCropRejected(1920, 1080, 90, LANDSCAPE, true);
     }
 
     @Test
-    public void aspectHelperAgreesWithTheRoutingRule() {
-        // The three rows docs/TSPLAYER.md states for MainActivity.routingAllowsTsPlayer. Routing and
-        // this gate call one function, so a clip cannot be "MediaPlayer material" one moment and
-        // "aspect fine" the next; this pins the aspect terms of that rule directly.
-        assertFalse(MediaCompatibility.videoAspectOppositeFrame(1920, 1080, 0, false));
-        assertTrue(MediaCompatibility.videoAspectOppositeFrame(1920, 1080, 0, true));
-        assertTrue(MediaCompatibility.videoAspectOppositeFrame(1080, 1920, 0, false));
-        assertFalse(MediaCompatibility.videoAspectOppositeFrame(1080, 1920, 0, true));
-        // Turning counts, in both directions.
-        assertFalse(MediaCompatibility.videoAspectOppositeFrame(1920, 1080, 90, true));
-        assertTrue(MediaCompatibility.videoAspectOppositeFrame(1080, 1920, 270, true));
-        // Unknown dimensions are never evidence of a mismatch.
-        assertFalse(MediaCompatibility.videoAspectOppositeFrame(0, 1080, 0, true));
-        assertFalse(MediaCompatibility.videoAspectOppositeFrame(1920, 0, 0, true));
+    public void panelShapeCarriesOrientationAndRejectsNothingMeasurable() {
+        // Orientation is load-bearing: normalising to long-side/short-side would call a landscape clip
+        // native on a portrait panel, which is the exact case that must go to MediaPlayer.
+        assertEquals(PORTRAIT, MediaCompatibility.PanelShape.of(1080, 1920));
+        assertFalse(PORTRAIT.equals(LANDSCAPE));
+        assertFalse(LANDSCAPE.equals(PORTRAIT));
+        assertEquals("1080x1920", PORTRAIT.toString());
+        // A side that is not a measurement is refused rather than carried, so callers see one answer.
+        assertNull(MediaCompatibility.PanelShape.of(0, 1920));
+        assertNull(MediaCompatibility.PanelShape.of(1080, -1));
     }
 
-    private static void assertUpscaleAccepted(int width, int height, int rotationDeg,
-                                             boolean framePortrait) {
-        assertNull(width + "x" + height + " at " + rotationDeg + " degrees on a "
-                        + (framePortrait ? "portrait" : "landscape") + " panel needs no upscale",
+    private static boolean differs(int width, int height, int rotationDeg,
+                                   MediaCompatibility.PanelShape panel) {
+        return MediaCompatibility.videoAspectDiffersFromPanel(width, height, rotationDeg, panel);
+    }
+
+    private static void assertCropAccepted(int width, int height, int rotationDeg,
+                                           MediaCompatibility.PanelShape panel, boolean twoEngines) {
+        assertNull(width + "x" + height + " at " + rotationDeg + " degrees on a " + panel
+                        + " panel needs no crop",
                 MediaCompatibility.incompatibleVideoUpscale(
-                        MediaType.VIDEO, width, height, rotationDeg, framePortrait));
+                        MediaType.VIDEO, width, height, rotationDeg, panel, twoEngines));
     }
 
-    private static void assertUpscaleRejected(int width, int height, int rotationDeg,
-                                              boolean framePortrait) {
+    private static void assertCropRejected(int width, int height, int rotationDeg,
+                                           MediaCompatibility.PanelShape panel, boolean twoEngines) {
         assertTrue("expected " + width + "x" + height + " at " + rotationDeg + " degrees on a "
-                        + (framePortrait ? "portrait" : "landscape") + " panel to need an upscale",
+                        + panel + " panel (two engines: " + twoEngines + ") to need a crop",
                 MediaCompatibility.incompatibleVideoUpscale(
-                        MediaType.VIDEO, width, height, rotationDeg, framePortrait) != null);
+                        MediaType.VIDEO, width, height, rotationDeg, panel, twoEngines) != null);
     }
 
     private static void assertBitrateAccepted(long bitRateBps) {

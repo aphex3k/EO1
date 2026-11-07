@@ -18,9 +18,11 @@ The ladder a display failure descends is per media type, not one shared sequence
 - **Still:** original → the backend's degraded source (`/thumbnail?size=preview`) → verdict.
 - **Video:** original → **the same original on the other engine** → the backend's degraded source (`/video/playback`) → verdict.
 
-That middle rung is a second *engine*, not a second fetch: the bytes are already cached, and it exists only while `preferTsPlayer` is true (`BuildConfig.USE_TSPLAYER` and `TsPlayerNative.isAvailable()`). Where the native library never loaded there is only one engine, so the rung is skipped and the cycle goes straight to the degraded source — and a clip whose display rotation is non-identity or whose aspect is opposite the frame's never reached TsPlayer in the first place, because routing decides the engine before the first play (see [Scaling & orientation](#scaling--orientation-routing)); replaying it would just re-select the engine that failed.
+That middle rung is a second *engine*, not a second fetch: the bytes are already cached, and it exists only when three things are true — the frame owns two engines (`preferTsPlayer`, i.e. `BuildConfig.USE_TSPLAYER` and `TsPlayerNative.isAvailable()`), **routing actually picked TsPlayer for this clip**, and that engine has fewer than `MAX_ENGINE_ATTEMPTS` attempts on these bytes. Where the native library never loaded there is only one engine, so the rung is skipped and the cycle goes straight to the degraded source.
 
-A video with a coded side above 1920px skips straight to the last rung, because that decoder garbles such video without raising an error. So does one whose macroblock throughput, or whose sustained video-track bitrate (15 Mbit/s), exceeds a hardware ceiling — from its second appearance onward, since those verdicts need the `moov` and so the first appearance pays one original fetch before descending. So, too, does **1080p** video whose *displayed* aspect is opposite the panel's — also from its second appearance onward, because that verdict needs the `tkhd` matrix as well as the coded size. The angle is not the trigger; the displayed aspect is, and the matrix enters only as the transform that produces it (an unreadable one leaves the gate dark, and a clip the matrix has already turned to match the panel needs no crop beyond 1:1, so routing it would be a quality loss with nothing to show for it). Be precise about what descending buys, because the arithmetic here is easy to overstate: a center-crop's factors depend on the clip's *shape* and the viewport, so `cropScaleFactors(1080, 1920, 1920, 1080)` and `(1080, 1920, 1280, 720)` are both `(3.16, 1.0)` — the fallback is composited over the same region and only the decode and the source read get cheaper. If a routed clip still runs slow, the cost is the composite, and the lever is fill-versus-letterbox in `TextureVideoView`, not the source. All four gates are decided while choosing a *source*, so they apply to files fetched from a remote backend: an uploaded file is never routed at all and is displayed at whatever size, frame rate, bitrate or orientation it arrived, because there is no degraded source to route it *to* (`MediaManager.originalUsable` returns true the moment `localPath` is set).
+The middle condition is the one that was missing, and it was not a theoretical gap: `displayVideo` re-derives the engine from the file's own header on every entry, so a clip that routing had already handed to MediaPlayer was replayed by the rung *onto MediaPlayer* — an entire wasted attempt (watchdog arming, prepare, 12 s paint deadline) before the ladder moved on. The rung tested whether the *frame* had a second engine rather than whether this *clip* had one, and once every non-native aspect is MediaPlayer material that is the common case rather than the exception. Note this also retires an older oddity: a clip that failed on TsPlayer, was swapped to MediaPlayer, and failed there used to be sent back through TsPlayer by this rung regardless.
+
+A video with a coded side above 1920px skips straight to the last rung, because that decoder garbles such video without raising an error. So does one whose macroblock throughput, or whose sustained video-track bitrate (15 Mbit/s), exceeds a hardware ceiling — from its second appearance onward, since those verdicts need the `moov` and so the first appearance pays one original fetch before descending. So, too, does video whose *displayed* aspect is not the panel's own shape — also from its second appearance onward, because that verdict needs the `tkhd` matrix as well as the coded size. The angle is not the trigger; the displayed aspect is, and the matrix enters only as the transform that produces it (an unreadable one leaves the gate dark, and a clip the matrix has already turned to match the panel needs no crop beyond 1:1, so routing it would be a quality loss with nothing to show for it). This gate used to be limited to 1080p, and it still is on a frame with one engine — see the scoping note below, because the two halves of that sentence have different reasons. Be precise about what descending buys, because the arithmetic here is easy to overstate: a center-crop's factors depend on the clip's *shape* and the viewport, so `cropScaleFactors(1080, 1920, 1920, 1080)` and `(1080, 1920, 1280, 720)` are both `(3.16, 1.0)` — the fallback is composited over the same region and only the decode and the source read get cheaper. If a routed clip still runs slow, the cost is the composite, and the lever is fill-versus-letterbox in `TextureVideoView`, not the source. All four gates are decided while choosing a *source*, so they apply to files fetched from a remote backend: an uploaded file is never **source**-routed and is displayed at whatever size, frame rate, bitrate or orientation it arrived, because there is no degraded source to route it *to* (`MediaManager.originalUsable` returns true the moment `localPath` is set). Say it that way rather than "never routed", because it is not true of the engine: an uploaded square clip on an EO2 is very much routed, and now goes to MediaPlayer rather than being letterboxed by TsPlayer. One guard makes the widened source gate sound at the small end: the `/video/playback` probe answers with its own size, and a "degraded" source that is **not smaller** than the original is refused, so a 480p clip is never sent away from its file in order to download a bigger 720p one. Equality alone used to be the test, which was right while the gate only fired at 1080p and would have been silently negative just below the server's transcode ladder.
 
 What the original and the fallback both fail on is tagged `EO1_INCOMPATIBLE` — for the operator to fix in Immich: regenerate thumbnails, re-encode, or remove it from the frame's albums. That terminal verdict is **Immich-only**: the tag is written by `MediaBackend.markIncompatible`, which `LocalMediaBackend` does not implement, so the interface's default no-op runs — and the "no fallback for this backend" log line it follows is `Log.i`, which reaches logcat (≈13 minutes) but not `/logs` or `eo1-app.log`. An uploaded file that fails to display therefore leaves no durable trace and is retried on the next cycle. See AGENTS.md, "No client-side transcoding", for how a local failure is made durable (only at scan time, via the `<name>.incompat.txt` sidecar).
 
@@ -102,15 +104,34 @@ the video view is not visible, and is re-armed by the next display attempt.
 
 ## Scaling & orientation (routing)
 
-TsPlayer's `.so` renders with a **fixed fit/letterbox scale** and its JNI surface exposes
+TsPlayer's `.so` renders with a **fixed scale of its own choosing** and its JNI surface exposes
 only `createPlayer/setSurface/start/stop/pause/resume/deletePlayer/getStatus/getCurrentTime`
 — no scale-mode or rotation control is reachable from Java. Two defects follow:
 
 - **Rotated video plays upside-down/wrong-way** (the `.so` ignores display-matrix metadata).
-- **Landscape clips do not fill a portrait viewport** — they are squished/letterboxed instead
-  of aspect-filling and cropping the sides.
+- **A clip whose shape is not the panel's is not filled** — it is letterboxed or squished rather
+  than aspect-filled and cropped on the long axis.
 
-So `MainActivity.displayVideo` routes each video before choosing a player. Inputs:
+Be precise about the second one, because the wording here was wrong for a long time and it misleads
+anyone reasoning about the fix. Two things were established from the shipped binary rather than from
+prose. The `.so` links no `libandroid` and imports no `ANativeWindow` symbol, so the `Surface` handed
+to `setSurface` is not a drawing target at all — pixels go to `/dev/amstream_*` and the Amlogic global
+video layer composites behind the framebuffer, with the app's `SurfaceView` a hole in front of it. And
+its entire geometry toolbox (`amvideo_utils_set_virtual_position`, `amvideo_setscreenmode`,
+`amdisplay_utils_set_scale_mode`, the `amvecm` screen-mode `ioctl`) is **unreachable**: a whole-`.text`
+scan finds the one function that would apply a per-clip rectangle has zero call sites. So TsPlayer
+makes no per-clip aspect decision — it neither stretches nor letterboxes *by choice*. What draws is the
+ROM's own video-layer rectangle, written once at boot by `set_display_mode.sh`, and whether that
+stretches or bars a non-native stream has never been observed on a frame.
+
+That is a statement about severity, not about the rule. The rule holds either way: an engine with no
+aspect control can only be correct when there is nothing to correct, which is when the clip's shape
+already equals the panel's. Everything else goes to the platform player, which center-crops to fill.
+
+So `MainActivity.displayVideo` routes each video before choosing a player, through
+`VideoRoutingRule.allowsTsPlayer` — a pure function, separate from `MainActivity` precisely so it could
+be tested: routing itself never had a test, and a change that moved most of a library from one engine to
+the other left the whole suite green. Inputs:
 
 - **Video rotation** — a bounded pure-Java ISOBMFF header probe (`VideoHeaderProbe`, no
   `MediaMetadataRetriever`, which would EBUSY-starve a live TsPlayer on `/dev/amstream_vbuf`):
@@ -118,13 +139,19 @@ So `MainActivity.displayVideo` routes each video before choosing a player. Input
   present; coded width/height from the first `stsd` video sample entry.
 - **Video coded dimensions** — probe first; the `MediaAsset` exif dimensions when the probe
   yields 0.
-- **Frame orientation** — the display's `Configuration.orientation`, read once in
-  `MainActivity.frameIsPortrait()` and handed to `MediaManager.setFramePortrait` at launch and from
-  `onConfigurationChanged` (verify on the EO2 that physically turning the frame actually flips it;
-  only a sensor path is warranted if not). This used to be only an engine question; since the 1080p
-  orientation gate it also decides whether an original is fetched at all, so a value that does not
-  follow the wall mount now retires half a correctly-encoded library instead of picking the wrong
-  player. Read it back from `/state`'s `video.frameOrientation`.
+- **Panel shape** — the root view's live `getWidth()/getHeight()`, read once in
+  `MainActivity.currentPanelShape()` and handed to `MediaManager.publishPanel` at launch, from
+  `onConfigurationChanged`, from `onWindowFocusChanged`, and again before every display attempt.
+  This replaced a `Configuration.orientation` boolean, and the reason matters: an orientation flag
+  cannot distinguish a 16:9 panel from a 16:10 one, which is the whole question the rule now asks.
+  Read the root and not a video view because a `GONE` view is never measured, and `onCreate` hides
+  whichever view is idle — so a video view would report 0 on exactly the frames this rule exists for.
+  Verify on the EO2 that physically turning the frame actually reaches `onConfigurationChanged`; the
+  manifest claims `orientation` in `configChanges`, so nothing else follows the wall. A panel that
+  cannot be measured yet leaves both decisions dark, which is the conservative direction: the clip
+  keeps TsPlayer and its original. Read the value back from `/state`'s `video.panelShape` (the pixels
+  the rule used) and `video.frameOrientation` (the same number as a word, derived rather than
+  separately measured, so the two cannot disagree).
 - **Frame rate** — also from the probe, via `mdhd` (timescale and duration) and the `stsz` sample
   count. This one is *not* an input to the player choice above; nothing about TsPlayer vs
   MediaPlayer depends on it. It selects the **source** instead: a clip whose coded size x frame rate
@@ -137,19 +164,33 @@ Routing rule — force the MediaPlayer/`TextureVideoView` fallback when:
 
 ```
 rotation ∈ {90, 180, 270}
-   or (effective W > effective H and frame is portrait)   // landscape video, portrait frame
-   or (effective H > effective W and frame is landscape)  // portrait video, landscape frame
+   or effective aspect differs from the panel's own shape by more than
+       MediaCompatibility.VIDEO_NATIVE_ASPECT_TOLERANCE_BP (3%)
 ```
 
-where effective dimensions are the coded dimensions swapped for 90°/270° rotations.
-Square or unknown aspect, and unknown rotation, keep the TsPlayer default. The two aspect lines are
-`MediaCompatibility.videoAspectOppositeFrame`, which the 1080p source gate calls too — deliberately
-one function, so the two paths cannot drift into two definitions of "opposite". They still differ in
-*coverage*, and that gap is real: routing falls back to the `MediaAsset`'s catalog dimensions when the
-file's header gives none, while the gate refuses to decide on anything but probed bytes — so a container
-the probe cannot read (an `.mkv`, whose angle lives in a Matroska element) is MediaPlayer material by the
-engine's reading and simply unjudgeable by the fetcher's. The rotation line stays local to routing: it
-asks whether a player can turn the picture, which is not the question a source decision asks. The decision is
+where effective dimensions are the coded dimensions swapped for 90°/270° rotations. Unknown
+dimensions and an unmeasurable panel keep the TsPlayer default; unknown rotation is judged from the
+coded dimensions by the aspect term, which cannot refuse it, while the rotation term simply cannot
+fire.
+
+The second line replaced a test for the aspect being merely **opposite** the panel's, which compared
+the clip's two sides against each other and never looked at the wall. That predicate could only be
+answered by a clip with a long axis, so a square fell through to TsPlayer and reached the panel
+letterboxed — the reported bug — and because "opposite" was really a hidden threshold at aspect 1.0,
+a 1088x1080 clip flipped engines while a 1080x1080 and a 1080x1088 did not. Comparing against the
+panel fixes both: "opposite" is just the largest case of "differs", so every clip the old rule caught
+is still caught, and 3% is the tolerance that keeps H.264's 1088-padding on the right side of the
+line (0.74% off a 1920x1080 panel). The nearest common video ratio to 16:9 is 16:10, 10% away, so
+any value between 2% and 5% picks the same set of clips — this is a margin, not a measurement.
+
+The aspect term is `MediaCompatibility.videoAspectDiffersFromPanel`, which the source gate calls too —
+deliberately one function, so the two paths cannot drift into two definitions of "native". They still
+differ in *coverage*, and that gap is real: routing falls back to the `MediaAsset`'s catalog dimensions
+when the file's header gives none, while the gate refuses to decide on anything but probed bytes — so a
+container the probe cannot read (an `.mkv`, whose angle lives in a Matroska element) is MediaPlayer
+material by the engine's reading and simply unjudgeable by the fetcher's. The rotation term stays local
+to routing: it asks whether a player can turn the picture, which is not the question a source decision
+asks. The decision is
 logged and reported via `debugInformationProvided` plus the debug `/state` `video` block
 (`rotation`, `width`, `height`, `frameOrientation`; `active` shows the effective player).
 

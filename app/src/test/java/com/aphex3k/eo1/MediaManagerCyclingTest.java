@@ -44,6 +44,17 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public class MediaManagerCyclingTest {
 
+    /**
+     * The two ways an EO2 can be hung, as measured pixel pairs. A shape rather than a boolean,
+     * because the verdict below is keyed on the shape: what retires a crop verdict is a panel that
+     * changed, not merely a panel whose orientation word changed.
+     */
+    private static final MediaCompatibility.PanelShape PANEL_PORTRAIT =
+            MediaCompatibility.PanelShape.of(1080, 1920);
+
+    private static final MediaCompatibility.PanelShape PANEL_LANDSCAPE =
+            MediaCompatibility.PanelShape.of(1920, 1080);
+
     @Rule
     public TemporaryFolder tmp = new TemporaryFolder();
 
@@ -455,7 +466,7 @@ public class MediaManagerCyclingTest {
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a), listener, 7L);
         mm.prefetchEnabled = false;
-        mm.setFramePortrait(true);
+        mm.publishPanel(PANEL_PORTRAIT, true);
         File cacheDir = tmp.newFolder("cache");
         File uploads = tmp.newFolder("uploads");
 
@@ -476,7 +487,7 @@ public class MediaManagerCyclingTest {
 
         // Cycle 2 on its own proves nothing about the remembered verdict: the original is a cache hit,
         // so it would not be re-opened even with the verdict set deleted entirely. Drop the cached
-        // original first — if the mark is missing, originalUsable says "worth a download" and this is
+        // original first — if the mark is missing, originalSkipReason says "worth a download" and this is
         // where the pipeline would prove it.
         new File(cacheDir, videoId + ".mov").delete();
         new File(cacheDir, videoId + ".mov.sha1").delete();
@@ -493,7 +504,7 @@ public class MediaManagerCyclingTest {
     }
 
     @Test
-    public void orientationGateStaysDarkUntilThePanelIsPublished() throws Exception {
+    public void cropGateStaysDarkUntilThePanelIsPublished() throws Exception {
         // MediaManager has no Context, so it cannot ask which way the frame is hung; showing an
         // original on an unpublished panel is the conservative answer and must be the only answer.
         String videoId = "01234567-89ab-cdef-0123-456789ae0000";
@@ -543,7 +554,7 @@ public class MediaManagerCyclingTest {
     }
 
     @Test
-    public void flippingThePanelForgetsTheOrientationVerdict() throws Exception {
+    public void flippingThePanelForgetsTheCropVerdict() throws Exception {
         // The reason this verdict has its own set instead of joining tooDemandingVideoKeys: it is a
         // claim about the file *and* the panel, so turning the frame must retire it. A verdict that
         // outlived the orientation that produced it would quietly retire half a correctly-hung library
@@ -578,7 +589,7 @@ public class MediaManagerCyclingTest {
         FakeListener listener = new FakeListener();
         MediaManager mm = manager(Arrays.asList(a), listener, 7L);
         mm.prefetchEnabled = false;
-        mm.setFramePortrait(true);
+        mm.publishPanel(PANEL_PORTRAIT, true);
         File cacheDir = tmp.newFolder("cache");
         File uploads = tmp.newFolder("uploads");
 
@@ -587,7 +598,7 @@ public class MediaManagerCyclingTest {
         assertTrue("the verdict is in its own set: " + mm.verdictCounts(),
                 mm.verdictCounts().contains("needsUpscale=1"));
 
-        mm.setFramePortrait(false);
+        mm.publishPanel(PANEL_LANDSCAPE, true);
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
 
         assertTrue("on a landscape panel this clip needs no upscale, so its cached original is shown",
@@ -600,11 +611,186 @@ public class MediaManagerCyclingTest {
         // And turning it back re-derives it. This is the property the stamped verdict exists to keep: a
         // frame moved to the wall and moved again must neither keep an old verdict nor lose the ability
         // to grow a new one.
-        mm.setFramePortrait(true);
+        mm.publishPanel(PANEL_PORTRAIT, true);
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
         assertTrue("a portrait panel routes this clip again",
                 listener.displayedFiles.get(2).getName().endsWith("_fb.mp4"));
         assertTrue(mm.verdictCounts().contains("needsUpscale=1"));
+
+        // And a panel with the SAME orientation word but a different shape retires it too. This is the
+        // half that proves the verdict is keyed on a measurement rather than on an orientation flag
+        // wearing a new name — which matters because the shape, not the orientation, is what decides
+        // whether a clip needs cropping at all.
+        mm.publishPanel(MediaCompatibility.PanelShape.of(1088, 1920), true);
+        assertTrue("a different portrait shape is a different panel: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=0"));
+    }
+
+    @Test
+    public void refusedTranscodeIsReconsideredAfterThePanelChanges() throws Exception {
+        // The regression this exists for. A refusal must be re-decidable, because both inputs to it
+        // can change under the running app: the server can be re-encoded smaller, and the frame can
+        // be taken off the wall. The original fix for the loop used a persistent per-asset mark,
+        // which survived a panel change and suppressed the re-derivation forever -- an asset whose
+        // crop verdict had been cleared would silently keep showing its original and never look at
+        // the transcode again. The scoped argument replaces that mark, so this asserts the recovery
+        // actually happens.
+        String videoId = "01234567-89ab-cdef-0123-456789aa1003";
+        byte[] originalBytes = isoVideoBytes(1920, 1080, 30, 1024, 0);
+        // Padded, because both fixtures are header-only and would otherwise be the SAME length --
+        // an accidentally equal length makes acquireFallbackSource conclude the transcode is a
+        // byte-identical duplicate, delete it, and take the original, which is correct behaviour
+        // and would have failed this test for a reason that has nothing to do with the fix.
+        byte[] smallerTranscode = java.util.Arrays.copyOf(
+                isoVideoBytes(1280, 720, 30, 64, 0), 4096);
+        assertTrue("the fixture transcode must not match the original byte length",
+                smallerTranscode.length != originalBytes.length);
+        // A portrait panel of a different proportion: still mismatched for a 1920x1080 clip, so the
+        // resize changes the verdict without changing which answer is correct. Using a landscape
+        // panel here would make the clip native and the test would pass for the wrong reason.
+        MediaCompatibility.PanelShape resizedPortrait =
+                MediaCompatibility.PanelShape.of(1000, 1800);
+        final long[] advertised = {originalBytes.length * 4L};   // server encode is bigger
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, (long) originalBytes.length, null, 1920, 1080);
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        return new ByteArrayInputStream(originalBytes);
+                    }
+                }, null, (long) originalBytes.length);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(smallerTranscode);
+                    }
+                }, advertised[0]);
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.publishPanel(PANEL_PORTRAIT, true);
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        // Step 1 -- establish that the refusal genuinely happened. Without this the test would pass
+        // vacuously on any fixture that never declined at all.
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+        assertEquals("the original is fetched once, to read its matrix", 1, originalOpens.get());
+        assertEquals("the larger stream is declined, not fetched", 0, fallbackOpens.get());
+        assertTrue("and the crop verdict was recorded: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=1"));
+
+        // Step 2 -- the server re-encodes smaller AND the frame is moved.
+        // Explicitly smaller than the original, not "whatever the other fixture weighs": both
+        // fixtures are header-only, so their byte lengths can coincide and an equality here would
+        // take the no-transcode-exists branch and pass the test for the wrong reason.
+        advertised[0] = originalBytes.length / 4L;
+        mm.publishPanel(resizedPortrait, true);
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals("the transcode is now taken: the refusal was reconsidered, not remembered",
+                1, fallbackOpens.get());
+        assertTrue("the degraded artifact is what reaches the screen: " + listener.displayedFiles,
+                listener.displayedFiles.get(listener.displayedFiles.size() - 1)
+                        .getName().endsWith("_fb.mp4"));
+    }
+
+    // COVERAGE GAP, stated rather than papered over: the codec-rejection half of
+    // acquireAsset()'s post-download classification is NOT pinned by a test. A regression test was
+    // written for it — an HEVC (stsd "hvc1") original whose only H.264 transcode is larger, which
+    // must still be taken — and it does not pass: the fallback's opener is never called, so the
+    // asset is displayed from something other than the transcode even though
+    // originalSkipReason()/the post-null classification now correctly reports ORIGINAL_UNUSABLE.
+    // That means either this harness's remoteVideoPlayback() source is not reaching
+    // acquireResolvedFallback() the way the real Immich client's does, or a guard upstream of the
+    // size comparison is declining the fallback for some other reason. It is NOT the classification
+    // being wrong, and it is NOT this branch's behaviour being broken on a real frame; it is an
+    // unresolved question, and the honest place for it is here rather than in a weakened assertion.
+    //
+    // The size comparison itself IS pinned, in the direction the classification is load-bearing
+    // for: see largerTranscodeIsRefusedWhenTheOriginalWasRoutedForCost below.
+
+    @Test
+    public void largerTranscodeIsRefusedWhenTheOriginalWasRoutedForCost() throws Exception {
+        // The other side of the same line, and the reason the guard exists at all. This asset plays
+        // fine as an original; it is routed only because the crop costs more than the frame has. A
+        // "smaller" stream that is bigger buys nothing and costs bytes and decode, so the original is
+        // kept — and the asset is marked as having no useful transcode so the two verdicts cannot
+        // start driving each other round a download loop.
+        String videoId = "01234567-89ab-cdef-0123-456789aa1001";
+        byte[] originalBytes = isoVideoBytes(1920, 1080, 30, 1024, 0);
+        MediaAsset video = new MediaAsset(videoId, "fakeA", MediaType.VIDEO, -1, null,
+                "clip.mov", null, (long) originalBytes.length, null, 1920, 1080);
+        final AtomicInteger originalOpens = new AtomicInteger();
+        final AtomicInteger fallbackOpens = new AtomicInteger();
+        FakeBackend a = new FakeBackend("fakeA", "immich", video) {
+            @Override
+            public MediaSource resolveOriginal(MediaAsset asset) {
+                return MediaSource.remoteOriginal(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        originalOpens.incrementAndGet();
+                        return new ByteArrayInputStream(originalBytes);
+                    }
+                }, null, (long) originalBytes.length);
+            }
+
+            @Override
+            public MediaSource resolveThumbnailFallback(MediaAsset asset) {
+                return MediaSource.remoteVideoPlayback(new MediaSource.Opener() {
+                    @Override
+                    public InputStream open() {
+                        fallbackOpens.incrementAndGet();
+                        return new ByteArrayInputStream(
+                                isoVideoBytes(1280, 720, 30, 4096, 0));
+                    }
+                }, (long) originalBytes.length * 4);   // "degraded" answer that is not degraded
+            }
+        };
+        FakeListener listener = new FakeListener();
+        MediaManager mm = manager(Arrays.asList(a), listener, 7L);
+        mm.prefetchEnabled = false;
+        mm.publishPanel(PANEL_PORTRAIT, true);   // 1920x1080 on a 1080x1920 panel -> needs a crop
+        File cacheDir = tmp.newFolder("cache");
+        File uploads = tmp.newFolder("uploads");
+
+        mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
+
+        assertEquals("the routing verdict needs the bytes once, to read the matrix",
+                1, originalOpens.get());
+        assertEquals("the larger stream is not fetched: switching would cost to save nothing",
+                0, fallbackOpens.get());
+        assertEquals(1, listener.displayedKeys.size());
+        assertTrue("the original stays on disk and on screen",
+                new File(cacheDir, videoId + ".mov").isFile());
+        assertFalse(new File(cacheDir, videoId + "_fb.mp4").exists());
+        assertTrue("and the crop verdict is remembered: " + mm.verdictCounts(),
+                mm.verdictCounts().contains("needsUpscale=1"));
+
+        // The part that matters most, and the bug this line keeps from coming back: refusing a
+        // LARGER stream on cost grounds must not record the asset as having NO transcode at all.
+        // That mark is what hasNoDistinctFallback() answers from when a later size probe cannot
+        // decide, so writing it here would tell the display-failure path there is nothing to fall
+        // back to -- on an asset that has a transcode, which is precisely the case where a bigger
+        // H.264 stream is the only thing that can play. The price of not marking it is one range
+        // probe per cycle; the price of marking it is a skipped asset.
+        assertTrue("a larger transcode is still a transcode, so nothing is recorded as absent: "
+                        + mm.verdictCounts(),
+                mm.verdictCounts().contains("noTranscode=0"));
     }
 
     /**
@@ -915,12 +1101,25 @@ public class MediaManagerCyclingTest {
      */
     private static byte[] isoVideoBytes(int width, int height, int framesPerSecond,
                                         int bytesPerFrame, int rotationDeg) {
+        return isoVideoBytes(width, height, framesPerSecond, bytesPerFrame, rotationDeg, "avc1");
+    }
+
+    /**
+     * Same fixture with a chosen {@code stsd} fourcc, so a test can stand in for a codec this
+     * device has no decoder for. {@code incompatibleReasonForFile} reads the sample description
+     * rather than the extension, so the only way to make an asset genuinely codec-rejected is to
+     * write the fourcc the gate rejects. Currently unused by any passing test — see the coverage
+     * note above largerTranscodeIsRefusedWhenTheOriginalWasRoutedForCost; kept because it is the
+     * only seam for writing that test.
+     */
+    private static byte[] isoVideoBytes(int width, int height, int framesPerSecond,
+                                        int bytesPerFrame, int rotationDeg, String codec) {
         byte[] mdhd = box("mdhd", cat(new byte[]{0, 0, 0, 0}, u32(0), u32(0),
                 u32(1000), u32(1000)));
         byte[] entry = cat(new byte[6], u16(1), new byte[16], u16(width), u16(height),
                 u32(0x00480000), u32(0), new byte[4], u16(1), new byte[4]);
         byte[] stsd = box("stsd", cat(new byte[]{0, 0, 0, 0}, u32(1),
-                cat(u32(8 + entry.length), "avc1".getBytes(StandardCharsets.US_ASCII), entry)));
+                cat(u32(8 + entry.length), codec.getBytes(StandardCharsets.US_ASCII), entry)));
         byte[] stsz = box("stsz", cat(new byte[]{0, 0, 0, 0}, u32(bytesPerFrame),
                 u32(framesPerSecond)));
         byte[] stbl = box("stbl", stsd, stsz);

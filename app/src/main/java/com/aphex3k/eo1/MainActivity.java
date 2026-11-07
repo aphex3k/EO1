@@ -164,6 +164,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private ImageView imageView;
     private TextureVideoView mediaPlayerVideoView;
     private TsVideoView tsVideoView;
+    /**
+     * The root of the display layout, and the only view this Activity trusts for the panel's size.
+     *
+     * <p>A video view cannot be the source: {@code onCreate} sets the inactive one to {@code GONE} and
+     * {@link #selectVideoPlayer} hides whichever engine is idle, and a {@code GONE} view is never
+     * measured — its width stays 0 forever. On an EO2, whose whole point is that one of the two views
+     * is hidden while the other plays, that would leave the aspect rule permanently dark. The root is
+     * {@code match_parent}, is never hidden, and holds every media view as a {@code fill_parent} child,
+     * so its box <em>is</em> the viewport {@code TextureVideoView.cropScaleFactors} is handed — the same
+     * number, not a proxy for it.
+     */
+    private View rootView;
     /** Chrome-less browser view for web-page assets; created on first use only. */
     private WebView webView;
     private String activeWebAssetId = "";
@@ -201,7 +213,44 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int lastVideoWidth;
     private int lastVideoHeight;
     private String lastVideoCodec;
+    /**
+     * The panel's measured viewport, last published. Every aspect decision in this Activity reads
+     * through {@link #currentPanelShape()} and this holds the same value for reporting, so the number
+     * an operator reads is the number the predicate used rather than a second opinion about the wall.
+     */
+    private MediaCompatibility.PanelShape lastFrameShape;
+    /** {@link #lastFrameShape} as a word, for the /state field that has always read portrait/landscape. */
     private String lastFrameOrientation;
+    /**
+     * Whether routing put the asset in hand on TsPlayer. {@code false} means MediaPlayer is the only
+     * engine that clip will ever be given, which is what makes the {@code ORIGINAL_REPLAY} rung a
+     * second engine rather than a repeat of the first.
+     */
+    private boolean lastRoutingAllowedTsPlayer = true;
+    /**
+     * How many display attempts TsPlayer has had at the bytes in hand. {@code ORIGINAL_REPLAY} exists
+     * to try an engine that has not been tried, so it may not run once that engine has used up its
+     * budget — replaying a deterministic create/surface failure buys nothing but a longer outage.
+     * Bounded rather than boolean so a genuinely transient native failure still gets a second turn.
+     */
+    private int tsAttemptsForActiveAsset;
+    /** Attempts TsPlayer is allowed per asset before the ladder must move on. */
+    private static final int MAX_ENGINE_ATTEMPTS = 2;
+    /**
+     * Counts only the loop restarts <em>this app</em> issues on the platform player — from
+     * {@code onVideoEnd}, or from the position watchdog's loop seam when a clip never reports an end.
+     *
+     * <p>It is not a lap counter and cannot be one. {@code setLooping(true)} makes the platform player
+     * loop inside itself, and a clip looping that way produces no callback at all, so a perfectly
+     * healthy MediaPlayer lap leaves these at {@code 0} / {@code -1} forever. That is why the names
+     * carry {@code manual}: an earlier draft reported them as {@code loopRestarts} / {@code loopCycleMs}
+     * beside TsPlayer's genuine native timings under one key, which would have read as a stalled clip
+     * on every clip that was fine. Liveness on this engine is {@code painted} and
+     * {@code playbackRateX100}, not these.
+     */
+    private long mediaManualLoopRestarts;
+    private long mediaManualLoopCycleMs = -1;
+    private long mediaManualLoopAtMs = -1;
     /**
      * Throughput of the asset last routed. Held as one immutable reference rather than four fields
      * so the web-server thread reading /state cannot see stats from two different assets.
@@ -425,6 +474,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
+        rootView = findViewById(R.id.rootView);
+        // The authority for "how big is this panel" is the layout pass, not a lifecycle callback.
+        // onConfigurationChanged runs BEFORE the view tree is re-measured, so reading bounds there
+        // can hand back the pre-rotation size, and a panel turned by the ROM post-processor need not
+        // produce another focus callback at all. Republishing on every real size change closes both:
+        // it is also the only path that survives displayVideo()'s same-path early return, which would
+        // otherwise let a one-video pool keep the shape it measured before the frame was moved.
+        rootView.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+            @Override
+            public void onLayoutChange(View v, int left, int top, int right, int bottom,
+                                       int oldLeft, int oldTop, int oldRight, int oldBottom) {
+                int width = right - left;
+                int height = bottom - top;
+                if (width != oldRight - oldLeft || height != oldBottom - oldTop) {
+                    publishFrameShape();
+                }
+            }
+        });
         imageView = findViewById(R.id.imageView);
         mediaPlayerVideoView = findViewById(R.id.videoView);
         tsVideoView = findViewById(R.id.tsVideoView);
@@ -500,9 +567,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         applyCurrentBrightness();
         this.eventManager = new EventManager(this, capabilities);
         this.mediaManager = new MediaManager(this, this.settingsManager, this);
-        // Before the first pool build, so the orientation gate is armed for the asset this frame
-        // displays first rather than dark until the next tick.
-        publishFrameOrientation();
+        // Before the first pool build, so the crop gate is armed for the asset this frame displays
+        // first rather than dark until the next tick. The layout has not run yet at this point, so
+        // this call may legitimately publish nothing; onWindowFocusChanged publishes again once it has.
+        publishFrameShape();
         this.connectionManager = new ConnectionManager(this);
 
         // Always-on LAN web server (debug / control / media upload).
@@ -793,6 +861,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (hasFocus) {
             View focus = getCurrentFocus();
             this.focusedView = focus == null ? "none" : focus.getClass().getSimpleName();
+            // First focus arrives after the window has been laid out, which is the earliest point the
+            // panel's pixel size is a fact rather than a zero. Without this the gate would stay dark
+            // for the first asset even though onCreate asked for it, and a dark gate is
+            // indistinguishable from a frame whose library refused to load.
+            publishFrameShape();
         }
     }
 
@@ -800,9 +873,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public void onConfigurationChanged(android.content.res.Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         // The manifest claims `orientation` in configChanges, so a panel that is turned does not
-        // recreate this activity — which means the orientation MediaManager judges 1080p video
-        // against would otherwise be the one this process booted with, forever.
-        publishFrameOrientation();
+        // recreate this activity — which means the shape MediaManager judges a clip's aspect against
+        // would otherwise be the one this process booted with, forever.
+        publishFrameShape();
     }
 
     @Override
@@ -2248,18 +2321,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             mediaManager.removeFromCache(file);
             return;
         }
-        if (isVideo && stage == DisplayStage.ORIGINAL && file != null && preferTsPlayer
+        // The middle three terms are one predicate with a javadoc; what is local here is the ladder
+        // plumbing — that this is the ORIGINAL rung, and that the bytes have to still be on disk.
+        if (isVideo && stage == DisplayStage.ORIGINAL && file != null
+                && VideoRoutingRule.offersSecondEngineAttempt(preferTsPlayer,
+                        lastRoutingAllowedTsPlayer, tsAttemptsForActiveAsset, MAX_ENGINE_ATTEMPTS)
                 && mediaManager.isUsableLocalVideo(file)) {
             // The original's bytes are already on disk (routing is content-deterministic, so a
             // re-fetch through /video/playback would be the same bytes): replay them on the
             // other engine rather than re-downloading. ORIGINAL_REPLAY is the rung after this,
             // so a second failure here cannot loop back into another replay.
-            //
-            // Gated on preferTsPlayer because the point of this rung is a second engine: with the
-            // native library unavailable there is only one, and displayVideo re-derives the choice
-            // from the file's own header, so replaying it selects the engine that just failed. With
-            // no other engine to try, spend the cycle on the degraded source instead.
-            Log.i(TAG, "playbackFallback: reusing local original for " + assetId);
+            Log.i(TAG, "playbackFallback: reusing local original for " + assetId
+                    + " on TsPlayer (attempt " + (tsAttemptsForActiveAsset + 1) + " of "
+                    + MAX_ENGINE_ATTEMPTS + ")");
             lastVisibleAsset = "";
             displayVideo(file, assetId, DisplayStage.ORIGINAL_REPLAY);
             return;
@@ -2404,6 +2478,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                             + " (" + (parked ? "parked" : "creeping")
                             + " player=" + reportedMs + " file=" + fileMs + ")"
                             + " rate=" + describePlaybackRate()));
+            noteMediaManualLoopRestart();
             try {
                 videoPlayer.seekTo(0);
                 videoPlayer.play();
@@ -3064,6 +3139,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 .append(" view=").append(focusedView)
                 .append(" lastKey=").append(lastKeyEventCode).append('\n');
         sb.append("video engine        : ").append(preferTsPlayer ? "TsPlayer" : "MediaPlayer")
+                // The panel the aspect rule compares every clip against, in the record that survives a
+                // reboot. /state carries it too, but /state is gone by the time anyone asks about a
+                // frame that has since been moved, power-cycled or re-hung — and an "unmeasured" here
+                // is the only evidence there will ever be that the rule was dark rather than wrong.
+                .append(" panel=").append(lastFrameShape == null ? "unmeasured" : lastFrameShape)
                 .append(" paintSignal=").append(videoPlayer.supportsPaintSignal())
                 .append(" painted=").append(videoPaintProduced)
                 .append(" lastFrame=")
@@ -3277,6 +3357,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         this.runOnUiThread(() -> {
             try {
+                if (stage == DisplayStage.ORIGINAL) {
+                    // The one per-asset edge in this ladder: ORIGINAL is entered once when an asset is
+                    // displayed, while ORIGINAL_REPLAY and FALLBACK are re-entries into the same
+                    // attempt series. Engine memory therefore resets here and nowhere else — reset it
+                    // at a re-entry and the replay rung forgets it already burned an attempt, which is
+                    // the bug this counter exists to stop. Kept inside the posted block with everything
+                    // else that touches it, because displayVideo is reached from the rotation thread.
+                    tsAttemptsForActiveAsset = 0;
+                    mediaManualLoopRestarts = 0;
+                    mediaManualLoopCycleMs = -1;
+                    mediaManualLoopAtMs = -1;
+                }
+                // Re-read the wall before either decision below. Doing it here rather than only at the
+                // lifecycle callbacks is what makes it impossible for the engine choice and the source
+                // gate to be judging two different panels — and on the UI thread, because a View's
+                // bounds belong to the thread that laid them out.
+                publishFrameShape();
                 cancelVideoWatchdog();
                 selectVideoPlayer(routingAllowsTsPlayer(file));
                 int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
@@ -3291,18 +3388,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
-     * TsPlayer is the default, but its .so renders with fixed fit/letterbox scaling and exposes
-     * no rotation or scale-mode control (docs/TSPLAYER.md, "Scaling & orientation"). Route to
-     * the MediaPlayer fallback when the video's display-matrix rotation is non-identity, or when
-     * the video's display aspect is the opposite of the frame's current orientation (a landscape
-     * video on a portrait frame would letterbox instead of fill). Square or unknown aspect and
-     * unknown rotation keep today's TsPlayer default.
+     * Chooses the engine for a file already in hand, and reports the choice. The rule itself is
+     * {@link VideoRoutingRule#allowsTsPlayer}; what lives here is everything that needs an
+     * {@code Activity} — reading the header, falling back to catalog dimensions, and saying the
+     * outcome where an operator can read it afterwards.
      *
-     * <p>This chooses an engine for a file already in hand. The aspect clause it shares with
-     * {@link MediaCompatibility#videoAspectOppositeFrame} is what
-     * {@link MediaCompatibility#incompatibleVideoUpscale} asks of the same numbers <em>before</em>
-     * the download, because the upscale this path hands to MediaPlayer for a 1080p clip runs below
-     * realtime — so such a clip never reaches here as an original.
+     * <p>The aspect clause is shared with {@link MediaCompatibility#incompatibleVideoUpscale}, which
+     * asks the same question of the same numbers <em>before</em> the download, because a clip this
+     * path hands to MediaPlayer is composited at a magnification this hardware does not keep up
+     * with — so on a two-engine frame such a clip should never arrive here as an original at all.
      */
     private boolean routingAllowsTsPlayer(File file) {
         VideoHeaderProbe.Probe probe = VideoHeaderProbe.probe(file);
@@ -3319,76 +3413,116 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 height = asset.height;
             }
         }
-        Boolean framePortrait = frameIsPortrait();
-        // The rotation term stays here and out of the shared helper: a turned clip needs a player
-        // that can turn it, which is an engine question. Whether it needs an upscale is a source
-        // question, and MediaCompatibility asks it the same way for both paths. A panel the platform
-        // cannot classify (ORIENTATION_UNDEFINED) keeps today's landscape reading here, because that
-        // is what the old inline comparison did; only the source gate treats it as unknown.
-        boolean forceFallback = rotation > 0
-                || (framePortrait != null && MediaCompatibility.videoAspectOppositeFrame(
-                        width, height, rotation, framePortrait));
+        MediaCompatibility.PanelShape panel = currentPanelShape();
+        boolean allowTs = VideoRoutingRule.allowsTsPlayer(rotation, width, height, panel);
+        boolean forceFallback = !allowTs;
         lastVideoRotation = rotation;
         lastVideoWidth = width;
         lastVideoHeight = height;
         lastVideoCodec = codec;
         lastVideoStats = probe.stats;
         lastVideoDurationMs = probe.stats.durationMs;
-        lastFrameOrientation = frameOrientationWord(framePortrait);
+        lastFrameShape = panel;
+        lastFrameOrientation = VideoRoutingRule.orientationWord(panel);
+        // Record the verdict where it is made. ORIGINAL_REPLAY asks this same field whether TsPlayer
+        // was ever a live option for these bytes, and a second derivation of that answer somewhere
+        // else is how the rung ends up replaying the engine that just failed.
+        lastRoutingAllowedTsPlayer = allowTs;
         // Said with preferTsPlayer in the sentence, not from the routing outcome alone: this method
         // decides which engine a clip is suitable for, and on a frame whose native library never
         // loaded the answer it hands to selectVideoPlayer is discarded. Naming TsPlayer here while
         // MediaPlayer composites the clip is what made an EO1's log read like an EO2's.
         String engineWord = VideoEngineReport.engineWord(forceFallback, preferTsPlayer);
+        String panelWord = panel == null ? "unmeasured" : panel.toString();
         Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
                 + " coded=" + width + "x" + height
-                + " frame=" + lastFrameOrientation + " player=" + engineWord
+                + " panel=" + panelWord + " frame=" + lastFrameOrientation
+                + " player=" + engineWord
                 + " " + describeStream(probe));
         debugInformationProvided(new DebugInformation("videoRouting",
                 "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
-                        + " frame=" + lastFrameOrientation + " -> " + engineWord + "; "
-                        + describeStream(probe)));
-        return !forceFallback;
+                        + " panel=" + panelWord + " frame=" + lastFrameOrientation
+                        + " -> " + engineWord + "; " + describeStream(probe)));
+        return allowTs;
     }
 
     /**
-     * Which way this frame's panel is hung, read one way, in one place. {@code MediaManager} has no
-     * {@code Context}, so the answer reaches the rotation pipeline only through here — which is the
-     * reason it is worth having a single reader rather than a second convention for what "portrait"
-     * means somewhere downstream.
+     * The panel's own shape, in live layout pixels, read one way, in one place.
      *
-     * @return {@code null} when the platform reports {@code ORIENTATION_UNDEFINED}, which the source
-     *         gate reads as "cannot judge" and shows the original
+     * <p>{@code MediaManager} has no {@code Context} and {@code MediaCompatibility} has no Android at
+     * all — so this is the only point where the wall enters either one's decisions, which is why the
+     * aspect rule and the crop gate cannot end up with two conventions for what the panel looks like.
+     *
+     * <p>The read is the root view, deliberately: the video views are {@code GONE} whenever their
+     * engine is idle, and a {@code GONE} view is never measured, so a video view would report 0 on
+     * exactly the frames whose engine this rule exists to choose.
+     *
+     * @return the shape, or {@code null} before the layout has settled, which every caller reads as
+     *         "cannot judge" and answers by keeping the clip's default engine and its original
      */
     @Nullable
-    private Boolean frameIsPortrait() {
-        int orientation = getResources().getConfiguration().orientation;
-        if (orientation == android.content.res.Configuration.ORIENTATION_PORTRAIT) {
-            return Boolean.TRUE;
+    private MediaCompatibility.PanelShape currentPanelShape() {
+        View root = rootView;
+        if (root == null) {
+            return null;
         }
-        if (orientation == android.content.res.Configuration.ORIENTATION_LANDSCAPE) {
-            return Boolean.FALSE;
-        }
-        return null;
-    }
-
-    /** The word {@code /state} and the routing log use for a published panel orientation. */
-    private static String frameOrientationWord(@Nullable Boolean portrait) {
-        return portrait == null ? "undefined" : (portrait ? "portrait" : "landscape");
+        return MediaCompatibility.PanelShape.of(root.getWidth(), root.getHeight());
     }
 
     /**
-     * Hands {@link #frameIsPortrait()} to the rotation pipeline's orientation gate, and records it for
+     * Hands {@link #currentPanelShape()} to the media pipeline's crop gate, and records it for
      * {@code /state} even when no video has been displayed to record it — an operator checking whether
      * the gate is deciding against the right wall needs the value the gate actually holds, not the one
      * the last {@code displayVideo} happened to see.
+     *
+     * <p>Driven by a layout-change listener on the root view, which is the only source guaranteed to
+     * hold the current size, and called directly from {@code onCreate},
+     * {@code onConfigurationChanged} and {@code onWindowFocusChanged} so a value exists before the
+     * first asset rather than only after the first resize. Those callbacks are convenience, not
+     * correctness: {@code onConfigurationChanged} runs <em>before</em> the view tree is re-measured, so
+     * it can read the pre-rotation bounds — the listener publishes again once they are real — and a
+     * panel turned by the ROM post-processor need not produce another focus callback at all.
+     * {@code onCreate} on its own would publish {@code null} and leave the gate dark for the very first
+     * asset, which is precisely what the comment above its call site says this method exists to prevent.
+     *
+     * <p>Also called at the top of {@code displayVideo}'s posted block, so the engine decision and the
+     * source decision cannot be judging two different panels. That call is belt-and-braces, not the
+     * mechanism that keeps the value fresh: {@code displayVideo} returns early for an unchanged path,
+     * so a pool holding a single video would never reach it again after the frame was moved.
      */
-    private void publishFrameOrientation() {
-        Boolean portrait = frameIsPortrait();
-        lastFrameOrientation = frameOrientationWord(portrait);
+    private void publishFrameShape() {
+        MediaCompatibility.PanelShape shape = currentPanelShape();
+        lastFrameShape = shape;
+        lastFrameOrientation = VideoRoutingRule.orientationWord(shape);
         if (mediaManager != null) {
-            mediaManager.setFramePortrait(portrait);
+            mediaManager.publishPanel(shape, preferTsPlayer);
         }
+    }
+
+    /**
+     * Stamps one <em>app-issued</em> restart on the platform player: either {@code onCompletion}
+     * arriving and {@code onVideoEnd} calling {@code play()}, or the position watchdog noticing a
+     * position parked past the duration the player reports — the case that never raises a callback at
+     * all. Both paths land here, so one count is one restart this process actually caused.
+     *
+     * <p>It does not count laps, and adding a wraparound observer to make it do so would be the wrong
+     * fix. {@code setLooping(true)} loops inside the platform player without any callback, so the
+     * ordinary case is genuinely invisible from here and the interesting cases — a seam that needed
+     * rescuing, or one that fired twice — are exactly the ones that DO come through this method. Its
+     * value is diagnostic, not statistical: {@code manualLoopRestarts} climbing while
+     * {@code manualLoopCycleMs} stays well under the clip's duration is the seam double-firing, which
+     * is the failure this change makes likely by moving most of an EO2's library onto this engine.
+     *
+     * <p>Before this existed the operator's only loop numbers came from {@code tsVideoView}, so a
+     * MediaPlayer clip reported an engine that was not running.
+     */
+    private void noteMediaManualLoopRestart() {
+        long now = System.currentTimeMillis();
+        if (mediaManualLoopAtMs > 0) {
+            mediaManualLoopCycleMs = now - mediaManualLoopAtMs;
+        }
+        mediaManualLoopAtMs = now;
+        mediaManualLoopRestarts++;
     }
 
     /** Sample-table facts in one line, each part omitted when the file did not give it. */
@@ -3489,6 +3623,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // TsPlayer SurfaceView must be VISIBLE to get a surface; MediaPlayer TextureView can stay
         // invisible until prepared (ImageView covers both until then).
         if (controller == tsPlayerController) {
+            // Counted here rather than at each caller because this is the one place an attempt on an
+            // engine actually begins — which includes the mid-attempt swap in
+            // fallbackTsPlayerToMediaPlayer, whose caller would otherwise have to remember to
+            // bookkeep a decision it did not make.
+            tsAttemptsForActiveAsset++;
             controller.setVisibility(View.VISIBLE);
         } else {
             controller.setVisibility(View.INVISIBLE);
@@ -3550,6 +3689,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     return;
                 }
                 debugInformationProvided(new DebugInformation("video", "restart after end"));
+                if (controller != tsPlayerController) {
+                    noteMediaManualLoopRestart();
+                }
                 controller.play();
                 videoWatchdogLastPosition = -1;
                 videoWatchdogLastProgressMs = System.currentTimeMillis();
@@ -4183,6 +4325,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (lastFrameOrientation != null) {
             video.addProperty("frameOrientation", lastFrameOrientation);
         }
+        // The number the aspect rule actually decided against, as opposed to the word derived from
+        // it. This is the one field that separates "the new rule is working" from "the new rule is
+        // dark and every clip kept its default engine" — with an unmeasured panel the predicate
+        // returns false for everything, and the frame looks exactly as it did before.
+        MediaCompatibility.PanelShape reportedPanel = lastFrameShape;
+        video.addProperty("panelShape", reportedPanel == null ? "unmeasured" : reportedPanel.toString());
         VideoHeaderProbe.StreamStats stream = lastVideoStats;
         video.addProperty("fpsMilli", stream.fpsMilli);
         video.addProperty("avgFrameBytes", stream.avgFrameBytes);
@@ -4203,14 +4351,26 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             video.addProperty("playbackRateMinX100", videoPlaybackRateMinX100);
             video.addProperty("playbackRateMaxX100", videoPlaybackRateMaxX100);
             video.addProperty("playbackRateSamples", videoPlaybackRateSamples);
-            if (tsVideoView != null) {
+            // The file on screen, read from the attempt rather than from one engine's view. It used to
+            // come from tsVideoView like the rest of this cluster, so a clip composited by MediaPlayer
+            // reported whichever TsPlayer file this process had last played.
+            if (activeVideoPath != null && !activeVideoPath.isEmpty()) {
+                video.addProperty("path", activeVideoPath);
+            }
+            // Everything below belongs to the engine that is actually compositing. These were read off
+            // tsVideoView unconditionally, so for a MediaPlayer clip `generation`, `playerCreated`,
+            // `surfaceReady` and the whole loop-perf object described a view that is hidden and
+            // playing nothing — and this class of clip is about to become the majority of an EO2's
+            // library, since every non-native aspect now composites here.
+            boolean tsActive = videoPlayer == tsPlayerController;
+            if (tsActive && tsVideoView != null) {
                 video.addProperty("generation", tsVideoView.getLoopGeneration());
                 video.addProperty("errors", tsVideoView.getVideoErrorCount());
                 video.addProperty("playerCreated", tsVideoView.isPlayerCreated());
                 video.addProperty("surfaceReady", tsVideoView.isSurfaceReady());
                 video.addProperty("recreatingForLoop", tsVideoView.isRecreatingForLoop());
-                video.addProperty("path", tsVideoView.getActivePath());
                 JsonObject loopPerf = new JsonObject();
+                loopPerf.addProperty("engine", VideoEngineReport.TS_PLAYER);
                 loopPerf.addProperty("restartLatencyMs", tsVideoView.getLastRestartLatencyMs());
                 loopPerf.addProperty("createPlayerMs", tsVideoView.getLastCreatePlayerMs());
                 loopPerf.addProperty("setSurfaceMs", tsVideoView.getLastSetSurfaceMs());
@@ -4220,6 +4380,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 loopPerf.addProperty("loopCycleMs", tsVideoView.getLastLoopCycleMs());
                 loopPerf.addProperty("posAtTriggerMs", tsVideoView.getLastPosAtTriggerMs());
                 loopPerf.addProperty("restartMethod", tsVideoView.getLastRestartMethod());
+                video.add("loopPerf", loopPerf);
+            } else if (!tsActive) {
+                // NOT the same measurement as the TsPlayer block above, and deliberately not given
+                // the same key. With setLooping(true) the platform player loops inside itself and
+                // never reports an end of stream, so a clip that is looping perfectly produces no
+                // event here at all: these two fields count only the restarts this app issues, from
+                // onVideoEnd or the position watchdog's seam. A healthy MediaPlayer lap therefore
+                // reads manualLoopRestarts=0 and manualLoopCycleMs=-1 — which is the design, not a
+                // stall. Absence of a number is not evidence of a stopped clip; `painted` and
+                // `playbackRate*` are the liveness fields on this engine.
+                JsonObject loopPerf = new JsonObject();
+                loopPerf.addProperty("engine", VideoEngineReport.MEDIA_PLAYER);
+                loopPerf.addProperty("manualLoopRestarts", mediaManualLoopRestarts);
+                loopPerf.addProperty("manualLoopCycleMs", mediaManualLoopCycleMs);
                 video.add("loopPerf", loopPerf);
             }
         }
