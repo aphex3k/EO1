@@ -6,6 +6,7 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+
 import static org.junit.Assert.fail;
 
 import com.aphex3k.media.MediaType;
@@ -158,16 +159,19 @@ public class PanelDisplayTest {
         assertEquals("", PanelDisplay.image("k", "/x.jpg", 1L, 1L).routingSentence());
     }
 
-    /** Adoption re-stamps the generation, so the number operators watch moves with the wall. */
+    /**
+     * A record is identified by the instance, and is never copied.
+     *
+     * <p>Every "does this callback still own the panel?" test in the app is a reference comparison. An
+     * earlier revision minted a copy at adoption to re-stamp the generation, and each of those comparisons
+     * silently stopped matching — so ownership has to stay value-identical for the tests that rely on it.
+     */
     @Test
-    public void adoptingADisplayGivesItAFreshGenerationAndKeepsItsContent() {
+    public void aRecordIsItsOwnIdentityForever() {
         PanelDisplay decided = PanelDisplay.image("k", "/x.jpg", 4L, 100L);
-        PanelDisplay adopted = decided.withGeneration(9L);
+        assertSame(decided, decided);
         assertEquals(4L, decided.generation);
-        assertEquals(9L, adopted.generation);
-        assertEquals(decided.type, adopted.type);
-        assertEquals(decided.assetKey, adopted.assetKey);
-        assertEquals(decided.pathOrUrl, adopted.pathOrUrl);
+        assertEquals(100L, decided.sinceMs);
     }
 
     @Test

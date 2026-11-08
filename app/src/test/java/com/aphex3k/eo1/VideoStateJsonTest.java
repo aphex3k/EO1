@@ -210,9 +210,54 @@ public class VideoStateJsonTest {
         assertTrue(photo.get("tsSupported").getAsBoolean());
         assertTrue(photo.get("tsAvailable").getAsBoolean());
         assertTrue(photo.get("paintSignal").getAsBoolean());
-        // Debug facts about the frame, not the clip.
+        // Debug facts about the frame itself. The rate windows are NOT here — see
+        // playbackRateIsNotReportedAsAFrameCapability.
         assertEquals(1, photo.get("tsFallbacks").getAsInt());
-        assertEquals(100, photo.get("playbackRateX100").getAsInt());
+        assertFalse(photo.has("playbackRateX100"));
+    }
+
+    /**
+     * A rate window is a measurement of one player over one attempt, not a capability of the machine.
+     *
+     * <p>A clip whose timeline advances while its photograph stays visible produces real samples, and
+     * printing them beside {@code showing: image} would quote a video's playback rate as if it described the
+     * frame. The cumulative {@code tsFallbacks} counter beside them is genuinely a frame fact — engine
+     * handovers this process has made, in total — and stays.
+     */
+    @Test
+    public void playbackRateIsNotReportedAsAFrameCapability() {
+        JsonObject photo = VideoStateJson.build(
+                PanelDisplay.image("k", "/x.jpg", GEN, WHEN), frame(), new NeverAskMeAboutThePlayer());
+        assertFalse("a rate window from some player is printed over a photograph",
+                photo.has("playbackRateX100"));
+
+        JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), new AnsweringProbe());
+        assertEquals(100, video.get("playbackRateX100").getAsInt());
+    }
+
+    /**
+     * Ownership has to be re-checked <em>after</em> the live reads, not only before them.
+     *
+     * <p>This probe goes stale on the last read, modelling the UI thread handing the player to the next
+     * asset between two of them. Every live field must then be dropped together; a block that published
+     * {@code positionMs} before noticing cannot take it back, which is why the reads are collected first.
+     */
+    @Test
+    public void aHandoffPartwayThroughTheLiveReadsDiscardsAllOfThem() {
+        AnsweringProbe probe = new AnsweringProbe() {
+            @Override
+            public int positionMs() {
+                stale = true;
+                return 4_200;
+            }
+        };
+        JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), probe);
+        assertFalse("position was read before the handoff and published after it",
+                video.has("positionMs"));
+        assertFalse(video.has("durationMs"));
+        assertFalse(video.has("painted"));
+        assertFalse(video.has("loopPerf"));
+        assertTrue("the record's own measurement is unaffected by a later handoff", video.has("codec"));
     }
 
     /** An unmeasured panel has to stay visible, and it is visible without a clip being up. */

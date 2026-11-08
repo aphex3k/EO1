@@ -19,6 +19,18 @@ public class DebugInformation {
     private final String key;
     private final String value;
     private final String assetKey;
+    private final boolean videoScoped;
+
+    /**
+     * A line about this asset <em>as a video</em> — a coded size, a bitrate, a playback position.
+     *
+     * <p>Asset identity is not enough for those. A clip held as render-silent is displayed as its still
+     * preview, which is the same asset and an image, and a row that only knew the asset would keep describing
+     * a video over that photograph.
+     */
+    public static DebugInformation ofVideo(String key, String value, String assetKey) {
+        return new DebugInformation(key, value, assetKey, true);
+    }
 
     public String getKey() {
         return key;
@@ -33,16 +45,26 @@ public class DebugInformation {
         return assetKey;
     }
 
+    /** Whether this line describes the asset as a video display. */
+    public boolean isVideoScoped() {
+        return videoScoped;
+    }
+
     DebugInformation(String key, String value) {
-        this(key, value, null);
+        this(key, value, null, false);
     }
 
     /**
      * @param assetKey the asset the line is about; {@code null} to leave the subject to the board's rule
      */
     DebugInformation(String key, String value, String assetKey) {
+        this(key, value, assetKey, false);
+    }
+
+    DebugInformation(String key, String value, String assetKey, boolean videoScoped) {
         this.key = key;
         this.value = value;
         this.assetKey = assetKey;
+        this.videoScoped = videoScoped;
     }
 }

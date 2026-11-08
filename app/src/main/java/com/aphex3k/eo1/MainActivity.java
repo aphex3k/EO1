@@ -217,7 +217,35 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * The display <em>in flight</em> is {@link #attempt}, because deciding to show something and having it
      * on the wall are different instants on every one of these paths.
      */
-    private volatile PanelDisplay panel;
+    /**
+     * The panel as one immutable value: what is on it, how many times it has changed hands, and when it
+     * last did.
+     *
+     * <p>One object rather than three fields because {@code /state} reads it on a web worker while the UI
+     * thread keeps rotating. Reported separately, the record and its counters can come from different
+     * moments — a handoff between the two reads prints a clip's path beside the next display's handoff
+     * timestamp, which is the same mixing this change set exists to stop, one field further down.
+     */
+    private static final class PanelState {
+        final PanelDisplay display;
+        final long changes;
+        final long changedAtMs;
+
+        PanelState(PanelDisplay display, long changes, long changedAtMs) {
+            this.display = display;
+            this.changes = changes;
+            this.changedAtMs = changedAtMs;
+        }
+    }
+
+    private volatile PanelState panelState;
+
+    /** What the panel provably holds, or null before the first display reaches it. */
+    @Nullable
+    private PanelDisplay panel() {
+        PanelState state = panelState;
+        return state == null ? null : state.display;
+    }
     /**
      * What a display path is currently putting on the panel, whether or not anything arrived yet.
      *
@@ -239,7 +267,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private volatile PanelDisplay videoCompositing;
     /** The page a load was started for, so its callbacks can prove the right thing or be ignored. */
     private volatile PanelDisplay webLoadRecord;
-    /** Handoff counter feeding {@link PanelDisplay#generation}; never read except through a record. */
+    /** Sequence number for each display <em>attempt</em>, feeding {@link PanelDisplay#generation}. */
     private final AtomicLong panelGeneration = new AtomicLong();
     /**
      * The panel's measured viewport, last published. Every aspect decision in this Activity reads
@@ -391,6 +419,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private Runnable videoPaintRunnable;
     private String videoPaintAssetId = "";
+    /**
+     * The record this watchdog was armed for, so a frame proving late can only promote the display it
+     * belongs to. Read from the panel-wide field instead, a superseded attempt could adopt whatever the
+     * next one had put up.
+     */
+    @Nullable
+    private volatile PanelDisplay videoPaintRecord;
     private File videoPaintFile;
     private WeakReference<MainActivity> videoPaintActivityReference;
     private DisplayStage videoPaintStage = DisplayStage.ORIGINAL;
@@ -1836,11 +1871,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         final String subject = debugInformation.getAssetKey() != null
                 ? debugInformation.getAssetKey()
                 : DebugBoard.implicitSubject(debugInformation.getKey(), currentPanelAssetKey());
+        final boolean videoScoped =
+                DebugBoard.videoScoped(debugInformation.getKey(), debugInformation.isVideoScoped());
 
         this.runOnUiThread(() -> {
             synchronized (this.debugInformation) {
                 this.debugInformation.put(debugInformation.getKey(),
-                        new DebugBoard.Row(debugInformation.getValue(), subject));
+                        new DebugBoard.Row(debugInformation.getValue(), subject, videoScoped));
             }
             renderDebugBoard();
         });
@@ -1881,7 +1918,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         runOnUiThread(() -> {
             Map<String, String> printable;
             synchronized (this.debugInformation) {
-                printable = DebugBoard.visible(this.debugInformation, panel);
+                printable = DebugBoard.visible(this.debugInformation, panel());
             }
             // Shortest first, as the board has always ordered itself. Inserting into a list rather than
             // sorting is the original behaviour and is kept: the layout is read off the wall.
@@ -1939,31 +1976,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             runOnUiThread(() -> panelNowProven(proven));
             return;
         }
-        // The generation is assigned here, not at construction: two paths can prove in the opposite order
-        // to the one they started in, and media.screen.generation is only worth watching if it moves
-        // forward with the wall.
-        PanelDisplay adopted = proven.withGeneration(panelGeneration.incrementAndGet());
-        panel = adopted;
-        // Keep the two pointing at one object when this attempt <em>is</em> what got adopted; otherwise
-        // media.attempt would appear beside media.screen for every display, because adopting mints a new
-        // record (it re-stamps the generation) and the two would differ by identity alone.
+        // One write, so a reader can never pair this display with a later handoff's counters. Counting here
+        // rather than stamping the record keeps records copy-free — an earlier revision minted a new one at
+        // adoption, and every "does this callback still own the panel?" test silently stopped matching.
+        PanelState before = panelState;
+        panelState = new PanelState(proven, (before == null ? 0L : before.changes) + 1L,
+                System.currentTimeMillis());
+        // This attempt is over — what it was putting up is up. Leaving it set would have media.attempt sit
+        // beside media.screen describing the same display indefinitely.
         if (attempt == proven) {
-            attempt = adopted;
+            attempt = null;
         }
-        // Ownership of a surface ends when another surface is proven on top of it. Without these, a page
-        // abandoned mid-load could still prove the panel later, and a player released by an image handoff
-        // could still be quoted as this clip's telemetry.
-        // ...and the same for whichever surface owns this content: the page a load was started for and the
-        // record a controller was handed must follow adoption, or a proven clip would report itself stale
-        // forever and /state would drop the very telemetry the panel now rests on.
-        if (webLoadRecord == proven) {
-            webLoadRecord = adopted;
-        } else if (adopted.type != MediaType.WEB) {
+        // Ownership of a surface ends when another surface is proven on top of it, so a page abandoned
+        // mid-load cannot prove the panel afterwards and a player released by an image handoff cannot be
+        // quoted as this clip's telemetry.
+        if (proven.type != MediaType.WEB) {
             webLoadRecord = null;
         }
-        if (videoCompositing == proven) {
-            videoCompositing = adopted;
-        } else if (adopted.type != MediaType.VIDEO) {
+        if (proven.type != MediaType.VIDEO) {
             videoCompositing = null;
         }
         renderDebugBoard();
@@ -2436,7 +2466,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (pending != null && !pending.assetKey.isEmpty()) {
             return pending.assetKey;
         }
-        PanelDisplay shown = panel;
+        PanelDisplay shown = panel();
         return shown == null ? "" : shown.assetKey;
     }
 
@@ -3396,7 +3426,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 .append('\n');
         // Read once, for the same reason buildStateJson does: this collector runs on a diagnostics
         // worker, and half of one asset and half of the next is not a report about either.
-        PanelDisplay shown = panel;
+        PanelDisplay shown = panel();
         sb.append("on screen           : ")
                 .append(shown == null ? "nothing yet" : shown.describe()).append('\n');
         if (shown != null && shown.showsVideo()) {
@@ -3414,7 +3444,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             sb.append("active video        : path=").append(shown.pathOrUrl)
                     .append(" stage=").append(shown.stage)
                     .append(" engine=").append(shown.engine);
-            if (panel == shown) {
+            // The same ownership test StatePlayerProbe applies: during a video-to-video preparation the
+            // outgoing clip <em>is</em> still the panel while the controller has already been handed the
+            // incoming file, and this collector would then pair this path with that player's paint flag and
+            // frame stamp — in the report that outlives the reboot it describes.
+            if (panel() == shown && (shown.showsVideo() ? videoCompositing == shown : true)) {
                 VideoPlayerController compositing = videoPlayer;
                 long lastFrameAtMs = compositing == null ? 0L : compositing.getLastFrameAtMs();
                 sb.append(" paintSignal=").append(compositing != null
@@ -4057,7 +4091,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         controller.setLooping(true);
         // Armed here, before any callback: an attempt whose prepareAsync() never returns and never
         // raises is exactly the case the prepared-armed position watchdog cannot see.
-        startVideoPaintWatchdog(assetId, file, activityReference, controller, stage);
+        startVideoPaintWatchdog(assetId, file, activityReference, controller, stage, mine);
     }
 
     /**
@@ -4070,6 +4104,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * root. The next image asset clears and reloads it in {@code displayPicture} regardless.
      */
     private void revealVideoSurface(View videoView, @Nullable PanelDisplay record) {
+        // Step aside for the photo plane only while this attempt still owns the panel's future. A record
+        // that is neither the display in flight nor the one already proven belongs to an attempt something
+        // else has superseded — and hiding the photograph on its behalf would leave the wall showing a
+        // surface no report describes, which is the failure this method existed to prevent.
+        if (record == null || (record != attempt && record != panel())) {
+            Log.i(TAG, "revealVideoSurface: superseded attempt, leaving the panel as reported");
+            return;
+        }
         imageView.setVisibility(View.INVISIBLE);
         lastVisibleView = videoView;
         videoPaintRevealed = true;
@@ -4078,7 +4120,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     private void startVideoPaintWatchdog(String assetId, File file,
                                          WeakReference<MainActivity> activityReference,
-                                         VideoPlayerController controller, DisplayStage stage) {
+                                         VideoPlayerController controller, DisplayStage stage,
+                                         PanelDisplay record) {
         cancelVideoPaintWatchdog();
         if (assetId == null) {
             return;
@@ -4087,6 +4130,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoPaintFile = file;
         videoPaintActivityReference = activityReference;
         videoPaintStage = stage;
+        videoPaintRecord = record;
         videoPaintStartMs = System.currentTimeMillis();
         // An engine with no per-frame proof cannot fail this check, and must not be watched by it:
         // getLastFrameAtMs() is a constant 0 there, so arming the poll would spend 12 seconds and then
@@ -4107,6 +4151,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoPaintAssetId = "";
         videoPaintFile = null;
         videoPaintActivityReference = null;
+        videoPaintRecord = null;
         videoPaintAwaitingResume = false;
     }
 
@@ -4181,7 +4226,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         + (System.currentTimeMillis() - videoPaintStartMs) + "ms"));
             }
             if (!videoPaintRevealed) {
-                revealVideoSurface(videoPlayer.getView(), videoCompositing);
+                revealVideoSurface(videoPlayer.getView(), videoPaintRecord);
             }
             cancelVideoPaintWatchdog();
             return;
@@ -4239,6 +4284,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * unnamed photograph.
      */
     private void revealPhotoView() {
+        // Taking the other surfaces away is part of uncovering this one. The browser view sits above the
+        // image in the layout, so a photo "revealed" without hiding the page is not on the panel at all —
+        // and an image rung that fails after a displayed page reached exactly that state, reporting
+        // image/none for a whole interval while the page stayed visible. hideWebView() is idempotent, so
+        // callers that already did it lose nothing.
+        hideWebView();
         imageView.setVisibility(View.VISIBLE);
         lastVisibleView = imageView;
         // What is uncovered is the <em>photograph</em>, and its identity is the one that loaded — never the
@@ -4580,10 +4631,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         network.add("wifi", DeviceTelemetry.wifi(this));
         o.add("network", network);
 
-        // One snapshot of what the panel holds, for every field below that describes the display. Read
-        // here rather than per block so the media and video sections cannot disagree because a handoff
-        // landed between them — the same argument buildStateJson makes about no reader holding a lock.
-        PanelDisplay shown = panel;
+        // One snapshot of the panel — its content, its handoff count and its timestamp, which travel in one
+        // object precisely so a read cannot take them from two different moments. Everything below that
+        // describes the display reads `shown` or `panelSnapshot`, never the field again.
+        PanelState panelSnapshot = panelState;
+        PanelDisplay shown = panelSnapshot == null ? null : panelSnapshot.display;
 
         JsonObject media = new JsonObject();
         media.addProperty("rotationAssets", mediaManager.rotationListSize());
@@ -4633,8 +4685,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (!shown.stage.isEmpty()) {
                 screen.addProperty("stage", shown.stage);
             }
-            screen.addProperty("generation", shown.generation);
-            screen.addProperty("sinceMs", shown.sinceMs);
+            // Handoffs, not intentions: the record's own number counts when the display was decided on,
+            // which for an asynchronously loaded image or a preparing clip is not when it reached the wall.
+            screen.addProperty("generation", panelSnapshot.changes);
+            screen.addProperty("sinceMs", panelSnapshot.changedAtMs);
+            screen.addProperty("attemptGeneration", shown.generation);
         }
         media.add("screen", screen);
         o.add("media", media);
@@ -4714,7 +4769,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // wall no longer holds while the overlay correctly omits it. One filter, two surfaces.
             Map<String, String> printable;
             synchronized (debugInformation) {
-                printable = DebugBoard.visible(debugInformation, panel);
+                printable = DebugBoard.visible(debugInformation, panel());
             }
             if (!printable.isEmpty()) {
                 JsonObject debug = new JsonObject();
@@ -4748,7 +4803,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         @Override
         public boolean stale() {
-            if (panel != subject) {
+            if (panel() != subject) {
                 return true;
             }
             // The panel check alone is not enough for a clip. On a video-to-video change the outgoing clip

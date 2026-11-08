@@ -210,31 +210,63 @@ public final class VideoStateJson {
             addDebugFrameFields(video, frame);
             return video;
         }
-        // "painted" is only a claim where the engine can answer it. TsPlayer's .so offers no per-frame
-        // signal, so reporting true there would be a tautology on the one field this exists to answer.
-        // The answer is the one read at the top of the block, not a second call: asking twice means the
-        // two halves of one document can describe two different controllers.
+        // Read into locals first, then re-validate ownership before any of it is published. Checking once
+        // up front is not enough: these are calls into a player the UI thread can hand to the next asset
+        // between two of them, so the last read could describe a different display than the first — and a
+        // block that has already written `positionMs` cannot take it back. Discarding the whole set on a
+        // changed owner is the only honest outcome, and it is why nothing live is added to `video` until
+        // this point returns.
+        boolean painted = false;
+        long lastFrameAgeMs = -1L;
         if (paintSignal) {
-            video.addProperty("painted", probe.painted());
+            painted = probe.painted();
             long lastFrameAtMs = probe.lastFrameAtMs();
-            video.addProperty("lastFrameAgeMs", lastFrameAtMs > 0L
-                    ? (System.currentTimeMillis() - lastFrameAtMs) : -1L);
+            lastFrameAgeMs = lastFrameAtMs > 0L ? (System.currentTimeMillis() - lastFrameAtMs) : -1L;
         }
-        video.addProperty("durationMs", probe.durationMs());
-        video.addProperty("positionMs", probe.positionMs());
+        int durationMs = probe.durationMs();
+        int positionMs = probe.positionMs();
+        // Which engine's counters to take is answered from the record, the same answer that produced the
+        // `engine` field above — not from a fresh look at which controller is live, which is a second
+        // opinion about a display this block has already committed to describing.
+        boolean tsActive = VideoEngineReport.TS_PLAYER.equals(shown.engine);
+        NativeCounters nativeCounters = frame.debugBuild && tsActive ? probe.nativeCounters() : null;
+        ManualCounters manualCounters = frame.debugBuild && !tsActive ? probe.manualCounters() : null;
+
+        if (probe.stale()) {
+            // Something reached the wall while this document was being assembled. The record's own
+            // measurements above stand — they came from the snapshot — but every number read live is
+            // dropped together rather than partly published, because a half-collected set is exactly the
+            // pairing of one clip's path with another player's position that this block exists to prevent.
+            addDebugFrameFields(video, frame);
+            return video;
+        }
+
+        if (paintSignal) {
+            video.addProperty("painted", painted);
+            video.addProperty("lastFrameAgeMs", lastFrameAgeMs);
+        }
+        video.addProperty("durationMs", durationMs);
+        video.addProperty("positionMs", positionMs);
+        // Measured from this player's timeline over this attempt, and reset per attempt: a clip whose
+        // timeline advances while its photograph is still visible produces real rate samples, and printing
+        // them beside `showing: image` would quote a video's rate as the frame's. `tsFallbacks` beside them
+        // is genuinely a frame fact — a cumulative counter of engine handovers this process has made.
+        if (frame.debugBuild) {
+            video.addProperty("playbackRateX100", frame.playbackRateX100);
+            video.addProperty("playbackRateMinX100", frame.playbackRateMinX100);
+            video.addProperty("playbackRateMaxX100", frame.playbackRateMaxX100);
+            video.addProperty("playbackRateSamples", frame.playbackRateSamples);
+        }
 
         addDebugFrameFields(video, frame);
 
+        // These belong to the engine compositing this clip, and were once read off the TsPlayer view
+        // unconditionally — so for a platform-player clip `generation`, `playerCreated`, `surfaceReady` and
+        // the whole loop-perf object described a hidden view playing nothing. They are taken above, before
+        // the ownership revalidation, and never re-read here: a second pass of live calls after that check
+        // would put the reads it is meant to guard back outside it.
         if (frame.debugBuild) {
-            // Everything below belongs to the engine compositing this clip. These were once read off the
-            // TsPlayer view unconditionally, so for a platform-player clip `generation`,
-            // `playerCreated`, `surfaceReady` and the whole loop-perf object described a hidden view
-            // playing nothing.
-            // From the record rather than a fresh read of which controller is live: the engine that was
-            // handed these bytes is part of the display, and a second opinion about it can disagree with
-            // the `engine` field five lines above.
-            boolean tsActive = VideoEngineReport.TS_PLAYER.equals(shown.engine);
-            NativeCounters counters = tsActive ? probe.nativeCounters() : null;
+            NativeCounters counters = nativeCounters;
             if (counters != null) {
                 video.addProperty("generation", counters.generation);
                 video.addProperty("errors", counters.errors);
@@ -254,12 +286,11 @@ public final class VideoStateJson {
                 loopPerf.addProperty("restartMethod", counters.restartMethod);
                 video.add("loopPerf", loopPerf);
             } else {
-                ManualCounters manual = probe.manualCounters();
                 JsonObject loopPerf = new JsonObject();
                 loopPerf.addProperty("engine", VideoEngineReport.MEDIA_PLAYER);
-                if (manual != null) {
-                    loopPerf.addProperty("manualLoopRestarts", manual.manualLoopRestarts);
-                    loopPerf.addProperty("manualLoopCycleMs", manual.manualLoopCycleMs);
+                if (manualCounters != null) {
+                    loopPerf.addProperty("manualLoopRestarts", manualCounters.manualLoopRestarts);
+                    loopPerf.addProperty("manualLoopCycleMs", manualCounters.manualLoopCycleMs);
                 }
                 video.add("loopPerf", loopPerf);
             }
@@ -267,16 +298,20 @@ public final class VideoStateJson {
         return video;
     }
 
-    /** Debug-only facts about the frame itself, which are true whatever the panel holds. */
+    /**
+     * Debug-only facts about the frame itself, true whatever the panel holds.
+     *
+     * <p>{@code playbackRate*} deliberately is not here. Those are derived from one player's position over
+     * one attempt and reset when the attempt resets, which makes them a measurement of a display rather
+     * than a capability of the machine — emitted from here they would appear beside {@code showing: image}
+     * for a clip whose timeline advanced while its photograph stayed visible. {@code tsFallbacks} does
+     * belong: it counts engine handovers this process has made, in total.
+     */
     private static void addDebugFrameFields(JsonObject video, Frame frame) {
         if (!frame.debugBuild) {
             return;
         }
         video.addProperty("tsFallbacks", frame.tsFallbacks);
-        video.addProperty("playbackRateX100", frame.playbackRateX100);
-        video.addProperty("playbackRateMinX100", frame.playbackRateMinX100);
-        video.addProperty("playbackRateMaxX100", frame.playbackRateMaxX100);
-        video.addProperty("playbackRateSamples", frame.playbackRateSamples);
     }
 
     /** The word {@code /state} has always used for an asset type, kept where both surfaces can share it. */

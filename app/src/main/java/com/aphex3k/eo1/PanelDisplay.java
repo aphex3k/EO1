@@ -106,9 +106,9 @@ public final class PanelDisplay {
      * asset it describes, in the order the facts were learned.
      */
     public final String routingFacts;
-    /** Increases by one per handoff, so two reads can be told apart from two displays. */
+    /** This attempt's creation number — <em>not</em> a count of times the panel changed. */
     public final long generation;
-    /** {@code System.currentTimeMillis()} at the handoff. */
+    /** When this display was <em>decided on</em>. When it reached the wall is the panel's business. */
     public final long sinceMs;
 
     /**
@@ -205,10 +205,20 @@ public final class PanelDisplay {
         return engine.isEmpty() ? routingFacts : routingFacts + " -> " + engine;
     }
 
-    public PanelDisplay withGeneration(long generation) {
-        return new PanelDisplay(type, assetKey, pathOrUrl, engine, stage, clip, routingFacts,
-                generation, sinceMs);
-    }
+    /**
+     * Instances of this class are never copied, and that is load-bearing.
+     *
+     * <p>An earlier revision minted a new record at adoption so that {@code media.screen.generation} would
+     * move forward with the wall rather than with the decisions that preceded it. The cost was worse than
+     * the bug it fixed: every "is this still the display I belong to?" test in {@code MainActivity} and in
+     * the {@code /state} probe compares <em>references</em>, and re-stamping made a record stop being equal
+     * to its own adopted copy — so an ownership check could report a live display as stale, and a surface
+     * could be uncovered on the strength of an attempt that had already been superseded.
+     *
+     * <p>Counting promotions therefore lives in {@code MainActivity}, where it belongs. A record identifies
+     * a display <em>attempt</em> and carries the sequence number it was created with; how many times the
+     * panel has actually changed hands, and when, are facts about the panel.
+     */
 
     /** The one debug-board line that can never disagree with the panel, because this writes it. */
     public String describe() {

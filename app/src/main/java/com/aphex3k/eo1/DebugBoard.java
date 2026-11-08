@@ -73,19 +73,61 @@ public final class DebugBoard {
     public static final class Row {
         public final String value;
         public final String assetKey;
+        /**
+         * Whether this row describes a <em>video display</em> of that asset rather than the asset itself.
+         *
+         * <p>Asset identity alone is not enough for a measurement. A clip this device cannot draw is held as
+         * render-silent and shown as its server-side still preview — same asset key, and now an image on the
+         * wall — so a {@code videoBudget} row carrying coded size, frame rate and bitrate, or a {@code video}
+         * row carrying a position, would go on describing a video over a photograph. That is the complaint
+         * this whole change set opened with, arriving through the one door that a per-asset filter cannot
+         * see: the asset did not change, only what kind of thing is being displayed of it.
+         */
+        public final boolean videoScoped;
 
         public Row(String value, String assetKey) {
+            this(value, assetKey, false);
+        }
+
+        public Row(String value, String assetKey, boolean videoScoped) {
             this.value = value == null ? "" : value;
             this.assetKey = assetKey;
+            this.videoScoped = videoScoped;
         }
 
         /** A row about the frame itself. */
         public static Row ofFrame(String value) {
-            return new Row(value, null);
+            return new Row(value, null, false);
+        }
+
+        /** A row that is about this asset <em>as a video</em>, and retires when it stops being one. */
+        public static Row ofVideo(String value, String assetKey) {
+            return new Row(value, assetKey, true);
         }
     }
 
     private DebugBoard() {
+    }
+
+    /**
+     * Keys whose rows describe the asset <em>as a video</em>, so they retire when the same asset is shown
+     * some other way — a render-silent clip displayed as its still preview, most of all.
+     *
+     * <p>Declared here rather than passed by each writer because the answer is a property of the row, not of
+     * the call site: eleven places write {@code video} and two write {@code videoBudget}, and a rule that
+     * lives in eleven places is the rule that gets missed at the twelfth.
+     */
+    public static final Set<String> VIDEO_SCOPED = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
+            "video", "videoBudget")));
+    // `displayVideo` is deliberately absent: after the display paths stopped writing a file name under it,
+    // its only remaining use is "render-silent still <id>", which explains a <em>photograph</em> and must
+    // stay up with it.
+
+    /**
+     * Whether a row about {@code key} is scoped to a video display of the asset.
+     */
+    public static boolean videoScoped(String key, boolean declared) {
+        return declared || VIDEO_SCOPED.contains(key);
     }
 
     /**
@@ -124,7 +166,17 @@ public final class DebugBoard {
             if (row == null) {
                 continue;
             }
-            if (row.assetKey == null || row.assetKey.equals(showing)) {
+            if (row.assetKey == null) {
+                out.put(entry.getKey(), row.value);
+            } else if (row.videoScoped) {
+                // Both the asset and the kind of display have to match. A still preview of the very clip
+                // these numbers were measured from is the same asset — and no longer a video.
+                boolean videoUp = panel != null && panel.showsVideo()
+                        && row.assetKey.equals(showing);
+                if (videoUp) {
+                    out.put(entry.getKey(), row.value);
+                }
+            } else if (row.assetKey.equals(showing)) {
                 out.put(entry.getKey(), row.value);
             }
         }

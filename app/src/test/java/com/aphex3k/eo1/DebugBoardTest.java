@@ -68,6 +68,48 @@ public class DebugBoardTest {
                 DebugBoard.FRAME_SCOPED.contains(SettingsManager.DEBUG_KEY_DEVICE_NAME));
     }
 
+    /**
+     * Asset identity is not the whole question: a clip this device cannot draw is displayed as its still
+     * preview, which is the <em>same asset</em> and an image. A measurement row that only knew the asset key
+     * would go on describing coded size, frame rate and bitrate over that photograph.
+     */
+    @Test
+    public void aVideoMeasurementRetiresWhenTheSameAssetIsShownAsAPreview() {
+        String clip = "3f2a9c1e-silent-clip-0000-000000000000";
+        Map<String, DebugBoard.Row> board = new HashMap<>();
+        board.put("videoBudget", new DebugBoard.Row(clip + " - over the bitrate ceiling", clip, true));
+        board.put("video", DebugBoard.Row.ofVideo("end pos=23621", clip));
+        // The verdict that put the still on the wall in the first place: about the asset, and explaining an
+        // image, so it is not video-scoped.
+        board.put("displayVideo", new DebugBoard.Row("render-silent still " + clip, clip));
+
+        // The clip itself, on the wall.
+        Map<String, String> asVideo = DebugBoard.visible(board,
+                PanelDisplay.video(clip, "/x.mp4", "MediaPlayer", "ORIGINAL",
+                        PanelDisplay.ClipFacts.UNKNOWN, "", 1L, 1L));
+        assertTrue(asVideo.containsKey("video"));
+        assertTrue("the routing verdict for a clip still on the wall should be visible",
+                asVideo.containsKey("videoBudget"));
+
+        // The same asset, now as its still preview: every video measurement retires.
+        Map<String, String> asPhoto = DebugBoard.visible(board, photo(clip));
+        assertFalse("a video's numbers are printed over a photograph", asPhoto.containsKey("video"));
+        assertFalse("a bitrate is printed over a photograph", asPhoto.containsKey("videoBudget"));
+        // The verdict that <em>caused</em> the preview is about the asset and explains an image: it stays.
+        assertTrue(asPhoto.containsKey("displayVideo"));
+    }
+
+    @Test
+    public void theVideoScopedSetNeverOverlapsTheFrameSet() {
+        for (String key : DebugBoard.VIDEO_SCOPED) {
+            assertFalse(key + " cannot be both a frame fact and a video measurement",
+                    DebugBoard.FRAME_SCOPED.contains(key));
+        }
+        assertTrue(DebugBoard.videoScoped("video", false));
+        assertFalse(DebugBoard.videoScoped("Incompatible", false));
+        assertTrue(DebugBoard.videoScoped("Incompatible", true));
+    }
+
     @Test
     public void theFrameSetNeverContainsAnAssetLine() {
         for (String assetLine : new String[]{"video", "displayVideo", "displayPictures",
