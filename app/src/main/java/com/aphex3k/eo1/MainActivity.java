@@ -100,6 +100,7 @@ import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.TimeZone;
 
 import okhttp3.HttpUrl;
@@ -153,14 +154,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private View lastVisibleView;
     private String lastVisibleAsset = "";
     private String activeVideoAssetId = "";
-    /**
-     * Which file and which rung the current video attempt is on, readable from the web server's thread.
-     * An original and the server's degraded encode of the same clip are the same size, duration and
-     * codec — the path is the only thing on {@code /state} that tells them apart, and therefore the only
-     * thing that says whether the compatibility ladder actually descended.
-     */
-    private volatile String activeVideoPath = "";
-    private volatile String activeVideoStage = "";
     private ImageView imageView;
     private TextureVideoView mediaPlayerVideoView;
     private TsVideoView tsVideoView;
@@ -186,7 +179,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private Runnable webLoadWatchdogRunnable;
     /** Sticky: this ROM offered no usable WebView provider, so web assets are skipped from here on. */
     private boolean webViewUnavailable;
-    private VideoPlayerController videoPlayer;
+    /**
+     * The controller currently compositing video. {@code volatile} because {@code /state} reads which
+     * engine it is on the web server's thread, and a torn read there says the frame has an engine it
+     * has not been given.
+     */
+    private volatile VideoPlayerController videoPlayer;
     private MediaPlayerController mediaPlayerController;
     private TsPlayerController tsPlayerController;
     private boolean preferTsPlayer;
@@ -208,11 +206,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String tsLoadError;
     private String tsBoardPlatform;
     private int tsFallbackCount;
-    /** Inputs of the last video routing decision, reported in the debug /state video block. */
-    private int lastVideoRotation = -1;
-    private int lastVideoWidth;
-    private int lastVideoHeight;
-    private String lastVideoCodec;
+    /**
+     * What the panel is holding, and the only source any report may use for a per-clip fact.
+     *
+     * <p>{@code volatile} because {@code /state} builds its document on a web server worker thread, and
+     * a handoff mid-document must not be able to emit half of one asset and half of another — so
+     * {@code buildStateJson} reads this into a local <em>once</em> and answers every field from that.
+     */
+    private volatile PanelDisplay panel;
+    /** Handoff counter feeding {@link PanelDisplay#generation}; never read except through a record. */
+    private final AtomicLong panelGeneration = new AtomicLong();
     /**
      * The panel's measured viewport, last published. Every aspect decision in this Activity reads
      * through {@link #currentPanelShape()} and this holds the same value for reporting, so the number
@@ -251,13 +254,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private long mediaManualLoopRestarts;
     private long mediaManualLoopCycleMs = -1;
     private long mediaManualLoopAtMs = -1;
-    /**
-     * Throughput of the asset last routed. Held as one immutable reference rather than four fields
-     * so the web-server thread reading /state cannot see stats from two different assets.
-     */
-    private VideoHeaderProbe.StreamStats lastVideoStats = VideoHeaderProbe.StreamStats.UNKNOWN;
-    /** The clip's real length from its own header; the player's can be shorter than this. */
-    private long lastVideoDurationMs = -1L;
     /** Measured playback rate of the playing video, x100: 100 is realtime, 60 is 0.6x slow. */
     private int videoPlaybackRateX100 = -1;
     /** Spread of the rate windows since this display was armed, and how many there were. */
@@ -1843,6 +1839,66 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
     }
 
+    /**
+     * The one statement of what the panel holds, and the only writer of {@link #panel}.
+     *
+     * <p>Every display path ends at this call, which is what lets the two reporting surfaces — the
+     * {@code /state} document and the debug board on the panel — describe the asset that is actually up
+     * instead of whichever one a writer last mentioned. Before it, a per-clip fact lived in a field only
+     * a video display wrote and nobody cleared, so a frame showing a photograph for a week reported the
+     * last clip's codec and frame rate, and the board printed the dead clip's lines beside the live
+     * photograph's. {@code /state} reads {@link #panel}; the board is swept here, once per handoff, by
+     * {@link DebugBoard}.
+     *
+     * <p>Swept on a <em>different asset</em>, not on every call: a mid-attempt engine handover re-stamps
+     * the same bytes, and wiping the board then would erase the very line saying the fallback happened.
+     *
+     * <p>Ordered, and the order is the point — sweep, then write. Every asset-scoped writer in the app
+     * funnels through {@link #debugInformationProvided}, which hops to this thread, so once the sweep and
+     * the first write of the new asset happen back to back on the UI thread, no line about the previous
+     * asset can land between them and survive.
+     *
+     * <p>Runs on the UI thread whatever called it, for that reason and not tidiness. {@code displayVideo}
+     * and the web client callbacks can be reached from the rotation thread or a browser callback, and a
+     * sweep racing a queued write is the race this ordering exists to remove.
+     */
+    private void panelNowShowing(@NonNull final PanelDisplay next) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(() -> panelNowShowing(next));
+            return;
+        }
+        PanelDisplay previous = panel;
+        boolean newAsset = previous == null || !previous.assetKey.equals(next.assetKey);
+        panel = next;
+        if (newAsset) {
+            synchronized (this.debugInformation) {
+                DebugBoard.onAssetHandoff(this.debugInformation);
+            }
+        }
+        debugInformationProvided(new DebugInformation(DebugBoard.KEY_ON_SCREEN, next.describe()));
+        if (!next.routingLine.isEmpty()) {
+            debugInformationProvided(new DebugInformation("videoRouting", next.routingLine));
+        }
+    }
+
+    /**
+     * The record for these very bytes, when the panel is already holding them — which is how a call that
+     * did not just run the routing rule tells the measurement of this clip from the leftovers of another.
+     *
+     * <p>{@link #fallbackTsPlayerToMediaPlayer} re-displays <em>the same file</em> on the other engine,
+     * so what the header probe read still describes it and only the compositor changed. For any other
+     * asset there is no answer, and no answer is reported as -1 rather than as the last clip's numbers
+     * — which is precisely the mistake this record was built to make impossible.
+     */
+    @Nullable
+    private PanelDisplay carriedDisplay(String assetId) {
+        PanelDisplay shown = panel;
+        if (shown != null && shown.showsVideo() && assetId != null && assetId.equals(shown.assetKey)) {
+            return shown;
+        }
+        return null;
+    }
+
     @Override
     public void displayPicture(File file, String assetId) {
         displayPicture(file, assetId, DisplayStage.ORIGINAL);
@@ -1866,7 +1922,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         lastRotationActivityMs = System.currentTimeMillis();
-        debugInformationProvided(new DebugInformation("displayPictures", file.getAbsolutePath()));
 
         this.runOnUiThread(() -> {
             cancelVideoWatchdog();
@@ -1874,10 +1929,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // No video is active while an image shows; a stale video callback (incl. one from a
             // null-assetId fallback stream) must not match activeVideoAssetId.
             activeVideoAssetId = "";
-            // Cleared with it: a frame permanently showing a photo must not keep reporting the last
-            // video's file and rung, which is otherwise indistinguishable from a live descent.
-            activeVideoPath = "";
-            activeVideoStage = "";
+            // Says what the panel now holds, and with it retires every per-clip fact the last video
+            // was measured at. This line replaces the old "clear the active video path and stage"
+            // pair, which fixed that bug for two fields and left the rest of the report alone.
+            panelNowShowing(PanelDisplay.image(assetId, file.getAbsolutePath(),
+                    panelGeneration.incrementAndGet(), System.currentTimeMillis()));
 
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
@@ -1949,14 +2005,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     // ------------------------------------------------------------- web-page assets
 
     /** How a media type is named in the {@code /state} payload. */
+    /**
+     * The word {@code /state} uses for an asset type — one mapping, shared with the video block's
+     * {@code showing} field, because two mappers is where a report starts disagreeing with itself.
+     */
     private static String mediaTypeName(@Nullable MediaType type) {
-        if (type == MediaType.VIDEO) {
-            return "video";
-        }
-        if (type == MediaType.WEB) {
-            return "web";
-        }
-        return type == MediaType.IMAGE ? "image" : "unknown";
+        return type == null ? "unknown" : VideoStateJson.mediaTypeName(type);
     }
 
     /**
@@ -1977,7 +2031,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         lastRotationActivityMs = System.currentTimeMillis();
-        debugInformationProvided(new DebugInformation("displayWebsite", url));
 
         this.runOnUiThread(() -> {
             if (isDestroyed()) {
@@ -1987,8 +2040,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             cancelVideoPaintWatchdog();
             // No video is active while a page shows; a stale video callback must not match.
             activeVideoAssetId = "";
-            activeVideoPath = "";
-            activeVideoStage = "";
             // Asset handoff: free the exclusive Amlogic video pipeline before the browser view.
             videoPlayer.release();
             videoPlayer.setVisibility(View.INVISIBLE);
@@ -2006,6 +2057,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             showWebView();
             lastVisibleView = webView;
             lastVisibleAsset = url;
+            // Stamped once the browser view is really the thing on the panel — before loadUrl, whose
+            // outcome is still unknown. A page that then fails is retired by abandonWebPage, which
+            // restamps; a frame that kept this record would claim a page it never painted.
+            panelNowShowing(PanelDisplay.web(assetId, url,
+                    panelGeneration.incrementAndGet(), System.currentTimeMillis()));
 
             try {
                 webView.loadUrl(url);
@@ -2164,6 +2220,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // Cleared, not set to the image: the screen content changed behind the display methods'
         // same-asset check, so the next tick must be allowed to re-show this very photo.
         lastVisibleAsset = "";
+        // The page is gone and the photograph underneath is visible again, so the panel no longer
+        // holds web content — and this says so without claiming to know which photo it does hold,
+        // which the line above is careful not to decide.
+        panelNowShowing(PanelDisplay.image("", "",
+                panelGeneration.incrementAndGet(), System.currentTimeMillis()));
         // A page this frame could not render never reaches assetFallback — it has no bytes and no
         // second engine — so it counts here, or the failure total would read calm on a frame whose
         // every web asset is dead.
@@ -2237,6 +2298,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoPlayer.setVisibility(View.INVISIBLE);
         hideWebView();
         revealPhotoView();
+        // The failed clip is off the panel from here, whatever the next rung does with it. Without
+        // this a ladder that dead-ends — a local upload has no degraded source to fall back to —
+        // leaves the report describing a video that stopped being displayed, which is the failure this
+        // whole record exists to make unstatable.
+        panelNowShowing(PanelDisplay.image("", "",
+                panelGeneration.incrementAndGet(), System.currentTimeMillis()));
     }
 
     /**
@@ -2466,7 +2533,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // at the shortened number without ever passing it, so demanding the file's length there
         // would skip this branch and leave the 8 s threshold to notice.
         int reportedMs = videoPlayer.getDuration();
-        long fileMs = lastVideoDurationMs;
+        // The watched clip's own length, from the record adopted when this attempt started. The guard
+        // above proves the watched asset is the active one, so this is the same file the watchdog was
+        // armed for — and never the previous clip's, which is what reading a stored field risked.
+        PanelDisplay watched = panel;
+        long fileMs = watched != null && watched.clip != null ? watched.clip.fileDurationMs : -1L;
         int cycleEndMs = parked ? reportedMs : (int) Math.max((long) reportedMs, fileMs);
         // A position absurdly far past the end is a bad reading rather than a finished clip: a
         // freshly created player has been observed reporting values near the epoch, and acting on
@@ -3138,20 +3209,33 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         sb.append("window              : focused=").append(windowFocused)
                 .append(" view=").append(focusedView)
                 .append(" lastKey=").append(lastKeyEventCode).append('\n');
+        // This line states the frame's default engine, once per launch, and is true whatever is on the
+        // panel — which is why it says nothing about the clip. The clip is the next line's business.
         sb.append("video engine        : ").append(preferTsPlayer ? "TsPlayer" : "MediaPlayer")
                 // The panel the aspect rule compares every clip against, in the record that survives a
                 // reboot. /state carries it too, but /state is gone by the time anyone asks about a
                 // frame that has since been moved, power-cycled or re-hung — and an "unmeasured" here
                 // is the only evidence there will ever be that the rule was dark rather than wrong.
                 .append(" panel=").append(lastFrameShape == null ? "unmeasured" : lastFrameShape)
-                .append(" paintSignal=").append(videoPlayer.supportsPaintSignal())
-                .append(" painted=").append(videoPaintProduced)
-                .append(" lastFrame=")
-                .append(videoPlayer.getLastFrameAtMs() == 0L ? "never"
-                        : ((now - videoPlayer.getLastFrameAtMs()) / 1000L) + "s ago")
                 .append('\n');
-        sb.append("active video        : path=").append(activeVideoPath)
-                .append(" stage=").append(activeVideoStage).append('\n');
+        // Read once, for the same reason buildStateJson does: this collector runs on a diagnostics
+        // worker, and half of one asset and half of the next is not a report about either.
+        PanelDisplay shown = panel;
+        sb.append("on screen           : ")
+                .append(shown == null ? "nothing yet" : shown.describe()).append('\n');
+        if (shown != null && shown.showsVideo()) {
+            // Paint evidence belongs to the engine that is compositing, and only while one is. These
+            // used to be written for every launch, so a frame that had not shown a video in a week
+            // still reported the last clip's player as painted — in the record people quote.
+            sb.append("active video        : path=").append(shown.pathOrUrl)
+                    .append(" stage=").append(shown.stage)
+                    .append(" paintSignal=").append(videoPlayer.supportsPaintSignal())
+                    .append(" painted=").append(videoPaintProduced)
+                    .append(" lastFrame=")
+                    .append(videoPlayer.getLastFrameAtMs() == 0L ? "never"
+                            : ((now - videoPlayer.getLastFrameAtMs()) / 1000L) + "s ago")
+                    .append('\n');
+        }
         // One line for the broker link, in the record that outlives logcat. "connected=false" and "connected
         // but no message for hours" are different diagnoses, and before this class reported into AppLogger
         // neither was recoverable at all — the events went to stdout, into a buffer CrashSources never reads.
@@ -3340,9 +3424,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (stage == DisplayStage.ORIGINAL && mediaManager != null
                 && mediaManager.isRenderSilent(assetId)) {
             lastRotationActivityMs = System.currentTimeMillis();
-            activeVideoPath = "";
-            activeVideoStage = "";
             Log.i(TAG, "displayVideo: " + assetId + " renders nothing on this device; showing its still");
+            // Stated before the still is fetched, so the clip that is definitively not on this wall
+            // stops being reported as if it were, rather than at whenever the preview lands.
+            panelNowShowing(PanelDisplay.image(assetId, "",
+                    panelGeneration.incrementAndGet(), System.currentTimeMillis()));
             debugInformationProvided(new DebugInformation("displayVideo", "render-silent still "
                     + assetId));
             mediaManager.showRenderSilentStill(this, assetId);
@@ -3350,7 +3436,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         lastRotationActivityMs = System.currentTimeMillis();
-        debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
         WeakReference<MainActivity> activityReference = new WeakReference<>(this);
         activeVideoAssetId = assetId;
@@ -3375,10 +3460,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 // bounds belong to the thread that laid them out.
                 publishFrameShape();
                 cancelVideoWatchdog();
-                selectVideoPlayer(routingAllowsTsPlayer(file));
+                VideoRoutingDecision routing = routingAllowsTsPlayer(file);
+                selectVideoPlayer(routing.allowTsPlayer);
                 int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
                 startVideoOnController(videoPlayer, file, assetId, videoDurationMs,
-                        activityReference, true, stage);
+                        activityReference, true, stage, routing);
             } catch (Exception e) {
                 restoreImageViewAfterVideoFailure();
                 assetFallback(assetId, activityReference, true, file, stage);
@@ -3397,8 +3483,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * asks the same question of the same numbers <em>before</em> the download, because a clip this
      * path hands to MediaPlayer is composited at a magnification this hardware does not keep up
      * with — so on a two-engine frame such a clip should never arrive here as an original at all.
+     *
+     * <p>Returns what it measured instead of storing it. Every field this method wrote was written only
+     * on a video display and cleared by nobody, so {@code /state} reported the last clip's codec, size,
+     * rate and rotation over whatever the panel had moved on to. The measurement now travels to
+     * {@link #panelNowShowing} as one value and is read from nowhere else.
      */
-    private boolean routingAllowsTsPlayer(File file) {
+    private VideoRoutingDecision routingAllowsTsPlayer(File file) {
         VideoHeaderProbe.Probe probe = VideoHeaderProbe.probe(file);
         int rotation = probe.rotationDeg;
         int width = probe.codedWidth;
@@ -3413,17 +3504,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 height = asset.height;
             }
         }
-        MediaCompatibility.PanelShape panel = currentPanelShape();
-        boolean allowTs = VideoRoutingRule.allowsTsPlayer(rotation, width, height, panel);
+        MediaCompatibility.PanelShape shape = currentPanelShape();
+        boolean allowTs = VideoRoutingRule.allowsTsPlayer(rotation, width, height, shape);
         boolean forceFallback = !allowTs;
-        lastVideoRotation = rotation;
-        lastVideoWidth = width;
-        lastVideoHeight = height;
-        lastVideoCodec = codec;
-        lastVideoStats = probe.stats;
-        lastVideoDurationMs = probe.stats.durationMs;
-        lastFrameShape = panel;
-        lastFrameOrientation = VideoRoutingRule.orientationWord(panel);
+        // The panel's own shape, not a property of the file: published from the layout listener for
+        // every frame, and deliberately left out of the clip record so a frame that has never played a
+        // video can still say whether the aspect rule is lit.
+        lastFrameShape = shape;
+        lastFrameOrientation = VideoRoutingRule.orientationWord(shape);
         // Record the verdict where it is made. ORIGINAL_REPLAY asks this same field whether TsPlayer
         // was ever a live option for these bytes, and a second derivation of that answer somewhere
         // else is how the rung ends up replaying the engine that just failed.
@@ -3433,17 +3521,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // loaded the answer it hands to selectVideoPlayer is discarded. Naming TsPlayer here while
         // MediaPlayer composites the clip is what made an EO1's log read like an EO2's.
         String engineWord = VideoEngineReport.engineWord(forceFallback, preferTsPlayer);
-        String panelWord = panel == null ? "unmeasured" : panel.toString();
+        String panelWord = shape == null ? "unmeasured" : shape.toString();
         Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
                 + " coded=" + width + "x" + height
                 + " panel=" + panelWord + " frame=" + lastFrameOrientation
                 + " player=" + engineWord
                 + " " + describeStream(probe));
-        debugInformationProvided(new DebugInformation("videoRouting",
+        return new VideoRoutingDecision(allowTs, engineWord,
+                new PanelDisplay.ClipFacts(rotation, width, height, codec,
+                        probe.stats.fpsMilli, probe.stats.avgFrameBytes, probe.stats.peakFrameBytes,
+                        probe.stats.bitRateBps, probe.stats.durationMs),
                 "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
                         + " panel=" + panelWord + " frame=" + lastFrameOrientation
-                        + " -> " + engineWord + "; " + describeStream(probe)));
-        return allowTs;
+                        + " -> " + engineWord + "; " + describeStream(probe));
     }
 
     /**
@@ -3578,8 +3668,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             tsVideoView.setVisibility(View.GONE);
             mediaPlayerVideoView.setVisibility(View.INVISIBLE);
         }
-        debugInformationProvided(new DebugInformation("videoPlayer",
-                useTs ? "TsPlayer" : "MediaPlayer"));
+        // No debug line here. The engine is a property of the display in hand, so it travels with it:
+        // {@link #startVideoOnController} adopts a {@link PanelDisplay} carrying this answer, the board
+        // prints it in its "on screen" row, and {@code /state} reports it as {@code video.engine}. A
+        // separate key written from here landed <em>before</em> that handoff swept the board, so on a new
+        // asset it announced an engine and then vanished — one more line whose freshness was a property
+        // of its writer rather than of the panel.
     }
 
     /**
@@ -3604,8 +3698,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         try {
             selectVideoPlayer(false);
             int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
+            // No fresh routing pass: these are the same bytes the record in hand was measured from,
+            // only handed to the other compositor.
             startVideoOnController(videoPlayer, file, assetId, videoDurationMs,
-                    activityReference, false, stage);
+                    activityReference, false, stage, null);
             return true;
         } catch (Exception e) {
             handleException(e);
@@ -3613,13 +3709,30 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
     }
 
+    /**
+     * Hands one file to one controller, and makes it the thing the panel is said to hold.
+     *
+     * @param routing what the routing rule measured for these bytes, or {@code null} from
+     *                {@link #fallbackTsPlayerToMediaPlayer}, which re-displays the same file on the
+     *                other engine — in which case the measurement already in the record in hand still
+     *                describes it, and anything else would be a previous clip's number
+     */
     private void startVideoOnController(VideoPlayerController controller, File file, String assetId,
                                         int durationHintMs,
                                         WeakReference<MainActivity> activityReference,
-                                        boolean allowTsFallback, DisplayStage stage) {
+                                        boolean allowTsFallback, DisplayStage stage,
+                                        @Nullable VideoRoutingDecision routing) {
         controller.stop();
-        activeVideoPath = file.getAbsolutePath();
-        activeVideoStage = stage.name();
+        PanelDisplay carried = routing == null ? carriedDisplay(assetId) : null;
+        PanelDisplay.ClipFacts clip = routing != null ? routing.clip
+                : (carried != null ? carried.clip : PanelDisplay.ClipFacts.UNKNOWN);
+        String routingLine = routing != null ? routing.routingLine
+                : (carried != null ? carried.routingLine : "");
+        panelNowShowing(PanelDisplay.video(assetId, file.getAbsolutePath(),
+                controller == tsPlayerController
+                        ? VideoEngineReport.TS_PLAYER : VideoEngineReport.MEDIA_PLAYER,
+                stage.name(), clip, routingLine,
+                panelGeneration.incrementAndGet(), System.currentTimeMillis()));
         // TsPlayer SurfaceView must be VISIBLE to get a surface; MediaPlayer TextureView can stay
         // invisible until prepared (ImageView covers both until then).
         if (controller == tsPlayerController) {
@@ -3728,7 +3841,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
         });
         controller.setDurationHint(durationHintMs);
-        controller.setDisplayRotation(lastVideoRotation);
+        // The rotation this attempt was routed with, read off the record just adopted rather than off a
+        // field left over from whichever clip was measured last.
+        controller.setDisplayRotation(clip.rotationDeg);
         controller.setDataSource(file.getPath());
         controller.setLooping(true);
         // Armed here, before any callback: an attempt whose prepareAsync() never returns and never
@@ -4221,6 +4336,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         network.add("wifi", DeviceTelemetry.wifi(this));
         o.add("network", network);
 
+        // One snapshot of what the panel holds, for every field below that describes the display. Read
+        // here rather than per block so the media and video sections cannot disagree because a handoff
+        // landed between them — the same argument buildStateJson makes about no reader holding a lock.
+        PanelDisplay shown = panel;
+
         JsonObject media = new JsonObject();
         media.addProperty("rotationAssets", mediaManager.rotationListSize());
         media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
@@ -4246,6 +4366,31 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             current.addProperty("local", currentAsset.localPath != null);
             media.add("current", current);
         }
+        // What the panel holds, kept separate from what rotation selected rather than collapsed into it.
+        // The two differ by one posted UI runnable in normal operation, and a `current` that keeps
+        // advancing while `screen.generation` stops moving is the shape of a frame that has stopped
+        // painting — which one field naming both facts can never show.
+        JsonObject screen = new JsonObject();
+        if (shown == null) {
+            screen.addProperty("type", "none");
+        } else {
+            screen.addProperty("type", mediaTypeName(shown.type));
+            if (!shown.assetKey.isEmpty()) {
+                screen.addProperty("key", shown.assetKey);
+            }
+            if (!shown.pathOrUrl.isEmpty()) {
+                screen.addProperty("pathOrUrl", shown.pathOrUrl);
+            }
+            if (!shown.engine.isEmpty()) {
+                screen.addProperty("engine", shown.engine);
+            }
+            if (!shown.stage.isEmpty()) {
+                screen.addProperty("stage", shown.stage);
+            }
+            screen.addProperty("generation", shown.generation);
+            screen.addProperty("sinceMs", shown.sinceMs);
+        }
+        media.add("screen", screen);
         o.add("media", media);
 
         JsonObject input = new JsonObject();
@@ -4269,135 +4414,30 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // and why is it black", and a release frame that cannot say which engine it chose, which rung of
         // the ladder it is on, or whether a single frame ever composited leaves an operator staring at a
         // black panel with no evidence to act on. The TsPlayer-internal counters stay debug-only.
-        JsonObject video = new JsonObject();
-        video.addProperty("active", videoPlayer == tsPlayerController ? "TsPlayer" : "MediaPlayer");
-        video.addProperty("preferTsPlayer", preferTsPlayer);
-        // "available" here means <em>usable on this frame</em>, not "the .so happened to load": the
-        // platform test is written first so a board whose silicon has no vendor player never reaches
-        // the class, and never triggers the dlopen it would fail. Quoting an UnsatisfiedLinkError as
-        // the reason on such a frame would send an operator looking for a missing file that is not
-        // what is missing.
-        // "usable here" rather than "the .so loaded", and read from the captured fields: a frame the
-        // gate denied never initialized the class, so it has no linker error to report and saying
-        // `tsAvailable: false` without `tsSupported: false` would imply the opposite.
-        boolean tsUsable = tsAllowed && tsLibraryLoaded;
-        video.addProperty("tsSupported", tsAllowed);
-        video.addProperty("tsAvailable", tsUsable);
-        // Every input to the gate, so the decision can be rebuilt from the document instead of
-        // inferred from its outcome: a frame that says only "MediaPlayer" cannot be distinguished from
-        // one that was never going to say anything else, and that difference is the whole report.
-        JsonObject tsGate = new JsonObject();
-        tsGate.addProperty("silicon", tsSilicon);
-        tsGate.addProperty("modelProfile", platform());
-        tsGate.addProperty("modelAllows", tsModelAllows);
-        tsGate.addProperty("decidedBy", tsGateAxis);
-        tsGate.addProperty("buildFlag", BuildConfig.USE_TSPLAYER);
-        tsGate.addProperty("libraryLoaded", tsLibraryLoaded);
-        video.add("tsGate", tsGate);
-
-        if (tsLoadError != null) {
-            video.addProperty("tsLoadError", tsLoadError);
-        }
-        if (!activeVideoPath.isEmpty()) {
-            video.addProperty("path", activeVideoPath);
-            video.addProperty("stage", activeVideoStage);
-        }
-        // "painted" is only a claim where the engine can actually answer it. TsPlayer has no per-frame
-        // signal, so reporting true there would be a tautology — and a tautology on the one field this
-        // block exists to answer is worse than the gap it replaces.
-        boolean paintSignal = videoPlayer.supportsPaintSignal();
-        video.addProperty("paintSignal", paintSignal);
-        if (paintSignal) {
-            video.addProperty("painted", videoPaintProduced);
-            long lastFrameAtMs = videoPlayer.getLastFrameAtMs();
-            video.addProperty("lastFrameAgeMs", lastFrameAtMs > 0L
-                    ? (System.currentTimeMillis() - lastFrameAtMs) : -1L);
-        }
-        if (currentAsset != null && currentAsset.type == MediaType.VIDEO) {
-            video.addProperty("renderSilent", mediaManager.isRenderSilent(currentAsset.key()));
-        }
-        video.addProperty("rotation", lastVideoRotation);
-        video.addProperty("width", lastVideoWidth);
-        video.addProperty("height", lastVideoHeight);
-        if (lastVideoCodec != null) {
-            video.addProperty("codec", lastVideoCodec);
-        }
-        if (lastFrameOrientation != null) {
-            video.addProperty("frameOrientation", lastFrameOrientation);
-        }
-        // The number the aspect rule actually decided against, as opposed to the word derived from
-        // it. This is the one field that separates "the new rule is working" from "the new rule is
-        // dark and every clip kept its default engine" — with an unmeasured panel the predicate
-        // returns false for everything, and the frame looks exactly as it did before.
-        MediaCompatibility.PanelShape reportedPanel = lastFrameShape;
-        video.addProperty("panelShape", reportedPanel == null ? "unmeasured" : reportedPanel.toString());
-        VideoHeaderProbe.StreamStats stream = lastVideoStats;
-        video.addProperty("fpsMilli", stream.fpsMilli);
-        video.addProperty("avgFrameBytes", stream.avgFrameBytes);
-        video.addProperty("peakFrameBytes", stream.peakFrameBytes);
-        video.addProperty("bitRateBps", stream.bitRateBps);
-        video.addProperty("fileDurationMs", stream.durationMs);
-        video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
-                lastVideoWidth, lastVideoHeight, stream.fpsMilli));
-        // From whichever player is actually showing the clip. These used to be read off
-        // tsVideoView unconditionally, so on the MediaPlayer path they reported 0 — which is
-        // how the slow-playback investigation ended up reconstructing a lap from the stall
-        // log's timestamps instead of reading the position it had already measured.
-        video.addProperty("durationMs", activeDurationMs());
-        video.addProperty("positionMs", activePositionMs());
-        if (BuildConfig.DEBUG) {
-            video.addProperty("tsFallbacks", tsFallbackCount);
-            video.addProperty("playbackRateX100", videoPlaybackRateX100);
-            video.addProperty("playbackRateMinX100", videoPlaybackRateMinX100);
-            video.addProperty("playbackRateMaxX100", videoPlaybackRateMaxX100);
-            video.addProperty("playbackRateSamples", videoPlaybackRateSamples);
-            // The file on screen, read from the attempt rather than from one engine's view. It used to
-            // come from tsVideoView like the rest of this cluster, so a clip composited by MediaPlayer
-            // reported whichever TsPlayer file this process had last played.
-            if (activeVideoPath != null && !activeVideoPath.isEmpty()) {
-                video.addProperty("path", activeVideoPath);
-            }
-            // Everything below belongs to the engine that is actually compositing. These were read off
-            // tsVideoView unconditionally, so for a MediaPlayer clip `generation`, `playerCreated`,
-            // `surfaceReady` and the whole loop-perf object described a view that is hidden and
-            // playing nothing — and this class of clip is about to become the majority of an EO2's
-            // library, since every non-native aspect now composites here.
-            boolean tsActive = videoPlayer == tsPlayerController;
-            if (tsActive && tsVideoView != null) {
-                video.addProperty("generation", tsVideoView.getLoopGeneration());
-                video.addProperty("errors", tsVideoView.getVideoErrorCount());
-                video.addProperty("playerCreated", tsVideoView.isPlayerCreated());
-                video.addProperty("surfaceReady", tsVideoView.isSurfaceReady());
-                video.addProperty("recreatingForLoop", tsVideoView.isRecreatingForLoop());
-                JsonObject loopPerf = new JsonObject();
-                loopPerf.addProperty("engine", VideoEngineReport.TS_PLAYER);
-                loopPerf.addProperty("restartLatencyMs", tsVideoView.getLastRestartLatencyMs());
-                loopPerf.addProperty("createPlayerMs", tsVideoView.getLastCreatePlayerMs());
-                loopPerf.addProperty("setSurfaceMs", tsVideoView.getLastSetSurfaceMs());
-                loopPerf.addProperty("startMs", tsVideoView.getLastStartMs());
-                loopPerf.addProperty("restartToPlayingMs", tsVideoView.getLastRestartToPlayingMs());
-                loopPerf.addProperty("endToPlayingMs", tsVideoView.getLastEndToPlayingMs());
-                loopPerf.addProperty("loopCycleMs", tsVideoView.getLastLoopCycleMs());
-                loopPerf.addProperty("posAtTriggerMs", tsVideoView.getLastPosAtTriggerMs());
-                loopPerf.addProperty("restartMethod", tsVideoView.getLastRestartMethod());
-                video.add("loopPerf", loopPerf);
-            } else if (!tsActive) {
-                // NOT the same measurement as the TsPlayer block above, and deliberately not given
-                // the same key. With setLooping(true) the platform player loops inside itself and
-                // never reports an end of stream, so a clip that is looping perfectly produces no
-                // event here at all: these two fields count only the restarts this app issues, from
-                // onVideoEnd or the position watchdog's seam. A healthy MediaPlayer lap therefore
-                // reads manualLoopRestarts=0 and manualLoopCycleMs=-1 — which is the design, not a
-                // stall. Absence of a number is not evidence of a stopped clip; `painted` and
-                // `playbackRate*` are the liveness fields on this engine.
-                JsonObject loopPerf = new JsonObject();
-                loopPerf.addProperty("engine", VideoEngineReport.MEDIA_PLAYER);
-                loopPerf.addProperty("manualLoopRestarts", mediaManualLoopRestarts);
-                loopPerf.addProperty("manualLoopCycleMs", mediaManualLoopCycleMs);
-                video.add("loopPerf", loopPerf);
-            }
-        }
-        o.add("video", video);
+        //
+        // `shown` is the snapshot taken above, shared with the media block. The builder itself lives in
+        // VideoStateJson so the rule "describe only what the panel holds" is testable at all.
+        VideoStateJson.Frame frameFacts = new VideoStateJson.Frame();
+        frameFacts.engine = videoPlayer == tsPlayerController
+                ? VideoEngineReport.TS_PLAYER : VideoEngineReport.MEDIA_PLAYER;
+        frameFacts.preferTsPlayer = preferTsPlayer;
+        frameFacts.tsSupported = tsAllowed;
+        frameFacts.tsLibraryLoaded = tsLibraryLoaded;
+        frameFacts.tsLoadError = tsLoadError;
+        frameFacts.tsSilicon = tsSilicon;
+        frameFacts.modelProfile = platform();
+        frameFacts.tsModelAllows = tsModelAllows;
+        frameFacts.tsGateAxis = tsGateAxis;
+        frameFacts.buildFlag = BuildConfig.USE_TSPLAYER;
+        frameFacts.panelShape = lastFrameShape == null ? null : lastFrameShape.toString();
+        frameFacts.frameOrientation = lastFrameOrientation;
+        frameFacts.tsFallbacks = tsFallbackCount;
+        frameFacts.playbackRateX100 = videoPlaybackRateX100;
+        frameFacts.playbackRateMinX100 = videoPlaybackRateMinX100;
+        frameFacts.playbackRateMaxX100 = videoPlaybackRateMaxX100;
+        frameFacts.playbackRateSamples = videoPlaybackRateSamples;
+        frameFacts.debugBuild = BuildConfig.DEBUG;
+        o.add("video", VideoStateJson.build(shown, frameFacts, new StatePlayerProbe()));
 
         if (BuildConfig.DEBUG && !debugInformation.isEmpty()) {
             JsonObject debug = new JsonObject();
@@ -4410,6 +4450,81 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         return o.toString();
+    }
+
+    /**
+     * The live player reads {@code /state}'s video block is allowed to make, and only for a clip the
+     * panel actually holds.
+     *
+     * <p>Behind an interface so {@link VideoStateJson} can be tested without a player, and so the
+     * question "did the report touch the engine?" has one answer in the code rather than one per field.
+     * Calling these while a photograph is on the screen meant asking a released player for its position
+     * from the web server's thread, at whatever moment the UI thread was tearing it down.
+     */
+    private final class StatePlayerProbe implements VideoStateJson.PlayerProbe {
+
+        @Override
+        public boolean paintSignal() {
+            VideoPlayerController active = videoPlayer;
+            return active != null && active.supportsPaintSignal();
+        }
+
+        @Override
+        public boolean painted() {
+            return videoPaintProduced;
+        }
+
+        @Override
+        public long lastFrameAtMs() {
+            VideoPlayerController active = videoPlayer;
+            return active == null ? 0L : active.getLastFrameAtMs();
+        }
+
+        @Override
+        public int durationMs() {
+            return activeDurationMs();
+        }
+
+        @Override
+        public int positionMs() {
+            return activePositionMs();
+        }
+
+        @Override
+        public VideoStateJson.NativeCounters nativeCounters() {
+            if (tsVideoView == null) {
+                return null;
+            }
+            VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
+            counters.generation = tsVideoView.getLoopGeneration();
+            counters.errors = tsVideoView.getVideoErrorCount();
+            counters.playerCreated = tsVideoView.isPlayerCreated();
+            counters.surfaceReady = tsVideoView.isSurfaceReady();
+            counters.recreatingForLoop = tsVideoView.isRecreatingForLoop();
+            counters.restartLatencyMs = tsVideoView.getLastRestartLatencyMs();
+            counters.createPlayerMs = tsVideoView.getLastCreatePlayerMs();
+            counters.setSurfaceMs = tsVideoView.getLastSetSurfaceMs();
+            counters.startMs = tsVideoView.getLastStartMs();
+            counters.restartToPlayingMs = tsVideoView.getLastRestartToPlayingMs();
+            counters.endToPlayingMs = tsVideoView.getLastEndToPlayingMs();
+            counters.loopCycleMs = tsVideoView.getLastLoopCycleMs();
+            counters.posAtTriggerMs = tsVideoView.getLastPosAtTriggerMs();
+            counters.restartMethod = tsVideoView.getLastRestartMethod();
+            return counters;
+        }
+
+        @Override
+        public VideoStateJson.ManualCounters manualCounters() {
+            VideoStateJson.ManualCounters counters = new VideoStateJson.ManualCounters();
+            counters.manualLoopRestarts = mediaManualLoopRestarts;
+            counters.manualLoopCycleMs = mediaManualLoopCycleMs;
+            return counters;
+        }
+
+        @Override
+        public boolean renderSilent(String assetKey) {
+            return mediaManager != null && mediaManager.isRenderSilent(assetKey);
+        }
     }
 
     @Override
