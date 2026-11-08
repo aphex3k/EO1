@@ -146,6 +146,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long WEB_LOAD_TIMEOUT_MS = 30000L;
     /** Minimum gap between download-progress logcat lines. */
     private static final long DOWNLOAD_PROGRESS_LOG_INTERVAL_MS = 5000L;
+    /** Denominator of the download bar's fill. Per-mille, so any {@code Content-Length} fits. */
+    private static final int DOWNLOAD_BAR_MAX = 1000;
     /** Logcat tag matched by debug.sh follow_logcat filter. */
     private static final String TAG = "EO1";
     /** Tag the options dialog is shown under, and the idempotency key for {@link #showConfigurationUI()}. */
@@ -3929,7 +3931,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void clientProgressUpdates(long bytesRead, long contentLength, boolean done, @Nullable HttpUrl url) {
 
-        long percent =  Math.round((100.0 * bytesRead) / contentLength);
+        // An undeclared length divides by -1 (a negative percent) or by 0 (Infinity, which rounds to
+        // Long.MAX_VALUE), and either poisons the throttle below for the rest of the download.
+        long percent = contentLength > 0L ? Math.round((100.0 * bytesRead) / contentLength) : 0L;
 
         long progressNowMs = System.currentTimeMillis();
         if (done) {
@@ -3978,18 +3982,60 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // MediaManager only forwards progress events while a remote download is in
         // flight (catalog fetches and local playback never reach this callback).
-        this.runOnUiThread(() -> {
-            if (done) {
-                //reset update progress indicator UI
-                progressIndicator.setProgressCompat(0, false);
-                progressIndicator.setVisibility(View.INVISIBLE);
-            } else {
-                //Update progress indicator UI percent
-                progressIndicator.setMax(Math.toIntExact(contentLength));
-                progressIndicator.setProgressCompat(Math.toIntExact(bytesRead), true);
-                progressIndicator.setVisibility(View.VISIBLE);
-            }
-        });
+        this.runOnUiThread(() -> applyDownloadBar(bytesRead, contentLength, done));
+    }
+
+    @Override
+    public void downloadCycleClosed() {
+        // MediaManager calls this when its in-flight count reaches zero, which is the only close
+        // that also covers a body that threw instead of reaching its end. Zero the clocks exactly as
+        // a clean finish does — otherwise the next download measures its age from a transfer that is
+        // already gone — and clear the throttle so its first percent is logged, not suppressed.
+        downloadStartedAtMs = 0L;
+        downloadProgressAtMs = 0L;
+        synchronized (downloadProgressLogLock) {
+            lastLoggedDownloadPercent = -1L;
+            lastDownloadProgressLogAtMs = 0L;
+        }
+        runOnUiThread(this::hideDownloadBar);
+    }
+
+    /** Puts the bar into the state one progress event describes. UI thread. */
+    private void applyDownloadBar(long bytesRead, long contentLength, boolean done) {
+        int permille = downloadBarPermille(bytesRead, contentLength);
+        if (done || permille < 0) {
+            hideDownloadBar();
+            return;
+        }
+        progressIndicator.setMax(DOWNLOAD_BAR_MAX);
+        progressIndicator.setProgressCompat(permille, true);
+        progressIndicator.setVisibility(View.VISIBLE);
+    }
+
+    /**
+     * The one way the bar goes away. It is emptied before it is hidden so a later transfer starts
+     * from nothing rather than animating down from wherever the last one stopped.
+     */
+    private void hideDownloadBar() {
+        progressIndicator.setProgressCompat(0, false);
+        progressIndicator.setVisibility(View.INVISIBLE);
+    }
+
+    /**
+     * The bar's fill for one progress event, out of {@link #DOWNLOAD_BAR_MAX}, or -1 when the
+     * response declared no length.
+     *
+     * <p>A fixed max rather than the byte count for two reasons: a {@code Content-Length} over 2 GiB
+     * does not fit the int the view takes, and an unknown length arrives as -1, which is not a max at
+     * all — it is the case that left a bar on screen that could never move. Hiding for -1 says less
+     * than animating an indeterminate bar would, and this panel has no spare frames to animate with.
+     */
+    static int downloadBarPermille(long bytesRead, long contentLength) {
+        if (contentLength <= 0L) {
+            return -1;
+        }
+        long permille = (Math.max(0L, bytesRead) * DOWNLOAD_BAR_MAX) / contentLength;
+        return (int) Math.min(permille, (long) DOWNLOAD_BAR_MAX);
     }
 
     // ------------------------------------------------------------------
