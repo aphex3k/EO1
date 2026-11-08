@@ -192,6 +192,34 @@ public class VideoLoopSeamRuleTest {
     }
 
     @Test
+    public void aBackwardsClockStepDoesNotManufactureARewind() {
+        // These frames run no time sync, so the wall clock can step backwards between two polls. That
+        // zeroes the elapsed interval and silences CREEPING; without the sincePreviousMs > 0 term this
+        // test would be the only thing left firing, and it would fire on a position already past the
+        // file's length -- outside the sub-second band that bounds what it can withhold.
+        assertFalse("no elapsed interval means no evidence of movement, either direction",
+                VideoLoopSeamRule.evaluate(37120, 37270, 0L, 37000, 37270L).restarts());
+        assertFalse("negative elapsed interval is a clock correction, not a rewind",
+                VideoLoopSeamRule.evaluate(37120, 37270, -5000L, 37000, 37270L).restarts());
+
+        // The same reading with a real interval is the seam, unchanged.
+        assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
+                VideoLoopSeamRule.evaluate(37120, 37270, POLL_MS, 37000, 37270L).tail);
+    }
+
+    @Test
+    public void theWholeSecondFloorIsWhatMakesTheseTailsExist() {
+        // 9 of 9 looping clips in a live EO2's log report floor(file/1000)*1000 as the player's
+        // duration, so the divergence this rule negotiates is a whole sub-second remainder, not a
+        // container artefact. Pinned at the extremes actually measured: a 41 ms shortfall and an
+        // 855 ms one.
+        assertEquals(EO2_FILE_MS,
+                VideoLoopSeamRule.evaluate(56011, 55023, POLL_MS, 55000, 55855L).boundaryMs);
+        assertEquals(31041L,
+                VideoLoopSeamRule.evaluate(31050, 31000, POLL_MS, 31000, 31041L).boundaryMs);
+    }
+
+    @Test
     public void thePollAfterARestartIsQuiet() {
         // The caller writes -1 after a restart precisely so the next poll cannot re-fire off the
         // reading it is about to make. Neither tail test may accept a missing previous reading.

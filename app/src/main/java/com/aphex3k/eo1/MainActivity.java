@@ -2443,10 +2443,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         // The end of the cycle, announced here because nothing else announces it: this is the one line
-        // that says the app, not the player, decided to wrap the lap. The gap pair is what turns the
-        // hold from an inference into a reading — it is stamped where pixels reach the surface, so it
-        // survives the media clock that ran at exactly 1.00x across the entire freeze this line used to
-        // report as healthy.
+        // that says the app, not the player, decided to wrap the lap. The gap pair is spacing since the
+        // data source was set — read FrameGapWindow before interpreting it. On the first run that
+        // carried it, 345 ms was the worst value recorded anywhere, including on a lap whose position
+        // was bit-identical between polls, because it counts buffers reaching a draw pass rather than
+        // changes of picture.
         if (seam.restarts()) {
             debugInformationProvided(new DebugInformation("video",
                     "loop restart pos=" + position + " end=" + seam.boundaryMs
@@ -3132,9 +3133,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 .append(" lastFrame=")
                 .append(videoPlayer.getLastFrameAtMs() == 0L ? "never"
                         : ((now - videoPlayer.getLastFrameAtMs()) / 1000L) + "s ago")
-                // Worst frame spacing this engine has reported for the clip in hand. It is in the
-                // durable line because it is the one number that survives to say a wall was held
-                // while every clock in the process insisted the clip was playing at 1.00x.
+                // Worst frame spacing this engine has reported for the clip in hand. It is the one
+                // number here that can say whether buffers kept arriving; it cannot say whether the
+                // picture changed, and a low value must not be read as "the clip was fine".
                 .append(" maxFrameGap=")
                 .append(maxFrameGapMs < 0 ? "none" : maxFrameGapMs + "ms")
                 .append('\n');

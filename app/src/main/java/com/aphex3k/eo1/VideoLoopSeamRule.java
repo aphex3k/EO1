@@ -20,10 +20,17 @@ package com.aphex3k.eo1;
  * position is the only detector. It has to answer "is this the end" from a number the player does not
  * report reliably.
  *
- * <p>Two things hide that boundary. The player's duration is shorter than the media it is holding
- * (23000 ms reported for a 23621 ms file, because the QuickTime {@code mvhd} timescale of 600 cannot
- * divide the frame period evenly), so ending on the player's number truncates frames still running.
- * And past that point the position does not freeze, it creeps
+ * <p>Two things hide that boundary. The player's duration is shorter than the media it is holding, and
+ * the reason is not the container: <b>this ROM's {@code MediaPlayer} floors a clip's length to the
+ * whole second.</b> Nine of nine looping clips in a live EO2's durable log report exactly
+ * {@code floor(fileMs / 1000) * 1000} — 23000 for 23621, 31000 for 31041, 37000 for 37270, 45000 for
+ * 45541, 55000 for 55855, 58000 for 58485 — so the shortfall is anywhere from 41 ms to 959 ms and
+ * ending on the player's number truncates frames still running by up to that remainder. (An earlier
+ * account blamed the QuickTime {@code mvhd} timescale for not dividing the frame period evenly. That
+ * was inherited from the first fix in this area, and the nine measurements contradict it: a timescale
+ * artefact would not land on a whole second nine times running.)
+ *
+ * <p>And past that point the position does not freeze, it creeps
  * ({@code 23011, 23169, 23374, 23879} ms) — so "did not move between polls" is never true either, and
  * every change-based test re-arms the stall threshold instead of firing.
  *
@@ -40,22 +47,45 @@ package com.aphex3k.eo1;
  * {@code 55756, 55049, 55023, 56011} — it steps <em>backwards</em> by 707 ms, then 26 ms, then
  * forward again. The first two readings satisfy {@link Tail#CREEPING} (a negative delta is below any
  * positive threshold) but both sit <em>below</em> the demanded 55855, so nothing restarted until the
- * fourth reading happened to drift past it: about 5.9 s during which the wall held its last decoded
- * frame, then a hard cut to frame 0. Roughly two thirds of that hold is this rule asking the file's
- * length of a position that had stopped advancing forward at all.
+ * fourth reading happened to drift past it: about 5.9 s of wall during which the position advanced
+ * 255 ms in total, then a hard cut to frame 0. Two of those three polls were spent below the file's
+ * length, which is what this rule asks for.
+ *
+ * <p><b>What that interval was is not known, and the earlier wording here overstated it.</b> "The wall
+ * held its last decoded frame" was inferred from position readings; no presentation data exists for
+ * that clip — it predates the frame-gap instrument. The instrument has since recorded 345 ms as its
+ * worst spacing anywhere, including on a lap whose position was bit-identical between polls, so it
+ * counts buffers reaching a draw pass rather than changes of picture and cannot settle the question in
+ * either direction. What is measured is a stall of the media timeline; whether the panel went dark with
+ * it is an open question, and the branch has to be justified without leaning on it.
  *
  * <p>{@link Tail#REWOUNDED} is the missing test: a reading at or past the player's own duration that is
- * lower than the reading before it has no forward content left to show, and waiting for the file's
- * rounding error of tail on the wall is not a trade worth making. The boundary in that case is the
- * player's duration, which is what the decision reports so the caller's log line names the end it
- * actually acted on.
+ * <em>lower</em> than the reading before it. Such a position is not advancing toward the file's length,
+ * so waiting for it buys polls rather than content. The boundary in that case is the player's duration,
+ * which is what the decision reports so the caller's log line names the end it actually acted on.
  *
- * <p>The cost is honest and bounded: a clip whose tail genuinely oscillates backwards while still
- * between the player's duration and the file's length loses that remainder — under a second on the one
- * series this is known from, since the gap is by construction the container's rounding error. What
- * would falsify it is a clip whose {@code mdhd} length is <em>shorter</em> than what the player
- * reports, the mirror of the case above; {@code positionMs >= reportedDurationMs} is what keeps that
- * hypothetical from truncating, and nothing on hardware has shown one.
+ * <p>The cost is bounded by construction and now measured. The branch is reachable only where
+ * {@code fileMs > reportedDurationMs} and the position sits between the two, so the most it can
+ * withhold is the sub-second remainder the player floors away — the design series loses 806 ms. Across
+ * 22 laps of a {@code player=37000 file=37270} clip on live hardware it fired on 4, cutting 150, 150,
+ * 157 and 266 ms (723 ms total, every one inside that 270 ms band). The sibling {@link Tail#PARKED}
+ * branch has always cut up to 855 ms on the same fleet, so this is not a new kind of loss.
+ *
+ * <p>The gain is the part still owed. On that clip, laps ending {@code REWOUNDED} averaged 40.75 s
+ * against 40.56 s for laps ending {@code CREEPING} — no shortening, and of the wrong sign — because
+ * both thresholds sit inside one 2 s poll, so the same poll qualifies either way and only the printed
+ * word changes. The benefit exists only for tails like the 55855 above, where the position hovers
+ * <em>below</em> the file's length for several polls and {@code CREEPING}'s gate can never be met;
+ * replaying that recorded series through this rule restarts it two polls (~4 s) sooner, which is a
+ * replay, not an observation. What would settle it is one lap of that 55855 ms clip on a build
+ * carrying this rule, reading the {@code rewound} line's {@code gap=} field: about 6000 ms means the
+ * hold is real and the truncation is priced fairly, about 300 ms means this branch is a latency bound
+ * on a stalled media clock and should never be described as a fix for a visible freeze.
+ *
+ * <p>The domain claim above holds unconditionally only because the test requires
+ * {@code sincePreviousMs > 0}: a <em>backward</em> clock step (these frames run no time sync —
+ * {@code docs/TRUST.md} gate 4) would zero that interval, silence {@code CREEPING}, and let
+ * {@code REWOUNDED} fire at a position past the file's length, outside the band that bounds its cost.
  *
  * <p><b>Do not "fix" {@link Tail#CREEPING} by requiring a non-negative delta.</b> The unqualified
  * {@code <} is load-bearing in the opposite direction from the one it looks like, and
@@ -217,7 +247,11 @@ public final class VideoLoopSeamRule {
                 && previousPositionMs - (long) reportedDurationMs <= END_SLACK_MS
                 && positionMs >= reportedDurationMs
                 && positionMs - (long) reportedDurationMs <= END_SLACK_MS
-                && positionMs < previousPositionMs) {
+                && positionMs < previousPositionMs
+                // Without a real elapsed interval, "lower than before" is a statement about the clock,
+                // not the media: a backward step kills CREEPING and would leave this test as the only
+                // thing firing, at positions the cost bound above does not cover.
+                && sincePreviousMs > 0) {
             return new Decision(Tail.REWOUNDED, reportedDurationMs);
         }
 

@@ -12,10 +12,20 @@ package com.aphex3k.eo1;
  * ever sees. Meanwhile the media clock can keep advancing at exactly 1.00x across the whole hold, so
  * every other field in the process says the clip is healthy while the wall is frozen.
  *
- * <p>Spacing is the missing question, and it is answerable for one subtraction per frame: a player
- * that presents frames unevenly shows it directly, and a player parked at end of file shows it as one
- * gap the length of the hold. Unlike the media clock this cannot be lied about by a stagefright timer
- * thread, because it is stamped where pixels actually reach the surface.
+ * <p>Spacing is the missing question, and it is answerable for one subtraction per frame — but it
+ * answers a <em>narrower</em> question than it first appears to, and the sentence that used to be here
+ * claimed more than the instrument can support. It said a player parked at end of file would show "one
+ * gap the length of the hold". It does not: the first hardware run of this class recorded a
+ * bit-identical parked position with a last gap of 78 ms and a maximum of 241 ms. The reason is what the
+ * stamp actually marks — {@code onSurfaceTextureUpdated} fires when a producer queues a buffer that a
+ * draw pass consumes, so it counts <em>buffer arrivals, not changes of picture</em>. A decoder at end
+ * of stream that re-queues the same frame reads as smooth, and because {@code mUpdateLayer} is a
+ * boolean rather than a counter, several real frames can collapse into one gap.
+ *
+ * <p>What it does establish, and it is still worth having: whether the surface was receiving anything at
+ * all, independent of any clock the player controls. A wide-open gap is positive evidence of a stall.
+ * A small one is not proof of motion — so never read a low {@code frameGapMaxMs} as "the picture was
+ * changing", and never let it clear a suspicion the media clock raised.
  *
  * <p>High-water rather than a window, deliberately: a clip is one data source, and "has this clip ever
  * held a frame" is the question an operator asks once, at any moment in a sixty second lap. A rolling
