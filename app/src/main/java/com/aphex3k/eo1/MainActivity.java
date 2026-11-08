@@ -2449,13 +2449,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // was bit-identical between polls, because it counts buffers reaching a draw pass rather than
         // changes of picture.
         if (seam.restarts()) {
+            // Read once each, and print the sentinel as a word: `gap=-1/-1` in an operator's grep looks
+            // like a measurement, while -1 means "no record" — which is every TsPlayer lap and any clip
+            // under two frames. Matches the durable line's `maxFrameGap=none`.
+            int lastGapMs = videoPlayer.getLastFrameGapMs();
+            int maxGapMs = videoPlayer.getMaxFrameGapMs();
             debugInformationProvided(new DebugInformation("video",
                     "loop restart pos=" + position + " end=" + seam.boundaryMs
                             + " (" + seam.reasonWord()
                             + " player=" + reportedMs + " file=" + fileMs + ")"
                             + " rate=" + describePlaybackRate()
-                            + " gap=" + videoPlayer.getLastFrameGapMs() + "/"
-                            + videoPlayer.getMaxFrameGapMs()));
+                            + " gap=" + (lastGapMs < 0 ? "none" : Integer.toString(lastGapMs))
+                            + "/" + (maxGapMs < 0 ? "none" : Integer.toString(maxGapMs))));
             noteMediaManualLoopRestart();
             try {
                 videoPlayer.seekTo(0);
