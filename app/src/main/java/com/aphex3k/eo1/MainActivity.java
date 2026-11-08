@@ -3936,15 +3936,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         long percent = contentLength > 0L ? Math.round((100.0 * bytesRead) / contentLength) : 0L;
 
         long progressNowMs = System.currentTimeMillis();
-        if (done) {
-            downloadStartedAtMs = 0L;
-            downloadProgressAtMs = 0L;
-        } else {
+        if (!done) {
             if (downloadStartedAtMs == 0L) {
                 downloadStartedAtMs = progressNowMs;
             }
             downloadProgressAtMs = progressNowMs;
         }
+        // `done` deliberately clears nothing here. Byte events stamp; the end of the window belongs to
+        // downloadCycleClosed, which is the one place that knows whether another download is counted.
+        // Zeroing the clocks on a finish used to erase the age of a transfer still in progress, and a
+        // finish is not that transfer's end.
 
         // OkHttp invokes this on every read() of the response body, so logging every
         // event floods logcat with repeated "download: 9%" lines. Log the content-length
@@ -3994,7 +3995,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // running and re-anchor its age to now. Standing aside strands nothing, because the close
         // that finds the count still at zero is whichever download ends last.
         runOnUiThread(() -> {
-            if (!downloadCycleEndsTheBar(downloadCountedInFlight())) {
+            if (downloadBarAction(DownloadBarSignal.CYCLE_CLOSED, 0, downloadCountedInFlight())
+                    == DownloadBarAction.UNCHANGED) {
                 return;
             }
             downloadStartedAtMs = 0L;
@@ -4007,29 +4009,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         });
     }
 
-    /**
-     * Whether a close ends the download window. A close is an edge, not a verdict: if another
-     * transfer is already counted, this one is not the last, and the bar belongs to it.
-     */
-    static boolean downloadCycleEndsTheBar(boolean inFlight) {
-        return !inFlight;
-    }
-
     /** Puts the bar into the state one progress event describes. UI thread. */
     private void applyDownloadBar(long bytesRead, long contentLength, boolean done) {
         int permille = downloadBarPermille(bytesRead, contentLength);
-        // Asked here, on the UI thread, rather than only on the thread that read the bytes. A
-        // prefetch body passes MediaManager's early-out whenever some other download is counted, and
-        // its post can then land behind the close that follows that download's failure — re-showing a
-        // bar with nothing left to hide it, since a prefetch neither raises the count nor lowers it.
-        // Testing at the moment of drawing makes the order of the two posts irrelevant.
-        if (!downloadBarVisible(done, permille, downloadCountedInFlight())) {
-            hideDownloadBar();
-            return;
+        switch (downloadBarAction(done ? DownloadBarSignal.TRANSFER_FINISHED
+                                       : DownloadBarSignal.TRANSFER_PROGRESS,
+                                 permille, downloadCountedInFlight())) {
+            case SHOW:
+                progressIndicator.setMax(DOWNLOAD_BAR_MAX);
+                progressIndicator.setProgressCompat(permille, true);
+                progressIndicator.setVisibility(View.VISIBLE);
+                break;
+            case HIDE:
+                hideDownloadBar();
+                break;
+            default:
+                break;
         }
-        progressIndicator.setMax(DOWNLOAD_BAR_MAX);
-        progressIndicator.setProgressCompat(permille, true);
-        progressIndicator.setVisibility(View.VISIBLE);
     }
 
     /** Whether a counted download exists at this instant. UI thread. */
@@ -4038,30 +4034,54 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         return manager != null && manager.isDownloadInFlight();
     }
 
+    /** The three things the bar can be asked about. */
+    enum DownloadBarSignal {
+        /** A read delivered bytes; {@code permille} says how far along they got. */
+        TRANSFER_PROGRESS,
+        /** A read reached the end of its body. */
+        TRANSFER_FINISHED,
+        /** No counted download is running — the edge MediaManager retires the count on. */
+        CYCLE_CLOSED
+    }
+
+    /** What the bar should do about one signal. */
+    enum DownloadBarAction { SHOW, HIDE, UNCHANGED }
+
     /**
-     * The bar's visibility rule, as a table rather than as ordering: a progress event shows the bar
-     * only if the transfer it describes is still up, its end has not arrived, and it carries a
-     * fraction at all.
+     * The download bar's whole rule, as a table rather than as an ordering.
+     *
+     * <p>Two facts decide it. Whether a counted download exists <em>now</em>, asked at the moment of
+     * drawing, is what makes an event's arrival order irrelevant instead of contested. And whether the
+     * event carries a fraction: an event with none has nothing to draw, and leaving the previous
+     * transfer's fill standing is the lesser truth — a bar frozen at someone else's 60% while this one
+     * streams is exactly what an operator reports as a stalled indicator.
+     *
+     * <p>A finish or a close that finds a download counted says nothing about it, so it changes
+     * nothing: that transfer's own events will speak, and whichever close lands with the count back at
+     * zero is the one that ends the window.
      */
-    static boolean downloadBarVisible(boolean done, int permille, boolean inFlight) {
-        return inFlight && !done && permille >= 0;
+    static DownloadBarAction downloadBarAction(DownloadBarSignal signal, int permille,
+                                               boolean inFlight) {
+        if (!inFlight) {
+            return DownloadBarAction.HIDE;
+        }
+        if (signal == DownloadBarSignal.TRANSFER_PROGRESS) {
+            return permille >= 0 ? DownloadBarAction.SHOW : DownloadBarAction.HIDE;
+        }
+        return DownloadBarAction.UNCHANGED;
     }
 
     /**
-     * The only place the bar is hidden, and it refuses while a counted download is up. Putting the
-     * test here rather than at each caller is what makes the ordering uninteresting: a {@code done}
-     * belonging to a transfer that already ended, or a close that another thread's increment beat
-     * here, cannot blank a download that is genuinely running. Nothing is stranded by the refusal —
-     * every download that raises the count retires it in a {@code finally}, so a refused hide is
-     * always followed by the one that arrives with the count at zero.
+     * The only place the bar is hidden. It decides nothing: whether a hide is warranted belongs to
+     * {@link #downloadBarAction}, so that a transfer with no fraction to show can clear the screen
+     * while a counted download is running, and a finish or close that belongs to some other transfer
+     * cannot. An earlier revision put the count test in here, and that is how a chunked download
+     * inherited the previous file's frozen fill.
      *
      * <p>Emptied before it is hidden so a later transfer starts from nothing rather than animating
      * down from wherever the last one stopped.
      */
     private void hideDownloadBar() {
-        if (downloadCountedInFlight()) {
-            return;
-        }
         progressIndicator.setProgressCompat(0, false);
         progressIndicator.setVisibility(View.INVISIBLE);
     }

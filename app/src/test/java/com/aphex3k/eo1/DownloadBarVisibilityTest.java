@@ -2,69 +2,121 @@ package com.aphex3k.eo1;
 
 import org.junit.Test;
 
-import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertEquals;
+
+import com.aphex3k.eo1.MainActivity.DownloadBarAction;
+import com.aphex3k.eo1.MainActivity.DownloadBarSignal;
 
 /**
- * When a download-progress event is allowed to leave the bar on screen.
+ * Every cell of the download bar's rule, plus the three interleavings that produced it.
  *
- * <p>The race this pins: the progress callback is bound to the HTTP client, not to the acquisition,
- * so a background prefetch's bytes reach {@link MediaManager#clientProgressUpdates} and pass its
- * in-flight early-out whenever a *counted* download happens to be running. That prefetch post can
- * then land behind the close raised when the counted download fails — and since a prefetch never
- * raises the count, it never lowers it either, so nothing else would ever hide the bar again. The
- * answer is not to order the two posts but to ask the question at the moment of drawing: is a
- * counted download up right now. Either order then ends with the bar hidden.
+ * <p>The bar is one view shared by whichever transfer happens to be streaming, so each of these
+ * verdicts exists because of a concrete ordering someone found:
+ * <ul>
+ *   <li>a prefetch's bytes reaching the UI thread after the counted download that let them through
+ *       the gate failed — which re-showed a bar nothing would ever hide again;</li>
+ *   <li>a close arriving after another thread started a new download — which blanked a transfer that
+ *       was genuinely running;</li>
+ *   <li>and the guard added for the second case hiding behind itself, so a chunked download left the
+ *       previous file's fill frozen on screen, which is the stalled bar all over again.</li>
+ * </ul>
+ *
+ * <p>What a JVM test cannot reach is that the callers consult this table at all: all three call sites
+ * run on the UI thread through {@code runOnUiThread}, so that half is held by structure rather than by
+ * a case here — the same caveat the TsPlayer gate documents.
  */
 public class DownloadBarVisibilityTest {
 
-    /** An event carrying a real fraction from a transfer that is still counted. */
+    // --- a progress event, which is the only one that can legitimately fill the bar --------------
+
     @Test
-    public void aProgressEventFromACountedDownloadShowsTheBar() {
-        assertTrue(MainActivity.downloadBarVisible(false, 500, true));
+    public void bytesFromACountedDownloadWithAKnownLengthShowTheirFraction() {
+        assertEquals(DownloadBarAction.SHOW, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_PROGRESS, 620, true));
+    }
+
+    /** The first race: the event passed the socket-thread gate, but the cycle closed behind it. */
+    @Test
+    public void bytesFromADownloadThatIsNoLongerCountedCannotReopenTheBar() {
+        assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_PROGRESS, 620, false));
     }
 
     /**
-     * The interleaving itself. Same event, but the cycle closed while it was in the queue: showing it
-     * would be a bar with no owner, which is the stalled indicator this PR exists to remove.
+     * The second race's counterpart. A chunked transfer has no denominator, so there is nothing to
+     * draw — and the fill already on the bar belongs to a transfer that has ended. Showing nothing is
+     * less false than showing someone else's progress.
      */
     @Test
-    public void anEventThatLandedAfterTheCycleClosedCannotReopenTheBar() {
-        assertFalse(MainActivity.downloadBarVisible(false, 500, false));
+    public void bytesWithNoFractionClearThePreviousTransfersFillRatherThanKeepIt() {
+        assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_PROGRESS, -1, true));
     }
 
     @Test
-    public void theLastEventOfATransferNeverLeavesTheBarUp() {
-        assertFalse(MainActivity.downloadBarVisible(true, 1000, true));
-        assertFalse(MainActivity.downloadBarVisible(true, 1000, false));
+    public void bytesWithNoFractionAndNothingCountedHideTheBar() {
+        assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_PROGRESS, -1, false));
     }
 
-    /** An undeclared length has no fraction to draw, whatever else is true. */
+    // --- terminal events, which speak for a transfer and not for the one on screen ---------------
+
+    /** A's end-of-body must not blank B, which is counted and streaming. */
     @Test
-    public void anEventWithNoFractionHasNothingToShow() {
-        assertFalse(MainActivity.downloadBarVisible(false, -1, true));
+    public void aFinishedTransferCannotBlankOneStillRunning() {
+        assertEquals(DownloadBarAction.UNCHANGED, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_FINISHED, 1000, true));
     }
 
-    /**
-     * The mirror of the race above, in the other direction. Download A's close is raised, and B is
-     * started and counted before that close reaches the UI thread. The close must stand aside: hiding
-     * there blanks a transfer that is genuinely running, and zeroing the clocks would re-anchor B's
-     * age to now and make {@code downloadInFlightMs()} understate it.
-     */
+    /** With nothing else up, the finish is the end of the window. */
+    @Test
+    public void aFinishedTransferWithNothingElseCountedHidesTheBar() {
+        assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_FINISHED, 1000, false));
+    }
+
+    /** A close is an edge, not a verdict: if another transfer is counted, this is not the last. */
     @Test
     public void aCloseThatFindsANewerDownloadCountedStandsAside() {
-        assertFalse(MainActivity.downloadCycleEndsTheBar(true));
+        assertEquals(DownloadBarAction.UNCHANGED, MainActivity.downloadBarAction(
+                DownloadBarSignal.CYCLE_CLOSED, 0, true));
     }
 
+    @Test
+    public void theLastCloseEndsTheWindow() {
+        assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
+                DownloadBarSignal.CYCLE_CLOSED, 0, false));
+    }
+
+    // --- the orderings, walked ------------------------------------------------------------------
+
     /**
-     * Standing aside cannot strand the bar, because a close only declines when a download is counted,
-     * and that download raises a close of its own when it ends. Walked as a sequence: A's close
-     * stands aside, B's bytes show the bar, B's close — with nothing else up — is the one that ends it.
+     * Standing aside cannot strand the bar. A close only declines while a download is counted, and
+     * every counted download retires the count in its {@code finally}, so the close that finds the
+     * count at zero is whichever download ends last.
      */
     @Test
     public void aStoodAsideCloseIsFollowedByTheLastDownloadsOwn() {
-        assertFalse(MainActivity.downloadCycleEndsTheBar(true));
-        assertTrue(MainActivity.downloadBarVisible(false, 400, true));
-        assertTrue(MainActivity.downloadCycleEndsTheBar(false));
+        assertEquals(DownloadBarAction.UNCHANGED, MainActivity.downloadBarAction(
+                DownloadBarSignal.CYCLE_CLOSED, 0, true));
+        assertEquals(DownloadBarAction.SHOW, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_PROGRESS, 400, true));
+        assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
+                DownloadBarSignal.CYCLE_CLOSED, 0, false));
+    }
+
+    /**
+     * The case the guard for the previous test would otherwise allow: A shows 62%, its close stands
+     * aside because B started in the gap, and B has no {@code Content-Length}. A's fill must not
+     * survive B's first event.
+     */
+    @Test
+    public void aChunkedDownloadFollowingAFinishedKnownLengthOneDoesNotKeepItsFill() {
+        assertEquals(DownloadBarAction.SHOW, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_PROGRESS, 620, true));
+        assertEquals(DownloadBarAction.UNCHANGED, MainActivity.downloadBarAction(
+                DownloadBarSignal.CYCLE_CLOSED, 0, true));
+        assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_PROGRESS, -1, true));
     }
 }
