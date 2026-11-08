@@ -416,6 +416,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String currentTrackId = null;
     private Runnable videoWatchdogRunnable;
     private String videoWatchdogAssetId = "";
+    /** The clip this watchdog was armed for, whose file length the loop seam needs for its *whole* life. *     * Reading it from the live attempt instead lost the duration the moment another display path became *     * the attempt — a render-silent asset chosen mid-playback, or a page that took the panel. */
+    @Nullable
+    private volatile PanelDisplay videoWatchdogRecord;
     private File videoWatchdogFile;
     private WeakReference<MainActivity> videoWatchdogActivityReference;
     /** Which rung of the display ladder the armed watchdog is watching; see {@link DisplayStage}. */
@@ -1592,6 +1595,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView.setVisibility(View.INVISIBLE);
         // Also stops the page's JavaScript and repaints for the whole quiet window.
         hideWebView();
+        // Nothing is visible now, so nothing should be reported: a dark frame in quiet hours used to answer
+        // /state with onScreen:true, its clip's measurements and its routing row, because hiding the
+        // surfaces was the one panel change that never went through the derivation. The surfaces keep their
+        // own identities (provenPhoto, videoCompositing, webProvenRecord) so waking restores the truth.
+        reprovePanel();
     }
 
     /**
@@ -1610,6 +1618,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // hideWebView() paused the page; making it visible again would not unfreeze it.
             webView.onResume();
         }
+        // Whatever was uncovered is visible again, so the panel is re-derived rather than remembered: each
+        // surface kept its own identity while the screen was dark, and this is the half of turnScreenOff's
+        // honesty that makes the dark interval cost nothing in reporting accuracy.
+        reprovePanel();
         // A video whose first frame was still owed when quiet hours began: its surface was hidden
         // along with everything else, so the deadline resumes only once the panel can paint again.
         resumeVideoPaintPollIfPending();
@@ -2467,17 +2479,28 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // is displayed. And the load in flight may no longer be this one, since the client object is
             // reused across pages.
             PanelDisplay loading = webLoadRecord;
-            if (view.getVisibility() != View.VISIBLE || loading == null
-                    || !Objects.equals(loading.pathOrUrl, url)) {
-                Log.i(TAG, "onPageFinished: " + url + " is not the visible load; proving nothing");
+            if (loading == null || !Objects.equals(loading.pathOrUrl, url)) {
+                Log.i(TAG, "onPageFinished: " + url + " is not the load in flight; proving nothing");
                 return;
             }
+            // Two separate claims, and they used to be one. "This page's content is now in the view" is true
+            // whether or not anyone can see the view — it is what a later showWebView() will expose — so it is
+            // recorded unconditionally. "This page is on the panel" is only true while the browser is the
+            // topmost visible surface, and promoting a hidden one would overwrite the photograph that
+            // replaced it.
+            webProvenRecord = loading;
+            // The load itself succeeded, seen or not: a page that rendered while its browser was covered has
+            // still met the watchdog's deadline, and letting the timeout fire afterwards would abandon a
+            // perfectly good page over a visibility accident.
             webLoadProducedPaint = true;
             cancelWebLoadWatchdog();
+            if (view.getVisibility() != View.VISIBLE) {
+                Log.i(TAG, "onPageFinished: " + url + " rendered while the browser is hidden; retained only");
+                return;
+            }
             // Proves <em>this page</em>, not "the current attempt": a page that finishes loading while a
             // photograph is being fetched would otherwise adopt the photograph on the strength of a callback
-            // about something else. Null once the page has been given up on, which is what makes a late
-            // callback prove nothing at all.
+            // about something else.
             noteDisplayProven(loading);
             Log.i(TAG, "web: rendered " + url);
             debugInformationProvided(new DebugInformation("web", "rendered " + url, activeWebAssetId));
@@ -2569,9 +2592,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         webView.onPause();
         webView.setVisibility(View.INVISIBLE);
-        // Nothing of the page is reaching the screen any more, so no report may name it. Leaving this set
-        // would make a re-derive choose a stopped page over the surface actually uncovered.
-        webProvenRecord = null;
+        // Deliberately does NOT clear webProvenRecord. Hiding and pausing a WebView leaves its rendered page
+        // in the view — that is what onPause means here — so showing it again later exposes that page, not a
+        // blank rectangle. Dropping the identity here made a web→photo→web rotation report "nothing on the
+        // panel" for the whole of the second page's load, on a wall that was displaying the first one.
+        // Nothing covered-by-this-surface risk is introduced: reproveTarget() consults this field only when
+        // the browser is the topmost <em>visible</em> surface, which is the check that keeps a hidden page
+        // from outranking a photograph.
     }
 
     private void startWebLoadWatchdog() {
@@ -2786,6 +2813,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             videoWatchdogRunnable = null;
         }
         videoWatchdogAssetId = "";
+        videoWatchdogRecord = null;
         videoWatchdogFile = null;
         videoWatchdogActivityReference = null;
         videoWatchdogLastPosition = -1;
@@ -2818,6 +2846,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             debugInformationProvided(new DebugInformation("video", "watchdog skipped (TsPlayer)"));
             return;
         }
+        // The clip this player was handed — the same authority the panel derivation uses — falling back to
+        // the attempt only if ownership was already cleared by an interleaved promotion.
+        PanelDisplay playing = videoCompositing != null ? videoCompositing : attempt;
+        videoWatchdogRecord = playing != null && playing.showsVideo() && assetId.equals(playing.assetKey)
+                ? playing : null;
         videoWatchdogAssetId = assetId;
         videoWatchdogFile = file;
         videoWatchdogActivityReference = activityReference;
@@ -2898,10 +2931,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // The watched clip's own length, from the record adopted when this attempt started. The guard
         // above proves the watched asset is the active one, so this is the same file the watchdog was
         // armed for — and never the previous clip's, which is what reading a stored field risked.
-        // From the attempt, not the panel: a clip being watched may not have reached the wall yet (the
-        // platform player keeps the photograph up until a frame is proven), and the seam decision needs the
-        // length of the file being played rather than of whatever is still showing.
-        PanelDisplay watched = attempt;
+        // The record this watchdog was armed for, and nothing else. Reading the attempt would be wrong in
+        // both directions: a clip being watched may not have reached the wall yet, and a render-silent asset
+        // chosen while this clip is still playing replaces the attempt with an image record — which reads
+        // back as "no duration known" (-1) and lets a creeping position past the player's shortened 23,000 ms
+        // trigger a restart before the file's remaining frames (23,621 ms) have finished.
+        PanelDisplay watched = videoWatchdogRecord;
         long fileMs = watched != null && watched.clip != null ? watched.clip.fileDurationMs : -1L;
         int cycleEndMs = parked ? reportedMs : (int) Math.max((long) reportedMs, fileMs);
         // A position absurdly far past the end is a bad reading rather than a finished clip: a
@@ -4666,12 +4701,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     // one as what is on screen — permanently, because if this was the only asset in the
                     // pool, every later tick fails the same way and no display method ever runs again.
                     // It is also the one state that must not be written as an image with an empty path:
-                    // a cleared panel claiming a photograph is the same false present tense as the bug
-                    // this record was built to remove.
-                    PanelDisplay emptied = PanelDisplay.nothing(panelGeneration.incrementAndGet(),
-                            System.currentTimeMillis());
-                    setPanelAttempt(emptied);
-                    panelNowProven(emptied);
+                    // a cleared panel claiming a photograph is the same false present tense as the bug this
+                    // record was built to remove. But "blank" is only the answer when the photo plane was
+                    // what the viewer was looking at — forgetting a photograph that was loading over a
+                    // displayed web page leaves the page on screen, so the remaining panel is derived from
+                    // the views rather than asserted here.
+                    reprovePanel();
                 }
                 if (mediaManager != null) {
                     mediaManager.showNextImage(MainActivity.this);
