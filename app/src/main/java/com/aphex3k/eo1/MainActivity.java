@@ -1984,9 +1984,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 System.currentTimeMillis());
         // This attempt is over — what it was putting up is up. Leaving it set would have media.attempt sit
         // beside media.screen describing the same display indefinitely.
-        if (attempt == proven) {
-            attempt = null;
-        }
+        // `attempt` is deliberately <em>left alone</em>. Clearing it at promotion — as an earlier revision
+        // did — made every consumer that asks "what is this clip's file duration?" or "which bytes were
+        // these measured from?" answer nothing the moment a frame appeared, which is exactly when those
+        // questions start being asked: the loop seam polls after promotion, and a TsPlayer→MediaPlayer
+        // handover happens after promotion. With records no longer copied, attempt and panel are the same
+        // object once a display is adopted, so media.attempt still disappears at rest — by equality, not by
+        // being erased.
         // Ownership of a surface ends when another surface is proven on top of it, so a page abandoned
         // mid-load cannot prove the panel afterwards and a player released by an image handoff cannot be
         // quoted as this clip's telemetry.
@@ -2024,10 +2028,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     @Nullable
     private PanelDisplay carriedDisplay(String assetId) {
-        PanelDisplay pending = attempt;
-        if (pending != null && pending.showsVideo() && assetId != null
-                && assetId.equals(pending.assetKey)) {
-            return pending;
+        for (PanelDisplay candidate : new PanelDisplay[]{attempt, videoCompositing}) {
+            if (candidate != null && candidate.showsVideo() && assetId != null
+                    && assetId.equals(candidate.assetKey)) {
+                return candidate;
+            }
         }
         return null;
     }
@@ -2062,9 +2067,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // No video is active while an image shows; a stale video callback (incl. one from a
             // null-assetId fallback stream) must not match activeVideoAssetId.
             activeVideoAssetId = "";
-            // Says what the panel now holds, and with it retires every per-clip fact the last video
-            // was measured at. This line replaces the old "clear the active video path and stage"
-            // pair, which fixed that bug for two fields and left the rest of the report alone.
             // The attempt, not the panel: Glide leaves the previous bitmap visible until onResourceReady
             // promotes this, and hides the browser view there too. Claiming the photograph here would
             // report an image across a web→image transition while the page was still on the wall — and if
@@ -2072,6 +2074,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             final PanelDisplay mine = PanelDisplay.image(assetId, file.getAbsolutePath(),
                     panelGeneration.incrementAndGet(), System.currentTimeMillis());
             setPanelAttempt(mine);
+            final boolean videoWasOnTheWall = panel() != null && panel().showsVideo();
 
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
@@ -2080,6 +2083,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 // pipeline before the next asset may run on TsPlayer.
                 videoPlayer.release();
                 videoPlayer.setVisibility(View.INVISIBLE);
+                // Hiding that surface <em>is</em> a change to the wall: the photo plane sits under it, so
+                // from this line onward the screen shows a photograph while the panel record still names the
+                // clip just torn down — and `videoCompositing` still points at a released player, so the
+                // staleness check that exists to stop exactly this reported the clip as live and readable.
+                // Proving what was uncovered is the honest half of "the attempt is not the panel"; the two
+                // web/image cases where nothing is uncovered are handled by their own teardowns, which is
+                // why this is conditional rather than unconditional here.
+                if (videoWasOnTheWall) {
+                    uncoverPhotoPlane();
+                }
                 if (!MainActivity.this.isDestroyed()) {
                     Glide.with(this).clear(imageView);
 
@@ -4289,20 +4302,40 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // and an image rung that fails after a displayed page reached exactly that state, reporting
         // image/none for a whole interval while the page stayed visible. hideWebView() is idempotent, so
         // callers that already did it lose nothing.
+        PanelDisplay target = photoPlaneNow();
+        setPanelAttempt(target);
         hideWebView();
         imageView.setVisibility(View.VISIBLE);
         lastVisibleView = imageView;
-        // What is uncovered is the <em>photograph</em>, and its identity is the one that loaded — never the
-        // asset whose failure made this run. A photo A sitting under a failed video B used to be reported as
-        // "screen: B, path: (unknown)", which mislabels the visible asset and simultaneously hides A's own
-        // diagnostics behind the wrong subject. And when the view holds no drawable at all, the honest answer
-        // is that nothing is on the panel rather than that an unnamed photo is.
-        PanelDisplay loaded = provenPhoto;
-        PanelDisplay target = (loaded == null || imageView.getDrawable() == null)
-                ? PanelDisplay.nothing(panelGeneration.incrementAndGet(), System.currentTimeMillis())
-                : loaded;
-        setPanelAttempt(target);
         panelNowProven(target);
+    }
+
+    /**
+     * Makes the photo plane the panel's content <em>without</em> touching the attempt.
+     *
+     * <p>For the case where a display path tears a surface down as its first step — {@code displayPicture}
+     * releasing the outgoing player — where the next asset is already in flight and must stay the attempt.
+     */
+    private void uncoverPhotoPlane() {
+        PanelDisplay target = photoPlaneNow();
+        hideWebView();
+        imageView.setVisibility(View.VISIBLE);
+        lastVisibleView = imageView;
+        panelNowProven(target);
+    }
+
+    /**
+     * What the photo plane actually holds: the photograph that last <em>loaded</em>, never the asset whose
+     * failure made this run — a photo A under a failed video B used to be reported as "screen: B", which
+     * mislabelled the visible asset and hid A's own diagnostics behind the wrong subject. An image view with
+     * no drawable is an empty panel, not an unnamed photograph.
+     */
+    private PanelDisplay photoPlaneNow() {
+        PanelDisplay loaded = provenPhoto;
+        if (loaded == null || imageView.getDrawable() == null) {
+            return PanelDisplay.nothing(panelGeneration.incrementAndGet(), System.currentTimeMillis());
+        }
+        return loaded;
     }
 
     @Override
@@ -4767,9 +4800,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (BuildConfig.DEBUG) {
             // The same filtered view the panel renders, so /state can never print a row about an asset the
             // wall no longer holds while the overlay correctly omits it. One filter, two surfaces.
+            // Filtered by the <em>snapshot</em> every other panel-scoped field in this response was built
+            // from, not by re-reading the field: a handoff landing during the update/network/telemetry reads
+            // above would otherwise emit a document whose video.showing describes the outgoing clip while
+            // debug["on screen"] describes the incoming photograph — one response, two panels.
             Map<String, String> printable;
             synchronized (debugInformation) {
-                printable = DebugBoard.visible(debugInformation, panel());
+                printable = DebugBoard.visible(debugInformation, shown);
             }
             if (!printable.isEmpty()) {
                 JsonObject debug = new JsonObject();
