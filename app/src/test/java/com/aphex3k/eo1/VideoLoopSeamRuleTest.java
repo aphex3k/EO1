@@ -20,10 +20,10 @@ import org.junit.Test;
  * {@code MainActivity.measurePlaybackRate}'s 5 s window, which re-anchors on every backwards step, so it
  * never spanned the stall it appears to describe. <b>The stalled media timeline is the claim this file
  * can support; "the wall held a frozen frame" is not.</b> No presentation data exists for that clip — it
- * predates the frame-gap instrument, and that instrument counts buffers, not picture changes.
- * instrument — and that one lap is one lap, not every lap. See {@link VideoLoopSeamRule}'s note on what
- * remains inferred. Every number below is read off that dump or off the series {@code 4386f8b}
- * recorded in its own message.
+ * predates the frame-gap instrument, and that counter sees buffers rather than picture changes. The
+ * sample is also one lap of one clip, so "every lap" would overstate it. See
+ * {@link VideoLoopSeamRule}'s note on what remains inferred. Every number below is read off that dump or
+ * off the series {@code 4386f8b} recorded in its own message.
  *
  * <p>The pair of tests that matters most is the pair that pulls in opposite directions: a tail that
  * steps backwards is finished and must restart ({@link #heldTailAtThePlayerEndRestartsTwoPollsEarlier}),
