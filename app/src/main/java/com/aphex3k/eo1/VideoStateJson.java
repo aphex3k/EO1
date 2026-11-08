@@ -66,6 +66,17 @@ public final class VideoStateJson {
      * panel holds a photograph. A test asserts the refusal by supplying a probe that throws.
      */
     public interface PlayerProbe {
+        /**
+         * Whether the panel stopped being this document's subject while it was being built.
+         *
+         * <p>{@code /state} is assembled on a web worker while the UI thread keeps rotating, so the record
+         * is a snapshot and the player is not. Without this, a handoff landing between the two can print the
+         * departed clip's path and engine beside the new player's position — or read a player the UI thread
+         * has just released. A builder that finds itself stale reports <em>nothing</em> from the player: an
+         * absent field is a fact, a mixed one is a lie.
+         */
+        boolean stale();
+
         /** Whether the compositing engine can report a composited frame at all. */
         boolean paintSignal();
 
@@ -191,6 +202,14 @@ public final class VideoStateJson {
                 clip.codedWidth, clip.codedHeight, clip.fpsMilli));
         video.addProperty("renderSilent", probe.renderSilent(shown.assetKey));
 
+        // Everything from here down is read live, so it is emitted only while the snapshot still names the
+        // panel. The measurements above came from the record and cannot go stale; these come from a player
+        // the UI thread may have handed to another asset — or released — since the record was taken.
+        boolean live = !probe.stale();
+        if (!live) {
+            addDebugFrameFields(video, frame);
+            return video;
+        }
         // "painted" is only a claim where the engine can answer it. TsPlayer's .so offers no per-frame
         // signal, so reporting true there would be a tautology on the one field this exists to answer.
         // The answer is the one read at the top of the block, not a second call: asking twice means the

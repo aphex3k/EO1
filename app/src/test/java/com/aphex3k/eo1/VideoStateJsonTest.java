@@ -39,6 +39,11 @@ public class VideoStateJsonTest {
     private static final class NeverAskMeAboutThePlayer implements VideoStateJson.PlayerProbe {
 
         @Override
+        public boolean stale() {
+            throw new AssertionError("asked whether a panel holding no clip is stale");
+        }
+
+        @Override
         public boolean paintSignal() {
             // A property of the controller class, not of playback: safe to answer whatever is up.
             return true;
@@ -358,10 +363,39 @@ public class VideoStateJsonTest {
         assertEquals(1, photoProbe.paintSignalCalls);
     }
 
+    /**
+     * The document is assembled on a web worker while the UI thread keeps rotating. The snapshot's own
+     * measurements cannot go stale and stay; everything read live from the player is suppressed rather than
+     * paired with a clip that is no longer the one on the panel — and rather than read from a controller the
+     * UI thread may have just released.
+     */
+    @Test
+    public void aRotationMidDocumentKeepsTheSnapshotAndDropsTheLiveReads() {
+        AnsweringProbe probe = new AnsweringProbe();
+        probe.stale = true;
+        JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), probe);
+        assertTrue("the record's own measurement is not affected by a handoff", video.has("codec"));
+        assertTrue(video.has("bitRateBps"));
+        assertFalse(video.has("durationMs"));
+        assertFalse(video.has("positionMs"));
+        assertFalse(video.has("painted"));
+        assertFalse(video.has("lastFrameAgeMs"));
+        assertFalse(video.has("loopPerf"));
+        assertFalse(video.has("generation"));
+    }
+
     /** A probe that answers, for the cases where a clip really is up. */
     private static class AnsweringProbe implements VideoStateJson.PlayerProbe {
         /** How many times the builder asked. One document must ask once. */
         int paintSignalCalls;
+
+        /** Flip it to model a rotation landing mid-document. */
+        boolean stale;
+
+        @Override
+        public boolean stale() {
+            return stale;
+        }
 
         @Override
         public boolean paintSignal() {

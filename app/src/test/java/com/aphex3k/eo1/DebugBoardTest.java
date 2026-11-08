@@ -2,6 +2,7 @@ package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -11,131 +12,55 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Which lines on the on-screen debug board outlive the asset they describe.
+ * What the on-screen debug board may print, and about whom.
  *
- * <p>The board used to have no lifetime at all — no {@code remove()} or {@code clear()} existed anywhere
- * in the repository — so every key ever written stayed printed forever, and a video replaced by a
- * photograph left the clip's lines on the wall beside the photograph's. That is the report an operator
- * reads as "it is still playing that clip", on the one surface they can see from across the room.
- *
- * <p>The two rules under test are the whole policy: {@link DebugBoard#sweepRequired} says <em>when</em>
- * the board is swept (only when a different asset is adopted), and {@link DebugBoard#onAssetHandoff}
- * says <em>what</em> survives it (the frame's own lines, plus any line naming the asset arriving). Both
- * are pure functions of a map and two strings, which is the reason the rule lives in a class at all —
- * while they were inline in an {@code Activity}, no JVM test could tell "sweeps when it should" from
- * "never sweeps", and a never-sweeping variant is indistinguishable from the original bug.
+ * <p>The board used to have no lifetime at all — no {@code remove()} or {@code clear()} existed anywhere in
+ * the repository — so every key ever written stayed printed forever, and a video replaced by a photograph
+ * left the clip's lines on the wall beside the photograph's. An interim revision swept the map at each
+ * handoff; these tests are why that was replaced with attribution. A sweep is an ordering rule, and these
+ * writes do not cooperate with ordering: an acquisition verdict lands <em>before</em> the asset it names is
+ * displayed, and a backend failure from {@code tagAssetAsIncompatible} lands <em>after</em> that asset has
+ * left. One sweep cannot be right for both, so the row carries its subject and the panel decides
+ * visibility.
  */
 public class DebugBoardTest {
 
-    private static Map<String, String> board(String... keys) {
-        Map<String, String> board = new LinkedHashMap<>();
-        for (String key : keys) {
-            board.put(key, "value-of-" + key);
+    private static final String GONE = "a11ce000-dead-beef-0000-000000000001";
+    private static final String HERE = "b0b00000-live-beef-0000-000000000002";
+
+    private static Map<String, DebugBoard.Row> rows(Object... keyValueSubjectTriples) {
+        Map<String, DebugBoard.Row> board = new LinkedHashMap<>();
+        for (int i = 0; i < keyValueSubjectTriples.length; i += 3) {
+            String key = (String) keyValueSubjectTriples[i];
+            String value = (String) keyValueSubjectTriples[i + 1];
+            String subject = (String) keyValueSubjectTriples[i + 2];
+            board.put(key, new DebugBoard.Row(value, subject));
         }
         return board;
     }
 
-    private static PanelDisplay image(String key) {
+    private static PanelDisplay photo(String key) {
         return PanelDisplay.image(key, "/x.jpg", 1L, 1L);
     }
 
-    // ---------------------------------------------------------------- when it sweeps
+    // ---------------------------------------------------------------- the frame's own lines
 
     @Test
-    public void aDifferentAssetArrivingSweepsTheBoard() {
-        assertTrue(DebugBoard.sweepRequired(image("asset-1"), image("asset-2")));
+    public void aFrameLineRendersWhateverIsOnThePanel() {
+        Map<String, String> visible = DebugBoard.visible(
+                rows("version", "2.0.1.4", null, "mqtt", "connected", null,
+                        "screenHold", "held", null, "key", "C at 19:32", null),
+                photo(HERE));
+        assertEquals("2.0.1.4", visible.get("version"));
+        assertEquals("connected", visible.get("mqtt"));
+        assertEquals("held", visible.get("screenHold"));
+        assertEquals("C at 19:32", visible.get("key"));
     }
 
     /**
-     * The case that made this a function rather than a line of code: covering a failed clip with a
-     * photograph does not change which asset the panel is about, and sweeping anyway deleted the
-     * "video: no frame within 30s" sentence on the statement after it was written.
-     */
-    @Test
-    public void restatingTheSameAssetDoesNotSweepTheBoard() {
-        assertFalse(DebugBoard.sweepRequired(
-                PanelDisplay.video("asset-1", "/x.mp4", "TsPlayer", "FALLBACK",
-                        PanelDisplay.ClipFacts.UNKNOWN, "", 1L, 1L),
-                image("asset-1")));
-    }
-
-    @Test
-    public void aMidAttemptEngineHandoverIsNotAnAssetChange() {
-        PanelDisplay before = PanelDisplay.video("asset-1", "/x.mp4", "TsPlayer", "ORIGINAL",
-                PanelDisplay.ClipFacts.UNKNOWN, "", 1L, 1L);
-        PanelDisplay after = PanelDisplay.video("asset-1", "/x.mp4", "MediaPlayer", "ORIGINAL",
-                PanelDisplay.ClipFacts.UNKNOWN, "", 2L, 1L);
-        assertFalse(DebugBoard.sweepRequired(before, after));
-    }
-
-    @Test
-    public void theFirstDisplayOfASessionHasNothingToSweep() {
-        assertFalse(DebugBoard.sweepRequired(null, image("asset-1")));
-    }
-
-    /** Removing the asset that was up is a handoff away from <em>something</em>, not to something. */
-    @Test
-    public void aClearedPanelSweepsTheAssetItRemoved() {
-        assertTrue(DebugBoard.sweepRequired(image("asset-1"), PanelDisplay.nothing(2L, 2L)));
-    }
-
-    // ---------------------------------------------------------------- what survives it
-
-    @Test
-    public void anAssetHandoffDropsTheLinesThatDescribeTheDepartedAsset() {
-        Map<String, String> board = board(
-                DebugBoard.KEY_ON_SCREEN, "video", "displayVideo", "videoRouting", "web",
-                "Incompatible");
-        board.put("video", "end pos=23621 duration=23000");
-        board.put("displayVideo", "/data/x/last.mp4");
-        board.put(DebugBoard.KEY_ON_SCREEN, "video /data/x/last.mp4 (TsPlayer, ORIGINAL)");
-
-        DebugBoard.onAssetHandoff(board, "a-brand-new-photo");
-
-        assertTrue("the board held nothing but departed-asset lines and survived: " + board.keySet(),
-                board.isEmpty());
-    }
-
-    /** The bug as reported, stated as an assertion. */
-    @Test
-    public void aVideoDoesNotOutliveItsDisplayOnTheWall() {
-        Map<String, String> board = new HashMap<>();
-        board.put(DebugBoard.KEY_ON_SCREEN, "video /last.mp4 (TsPlayer, ORIGINAL)");
-        board.put("video", "end pos=23621 duration=23000");
-        board.put("displayVideo", "/data/x/last.mp4");
-
-        DebugBoard.onAssetHandoff(board, "photo-2");
-
-        assertFalse("the dead clip is still being reported", board.containsKey("displayVideo"));
-        assertFalse("the dead clip's state line is still being reported", board.containsKey("video"));
-        assertFalse("the previous asset's on-screen sentence is still being reported",
-                board.containsKey(DebugBoard.KEY_ON_SCREEN));
-    }
-
-    @Test
-    public void aFrameLineSurvivesWhateverIsDisplayed() {
-        Map<String, String> board = board("version", SettingsManager.DEBUG_KEY_DEVICE_NAME,
-                "connection status", "mqtt", "watchdog", "screenHold", "screenOffWakeLock",
-                "quietHours", "quietHoursSchedule", "startQuietHours", "endQuietHours",
-                "Min Brightness", "Reported Light Value", "Calculated Brightness Value",
-                "vendorUpdater", "compatibility", "Update", "Update Available", "Last Exception",
-                "key", "Failed to delete outdated configuration file");
-        board.put("video", "prepared duration=23621 player=MediaPlayer");
-
-        DebugBoard.onAssetHandoff(board, "photo-2");
-
-        assertFalse(board.containsKey("video"));
-        assertEquals(DebugBoard.FRAME_SCOPED.size(), board.size());
-        assertTrue(board.keySet().containsAll(DebugBoard.FRAME_SCOPED));
-    }
-
-    /**
-     * A declared survivor has to be a name the app actually writes.
-     *
-     * <p>{@code "device name"} and {@code "connection status"} are duplicated string literals between
-     * this set and their writers, and a rename on either side silently stops the row surviving a
-     * handoff. Pinning the one that is a compile-time constant costs nothing; the other comes from a
-     * string resource, which no JVM test can read, and is left to its comment.
+     * A declared survivor has to be a name the app actually writes. {@code "device name"} duplicates
+     * {@code SettingsManager.DEBUG_KEY_DEVICE_NAME} as a literal because this class holds no Android; a
+     * rename on either side silently changes what the board prints, and this is what catches it.
      */
     @Test
     public void aDeclaredSurvivorIsPinnedToTheNameItsWriterUses() {
@@ -143,106 +68,118 @@ public class DebugBoardTest {
                 DebugBoard.FRAME_SCOPED.contains(SettingsManager.DEBUG_KEY_DEVICE_NAME));
     }
 
-    /** The inversion of the default is the whole design; this is the test that pins it. */
-    @Test
-    public void aKeyNobodyDeclaredIsSwept() {
-        Map<String, String> board = new HashMap<>();
-        board.put("someBrandNewAssetLineWrittenTomorrow", "a claim about the clip");
-        board.put("video", "a claim about the clip");
-
-        DebugBoard.onAssetHandoff(board, "photo-2");
-
-        assertTrue("an undeclared key must not outlive the asset it describes", board.isEmpty());
-    }
-
-    /**
-     * Acquisition verdicts are written about the asset that is <em>then</em> displayed, so they land
-     * while the previous asset is still the one recorded. Sweeping by subject rather than by arrival is
-     * what keeps {@code videoBudget}'s explanation of a routed clip on the board for as long as that
-     * clip is what is on the wall — the same problem {@code videoRouting} solved by travelling inside the
-     * record, and this is the half of it that cannot.
-     */
-    @Test
-    public void aLineNamingTheArrivingAssetSurvivesItsOwnHandoff() {
-        String arriving = "3f2a9c1e-7d4b-4a11-9a2f-55c0ffee1234";
-        Map<String, String> board = new HashMap<>();
-        board.put("videoBudget", arriving + " - coded 3840x2160 above the panel's throughput");
-        board.put("Incompatible", "skipped " + arriving + " (no backend)");
-        board.put("Thumbnail", "Failed to get thumbnail for asset: " + arriving);
-        board.put("Show", "Asset not in the rotation pool: " + arriving);
-        board.put("video", "end pos=23621 duration=23000");
-        board.put(DebugBoard.KEY_ON_SCREEN, "video /old.mp4 (TsPlayer, ORIGINAL)");
-
-        DebugBoard.onAssetHandoff(board, arriving);
-
-        assertTrue(board.containsKey("videoBudget"));
-        assertTrue(board.containsKey("Incompatible"));
-        assertTrue(board.containsKey("Thumbnail"));
-        assertTrue(board.containsKey("Show"));
-        assertFalse("a finished clip's state line names no asset and must go",
-                board.containsKey("video"));
-        assertFalse(board.containsKey(DebugBoard.KEY_ON_SCREEN));
-    }
-
-    /** An unnamed incoming asset keeps no asset lines: there is nothing to match a line against. */
-    @Test
-    public void anUnidentifiableArrivingAssetKeepsOnlyFrameLines() {
-        Map<String, String> board = new HashMap<>();
-        board.put("videoBudget", "3f2a9c1e - too demanding");
-        board.put("version", "2.0.1.4");
-
-        DebugBoard.onAssetHandoff(board, "");
-
-        assertEquals(1, board.size());
-        assertEquals("2.0.1.4", board.get("version"));
-    }
-
-    /**
-     * The accepted cost of a default that is a set complement, written down rather than discovered.
-     *
-     * <p>{@code BrightnessManager.sensorAccuracyChanged} keys its line by {@code Sensor.getName()}, so no
-     * literal can declare it frame-scoped and the sweep takes it. It is a hardware inventory row, it is
-     * still in {@code files/eo1-app.log}, and the alternative — treating an unknown key as persistent — is
-     * the exact failure this class removes. This asserts the trade rather than hiding it.
-     */
-    @Test
-    public void aHardwareInventoryLineNamedByTheSensorIsSweptAndThatIsDeliberate() {
-        Map<String, String> board = board("Ambient Light Sensor");
-        DebugBoard.onAssetHandoff(board, "photo-2");
-        assertTrue(board.isEmpty());
-    }
-
-    /**
-     * The third key a default-sweep would have taken by mistake. The last physical key the app handled is
-     * state about the frame, not about an asset, so it is declared — a row that quietly vanished on every
-     * rotation would have read as "the buttons stopped working", which is a diagnosis this repo has
-     * already chased twice.
-     */
-    @Test
-    public void theLastKeyPressedSurvivesAnAssetHandoff() {
-        Map<String, String> board = board("key");
-        board.put("key", "C at 2026-11-08 19:32:01");
-        DebugBoard.onAssetHandoff(board, "photo-2");
-        assertEquals(1, board.size());
-        assertTrue(DebugBoard.FRAME_SCOPED.contains("key"));
-    }
-
-    @Test
-    public void anEmptyBoardSurvivesAHandoff() {
-        Map<String, String> board = new HashMap<>();
-        DebugBoard.onAssetHandoff(board, "photo-2");
-        assertTrue(board.isEmpty());
-    }
-
     @Test
     public void theFrameSetNeverContainsAnAssetLine() {
-        // A key in both places is the bug wearing the fix's clothes: it would be declared swept and kept
-        // anyway.
-        for (String assetLine : new String[]{"video", "videoRouting", "displayVideo",
-                "displayPictures", "displayWebsite", "web", "Show", "videoBudget", "Thumbnail",
-                "Incompatible", DebugBoard.KEY_ON_SCREEN}) {
+        for (String assetLine : new String[]{"video", "displayVideo", "displayPictures",
+                "displayWebsite", "web", "Show", "videoBudget", "Thumbnail", "Incompatible",
+                DebugBoard.KEY_ON_SCREEN, DebugBoard.KEY_ROUTING}) {
             assertFalse(assetLine + " describes the asset, not the frame",
                     DebugBoard.FRAME_SCOPED.contains(assetLine));
         }
+    }
+
+    // ---------------------------------------------------------------- attribution
+
+    @Test
+    public void aLineAboutTheAssetOnThePanelRenders() {
+        Map<String, String> visible = DebugBoard.visible(
+                rows("video", "prepared duration=23621", HERE), photo(HERE));
+        assertEquals("prepared duration=23621", visible.get("video"));
+    }
+
+    /**
+     * The hole a sweep could not close. {@code tagAssetAsIncompatible} posts from its own thread when the
+     * backend finally answers, which can be several rotations after the asset left; nothing in the display
+     * path knows the write is coming, so no ordering rule could have removed it again.
+     */
+    @Test
+    public void aLateVerdictAboutADepartedAssetIsNotPrintedOverWhatIsUpNow() {
+        Map<String, DebugBoard.Row> board = rows("Incompatible", "could not flag " + GONE
+                + " in 'immich-1': timeout", GONE);
+        board.put("version", DebugBoard.Row.ofFrame("2.0.1.4"));
+
+        Map<String, String> visible = DebugBoard.visible(board, photo(HERE));
+
+        assertFalse("a departed asset's failure is printed as if it were current",
+                visible.containsKey("Incompatible"));
+        assertEquals("2.0.1.4", visible.get("version"));
+    }
+
+    /** The mirror case, which is why filtering happens at render rather than at write. */
+    @Test
+    public void aVerdictRecordedBeforeItsAssetArrivesAppearsWhenThatAssetReachesThePanel() {
+        String incoming = "c0ming00-0000-0000-0000-000000000003";
+        Map<String, DebugBoard.Row> board = rows("videoBudget", incoming + " - over the bitrate ceiling",
+                incoming);
+
+        // Written while the previous asset is still what the panel holds.
+        assertFalse(DebugBoard.visible(board, photo(HERE)).containsKey("videoBudget"));
+        // ...and visible the moment the asset it describes is what is up, with no write in between.
+        assertEquals(incoming + " - over the bitrate ceiling",
+                DebugBoard.visible(board, photo(incoming)).get("videoBudget"));
+    }
+
+    @Test
+    public void aWriterThatDidNotNameItsAssetIsAttributedToThePanel() {
+        assertNull(DebugBoard.implicitSubject("version", HERE));
+        assertEquals(HERE, DebugBoard.implicitSubject("video", HERE));
+        assertEquals("", DebugBoard.implicitSubject("video", ""));
+    }
+
+    // ---------------------------------------------------------------- derived rows
+
+    @Test
+    public void thePanelDescriptionIsDerivedRatherThanWritten() {
+        Map<String, DebugBoard.Row> board = new HashMap<>();
+        board.put(DebugBoard.KEY_ON_SCREEN, new DebugBoard.Row("video /old.mp4", null));
+
+        Map<String, String> visible = DebugBoard.visible(board, photo(HERE));
+
+        assertEquals("image " + "/x.jpg", visible.get(DebugBoard.KEY_ON_SCREEN));
+    }
+
+    @Test
+    public void anEmptyPanelSaysNothingYetRatherThanAnOldClaim() {
+        Map<String, DebugBoard.Row> board = new HashMap<>();
+        board.put(DebugBoard.KEY_ON_SCREEN, new DebugBoard.Row("video /old.mp4", null));
+        assertEquals("nothing yet", DebugBoard.visible(board, null).get(DebugBoard.KEY_ON_SCREEN));
+    }
+
+    /**
+     * A clip covered by a photograph of the <em>same</em> asset is not an asset change, so attribution
+     * alone would keep the routing sentence on the board — and it carries codec, dimensions, frame rate and
+     * bitrate, which is exactly what must not be stated over an image. It is therefore derived from the
+     * record, which an image record cannot populate.
+     */
+    @Test
+    public void aClipsRoutingMeasurementLeavesWhenThePanelStopsShowingVideo() {
+        PanelDisplay clip = PanelDisplay.video(HERE, "/x.mp4", "TsPlayer", "ORIGINAL",
+                new PanelDisplay.ClipFacts(0, 1920, 1080, "avc1", 29970, 1L, 1L, 15_000_000L, 23_621L),
+                "codec=avc1 rotation=0 dims=1920x1080 -> TsPlayer", 1L, 1L);
+        assertEquals("codec=avc1 rotation=0 dims=1920x1080 -> TsPlayer",
+                DebugBoard.visible(new HashMap<String, DebugBoard.Row>(), clip).get(DebugBoard.KEY_ROUTING));
+
+        // The same asset, now covered by its still preview after the clip failed to paint.
+        Map<String, String> overPhoto = DebugBoard.visible(
+                new HashMap<String, DebugBoard.Row>(), photo(HERE));
+        assertFalse("a photograph is on the wall and the routing line is still reporting a clip",
+                overPhoto.containsKey(DebugBoard.KEY_ROUTING));
+    }
+
+    @Test
+    public void aStaleRoutingRowIsSupersededByTheDerivedOne() {
+        Map<String, DebugBoard.Row> board = rows(DebugBoard.KEY_ROUTING, "codec=hevc STALE", HERE);
+        PanelDisplay clip = PanelDisplay.video(HERE, "/x.mp4", "MediaPlayer", "FALLBACK",
+                PanelDisplay.ClipFacts.UNKNOWN, "codec=avc1 fresh", 1L, 1L);
+        assertEquals("codec=avc1 fresh",
+                DebugBoard.visible(board, clip).get(DebugBoard.KEY_ROUTING));
+    }
+
+    @Test
+    public void anEmptyBoardRendersOnlyThePanelLine() {
+        Map<String, String> visible = DebugBoard.visible(
+                new HashMap<String, DebugBoard.Row>(), photo(HERE));
+        assertEquals(1, visible.size());
+        assertTrue(visible.containsKey(DebugBoard.KEY_ON_SCREEN));
     }
 }
