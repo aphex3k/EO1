@@ -3987,17 +3987,32 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     @Override
     public void downloadCycleClosed() {
-        // MediaManager calls this when its in-flight count reaches zero, which is the only close
-        // that also covers a body that threw instead of reaching its end. Zero the clocks exactly as
-        // a clean finish does — otherwise the next download measures its age from a transfer that is
-        // already gone — and clear the throttle so its first percent is logged, not suppressed.
-        downloadStartedAtMs = 0L;
-        downloadProgressAtMs = 0L;
-        synchronized (downloadProgressLogLock) {
-            lastLoggedDownloadPercent = -1L;
-            lastDownloadProgressLogAtMs = 0L;
-        }
-        runOnUiThread(this::hideDownloadBar);
+        // Everything a close does happens on the UI thread, behind the same live count a show is
+        // decided by. The count is raised before a download's first read and retired in a finally, so
+        // a second thread can open download B in the gap between A's decrement and this running;
+        // hiding B's bar or zeroing B's clocks from here would blank a transfer that is genuinely
+        // running and re-anchor its age to now. Standing aside strands nothing, because the close
+        // that finds the count still at zero is whichever download ends last.
+        runOnUiThread(() -> {
+            if (!downloadCycleEndsTheBar(downloadCountedInFlight())) {
+                return;
+            }
+            downloadStartedAtMs = 0L;
+            downloadProgressAtMs = 0L;
+            synchronized (downloadProgressLogLock) {
+                lastLoggedDownloadPercent = -1L;
+                lastDownloadProgressLogAtMs = 0L;
+            }
+            hideDownloadBar();
+        });
+    }
+
+    /**
+     * Whether a close ends the download window. A close is an edge, not a verdict: if another
+     * transfer is already counted, this one is not the last, and the bar belongs to it.
+     */
+    static boolean downloadCycleEndsTheBar(boolean inFlight) {
+        return !inFlight;
     }
 
     /** Puts the bar into the state one progress event describes. UI thread. */
@@ -4033,10 +4048,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
-     * The one way the bar goes away. It is emptied before it is hidden so a later transfer starts
-     * from nothing rather than animating down from wherever the last one stopped.
+     * The only place the bar is hidden, and it refuses while a counted download is up. Putting the
+     * test here rather than at each caller is what makes the ordering uninteresting: a {@code done}
+     * belonging to a transfer that already ended, or a close that another thread's increment beat
+     * here, cannot blank a download that is genuinely running. Nothing is stranded by the refusal —
+     * every download that raises the count retires it in a {@code finally}, so a refused hide is
+     * always followed by the one that arrives with the count at zero.
+     *
+     * <p>Emptied before it is hidden so a later transfer starts from nothing rather than animating
+     * down from wherever the last one stopped.
      */
     private void hideDownloadBar() {
+        if (downloadCountedInFlight()) {
+            return;
+        }
         progressIndicator.setProgressCompat(0, false);
         progressIndicator.setVisibility(View.INVISIBLE);
     }

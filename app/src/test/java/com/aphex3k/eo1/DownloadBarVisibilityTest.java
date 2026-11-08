@@ -44,4 +44,27 @@ public class DownloadBarVisibilityTest {
     public void anEventWithNoFractionHasNothingToShow() {
         assertFalse(MainActivity.downloadBarVisible(false, -1, true));
     }
+
+    /**
+     * The mirror of the race above, in the other direction. Download A's close is raised, and B is
+     * started and counted before that close reaches the UI thread. The close must stand aside: hiding
+     * there blanks a transfer that is genuinely running, and zeroing the clocks would re-anchor B's
+     * age to now and make {@code downloadInFlightMs()} understate it.
+     */
+    @Test
+    public void aCloseThatFindsANewerDownloadCountedStandsAside() {
+        assertFalse(MainActivity.downloadCycleEndsTheBar(true));
+    }
+
+    /**
+     * Standing aside cannot strand the bar, because a close only declines when a download is counted,
+     * and that download raises a close of its own when it ends. Walked as a sequence: A's close
+     * stands aside, B's bytes show the bar, B's close — with nothing else up — is the one that ends it.
+     */
+    @Test
+    public void aStoodAsideCloseIsFollowedByTheLastDownloadsOwn() {
+        assertFalse(MainActivity.downloadCycleEndsTheBar(true));
+        assertTrue(MainActivity.downloadBarVisible(false, 400, true));
+        assertTrue(MainActivity.downloadCycleEndsTheBar(false));
+    }
 }
