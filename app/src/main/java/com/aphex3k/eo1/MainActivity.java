@@ -2066,11 +2066,31 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * knows a bitrate — but they no longer decide when the panel changed.
      */
     private PanelDisplay reproveTarget() {
-        // A browser view that is visible is showing <em>whatever it last painted</em>, not the URL it was
-        // pointed at a moment ago — the object is reused, so a A→B rotation shows A throughout B's load.
+        // Walked in the order the views are actually stacked, because that order is the answer to "what is
+        // on the wall". In activity_main.xml both video surfaces are declared <em>before</em> imageView, so
+        // a RelativeLayout draws the image on top of them — which is why revealVideoSurface() has to hide
+        // the photo for a clip to be seen at all, and why a VISIBLE TsPlayer surface under a VISIBLE image
+        // view is a photograph, not a video. The browser is added at indexOfChild(imageView) + 1, above the
+        // image. Top to bottom, then: browser, photo, video surfaces.
+        //
+        // Getting this order backwards was the direct cause of reports naming a covered surface — the one
+        // complaint this whole change set opened with — and the reason each check must test visibility
+        // rather than "did something load here": a surface that covers the screen is what the viewer sees
+        // whether or not it has finished its own work.
         WebView page = webView;
-        if (page != null && page.getVisibility() == View.VISIBLE && webProvenRecord != null) {
-            return webProvenRecord;
+        if (page != null && page.getVisibility() == View.VISIBLE) {
+            // A visible browser shows the page it last <em>painted</em>, not the URL it was pointed at — the
+            // object is reused, so an A→B rotation shows A all the way through B's load. A browser with
+            // nothing painted yet is a black rectangle covering everything under it, which is the honest
+            // answer and not the photograph it hides.
+            PanelDisplay painted = webProvenRecord;
+            return painted != null ? painted : blankPanel();
+        }
+        if (imageView.getVisibility() == View.VISIBLE && imageView.getDrawable() != null) {
+            PanelDisplay photo = provenPhoto;
+            if (photo != null) {
+                return photo;
+            }
         }
         VideoPlayerController player = videoPlayer;
         View videoSurface = player == null ? null : player.getView();
@@ -2083,7 +2103,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return pending;
             }
         }
-        return photoPlaneNow();
+        // Nothing on top is showing, and either the image plane is hidden or its drawable has been cleared.
+        return blankPanel();
+    }
+
+    /** The single record for "nothing visible", so re-deriving a blank wall is not a new handoff. */
+    private PanelDisplay blankPanel() {
+        PanelDisplay blank = emptyPanel;
+        if (blank == null) {
+            blank = PanelDisplay.nothing(panelGeneration.incrementAndGet(), System.currentTimeMillis());
+            emptyPanel = blank;
+        }
+        return blank;
     }
 
     /**
@@ -2429,13 +2460,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (!Objects.equals(url, webUrlOnScreen)) {
                 return;
             }
+            // Three further tests, because "this URL finished" is not the same claim as "this page is on the
+            // wall". The browser may have been covered since — hideWebView() ends its claim on the screen but
+            // leaves the URL standing, so a photograph that replaced a still-loading page used to be
+            // overwritten by that page's completion a few seconds later, describing a hidden browser as what
+            // is displayed. And the load in flight may no longer be this one, since the client object is
+            // reused across pages.
+            PanelDisplay loading = webLoadRecord;
+            if (view.getVisibility() != View.VISIBLE || loading == null
+                    || !Objects.equals(loading.pathOrUrl, url)) {
+                Log.i(TAG, "onPageFinished: " + url + " is not the visible load; proving nothing");
+                return;
+            }
             webLoadProducedPaint = true;
             cancelWebLoadWatchdog();
             // Proves <em>this page</em>, not "the current attempt": a page that finishes loading while a
             // photograph is being fetched would otherwise adopt the photograph on the strength of a callback
             // about something else. Null once the page has been given up on, which is what makes a late
             // callback prove nothing at all.
-            noteDisplayProven(webLoadRecord);
+            noteDisplayProven(loading);
             Log.i(TAG, "web: rendered " + url);
             debugInformationProvided(new DebugInformation("web", "rendered " + url, activeWebAssetId));
         }
@@ -4112,6 +4155,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             controller.setVisibility(View.VISIBLE);
         } else {
             controller.setVisibility(View.INVISIBLE);
+            // The surface that was showing has just been taken away and this one will not appear until a
+            // frame is proven, so on a TsPlayer→MediaPlayer handover the wall is blank from this line —
+            // while the panel record still named the clip the outgoing engine had been drawing, and could go
+            // on doing so for the whole paint timeout if preparation never completed. Deriving now says
+            // "blank"; the later revealVideoSurface() replaces it with the clip when there is one.
+            reprovePanel();
         }
         controller.setListener(new VideoPlayerListener() {
             @Override
@@ -4437,22 +4486,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private PanelDisplay photoPlaneNow() {
         PanelDisplay loaded = provenPhoto;
-        // Visible, loaded, and holding a drawable. A video→MediaPlayer handover leaves the image view
-        // INVISIBLE behind a video surface that has not painted yet, and reporting the photograph it still
-        // holds would name content that no pixel of is reaching the screen.
-        if (loaded == null || imageView.getVisibility() != View.VISIBLE
-                || imageView.getDrawable() == null) {
-            // One shared identity for "blank": minting a fresh record per read made every re-derivation of
-            // an unchanged blank panel look like a new handoff, advancing generation and resetting sinceMs on
-            // a wall that had not moved — and left media.attempt set after a recovery finished, because its
-            // attempt and its proof were two different objects describing the same nothing.
-            PanelDisplay blank = emptyPanel;
-            if (blank == null) {
-                blank = PanelDisplay.nothing(panelGeneration.incrementAndGet(),
-                        System.currentTimeMillis());
-                emptyPanel = blank;
-            }
-            return blank;
+        if (loaded == null || imageView.getDrawable() == null) {
+            return blankPanel();
         }
         return loaded;
     }
