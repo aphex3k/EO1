@@ -3121,6 +3121,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // Read once: the writer is the compositor callback on another thread, and the value only ever
         // rises within a clip, so testing one read and printing another would print a number that is
         // not the one that was classified.
+        // Read once, for the same reason as the gap below: the compositor callback writes this on the UI
+        // thread while this line is being built on the diagnostics worker, and testing one read and
+        // printing another can classify a frame that arrived in between as "never".
+        long lastFrameAtMs = videoPlayer.getLastFrameAtMs();
         int maxFrameGapMs = videoPlayer.getMaxFrameGapMs();
         sb.append("video engine        : ").append(preferTsPlayer ? "TsPlayer" : "MediaPlayer")
                 // The panel the aspect rule compares every clip against, in the record that survives a
