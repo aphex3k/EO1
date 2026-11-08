@@ -625,46 +625,45 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         // report compare it against other wall-clock times; the spacing wants a monotonic one, because
         // these frames run no time sync and a forward correction would land in the retained maximum as
         // a stutter that never happened. See FrameGapWindow's clock contract.
+        // Deliberately unguarded, unlike the visibility paths: a frame cannot reach a surface before
+        // the view is attached and drawn, so mFrameGaps is initialised here by construction. Adding a
+        // null test would imply a hazard that does not exist on this path.
         mLastFrameAtMs = System.currentTimeMillis();
         mFrameGaps.recordFrame(SystemClock.elapsedRealtime());
     }
 
-    /**
-     * Any change of visibility means the interval across it says nothing about the clip: the app hides
-     * this view for quiet hours and on pause, and an {@code INVISIBLE} TextureView composites no frames
-     * at all. Without this, the first frame after the panel comes back would record the whole dark
-     * window as the clip's worst gap and keep it there for the rest of the source.
-     *
-     * <p><b>Why the null test stays.</b> This view is declared {@code android:visibility="invisible"}
-     * in {@code activity_main.xml}, and {@code View}'s {@code (Context, AttributeSet)} constructor does
-     * route that through {@code setFlags()}, which can reach this callback — so the question of whether
-     * it fires before field initializers run is a real one, and a wrong answer here is an NPE inside
-     * {@code LayoutInflater.inflate} on an unattended frame.
-     *
-     * <p>Measured, not assumed: disassembling this ROM's {@code framework.jar} shows {@code View.setFlags}
-     * branching to {@code if (mParent instanceof ViewGroup)} <em>before</em> its
-     * {@code dispatchVisibilityChanged} call, and {@code mParent} is necessarily null while the
-     * constructor runs because {@code LayoutInflater} builds children before attaching them. So on
-     * API 19 as shipped here, the constructor cannot reach it. The guard is kept anyway because that
-     * ordering is a private implementation detail of one vendor build, not a documented framework
-     * contract, and this APK is expected to run on boards nobody has measured; skipping is also the
-     * semantically right answer where it does fire pre-initialisation, since nothing has been recorded
-     * yet and there is no stamp to drop.
-     */
     @Override
     protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
         super.onVisibilityChanged(changedView, visibility);
-        if (mFrameGaps != null) {
-            mFrameGaps.suspendSampling();
-        }
+        suspendFrameGapSampling();
     }
 
     @Override
     protected void onWindowVisibilityChanged(int visibility) {
         super.onWindowVisibilityChanged(visibility);
-        // In this ROM's framework the only callers are the window-visibility paths, which run on
-        // attach, so this cannot precede field initialisation either. Same reasoning as above: keep the
-        // test, because the guarantee belongs to a vendor build rather than to this class.
+        suspendFrameGapSampling();
+    }
+
+    /**
+     * Any change in either kind of visibility means the interval across it says nothing about the clip:
+     * the app hides this view for quiet hours and on pause, and an {@code INVISIBLE} TextureView
+     * composites no frames at all. Without suspension, the first frame after the panel comes back would
+     * record the whole dark window as the clip's worst gap and keep it there for the rest of the source.
+     *
+     * <p><b>Why the null test stays.</b> This view is declared {@code android:visibility="invisible"} in
+     * {@code activity_main.xml}, and {@code View}'s {@code (Context, AttributeSet)} constructor routes
+     * that through {@code setFlags()}, which can reach these callbacks — so whether it fires before
+     * field initializers run is a real question, and a wrong answer is an NPE inside
+     * {@code LayoutInflater.inflate} on an unattended frame. Measured rather than assumed: disassembling
+     * this ROM's {@code framework.jar} shows {@code View.setFlags} branching on
+     * {@code mParent instanceof ViewGroup} <em>before</em> its {@code dispatchVisibilityChanged} call,
+     * and {@code mParent} is necessarily null while a constructor runs because {@code LayoutInflater}
+     * builds children before attaching them. So on API 19 as shipped here neither path can precede
+     * initialisation — but that ordering is a private detail of one vendor build, not a documented
+     * contract, and this APK runs on boards nobody has measured. Skipping is also the semantically
+     * right answer where it does fire early: nothing has been recorded, so there is no stamp to drop.
+     */
+    private void suspendFrameGapSampling() {
         if (mFrameGaps != null) {
             mFrameGaps.suspendSampling();
         }

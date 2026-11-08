@@ -218,8 +218,13 @@ public final class VideoLoopSeamRule {
         // poll rather than from the rate window, which needs 5 s to fill and so left the seam open
         // for seconds even after the crawl had begun. The delta is deliberately not clamped to zero:
         // see the class note on why a backwards step must count.
+        // The cast is before the subtraction, not after: this rule deliberately reasons about readings
+        // it does not believe (an epoch-scale position is in its own test data), and a difference
+        // computed in int and then promoted would have to stay inside the range where no overflow can
+        // occur. Widening first makes that a property of the expression rather than an argument about
+        // what values can reach here.
         boolean creeping = !parked && previousPositionMs >= 0 && sincePreviousMs > 0
-                && (positionMs - previousPositionMs) * 100L < sincePreviousMs * TAIL_RATE_X100;
+                && ((long) positionMs - previousPositionMs) * 100L < sincePreviousMs * TAIL_RATE_X100;
 
         // Which end to demand depends on which test fired: a parked position is at the end as far as
         // the player is concerned, and insisting on the file's length there would skip this branch
