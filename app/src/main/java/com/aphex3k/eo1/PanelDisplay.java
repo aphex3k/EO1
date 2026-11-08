@@ -105,7 +105,7 @@ public final class PanelDisplay {
      * routing. Holding it in the value means the sweep happens first and the line arrives with the
      * asset it describes, in the order the facts were learned.
      */
-    public final String routingLine;
+    public final String routingFacts;
     /** Increases by one per handoff, so two reads can be told apart from two displays. */
     public final long generation;
     /** {@code System.currentTimeMillis()} at the handoff. */
@@ -116,7 +116,7 @@ public final class PanelDisplay {
      * a javadoc block. The factories are the API; this is the gate they all pass through.
      */
     PanelDisplay(MediaType type, String assetKey, String pathOrUrl, String engine,
-                 String stage, ClipFacts clip, String routingLine,
+                 String stage, ClipFacts clip, String routingFacts,
                  long generation, long sinceMs) {
         if ((type == MediaType.VIDEO) != (clip != null)) {
             throw new IllegalArgumentException("clip belongs to a video and only to a video");
@@ -127,7 +127,7 @@ public final class PanelDisplay {
         this.engine = engine == null ? "" : engine;
         this.stage = stage == null ? "" : stage;
         this.clip = clip;
-        this.routingLine = routingLine == null ? "" : routingLine;
+        this.routingFacts = routingFacts == null ? "" : routingFacts;
         this.generation = generation;
         this.sinceMs = sinceMs;
     }
@@ -170,14 +170,44 @@ public final class PanelDisplay {
      *               "not known" and a stale number does not
      */
     public static PanelDisplay video(String assetKey, String path, String engine, String stage,
-                                     ClipFacts clip, String routingLine,
+                                     ClipFacts clip, String routingFacts,
                                      long generation, long sinceMs) {
         return new PanelDisplay(MediaType.VIDEO, assetKey, path, engine, stage,
-                clip == null ? ClipFacts.UNKNOWN : clip, routingLine, generation, sinceMs);
+                clip == null ? ClipFacts.UNKNOWN : clip, routingFacts, generation, sinceMs);
     }
 
     public boolean showsVideo() {
         return type == MediaType.VIDEO;
+    }
+
+    /**
+     * The same display, assigned a generation at the moment it was <em>adopted</em> rather than when it was
+     * decided on.
+     *
+     * <p>A record can be created by one display path and prove itself much later, and two paths can prove
+     * in the opposite order to the one they started in. Taking the number at creation would let
+     * {@code media.screen.generation} go backwards on the wall, which is the one property that makes it
+     * worth watching.
+     */
+    /**
+     * The routing sentence as an operator reads it: what was measured, then the compositor that
+     * <em>decision</em> produced — appended, never stored.
+     *
+     * <p>The compositor is a property of the record, not of the measurement, because the two can part
+     * company: a clip routed to TsPlayer and then handed to the platform player after a stalled attempt
+     * carries the original routing facts, and a sentence that had baked {@code -> TsPlayer} into them
+     * contradicted the {@code engine} field beside it, on the board and in {@code /state}'s debug block.
+     */
+    public String routingSentence() {
+        if (routingFacts.isEmpty()) {
+            return "";
+        }
+        return engine.isEmpty() ? routingFacts : routingFacts + " -> " + engine;
+    }
+
+    public PanelDisplay withGeneration(long generation) {
+        return new PanelDisplay(type, assetKey, pathOrUrl, engine, stage, clip, routingFacts,
+                generation, sinceMs);
     }
 
     /** The one debug-board line that can never disagree with the panel, because this writes it. */

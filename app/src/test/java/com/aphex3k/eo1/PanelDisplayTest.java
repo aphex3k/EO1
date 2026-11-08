@@ -132,6 +132,44 @@ public class PanelDisplayTest {
         assertNotEquals(PanelDisplay.image("", "", GEN, WHEN).describe(), blank.describe());
     }
 
+    /**
+     * The compositor is appended at render, never baked into the measurement.
+     *
+     * <p>A clip routed to TsPlayer and then handed to the platform player after a stalled attempt carries
+     * its original routing facts. If the sentence had stored {@code -> TsPlayer} inside them, the board and
+     * {@code /state}'s debug row would contradict the {@code engine} field printed beside them.
+     */
+    @Test
+    public void theRoutingSentenceNamesWhicheverCompositorTheRecordCarries() {
+        PanelDisplay routed = PanelDisplay.video("k", "/x.mp4", "TsPlayer", "ORIGINAL",
+                PanelDisplay.ClipFacts.UNKNOWN, "codec=avc1 dims=1920x1080", 1L, 1L);
+        assertEquals("codec=avc1 dims=1920x1080 -> TsPlayer", routed.routingSentence());
+
+        // The same attempt, adopted by the other controller: the facts are unchanged, the sentence is not.
+        PanelDisplay handedOver = PanelDisplay.video("k", "/x.mp4", "MediaPlayer", "ORIGINAL_REPLAY",
+                routed.clip, routed.routingFacts, 2L, 1L);
+        assertEquals("codec=avc1 dims=1920x1080 -> MediaPlayer", handedOver.routingSentence());
+    }
+
+    @Test
+    public void anUnroutedClipCarriesNoRoutingSentence() {
+        assertEquals("", PanelDisplay.video("k", "/x.mp4", "MediaPlayer", "FALLBACK",
+                PanelDisplay.ClipFacts.UNKNOWN, "", 1L, 1L).routingSentence());
+        assertEquals("", PanelDisplay.image("k", "/x.jpg", 1L, 1L).routingSentence());
+    }
+
+    /** Adoption re-stamps the generation, so the number operators watch moves with the wall. */
+    @Test
+    public void adoptingADisplayGivesItAFreshGenerationAndKeepsItsContent() {
+        PanelDisplay decided = PanelDisplay.image("k", "/x.jpg", 4L, 100L);
+        PanelDisplay adopted = decided.withGeneration(9L);
+        assertEquals(4L, decided.generation);
+        assertEquals(9L, adopted.generation);
+        assertEquals(decided.type, adopted.type);
+        assertEquals(decided.assetKey, adopted.assetKey);
+        assertEquals(decided.pathOrUrl, adopted.pathOrUrl);
+    }
+
     @Test
     public void theInvariantIsEnforcedRatherThanDocumented() {
         // Both directions: a video with no facts and a photograph with facts are the two shapes the

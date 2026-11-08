@@ -59,8 +59,10 @@ public final class DebugBoard {
             "connection status", "mqtt", "watchdog", "vendorUpdater", "key",
             // Self-update, and a backend's compatibility verdict about its service (not about a clip).
             "Update", "Update Available", "compatibility",
-            // The last thing that went wrong anywhere in the process.
-            "Last Exception")));
+            // The last thing that went wrong anywhere in the process, and the most recent reason an asset
+            // did not make it onto the panel — which has to survive the recovery it explains. See
+            // MainActivity.noteDisplayFailure for why this one row is deliberately not attributed.
+            "Last Exception", "displayFailure")));
 
     /**
      * One board row: what it says, and which asset it is about.
@@ -129,10 +131,11 @@ public final class DebugBoard {
         // Reserved keys, always the record's own words. No writer may use either name: a second opinion
         // about the screen is what this class was rewritten to make impossible.
         out.put(KEY_ON_SCREEN, panel == null ? "nothing yet" : panel.describe());
-        if (panel != null && !panel.routingLine.isEmpty()) {
-            out.put(KEY_ROUTING, panel.routingLine);
-        } else {
+        String routing = panel == null ? "" : panel.routingSentence();
+        if (routing.isEmpty()) {
             out.remove(KEY_ROUTING);
+        } else {
+            out.put(KEY_ROUTING, routing);
         }
         return out;
     }
@@ -140,6 +143,6 @@ public final class DebugBoard {
     /** The panel's own line. Written by nobody, derived from {@link PanelDisplay#describe()} by everyone. */
     public static final String KEY_ON_SCREEN = "on screen";
 
-    /** The routing sentence. Derived from {@link PanelDisplay#routingLine}, so a photo cannot carry one. */
+    /** The routing sentence. Derived from {@link PanelDisplay#routingFacts}, so a photo cannot carry one. */
     public static final String KEY_ROUTING = "videoRouting";
 }

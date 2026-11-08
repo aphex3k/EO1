@@ -28,13 +28,13 @@ public final class VideoRoutingDecision {
      * The routing sentence, in the wording the debug board has always carried it in — codec, rotation,
      * coded size, the panel it was judged against, and the engine it came out as.
      */
-    public final String routingLine;
+    public final String routingFacts;
 
     public VideoRoutingDecision(boolean allowTsPlayer, String engineWord,
-                               PanelDisplay.ClipFacts clip, String routingLine) {
+                               PanelDisplay.ClipFacts clip, String routingFacts) {
         this.allowTsPlayer = allowTsPlayer;
         this.engineWord = engineWord;
         this.clip = clip == null ? PanelDisplay.ClipFacts.UNKNOWN : clip;
-        this.routingLine = routingLine == null ? "" : routingLine;
+        this.routingFacts = routingFacts == null ? "" : routingFacts;
     }
 }

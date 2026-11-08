@@ -155,7 +155,7 @@ public class DebugBoardTest {
     public void aClipsRoutingMeasurementLeavesWhenThePanelStopsShowingVideo() {
         PanelDisplay clip = PanelDisplay.video(HERE, "/x.mp4", "TsPlayer", "ORIGINAL",
                 new PanelDisplay.ClipFacts(0, 1920, 1080, "avc1", 29970, 1L, 1L, 15_000_000L, 23_621L),
-                "codec=avc1 rotation=0 dims=1920x1080 -> TsPlayer", 1L, 1L);
+                "codec=avc1 rotation=0 dims=1920x1080", 1L, 1L);
         assertEquals("codec=avc1 rotation=0 dims=1920x1080 -> TsPlayer",
                 DebugBoard.visible(new HashMap<String, DebugBoard.Row>(), clip).get(DebugBoard.KEY_ROUTING));
 
@@ -171,8 +171,32 @@ public class DebugBoardTest {
         Map<String, DebugBoard.Row> board = rows(DebugBoard.KEY_ROUTING, "codec=hevc STALE", HERE);
         PanelDisplay clip = PanelDisplay.video(HERE, "/x.mp4", "MediaPlayer", "FALLBACK",
                 PanelDisplay.ClipFacts.UNKNOWN, "codec=avc1 fresh", 1L, 1L);
-        assertEquals("codec=avc1 fresh",
+        // Rendered from the record, including the compositor it now carries — so a clip handed over from
+        // TsPlayer keeps its measurements and stops claiming the engine that gave up on it.
+        assertEquals("codec=avc1 fresh -> MediaPlayer",
                 DebugBoard.visible(board, clip).get(DebugBoard.KEY_ROUTING));
+    }
+
+    /**
+     * The one asset-naming row that must <em>not</em> be attributed.
+     *
+     * <p>A failure explanation is a fact about the machine, and it is needed precisely after recovery has
+     * uncovered a photograph of some other asset — at which point a row attributed to the failed clip is
+     * filtered out as "not about the panel", so every recovery would swallow its own diagnosis. Attributing
+     * it to nothing instead would print a stale failure forever, so it is frame-scoped with the asset named
+     * inside the text: visible whenever it is the latest answer, and honest about what it refers to.
+     */
+    @Test
+    public void theReasonAnAssetMissedThePanelSurvivesTheRecoveryItExplains() {
+        Map<String, DebugBoard.Row> board = rows(
+                "displayFailure", "clip-9: no frame within 30s stage=FALLBACK on clip-9.mp4", null,
+                "video", "end pos=23621", "clip-9");
+
+        Map<String, String> visible = DebugBoard.visible(board, photo("photo-3"));
+
+        assertTrue("the recovery hid the sentence explaining itself",
+                visible.containsKey("displayFailure"));
+        assertFalse("the failed clip's own state line must still go", visible.containsKey("video"));
     }
 
     @Test
