@@ -3118,12 +3118,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         sb.append("window              : focused=").append(windowFocused)
                 .append(" view=").append(focusedView)
                 .append(" lastKey=").append(lastKeyEventCode).append('\n');
-        // Read once: the writer is the compositor callback on another thread, and the value only ever
-        // rises within a clip, so testing one read and printing another would print a number that is
-        // not the one that was classified.
-        // Read once, for the same reason as the gap below: the compositor callback writes this on the UI
-        // thread while this line is being built on the diagnostics worker, and testing one read and
-        // printing another can classify a frame that arrived in between as "never".
+        // Both of these are read into a local once and used twice, for the same reason: the compositor
+        // callback writes them on the UI thread while this line is assembled on the diagnostics worker,
+        // so a second read can classify one value and print another. For the stamp the visible failure is
+        // a clip that has painted printing "never"; for the gap it is printing a number that is not the
+        // one that was tested. See also the volatile note in FrameGapWindow.
         long lastFrameAtMs = videoPlayer.getLastFrameAtMs();
         int maxFrameGapMs = videoPlayer.getMaxFrameGapMs();
         sb.append("video engine        : ").append(preferTsPlayer ? "TsPlayer" : "MediaPlayer")
@@ -3135,8 +3134,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 .append(" paintSignal=").append(videoPlayer.supportsPaintSignal())
                 .append(" painted=").append(videoPaintProduced)
                 .append(" lastFrame=")
-                .append(videoPlayer.getLastFrameAtMs() == 0L ? "never"
-                        : ((now - videoPlayer.getLastFrameAtMs()) / 1000L) + "s ago")
+                .append(lastFrameAtMs == 0L ? "never"
+                        : ((now - lastFrameAtMs) / 1000L) + "s ago")
                 // Worst frame spacing this engine has reported for the clip in hand. It is the one
                 // number here that can say whether buffers kept arriving; it cannot say whether the
                 // picture changed, and a low value must not be read as "the clip was fine".
