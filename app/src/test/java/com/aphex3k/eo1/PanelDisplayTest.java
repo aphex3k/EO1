@@ -174,6 +174,21 @@ public class PanelDisplayTest {
         assertEquals(100L, decided.sinceMs);
     }
 
+    /**
+     * Each call mints a new instance, which is why the holder of "the panel is blank" caches one.
+     *
+     * <p>Promotion is decided by reference, so re-deriving an unchanged blank wall must not look like a new
+     * handoff: a fresh record per read would advance {@code media.screen.generation} and reset
+     * {@code sinceMs} on a panel that had not moved, and leave {@code media.attempt} beside
+     * {@code media.screen} after a recovery finished.
+     */
+    @Test
+    public void nothingIsNotInternedSoTheCallerHasToHoldOne() {
+        assertNotEquals(PanelDisplay.nothing(1L, 1L), PanelDisplay.nothing(2L, 1L));
+        assertEquals(PanelDisplay.nothing(1L, 1L).describe(),
+                PanelDisplay.nothing(2L, 1L).describe());
+    }
+
     @Test
     public void theInvariantIsEnforcedRatherThanDocumented() {
         // Both directions: a video with no facts and a photograph with facts are the two shapes the

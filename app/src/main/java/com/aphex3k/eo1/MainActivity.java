@@ -267,6 +267,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private volatile PanelDisplay videoCompositing;
     /** The page a load was started for, so its callbacks can prove the right thing or be ignored. */
     private volatile PanelDisplay webLoadRecord;
+    /**
+     * The page the browser is actually <em>showing</em> — which is not the page it is loading.
+     *
+     * <p>One {@code WebView} object is reused for every page, so navigating from A to B leaves A's rendered
+     * content on screen until B paints. Conflating the two made a web→web rotation adopt B the instant its
+     * view came up: both reports named a page that had not loaded, the handoff count advanced on an
+     * unchanged wall, and {@code media.attempt} disappeared because the record had been "adopted". A
+     * pending load is an attempt; a painted page is the panel.
+     */
+    private volatile PanelDisplay webProvenRecord;
+    /**
+     * The one record for "the panel is blank", so repeated reads of an unchanged blank wall are not repeated
+     * handoffs. Cleared whenever something real is adopted, which lets a later blank report the time it
+     * actually went blank rather than the first time it ever did.
+     */
+    @Nullable
+    private volatile PanelDisplay emptyPanel;
     /** Sequence number for each display <em>attempt</em>, feeding {@link PanelDisplay#generation}. */
     private final AtomicLong panelGeneration = new AtomicLong();
     /**
@@ -1888,6 +1905,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
+     * Writes a line to the durable record and to logcat, without a board row.
+     *
+     * <p>{@code files/eo1-app.log} is promised as an unchanged transcript: every diagnostic this app emits is
+     * supposed to be readable there long after the panel moved on. Making the routing sentence a <em>derived</em>
+     * board row — which is what stops a clip's coded size and bitrate being printed over a photograph of the
+     * same asset — also stopped it being written anywhere durable at all, since derived rows never pass
+     * through a writer. Once the clip left the panel and logcat's ~13 minutes rolled over, the routing
+     * decision for it was gone from {@code /logs} and from the file alike. This is the seam between "visible
+     * on the board now" and "recorded forever", and it is not optional for anything the docs promise.
+     */
+    private void logDurable(String key, String value) {
+        Log.i(TAG, key + ": " + value);
+        if (this.appLogger != null) {
+            this.appLogger.info(TAG, key + ": " + value);
+        }
+    }
+
+    /**
      * Records why an asset did not make it onto the panel.
      *
      * <p>Frame-scoped, deliberately, and with the asset named in the text rather than as the row's subject.
@@ -2001,7 +2036,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         } else {
             videoCompositing = null;
         }
-        webLoadRecord = proven.type == MediaType.WEB ? proven : null;
+        // A painted page becomes what the browser is showing; a pending load never does. webLoadRecord keeps
+        // identifying the load in flight, for callbacks to prove against, and is untouched here.
+        if (proven.type == MediaType.WEB) {
+            webProvenRecord = proven;
+        }
+        if (proven.type != null) {
+            emptyPanel = null;
+        }
         renderDebugBoard();
     }
 
@@ -2024,9 +2066,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * knows a bitrate — but they no longer decide when the panel changed.
      */
     private PanelDisplay reproveTarget() {
+        // A browser view that is visible is showing <em>whatever it last painted</em>, not the URL it was
+        // pointed at a moment ago — the object is reused, so a A→B rotation shows A throughout B's load.
         WebView page = webView;
-        if (page != null && page.getVisibility() == View.VISIBLE && webLoadRecord != null) {
-            return webLoadRecord;
+        if (page != null && page.getVisibility() == View.VISIBLE && webProvenRecord != null) {
+            return webProvenRecord;
         }
         VideoPlayerController player = videoPlayer;
         View videoSurface = player == null ? null : player.getView();
@@ -2482,6 +2526,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         webView.onPause();
         webView.setVisibility(View.INVISIBLE);
+        // Nothing of the page is reaching the screen any more, so no report may name it. Leaving this set
+        // would make a re-derive choose a stopped page over the surface actually uncovered.
+        webProvenRecord = null;
     }
 
     private void startWebLoadWatchdog() {
@@ -4049,6 +4096,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // outgoing clip <em>is</em> still the panel while the controller already belongs to the incoming
         // one, and reading its position then would pair one clip's path with another attempt's numbers.
         videoCompositing = mine;
+        // The durable copy of the routing decision. The board row is derived from the record and therefore
+        // disappears with the clip; this line is what makes the decision readable a week later, and it is
+        // emitted here rather than in routingAllowsTsPlayer so an engine handover re-logs the same
+        // measurement under the compositor that actually took the file.
+        logDurable("videoRouting", mine.routingSentence());
         // TsPlayer SurfaceView must be VISIBLE to get a surface; MediaPlayer TextureView can stay
         // invisible until prepared (ImageView covers both until then).
         if (controller == tsPlayerController) {
@@ -4385,8 +4437,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private PanelDisplay photoPlaneNow() {
         PanelDisplay loaded = provenPhoto;
-        if (loaded == null || imageView.getDrawable() == null) {
-            return PanelDisplay.nothing(panelGeneration.incrementAndGet(), System.currentTimeMillis());
+        // Visible, loaded, and holding a drawable. A video→MediaPlayer handover leaves the image view
+        // INVISIBLE behind a video surface that has not painted yet, and reporting the photograph it still
+        // holds would name content that no pixel of is reaching the screen.
+        if (loaded == null || imageView.getVisibility() != View.VISIBLE
+                || imageView.getDrawable() == null) {
+            // One shared identity for "blank": minting a fresh record per read made every re-derivation of
+            // an unchanged blank panel look like a new handoff, advancing generation and resetting sinceMs on
+            // a wall that had not moved — and left media.attempt set after a recovery finished, because its
+            // attempt and its proof were two different objects describing the same nothing.
+            PanelDisplay blank = emptyPanel;
+            if (blank == null) {
+                blank = PanelDisplay.nothing(panelGeneration.incrementAndGet(),
+                        System.currentTimeMillis());
+                emptyPanel = blank;
+            }
+            return blank;
         }
         return loaded;
     }
