@@ -3,6 +3,8 @@ package com.aphex3k.eo1;
 import org.junit.Test;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import com.aphex3k.eo1.MainActivity.DownloadBarAction;
 import com.aphex3k.eo1.MainActivity.DownloadBarSignal;
@@ -116,6 +118,42 @@ public class DownloadBarVisibilityTest {
                 DownloadBarSignal.TRANSFER_PROGRESS, 620, true));
         assertEquals(DownloadBarAction.UNCHANGED, MainActivity.downloadBarAction(
                 DownloadBarSignal.CYCLE_CLOSED, 0, true));
+        assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
+                DownloadBarSignal.TRANSFER_PROGRESS, -1, true));
+    }
+
+    // --- the in-flight clocks, which answer the same two questions differently -------------------
+
+    @Test
+    public void bytesFromACountedTransferAreEvidenceTheDownloadIsInFlight() {
+        assertTrue(MainActivity.downloadBytesCounted(DownloadBarSignal.TRANSFER_PROGRESS, true));
+    }
+
+    /**
+     * The fourth round's race. A prefetch passes the forwarding gate while a counted download is up,
+     * stops, and resumes after that download's close has cleared the clocks. Stamping there reports a
+     * transfer that has ended, and the next download inherits a start time that is not its own.
+     */
+    @Test
+    public void bytesArrivingAfterTheCloseAreNotEvidenceOfAnything() {
+        assertFalse(MainActivity.downloadBytesCounted(DownloadBarSignal.TRANSFER_PROGRESS, false));
+    }
+
+    /** A finish and a close both say the window is ending, not that bytes are moving now. */
+    @Test
+    public void aTerminalEventDoesNotStampTheClocks() {
+        assertFalse(MainActivity.downloadBytesCounted(DownloadBarSignal.TRANSFER_FINISHED, true));
+        assertFalse(MainActivity.downloadBytesCounted(DownloadBarSignal.CYCLE_CLOSED, true));
+    }
+
+    /**
+     * Bytes with no declared length: they keep the transfer alive in the clocks, and still draw no
+     * bar. The two rules differ here on purpose — an undeclared {@code Content-Length} is a missing
+     * denominator, not a missing download.
+     */
+    @Test
+    public void undeclaredLengthBytesStillStampEvenThoughTheyDrawNothing() {
+        assertTrue(MainActivity.downloadBytesCounted(DownloadBarSignal.TRANSFER_PROGRESS, true));
         assertEquals(DownloadBarAction.HIDE, MainActivity.downloadBarAction(
                 DownloadBarSignal.TRANSFER_PROGRESS, -1, true));
     }

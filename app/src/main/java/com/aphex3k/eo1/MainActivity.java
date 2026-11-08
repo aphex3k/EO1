@@ -3935,17 +3935,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // Long.MAX_VALUE), and either poisons the throttle below for the rest of the download.
         long percent = contentLength > 0L ? Math.round((100.0 * bytesRead) / contentLength) : 0L;
 
-        long progressNowMs = System.currentTimeMillis();
-        if (!done) {
-            if (downloadStartedAtMs == 0L) {
-                downloadStartedAtMs = progressNowMs;
-            }
-            downloadProgressAtMs = progressNowMs;
-        }
-        // `done` deliberately clears nothing here. Byte events stamp; the end of the window belongs to
-        // downloadCycleClosed, which is the one place that knows whether another download is counted.
-        // Zeroing the clocks on a finish used to erase the age of a transfer still in progress, and a
-        // finish is not that transfer's end.
+        // Nothing about the clocks happens here. They are written on the UI thread, in
+        // applyDownloadBar, because this method runs on whichever thread read the bytes: a prefetch
+        // can pass MediaManager's gate, stop between here and its own UI post, and resume after the
+        // close that follows the counted download it was riding on — stamping a transfer that has
+        // already ended, which downloadInFlightMs() then reports and the next download inherits.
+        // A finish clears nothing either; the end of the window belongs to downloadCycleClosed.
 
         // OkHttp invokes this on every read() of the response body, so logging every
         // event floods logcat with repeated "download: 9%" lines. Log the content-length
@@ -4012,9 +4007,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** Puts the bar into the state one progress event describes. UI thread. */
     private void applyDownloadBar(long bytesRead, long contentLength, boolean done) {
         int permille = downloadBarPermille(bytesRead, contentLength);
-        switch (downloadBarAction(done ? DownloadBarSignal.TRANSFER_FINISHED
-                                       : DownloadBarSignal.TRANSFER_PROGRESS,
-                                 permille, downloadCountedInFlight())) {
+        DownloadBarSignal signal = done ? DownloadBarSignal.TRANSFER_FINISHED
+                                        : DownloadBarSignal.TRANSFER_PROGRESS;
+        boolean inFlight = downloadCountedInFlight();
+        if (downloadBytesCounted(signal, inFlight)) {
+            long nowMs = System.currentTimeMillis();
+            if (downloadStartedAtMs == 0L) {
+                downloadStartedAtMs = nowMs;
+            }
+            downloadProgressAtMs = nowMs;
+        }
+        switch (downloadBarAction(signal, permille, inFlight)) {
             case SHOW:
                 progressIndicator.setMax(DOWNLOAD_BAR_MAX);
                 progressIndicator.setProgressCompat(permille, true);
@@ -4069,6 +4072,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return permille >= 0 ? DownloadBarAction.SHOW : DownloadBarAction.HIDE;
         }
         return DownloadBarAction.UNCHANGED;
+    }
+
+    /**
+     * Whether an event is evidence that bytes are moving <em>now</em>, which is what the in-flight
+     * clocks record. Same two facts as the bar's rule and the same reason: asked on the UI thread, so
+     * an event that arrives after the close that zeroed the clocks cannot re-anchor them to a transfer
+     * that has ended. Bytes from a counted download count even when its length is undeclared, and so
+     * draw no bar while still proving the transfer alive — which is why this is not the cell above.
+     */
+    static boolean downloadBytesCounted(DownloadBarSignal signal, boolean inFlight) {
+        return inFlight && signal == DownloadBarSignal.TRANSFER_PROGRESS;
     }
 
     /**
