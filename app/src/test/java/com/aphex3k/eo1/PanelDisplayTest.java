@@ -2,6 +2,7 @@ package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
@@ -116,6 +117,19 @@ public class PanelDisplayTest {
         PanelDisplay image = PanelDisplay.image(null, null, GEN, WHEN);
         assertEquals("", image.assetKey);
         assertEquals("", image.pathOrUrl);
+    }
+
+    /**
+     * An emptied panel is a different claim from a photograph whose file cannot be named, and conflating
+     * them is how a frame that was asked to forget its only asset goes on reporting an image.
+     */
+    @Test
+    public void nothingOnThePanelIsNotAnImageWithNoFile() {
+        PanelDisplay blank = PanelDisplay.nothing(GEN, WHEN);
+        assertNull(blank.type);
+        assertFalse(blank.showsVideo());
+        assertEquals("nothing on the panel", blank.describe());
+        assertNotEquals(PanelDisplay.image("", "", GEN, WHEN).describe(), blank.describe());
     }
 
     @Test

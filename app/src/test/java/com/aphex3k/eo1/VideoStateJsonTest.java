@@ -338,10 +338,34 @@ public class VideoStateJsonTest {
         assertTrue(video.has("positionMs"));
     }
 
+    /**
+     * The one-read discipline the comments call load-bearing, as an assertion rather than a sentence.
+     *
+     * <p>{@code videoPlayer} is volatile and reassigned by the engine switch from both the UI thread and
+     * the player's event thread, so a builder that asked twice could print one controller's
+     * {@code paintSignal} beside another controller's frame stamp — the halves of one document describing
+     * two engines, which is the failure the hoisted local exists to prevent.
+     */
+    @Test
+    public void theBuilderAsksThePlayerOncePerDocument() {
+        AnsweringProbe probe = new AnsweringProbe();
+        VideoStateJson.build(videoOnScreen(), frame(), probe);
+        assertEquals("paintSignal asked " + probe.paintSignalCalls + " times for one document",
+                1, probe.paintSignalCalls);
+
+        AnsweringProbe photoProbe = new AnsweringProbe();
+        VideoStateJson.build(PanelDisplay.image("k", "/x.jpg", GEN, WHEN), frame(), photoProbe);
+        assertEquals(1, photoProbe.paintSignalCalls);
+    }
+
     /** A probe that answers, for the cases where a clip really is up. */
     private static class AnsweringProbe implements VideoStateJson.PlayerProbe {
+        /** How many times the builder asked. One document must ask once. */
+        int paintSignalCalls;
+
         @Override
         public boolean paintSignal() {
+            paintSignalCalls++;
             return true;
         }
 
@@ -365,9 +389,22 @@ public class VideoStateJsonTest {
             return 4_200;
         }
 
+        /**
+         * Answered, not abstained. Returning null here would make the engine guard untestable: the
+         * MediaPlayer-clip assertions would pass because the fixture declined to answer rather than
+         * because {@code VideoStateJson} refused to ask, which is the difference between a test and a
+         * tautology on the exact regression AGENTS.md documents verbatim.
+         */
         @Override
         public VideoStateJson.NativeCounters nativeCounters() {
-            return null;
+            VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
+            counters.generation = 9;
+            counters.errors = 3;
+            counters.playerCreated = true;
+            counters.surfaceReady = true;
+            counters.recreatingForLoop = true;
+            counters.loopCycleMs = 8_000L;
+            return counters;
         }
 
         @Override

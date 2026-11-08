@@ -3,6 +3,7 @@ package com.aphex3k.eo1;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Map;
 import java.util.Set;
 
@@ -72,6 +73,10 @@ public final class DebugBoard {
             "Min Brightness", "Reported Light Value", "Calculated Brightness Value",
             // Network, broker and the frame's own watchdog.
             "connection status", "mqtt", "watchdog", "vendorUpdater",
+            // The last physical key this app handled. Input state, not asset state — and the row that
+            // answers "did the frame hear me?" would otherwise disappear on the next rotation, which is a
+            // diagnosis this repo has already chased twice.
+            "key",
             // Self-update, and a backend's compatibility verdict about its service (not about a clip).
             "Update", "Update Available", "compatibility",
             // The last thing that went wrong anywhere in the process.
@@ -81,16 +86,60 @@ public final class DebugBoard {
     }
 
     /**
-     * Drops every line that describes an asset, keeping the frame's own.
+     * Whether adopting {@code next} in place of {@code previous} is an asset handoff — the only event
+     * that may sweep the board.
      *
-     * <p>Also drops {@code "on screen"}: the caller rewrites it immediately from the new
-     * {@link PanelDisplay}, and leaving the previous asset's sentence in place for even one render of
-     * the interval between the two writes is the bug this class exists to close.
+     * <p>Keyed on the asset, not on the call, because several paths restate the panel without changing
+     * what is on it: a clip that failed and is now covered by a photo, and a page that failed to render,
+     * both via {@code revealPhotoView}, and a mid-attempt engine handover. Treating those as handoffs
+     * deleted the line explaining the failure on the statement after it was written — the one sentence
+     * that says why the panel in front of an operator is blank.
+     *
+     * <p>Public, and separate from the sweep for one reason: this predicate is the entire policy, and
+     * while it lived inline in an {@code Activity} no test could tell "sweeps when it should" from
+     * "never sweeps" — and a permanently-false condition here reproduces the original bug exactly.
+     */
+    public static boolean sweepRequired(PanelDisplay previous, PanelDisplay next) {
+        if (previous == null) {
+            // Nothing was on the board's account of the panel, so there is no departed asset to unmention.
+            return false;
+        }
+        return !previous.assetKey.equals(next == null ? "" : next.assetKey);
+    }
+
+    /**
+     * Drops every line that describes a departed asset, keeping the frame's own and any line naming the
+     * asset that is arriving.
+     *
+     * <p>The arriving-key test is not a convenience. Several acquisition verdicts — {@code videoBudget},
+     * {@code Show}, {@code Thumbnail}, {@code Incompatible} — are written on the acquisition thread
+     * <em>about</em> the asset that is then displayed, so they land while the previous asset is still the
+     * one recorded, and a plain sweep would delete each of them at the moment its subject reached the
+     * panel. Those lines carry the asset key in their value, which is what makes "is this line about the
+     * thing on screen" answerable without asking fifty-eight writers to declare a lifetime. A line naming
+     * no asset — a finished clip's {@code video: end pos=…} — is still dropped, which is the point.
+     *
+     * <p>{@code "on screen"} always goes: the caller rewrites it immediately from the new
+     * {@link PanelDisplay}, and leaving the previous asset's sentence standing for even one render of the
+     * gap is the bug this class exists to close.
      *
      * @param board the live debug board, mutated in place; the caller holds its monitor
+     * @param arrivingKey the key of the asset now on the panel, or "" when it cannot be named
      */
-    public static void onAssetHandoff(Map<String, String> board) {
-        board.keySet().retainAll(FRAME_SCOPED);
-        board.remove(KEY_ON_SCREEN);
+    public static void onAssetHandoff(Map<String, String> board, String arrivingKey) {
+        String key = arrivingKey == null ? "" : arrivingKey;
+        Iterator<Map.Entry<String, String>> entries = board.entrySet().iterator();
+        while (entries.hasNext()) {
+            Map.Entry<String, String> entry = entries.next();
+            if (FRAME_SCOPED.contains(entry.getKey())) {
+                continue;
+            }
+            if (KEY_ON_SCREEN.equals(entry.getKey())) {
+                entries.remove();
+            } else if (key.isEmpty() || entry.getValue() == null
+                    || !entry.getValue().contains(key)) {
+                entries.remove();
+            }
+        }
     }
 }

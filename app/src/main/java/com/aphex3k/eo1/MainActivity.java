@@ -1868,11 +1868,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
         PanelDisplay previous = panel;
-        boolean newAsset = previous == null || !previous.assetKey.equals(next.assetKey);
+        boolean handoff = DebugBoard.sweepRequired(previous, next);
         panel = next;
-        if (newAsset) {
+        if (handoff) {
             synchronized (this.debugInformation) {
-                DebugBoard.onAssetHandoff(this.debugInformation);
+                DebugBoard.onAssetHandoff(this.debugInformation, next.assetKey);
             }
         }
         debugInformationProvided(new DebugInformation(DebugBoard.KEY_ON_SCREEN, next.describe()));
@@ -2045,6 +2045,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             videoPlayer.setVisibility(View.INVISIBLE);
 
             if (!ensureWebView()) {
+                // No browser view exists to cover anything, so the surface is whatever photo was already
+                // underneath — and the player two lines above has just been released. Stamping that here
+                // is what keeps this branch from being the one web path that leaves the record naming a
+                // clip the panel no longer holds; abandonWebPage already does exactly this for the other
+                // way a page can fail.
+                revealPhotoView(currentPanelAssetKey());
                 mediaManager.webDisplayFailed(MainActivity.this, assetId);
                 return;
             }
@@ -2216,15 +2222,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         webUrlOnScreen = "";
         activeWebAssetId = "";
         hideWebView();
-        revealPhotoView();
+        // Named with the page that failed, not blank: the asset on the panel has not changed, only the
+        // surface covering it, and an asset handoff is what sweeps the board. Stamping it as a new asset
+        // here deleted the "web: failed …" / "web: timeout …" line on the statement after it was written,
+        // which is the one sentence explaining the blank panel an operator is standing in front of.
+        revealPhotoView(failedAssetId);
         // Cleared, not set to the image: the screen content changed behind the display methods'
         // same-asset check, so the next tick must be allowed to re-show this very photo.
         lastVisibleAsset = "";
-        // The page is gone and the photograph underneath is visible again, so the panel no longer
-        // holds web content — and this says so without claiming to know which photo it does hold,
-        // which the line above is careful not to decide.
-        panelNowShowing(PanelDisplay.image("", "",
-                panelGeneration.incrementAndGet(), System.currentTimeMillis()));
         // A page this frame could not render never reaches assetFallback — it has no bytes and no
         // second engine — so it counts here, or the failure total would read calm on a frame whose
         // every web asset is dead.
@@ -2297,13 +2302,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoPlayer.release();
         videoPlayer.setVisibility(View.INVISIBLE);
         hideWebView();
-        revealPhotoView();
-        // The failed clip is off the panel from here, whatever the next rung does with it. Without
-        // this a ladder that dead-ends — a local upload has no degraded source to fall back to —
-        // leaves the report describing a video that stopped being displayed, which is the failure this
-        // whole record exists to make unstatable.
-        panelNowShowing(PanelDisplay.image("", "",
-                panelGeneration.incrementAndGet(), System.currentTimeMillis()));
+        // The failed clip is off the panel from here, whatever the next rung does with it — but the
+        // <em>asset</em> has not changed, only the surface covering it. Naming it that way is what lets
+        // the line explaining the failure survive: a ladder that dead-ends, as every local upload does
+        // because an upload has no degraded source, must not leave a video named as what is displayed.
+        revealPhotoView(currentPanelAssetKey());
+    }
+
+    /** The asset the panel currently names, or {@code ""} before the first display. */
+    private String currentPanelAssetKey() {
+        PanelDisplay shown = panel;
+        return shown == null ? "" : shown.assetKey;
     }
 
     /**
@@ -2383,6 +2392,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     + " flagging it as incompatible with this device");
             if (isVideo) {
                 restoreImageViewAfterVideoFailure();
+            } else {
+                // The image counterpart, and it matters more here than on the video path: the line below
+                // unlinks the file this asset's record points at, so without a restatement the panel
+                // report names a path that no longer exists on disk — permanently, for an upload whose
+                // backend has no degraded source to fall back to.
+                revealPhotoView(assetId);
             }
             mediaManager.tagAssetAsIncompatible(assetId);
             mediaManager.removeFromCache(file);
@@ -2407,6 +2422,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         if (isVideo) {
             restoreImageViewAfterVideoFailure();
+        } else {
+            // Same reason as on the terminal rung: the original's bytes are dropped below, and if the
+            // degraded source turns out not to exist — every local upload — the display call never runs,
+            // leaving the record pointing at the file this call just deleted.
+            revealPhotoView(assetId);
         }
         MainActivity activity = activityReference.get();
         if (activity != null) {
@@ -2791,7 +2811,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // The browser view sits above the image, so claiming the image is on screen only works
             // if the page is taken away first.
             hideWebView();
-            revealPhotoView();
+            // Revealing the photo is a change to the panel, so it is stated as one: without this the
+            // record went on naming the clip whose plane this rung just tore down, and the /state probe
+            // kept calling into the controller that was released two lines above — on the one path a
+            // wedged frame is most likely to be diagnosed from, because this is what KioskWatchdog
+            // reaches for, and the report it collects prints the same stale record.
+            revealPhotoView(currentPanelAssetKey());
             mediaManager.showNextImage(this);
         } catch (Exception e) {
             handleException(e);
@@ -3227,13 +3252,21 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // Paint evidence belongs to the engine that is compositing, and only while one is. These
             // used to be written for every launch, so a frame that had not shown a video in a week
             // still reported the last clip's player as painted — in the record people quote.
+            // The controller is read once into `compositing`, and the engine named comes from the record:
+            // three separate reads of a volatile field this Activity and the player's own event thread
+            // both assign could otherwise print one engine's paintSignal beside another engine's frame
+            // stamp, in a report that outlives the reboot it describes.
+            VideoPlayerController compositing = videoPlayer;
+            long lastFrameAtMs = compositing == null ? 0L : compositing.getLastFrameAtMs();
             sb.append("active video        : path=").append(shown.pathOrUrl)
                     .append(" stage=").append(shown.stage)
-                    .append(" paintSignal=").append(videoPlayer.supportsPaintSignal())
+                    .append(" engine=").append(shown.engine)
+                    .append(" paintSignal=").append(compositing != null
+                            && compositing.supportsPaintSignal())
                     .append(" painted=").append(videoPaintProduced)
                     .append(" lastFrame=")
-                    .append(videoPlayer.getLastFrameAtMs() == 0L ? "never"
-                            : ((now - videoPlayer.getLastFrameAtMs()) / 1000L) + "s ago")
+                    .append(lastFrameAtMs == 0L ? "never"
+                            : ((now - lastFrameAtMs) / 1000L) + "s ago")
                     .append('\n');
         }
         // One line for the broker link, in the record that outlives logcat. "connected=false" and "connected
@@ -4018,10 +4051,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * Puts the photo plane back on screen and records it as what is showing — the one place that pairing
      * is written down, so no recovery path can uncover a view while leaving {@code lastVisibleView}
      * pointing at a video surface nobody can see.
+     *
+     * <p>It also restates the panel. Every recovery rung that uncovers the photo is a change to what the
+     * wall shows, and four of them were written before this method existed — so each had to remember to
+     * stamp, and three of them forgot, which left a torn-down clip named as what is on screen. Passing the
+     * asset through is what keeps a failure's own line on the board: a photo covering <em>the same
+     * asset</em> is not an asset handoff, so nothing is swept, and the line saying why the clip is not on
+     * the wall survives. {@code ""} is for the paths that genuinely cannot say which photo is underneath.
      */
-    private void revealPhotoView() {
+    private void revealPhotoView(String assetKey) {
         imageView.setVisibility(View.VISIBLE);
         lastVisibleView = imageView;
+        panelNowShowing(PanelDisplay.image(assetKey == null ? "" : assetKey, "",
+                panelGeneration.incrementAndGet(), System.currentTimeMillis()));
     }
 
     @Override
@@ -4190,6 +4232,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         // A destroyed activity cannot clear a view; the next display replaces it.
                     }
                     imageView.setImageDrawable(null);
+                    // The wall is empty from here, so say that. Naming no asset would leave the removed
+                    // one as what is on screen — permanently, because if this was the only asset in the
+                    // pool, every later tick fails the same way and no display method ever runs again.
+                    // It is also the one state that must not be written as an image with an empty path:
+                    // a cleared panel claiming a photograph is the same false present tense as the bug
+                    // this record was built to remove.
+                    panelNowShowing(PanelDisplay.nothing(panelGeneration.incrementAndGet(),
+                            System.currentTimeMillis()));
                 }
                 if (mediaManager != null) {
                     mediaManager.showNextImage(MainActivity.this);
@@ -4374,7 +4424,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (shown == null) {
             screen.addProperty("type", "none");
         } else {
-            screen.addProperty("type", mediaTypeName(shown.type));
+            // VideoStateJson's mapper, not this file's: the record's null type means "nothing on the
+            // panel", and media.screen and video.showing must not spell the same state two ways.
+            screen.addProperty("type", VideoStateJson.mediaTypeName(shown.type));
             if (!shown.assetKey.isEmpty()) {
                 screen.addProperty("key", shown.assetKey);
             }

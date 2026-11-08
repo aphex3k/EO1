@@ -72,6 +72,12 @@ public final class PanelDisplay {
         }
     }
 
+    /**
+     * {@code null} means the panel is showing nothing — the state after the operator asks the frame to
+     * forget the asset that was up. It is a distinct value rather than an {@link #image} with empty
+     * fields because "a photograph whose file we cannot name" and "no photograph at all" are different
+     * answers, and collapsing them would let a cleared panel claim an image.
+     */
     public final MediaType type;
     /** Rotation pool key of the asset on the panel; "" when the panel holds something unkeyed. */
     public final String assetKey;
@@ -112,9 +118,6 @@ public final class PanelDisplay {
     PanelDisplay(MediaType type, String assetKey, String pathOrUrl, String engine,
                  String stage, ClipFacts clip, String routingLine,
                  long generation, long sinceMs) {
-        if (type == null) {
-            throw new IllegalArgumentException("type");
-        }
         if ((type == MediaType.VIDEO) != (clip != null)) {
             throw new IllegalArgumentException("clip belongs to a video and only to a video");
         }
@@ -130,13 +133,25 @@ public final class PanelDisplay {
     }
 
     /**
-     * There is no factory for "nothing yet", and that is deliberate: before the first handoff the
-     * holder in {@code MainActivity} is {@code null}, which is a different claim from "an image with
-     * no path". A record is only ever built from a display that actually happened.
+     * There is no factory for "nothing <em>yet</em>", and that is deliberate: before the first display of
+     * the session the holder in {@code MainActivity} is {@code null}, because a record is only ever built
+     * from a display that actually happened. {@link #nothing} is the other case — something was on the
+     * panel and has been taken away.
      */
     public static PanelDisplay image(String assetKey, String path, long generation, long sinceMs) {
         return new PanelDisplay(MediaType.IMAGE, assetKey, path, "", "", null, "",
                 generation, sinceMs);
+    }
+
+    /**
+     * The panel is holding nothing: the surface was cleared, as it is when the operator asks the frame to
+     * forget the asset that was up and there is no other asset to show in its place.
+     *
+     * <p>{@link #image} with empty fields would be a false statement of the same shape this class exists
+     * to prevent — a report claiming a photograph on a wall that shows nothing.
+     */
+    public static PanelDisplay nothing(long generation, long sinceMs) {
+        return new PanelDisplay(null, "", "", "", "", null, "", generation, sinceMs);
     }
 
     public static PanelDisplay web(String assetKey, String url, long generation, long sinceMs) {
@@ -168,6 +183,9 @@ public final class PanelDisplay {
     /** The one debug-board line that can never disagree with the panel, because this writes it. */
     public String describe() {
         StringBuilder text = new StringBuilder();
+        if (type == null) {
+            return "nothing on the panel";
+        }
         switch (type) {
             case VIDEO:
                 text.append("video");
