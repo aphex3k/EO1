@@ -9,11 +9,14 @@ import org.junit.Test;
  * Frame spacing, pinned.
  *
  * <p>This is the instrument half of a stutter report. The app's only per-frame datum was the wall
- * clock of the last frame, which cannot tell a picture held for six seconds at the end of a lap from a
- * clip that stopped painting — and the EO2 dump that motivated {@link VideoLoopSeamRule} shows why
- * that matters: the media clock advanced at exactly 1.00x across the entire hold, so every field in
- * the process described a healthy clip while the wall was frozen. Spacing is the one measurement that
- * cannot be contradicted by a stagefright timer, because it is stamped where pixels reach the surface.
+ * clock of the last frame, which cannot tell an interval in which nothing new reached the screen from a
+ * clip that stopped painting — and the EO2 dump that motivated {@link VideoLoopSeamRule} shows why the
+ * distinction matters: across ~5.9 s of wall the position advanced 255 ms, and every clock-based field
+ * described a healthy clip while it did. Spacing is the one measurement no stagefright timer can
+ * contradict, because it is stamped at a draw pass rather than derived from elapsed time — but it says
+ * whether buffers arrived, not whether the picture changed. See {@link FrameGapWindow} for the whole
+ * distinction; the short version is that <b>whether the wall was frozen is still an open question</b>,
+ * and this instrument exists to answer it rather than to have answered it.
  *
  * <p>What is asserted here is the semantics an operator reads off {@code /state}: what "no record"
  * means, what a reset discards, and the two clock hazards of a device that is power-cycled and never
@@ -58,7 +61,7 @@ public class FrameGapWindowTest {
             t += FRAME_MS;
         }
         window.recordFrame(t);            // the last smooth frame, so the hold is exactly 6000
-        window.recordFrame(t + 6000L);    // the seam: the wall held its decoded frame
+        window.recordFrame(t + 6000L);    // a 6 s interval with nothing arriving: what must be recorded
         window.recordFrame(t + 6033L);
 
         assertEquals(6000, window.getMaxGapMs());

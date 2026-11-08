@@ -13,11 +13,14 @@ import org.junit.Test;
  * <p>This file exists for the reason {@link VideoRoutingTest} does, with a sharper edge: the rule had
  * never been tested <em>and</em> its author said so. Commit {@code 4386f8b} introduced the boundary
  * this asserts, and closed its own message with "the part not yet measured on hardware: the EO2 is
- * inside quiet hours". Three weeks later a live EO2 dump showed what the unmeasured half does — a
- * 55855 ms clip whose player reports 55000 held its last decoded frame for about 5.9 s every lap,
- * reported on the seam line as {@code rate=1.00x}, because the media clock really was keeping wall
- * time while nothing new reached the surface. Every number below is read off that dump or off the
- * series {@code 4386f8b} recorded in its own message.
+ * inside quiet hours". Three weeks later a live EO2 dump showed what the unmeasured half does — on a
+ * 55855 ms clip whose player reports 55000, the lap spent about 5.9 s of wall clock in which the
+ * position advanced 255 ms, and the seam line described all of it as {@code rate=1.00x} because the
+ * media clock really was keeping wall time. <b>That is the claim this file can support; "the wall held
+ * a frozen frame" is not.</b> No presentation data exists for that clip — it predates the frame-gap
+ * instrument — and that one lap is one lap, not every lap. See {@link VideoLoopSeamRule}'s note on what
+ * remains inferred. Every number below is read off that dump or off the series {@code 4386f8b}
+ * recorded in its own message.
  *
  * <p>The pair of tests that matters most is the pair that pulls in opposite directions: a tail that
  * steps backwards is finished and must restart ({@link #heldTailAtThePlayerEndRestartsTwoPollsEarlier}),

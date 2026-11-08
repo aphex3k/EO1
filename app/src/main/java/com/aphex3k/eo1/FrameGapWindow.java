@@ -6,11 +6,13 @@ package com.aphex3k.eo1;
  *
  * <p>It exists because the app had exactly one per-frame datum — the wall clock of the last frame
  * ({@code TextureVideoView.getLastFrameAtMs()}) — and that answers only "when did something arrive",
- * read at the instant someone asks. A frame held on the wall for six seconds and a clip that simply
- * stopped painting look identical through it unless the reader happens to poll inside the hold, and
- * the one poll that could have caught it (the paint watchdog) cancels itself on the first frame it
- * ever sees. Meanwhile the media clock can keep advancing at exactly 1.00x across the whole hold, so
- * every other field in the process says the clip is healthy while the wall is frozen.
+ * read at the instant someone asks. A six-second interval in which nothing new reaches the screen and a
+ * clip that simply stopped painting look identical through it unless the reader happens to poll inside
+ * the interval, and the one poll that could have caught it (the paint watchdog) cancels itself on the
+ * first frame it ever sees. Meanwhile the media clock can keep advancing at exactly 1.00x across the
+ * whole interval, so every other field in the process calls the clip healthy. <b>Whether the wall was
+ * actually frozen during such an interval is what this class was built to find out, and it has not
+ * answered it yet</b> — see the paragraph below on what the counter can and cannot see.
  *
  * <p>Spacing is the missing question, and it is answerable for one subtraction per frame — but it
  * answers a <em>narrower</em> question than it first appears to, and the sentence that used to be here
@@ -127,8 +129,8 @@ public final class FrameGapWindow {
      * the caller is asking about; it is only the interval <em>across</em> the suspension that means
      * nothing.
      *
-     * <p>This is the difference between reporting a six second held frame and reporting the three hours
-     * the frame spent dark.
+     * <p>This is the difference between reporting an interval in which the clip stopped presenting and
+     * reporting the three hours the frame spent dark.
      */
     public void suspendSampling() {
         haveStamp = false;
