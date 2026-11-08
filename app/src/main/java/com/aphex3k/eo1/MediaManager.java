@@ -2222,11 +2222,23 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return one.length() <= 200 ? one : one.substring(0, 200) + "...";
     }
 
+    /**
+     * Whether any download is in flight right now. The progress bar's visibility is decided against
+     * this on the UI thread, because a byte event that cleared the gate below is already off the
+     * thread that raised the count, and can therefore arrive after the close that follows it.
+     */
+    public boolean isDownloadInFlight() {
+        return activeDownloads.get() > 0;
+    }
+
     @Override
     public void clientProgressUpdates(long bytesRead, long contentLength, boolean done,
                                       @Nullable HttpUrl url) {
-        // Forward only while a download is actually in flight: local playback and catalog
-        // fetches must not move the UI progress bar.
+        // An early-out, not the guarantee. Local playback and catalog fetches must not move the bar,
+        // and skipping them here keeps a per-read callback from posting to the UI thread all day. It
+        // cannot be the rule: the listener is bound per HTTP client rather than per acquisition, so a
+        // prefetch — which never raises the count — reaches this method too, and passes whenever some
+        // other download happens to be up. The authoritative test is in MainActivity.
         if (activeDownloads.get() <= 0) {
             return;
         }

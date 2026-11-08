@@ -4003,13 +4003,33 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** Puts the bar into the state one progress event describes. UI thread. */
     private void applyDownloadBar(long bytesRead, long contentLength, boolean done) {
         int permille = downloadBarPermille(bytesRead, contentLength);
-        if (done || permille < 0) {
+        // Asked here, on the UI thread, rather than only on the thread that read the bytes. A
+        // prefetch body passes MediaManager's early-out whenever some other download is counted, and
+        // its post can then land behind the close that follows that download's failure — re-showing a
+        // bar with nothing left to hide it, since a prefetch neither raises the count nor lowers it.
+        // Testing at the moment of drawing makes the order of the two posts irrelevant.
+        if (!downloadBarVisible(done, permille, downloadCountedInFlight())) {
             hideDownloadBar();
             return;
         }
         progressIndicator.setMax(DOWNLOAD_BAR_MAX);
         progressIndicator.setProgressCompat(permille, true);
         progressIndicator.setVisibility(View.VISIBLE);
+    }
+
+    /** Whether a counted download exists at this instant. UI thread. */
+    private boolean downloadCountedInFlight() {
+        MediaManager manager = mediaManager;
+        return manager != null && manager.isDownloadInFlight();
+    }
+
+    /**
+     * The bar's visibility rule, as a table rather than as ordering: a progress event shows the bar
+     * only if the transfer it describes is still up, its end has not arrived, and it carries a
+     * fraction at all.
+     */
+    static boolean downloadBarVisible(boolean done, int permille, boolean inFlight) {
+        return inFlight && !done && permille >= 0;
     }
 
     /**
