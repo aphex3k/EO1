@@ -96,8 +96,10 @@ clip for the life of the process on the strength of the app's own visibility boo
 Each poll reads `getCurrentPosition()`; any movement resets the stall clock, so 8 s of a position frozen
 at one value buys one recovery `seekTo` (to 0 when the read sits within a second of the reported end,
 otherwise to where it stalled) and a fresh threshold. A second 8 s of nothing hands the same file to
-MediaPlayer if TsPlayer was serving it, and otherwise descends one rung. It also owns the loop seam: last frames
-past the duration the player reports are detected here (`parked`/`creeping`), because nothing raises
+MediaPlayer if TsPlayer was serving it, and otherwise descends one rung. It also owns the loop seam: a
+lap's end is detected here against both the duration the player reports and the file's own length, under
+three reasons — `parked`, `creeping`, and `rewound` (at or past the player's duration but below the
+previous reading) — because nothing raises
 `onCompletion`. It cannot see a decoder that advances and paints nothing — that is the whole reason the
 paint deadline exists. Unlike the paint poll it **cancels** rather than parks when the screen is off or
 the video view is not visible, and is re-armed by the next display attempt.
@@ -419,9 +421,13 @@ To force MediaPlayer only: set `buildConfigField "boolean", "USE_TSPLAYER", "fal
   the dump grants anyone else write.
   It is therefore benign and unreachable from here — a denied `open()` changes no per-frame work — but
   it is the line an operator will point at when a stutter report says "the log files show exceptions",
-  and it is not the stutter. The stutter on that frame was this app's own loop seam
-  (`VideoLoopSeamRule`), which held one frozen picture for ~5.9 s per lap while the media clock kept
-  reporting 1.00x. Do not revive the closed section below over it.
+  and it is not the stutter. What the loop seam (`VideoLoopSeamRule`) was doing on that frame is
+  documented in the code and in PR #106: across the one lap ever sampled at its tail, about 5.9 s of wall
+  passed in which the media clock advanced 255 ms — roughly 0.04x, against 1.00x through the body of the
+  same lap. **Whether the panel held a frozen picture during that interval has never been observed**, and
+  the `rate=1.00x` printed beside it is not the media clock but `MainActivity.measurePlaybackRate`'s 5 s
+  window, which re-anchors on every backwards position step. Do not revive the closed section below over
+  it, and do not describe that interval as a frozen frame without new evidence.
 
 ## TsPlayer on the EO1: closed
 

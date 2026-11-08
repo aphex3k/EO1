@@ -72,9 +72,10 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     // error-free prepare while painting nothing leaves every other signal looking healthy.
     private volatile long mLastFrameAtMs;
 
-    // Spacing between the frames behind that stamp. The stamp alone says when the last picture
-    // arrived, which cannot tell a six-second hold at the end of a lap from a clip that merely
-    // stopped painting — and the media clock advances at 1.00x through both.
+    // Spacing between the buffers behind that stamp. The stamp alone says only when the last one
+    // arrived, so it cannot separate a long interval with nothing new on the surface from a clip that
+    // stopped painting. The media clock settles neither question either: it can run at 1.00x, or stall
+    // outright the way the one recorded tail stalled. FrameGapWindow states what each reading proves.
     private final FrameGapWindow mFrameGaps = new FrameGapWindow();
 
     private State mState;

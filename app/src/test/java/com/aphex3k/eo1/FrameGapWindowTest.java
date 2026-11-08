@@ -51,7 +51,7 @@ public class FrameGapWindowTest {
     }
 
     @Test
-    public void aHeldFrameIsRetainedForTheRestOfTheClip() {
+    public void aLongQuietIntervalIsRetainedForTheRestOfTheClip() {
         // The point of a high-water mark rather than a window: the interesting gap has scrolled out of
         // any short ring by the time anyone asks, and a sixty second lap gives a poll no better than a
         // few percent chance of landing inside the hold.

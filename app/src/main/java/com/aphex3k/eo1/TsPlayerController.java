@@ -91,8 +91,8 @@ public class TsPlayerController implements VideoPlayerController {
      *
      * <p>The frame-gap answers are {@code NO_GAP} for the same reason rather than a guess: "this
      * engine cannot see its own spacing" and "this engine's spacing has always been fine" must not
-     * become the same reported number, and TsPlayer clips have the native loop and none of the
-     * platform player's end-of-file hold to be measured for in the first place.
+     * become the same reported number, and TsPlayer clips loop natively, so there is no platform-player
+     * end-of-file tail whose spacing would need measuring in the first place.
      */
     @Override
     public boolean supportsPaintSignal() {

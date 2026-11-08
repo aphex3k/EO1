@@ -15,9 +15,12 @@ import org.junit.Test;
  * this asserts, and closed its own message with "the part not yet measured on hardware: the EO2 is
  * inside quiet hours". Three weeks later a live EO2 dump showed what the unmeasured half does — on a
  * 55855 ms clip whose player reports 55000, the lap spent about 5.9 s of wall clock in which the
- * position advanced 255 ms, and the seam line described all of it as {@code rate=1.00x} because the
- * media clock really was keeping wall time. <b>That is the claim this file can support; "the wall held
- * a frozen frame" is not.</b> No presentation data exists for that clip — it predates the frame-gap
+ * position advanced 255 ms — about 0.04x, against 1.00x through the body of the same lap. The seam line
+ * printed {@code rate=1.00x} beside it, but that field is not the media clock: it is
+ * {@code MainActivity.measurePlaybackRate}'s 5 s window, which re-anchors on every backwards step, so it
+ * never spanned the stall it appears to describe. <b>The stalled media timeline is the claim this file
+ * can support; "the wall held a frozen frame" is not.</b> No presentation data exists for that clip — it
+ * predates the frame-gap instrument, and that instrument counts buffers, not picture changes.
  * instrument — and that one lap is one lap, not every lap. See {@link VideoLoopSeamRule}'s note on what
  * remains inferred. Every number below is read off that dump or off the series {@code 4386f8b}
  * recorded in its own message.
@@ -43,7 +46,8 @@ public class VideoLoopSeamRuleTest {
     @Test
     public void heldTailAtThePlayerEndRestartsTwoPollsEarlier() {
         // The last four position readings of the dumped lap, verbatim: 55756, 55049, 55023, 56011.
-        // The clip's real content ends at 55855, and the wall holds its last frame the whole time.
+        // The clip's real content ends at 55855, so these three polls advance the media clock by 255 ms
+        // in total across roughly 5.9 s of wall. What the panel was showing is not recorded.
         assertFalse("still advancing toward the end",
                 VideoLoopSeamRule.evaluate(53743, 51728, POLL_MS, EO2_PLAYER_MS, EO2_FILE_MS).restarts());
         assertFalse("2013 ms of media in 2000 ms of clock is playing, not finished",
@@ -73,7 +77,7 @@ public class VideoLoopSeamRuleTest {
     @Test
     public void protectedCrawlIsNotCutShort() {
         // 4386f8b's own series: past the shortened duration the position inches FORWARD
-        // (23011, 23169, 23374, 23879) at roughly 0.02x, and those are frames still being shown. A
+        // (23011, 23169, 23374, 23879) at roughly 0.02x, and they are still short of the file's length. A
         // test that fired here would truncate the last 0.6 s — the exact fault that revision exists
         // to prevent, and the reason REWOUNDED demands a backwards step rather than a slow one.
         assertFalse(VideoLoopSeamRule.evaluate(23011, 22900, POLL_MS, CRAWL_PLAYER_MS, CRAWL_FILE_MS).restarts());
@@ -94,7 +98,7 @@ public class VideoLoopSeamRuleTest {
         // duration disqualifies REWOUNDED, which needs one, so a stepping-backwards tail above the
         // file's length would have no test left: the 8 s stall rung behind the seam only ever sees an
         // exactly-equal reading. Requiring headway to be non-negative therefore trades a false
-        // positive for an indefinite freeze on the last frame.
+        // positive for a lap that never ends and a media clock that never advances again.
         VideoLoopSeamRule.Decision tail =
                 VideoLoopSeamRule.evaluate(23850, 23900, POLL_MS, 0, CRAWL_FILE_MS);
         assertTrue(tail.restarts());

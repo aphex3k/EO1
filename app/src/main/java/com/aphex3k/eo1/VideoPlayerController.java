@@ -66,9 +66,12 @@ public interface VideoPlayerController {
      * at its current source, or {@link FrameGapWindow#NO_GAP} when there is no such record — which
      * covers both "fewer than two frames have arrived" and an engine that reports none.
      *
-     * <p>Where {@link #getLastFrameAtMs()} says when the last picture arrived, this says whether
-     * pictures arrived <em>evenly</em>. A clip held at end of file while its media clock keeps
-     * advancing shows up here and nowhere else, because every other signal in the process is a clock.
+     * <p>Where {@link #getLastFrameAtMs()} says when the last buffer arrived, this says whether buffers
+     * kept arriving at an even rate. Every other signal in the process is a clock, which is why it
+     * exists — but read it narrowly: a wide interval is positive evidence that nothing arrived, a small
+     * interval is <em>not</em> evidence that the picture changed (a producer can re-queue a frame the
+     * panel has already shown), and neither says what the panel was displaying.
+     * {@link FrameGapWindow} carries the full account.
      */
     int getMaxFrameGapMs();
 

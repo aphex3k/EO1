@@ -24,8 +24,9 @@ package com.aphex3k.eo1;
  * the reason is not the container: <b>this ROM's {@code MediaPlayer} floors a clip's length to the
  * whole second.</b> Nine of nine looping clips in a live EO2's durable log report exactly
  * {@code floor(fileMs / 1000) * 1000} — 23000 for 23621, 31000 for 31041, 37000 for 37270, 45000 for
- * 45541, 55000 for 55855, 58000 for 58485 — so the shortfall is anywhere from 41 ms to 959 ms and
- * ending on the player's number truncates frames still running by up to that remainder. (An earlier
+ * 45541, 55000 for 55855, 58000 for 58485 — so the remainder is under one second by construction and
+ * measured at 41 ms to 855 ms across those nine, and ending on the player's number truncates frames
+ * still running by up to that. (An earlier
  * account blamed the QuickTime {@code mvhd} timescale for not dividing the frame period evenly. That
  * was inherited from the first fix in this area, and the nine measurements contradict it: a timescale
  * artefact would not land on a whole second nine times running.)
@@ -53,11 +54,15 @@ package com.aphex3k.eo1;
  *
  * <p><b>What that interval was is not known, and the earlier wording here overstated it.</b> "The wall
  * held its last decoded frame" was inferred from position readings; no presentation data exists for
- * that clip — it predates the frame-gap instrument. The instrument has since recorded 345 ms as its
- * worst spacing anywhere, including on a lap whose position was bit-identical between polls, so it
- * counts buffers reaching a draw pass rather than changes of picture and cannot settle the question in
- * either direction. What is measured is a stall of the media timeline; whether the panel went dark with
- * it is an open question, and the branch has to be justified without leaning on it.
+ * that clip — it predates the frame-gap instrument. And that instrument has since recorded no interval
+ * above 345 ms anywhere, including on a lap whose position was bit-identical between polls (whose own
+ * maximum was 241 ms), which is the direct evidence that it counts buffers reaching a draw pass rather
+ * than changes of picture. It therefore cannot settle the question in either direction. What is measured
+ * is a stall of the media timeline — about 0.04x across those polls, against 1.00x through the body of
+ * the same lap; whether the panel went along with it is an open question, and the branch has to be
+ * justified without leaning on it. ({@code rate=} printed beside the restart is not the media clock: it
+ * is {@code MainActivity.measurePlaybackRate}'s 5 s window, which re-anchors on a backwards step, so it
+ * never spanned the stall it appears to describe.)
  *
  * <p>{@link Tail#REWOUNDED} is the missing test: a reading at or past the player's own duration that is
  * <em>lower</em> than the reading before it. Such a position is not advancing toward the file's length,
@@ -77,10 +82,13 @@ package com.aphex3k.eo1;
  * word changes. The benefit exists only for tails like the 55855 above, where the position hovers
  * <em>below</em> the file's length for several polls and {@code CREEPING}'s gate can never be met;
  * replaying that recorded series through this rule restarts it two polls (~4 s) sooner, which is a
- * replay, not an observation. What would settle it is one lap of that 55855 ms clip on a build
- * carrying this rule, reading the {@code rewound} line's {@code gap=} field: about 6000 ms means the
- * hold is real and the truncation is priced fairly, about 300 ms means this branch is a latency bound
- * on a stalled media clock and should never be described as a fix for a visible freeze.
+ * replay, not an observation. Two things would settle it, and the {@code gap=} field is <em>not</em>
+ * one of them, for the reason given two paragraphs above. The cheap one is a lap of that clip on a
+ * build carrying this rule with the position sampled at every poll rather than only at the seam, which
+ * measures the stall directly instead of inferring it from four samples. The one that answers the
+ * question as actually asked — did the picture move — needs the panel itself: a viewer, or a frame
+ * difference across the interval. Until then this branch is a bound on latency against a stalled media
+ * clock, and should not be described as a fix for a visible freeze.
  *
  * <p>The domain claim above holds unconditionally only because the test requires
  * {@code sincePreviousMs > 0}: a <em>backward</em> clock step (these frames run no time sync —
@@ -94,7 +102,8 @@ package com.aphex3k.eo1;
  * {@code REWOUNDED} cannot speak: a player that reports no duration at all
  * ({@code reportedDurationMs <= 0}, which {@link Tail#REWOUNDED} requires) still gets restarted by
  * creeping against the file's length, and a clamped creeping would leave that clip reading backwards
- * forever with no seam and no stall recovery — an indefinite freeze on the last frame.
+ * forever with no seam and no stall recovery: the lap would never end and its media clock would never
+ * advance again, whatever the panel happens to be showing at the time.
  * {@code backwardsTailWithoutAPlayerDurationStillRestarts} pins it.
  *
  * <p>What {@link Tail#REWOUNDED} did change is why the backwards step matters. Before it, the
@@ -114,8 +123,9 @@ public final class VideoLoopSeamRule {
     public static final int TAIL_RATE_X100 = 50;
 
     /**
-     * How far past the end a position may sit and still be believed. Measured restarts land 5 to
-     * 375 ms past the file's own length; anything orders of magnitude beyond that is a bogus read
+     * How far past the end a position may sit and still be believed. Measured restarts land 51 to
+     * 707 ms past the file's own length across 22 laps of one clip (5 to 375 ms in the earlier sample);
+     * anything orders of magnitude beyond that is a bogus read
      * from a player that has not settled, not a clip that has finished. A freshly created player has
      * been observed reporting values near the epoch, and acting on one every poll would turn the loop
      * into a restart storm — so this bound is applied to every tail test, including

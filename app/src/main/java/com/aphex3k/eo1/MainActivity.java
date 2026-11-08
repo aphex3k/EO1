@@ -2444,9 +2444,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // The end of the cycle, announced here because nothing else announces it: this is the one line
         // that says the app, not the player, decided to wrap the lap. The gap pair is spacing since the
-        // data source was set — read FrameGapWindow before interpreting it. On the first run that
-        // carried it, 345 ms was the worst value recorded anywhere, including on a lap whose position
-        // was bit-identical between polls, because it counts buffers reaching a draw pass rather than
+        // data source was set — read FrameGapWindow before interpreting it. On the first run that carried
+        // it, no interval anywhere exceeded 345 ms, and a lap whose position was bit-identical between
+        // polls still reported a 241 ms maximum: the counter sees buffers reaching a draw pass, not
         // changes of picture.
         if (seam.restarts()) {
             // Read once each, and print the sentinel as a word: `gap=-1/-1` in an operator's grep looks
@@ -4309,11 +4309,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             long lastFrameAtMs = videoPlayer.getLastFrameAtMs();
             video.addProperty("lastFrameAgeMs", lastFrameAtMs > 0L
                     ? (System.currentTimeMillis() - lastFrameAtMs) : -1L);
-            // Frame SPACING, which the age above is not. A six second hold at the end of a lap and a
-            // clip that stopped painting are the same age at the moment of reading, and the media
-            // clock advances at 1.00x through the hold — so before these two fields the only way to
-            // show a held frame was to reconstruct it from the position series in logcat, which holds
-            // about thirteen minutes and keeps no record of the surface.
+            // Frame SPACING, which the age above is not. A long interval with nothing arriving and a
+            // clip that stopped painting are the same age at the moment of reading, and the media clock
+            // settles neither — it can run at 1.00x or stall outright, as it did in the one recorded
+            // tail (255 ms of position across about 5.9 s of wall). Before these two fields the app kept
+            // no record of the surface at all, only of the player's position, and logcat holds about
+            // thirteen minutes of that. What a wide value proves is that nothing arrived; what a small
+            // one proves is nothing — a producer can re-queue a frame the panel already showed. Whether
+            // the picture itself was ever withheld is still unobserved. See FrameGapWindow.
             //
             // Deliberately outside the BuildConfig.DEBUG gate that hides playbackRate* and loopPerf:
             // the class of fault this reports happens on shipped builds, where "manualLoopRestarts is
