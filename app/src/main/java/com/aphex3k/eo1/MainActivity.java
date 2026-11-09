@@ -2339,12 +2339,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // display request, and whoever made that request may already have claimed an attempt for it — a
             // render-silent clip re-selected while its preview is already on the wall minted a fresh record,
             // resolved to the same cached `_fb.jpg`, and returned here with no load to call back. The attempt
-            // then outlived every callback that could retire it: media.attempt sat beside media.screen forever
-            // on a one-clip pool, which is the exact signature this file documents as "a display failing to
-            // land", reported by a frame that was fine. revealPhotoView() is the seam for this: it takes the
-            // covering surfaces away, names the photo the view actually holds (the cached records, so nothing
-            // new is minted and no handoff is counted), and states both moments at once.
-            revealPhotoView();
+            // then out. revealPhotoView() is the seam for this: it takes the covering surfaces away, names
+            // the photo the view actually holds (the cached records, so nothing new is minted and no handoff
+            // is counted), and states both moments at once.
+            //
+            // Only while the panel is lit, though, and the ordering is the reason: this guard is evaluated
+            // ABOVE the screen-should-be-on check below, and revealPhotoView() makes three visibility writes.
+            // Un-hiding the photo plane during quiet hours undoes what turnScreenOff() just did, for the whole
+            // dark window — the schedule acts on edges only, so nothing would hide it again — for no benefit,
+            // because no display path mints an attempt in the dark (displayVideo returns at that same check
+            // before it gets here), so there is nothing waiting to be settled.
+            if (!panelIsDark()) {
+                revealPhotoView();
+            }
             return;
         }
 
