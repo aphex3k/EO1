@@ -2335,6 +2335,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
             Log.i(TAG, "displayPicture: skip same asset " + assetId);
+            // Settle before leaving. A display path that decides there is nothing to do still answered a
+            // display request, and whoever made that request may already have claimed an attempt for it — a
+            // render-silent clip re-selected while its preview is already on the wall minted a fresh record,
+            // resolved to the same cached `_fb.jpg`, and returned here with no load to call back. The attempt
+            // then outlived every callback that could retire it: media.attempt sat beside media.screen forever
+            // on a one-clip pool, which is the exact signature this file documents as "a display failing to
+            // land", reported by a frame that was fine. revealPhotoView() is the seam for this: it takes the
+            // covering surfaces away, names the photo the view actually holds (the cached records, so nothing
+            // new is minted and no handoff is counted), and states both moments at once.
+            revealPhotoView();
             return;
         }
 
