@@ -2031,10 +2031,37 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private void setPanelAttempt(@NonNull PanelDisplay next) {
         attempt = next;
+        // Every display path goes through here, which makes it the one place a superseded web load can be
+        // retired. A load that is no longer what this frame is putting up has lost its standing to change the
+        // surfaces: its watchdog calls abandonWebPage(), which uncovers the retained photograph and replaces
+        // the video's pending attempt with it, and that video's first-frame reveal then fails
+        // mayBeRevealed() — so the photo covers a clip that is playing, which is the failure this whole
+        // change set was written to make impossible, arriving from a callback about an asset nobody asked
+        // for any more.
+        PanelDisplay loading = webLoadRecord;
+        if (loading != null && loading != next) {
+            retirePendingWebLoad();
+        }
         // A row written while this attempt is in flight is about it, not about the panel it has not yet
         // replaced — so the printable-subject resolution has to see the attempt too. Re-render on the way
         // in, so a verdict recorded for the incoming asset appears the moment that asset is the attempt.
         renderDebugBoard();
+    }
+
+    /**
+     * Ends a page load this frame has stopped waiting for, without touching what it left on the wall.
+     *
+     * <p>Two identities go, and they are the two the web path's three callbacks test: the record
+     * ({@code onPageFinished}) and the URL ({@code onReceivedError}, the load watchdog). Clearing one and not
+     * the other leaves a door. {@code webProvenRecord} deliberately SURVIVES — a page the browser has already
+     * painted is what the view shows when it is shown again, and that is a fact about the surface rather than
+     * about a load in flight. See {@link #hideWebView()}.
+     */
+    private void retirePendingWebLoad() {
+        cancelWebLoadWatchdog();
+        webLoadRecord = null;
+        webUrlOnScreen = "";
+        activeWebAssetId = "";
     }
 
     /**
@@ -2428,8 +2455,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return;
             }
 
-            activeWebAssetId = assetId;
-            webUrlOnScreen = url;
             webLoadProducedPaint = false;
             // The record exists <em>before</em> the surface becomes visible. A panel re-derived from the
             // view tree while the browser was showing but its record still named the previous page would
@@ -2442,6 +2467,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             final PanelDisplay mine = PanelDisplay.web(assetId, url,
                     panelGeneration.incrementAndGet(), System.currentTimeMillis());
             setPanelAttempt(mine);
+            // AFTER the attempt is set, because setting it retires whatever load was still in flight — and
+            // retiring clears the URL and the asset that load was identified by. Naming this page before the
+            // call would have the retirement erase its own name, and then its watchdog, its onPageFinished and
+            // its onReceivedError would each no-op on an empty identity while the page sat there loading.
+            activeWebAssetId = assetId;
+            webUrlOnScreen = url;
             // The browser client is one object reused across every page, so a callback cannot capture its
             // attempt — it has to be told which load it belongs to, and a callback for a load this frame has
             // since abandoned must not be allowed to adopt the panel for whatever is loading now.
