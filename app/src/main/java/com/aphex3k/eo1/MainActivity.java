@@ -304,14 +304,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * page's <em>identity</em>, which stays live so {@code onPageFinished} can still record what the browser
      * ended up painting.
      *
-     * <p>{@code volatile}, because it is written from more than one thread and read from another. The only
-     * writer is {@code setPanelAttempt} — reached on the UI thread by most display paths, but from the
-     * rotation thread by {@code displayVideo}'s render-silent branch and by the fallback paths that uncover a
-     * photograph — and the readers are the WebView's callbacks and the load watchdog, both on the main
-     * looper. An unpublished flag there lets a load this frame has retired keep believing it owns the
-     * surfaces, and its error handler then uncovers the photograph over the display that replaced it.
+     * <p>Main looper only, and not {@code volatile} because that would be decoration: every way into a
+     * display method is posted — {@code MediaManager} hands its display calls to a {@code UiPoster} that is
+     * {@code Activity::runOnUiThread} in production, and the fallback paths post the same way — and the
+     * writers here are {@code setPanelAttempt}, {@code displayWebsite} and {@code abandonWebPage}, while the
+     * readers are the WebView's callbacks and the load watchdog's handler. A future off-thread caller would
+     * need to post, not to publish this flag: {@code volatile} would make the write visible and leave the
+     * retirement still free to race the display it is meant to follow.
      */
-    private volatile boolean webLoadOwnsSurfaces = true;
+    private boolean webLoadOwnsSurfaces = true;
     /**
      * The one record for "the panel is blank", so repeated reads of an unchanged blank wall are not repeated
      * handoffs. Cleared whenever something real is adopted, which lets a later blank report the time it
@@ -4047,12 +4048,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // asynchronously and the previous surface stays up until it lands — so the panel must keep
             // saying what is actually visible; the preview's own display call proves the switch when it
             // happens. What the clip <em>cannot</em> be is the answer to "what is playing", and the
-            // attempt being a still already says that.
-            //
-            // This runs on the caller's thread, and displayVideo is reached from the rotation thread (the
-            // comment below posts for its own reasons). That matters here because setting an attempt is how a
-            // superseded web load is retired: see webLoadOwnsSurfaces, which the browser's callbacks read on
-            // the main looper and which is therefore published rather than a plain field.
+            // attempt being a still already says that. Setting it is also how a superseded web load is
+            // retired — see webLoadOwnsSurfaces — and like every other display path this one arrives on the
+            // main looper, because MediaManager posts its display calls rather than making them inline.
             setPanelAttempt(PanelDisplay.image(assetId, "",
                     panelGeneration.incrementAndGet(), System.currentTimeMillis()));
             debugInformationProvided(new DebugInformation("displayVideo", "render-silent still "
@@ -4073,8 +4071,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     // displayed, while ORIGINAL_REPLAY and FALLBACK are re-entries into the same
                     // attempt series. Engine memory therefore resets here and nowhere else — reset it
                     // at a re-entry and the replay rung forgets it already burned an attempt, which is
-                    // the bug this counter exists to stop. Kept inside the posted block with everything
-                    // else that touches it, because displayVideo is reached from the rotation thread.
+                    // the bug this counter exists to stop. Kept inside the posted block with everything else
+                    // that touches it. (This line used to justify that placement by saying displayVideo is
+                    // reached from the rotation thread. It is not: MediaManager posts every display call
+                    // through a UiPoster that is runOnUiThread in production, so the method enters on the main
+                    // looper whichever thread decided to rotate. The grouping below is still the reason to
+                    // keep them here — but it is a sequencing argument, and a false thread claim in a comment
+                    // is how a correct-looking race fix gets written.)
                     tsAttemptsForActiveAsset = 0;
                     mediaManualLoopRestarts = 0;
                     mediaManualLoopCycleMs = -1;
