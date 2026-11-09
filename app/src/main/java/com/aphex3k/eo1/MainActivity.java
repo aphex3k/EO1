@@ -261,8 +261,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * <p>Ownership, not currency. {@code panel} says what is displayed; this says which attempt a player's
      * numbers describe. They differ on a video-to-video change — the outgoing clip is still the panel while
      * the controller already plays the incoming one — and reading position from one to answer a report about
-     * the other is the mix this field exists to make impossible. Cleared when a non-video surface takes the
-     * panel, so a released player cannot be quoted at all.
+     * the other is the mix this field exists to make impossible.
+     *
+     * <p>Its lifetime is the controller's, not the panel's: it is set when a file is handed over and cleared
+     * only by the release or reassignment itself — {@code releaseVideoDisplay()} and {@code
+     * selectVideoPlayer}'s release branch. A promotion by a photo, a page or a blank panel leaves it alone on
+     * purpose, because that player may be merely hidden and still running, and forgetting its identity there
+     * is what made a screen toggle during a pending preview wake to a clip that is playing with nothing
+     * naming it. Quoting a released player is prevented by the ownership test in the staleness check, not by
+     * clearing a field as a side effect of something else happening.
      */
     private volatile PanelDisplay videoCompositing;
     /**
