@@ -808,7 +808,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
         if (pinned < 0) {
             Log.w(TAG, "showNextImage: pinned asset " + key + " is not in this cycle's pool");
-            postDebugInformation("Show", "Asset not in the rotation pool: " + key);
+            postDebugInformation("Show", "Asset not in the rotation pool: " + key, key);
             return;
         }
         int at = poolCursor;
@@ -1124,7 +1124,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         // Durable record: Log.w above is logcat-only (~13 min on the device), and once this asset
         // routes, /state's video.bitRateBps reflects the *displayed* fallback, not these bytes. So the
         // exact numbers that triggered the verdict live only in this report.
-        postDebugInformation("videoBudget", asset.key() + " - " + reason);
+        postDebugInformation("videoBudget", asset.key() + " - " + reason, asset.key());
         return true;
     }
 
@@ -1174,7 +1174,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         // Durable record, as above: /state's video block will describe the fallback this verdict put
         // on screen, so the coded size, matrix and panel shape that decided it exist nowhere
         // else once logcat has rolled over.
-        postDebugInformation("videoBudget", asset.key() + " - " + reason);
+        postDebugInformation("videoBudget", asset.key() + " - " + reason, asset.key());
         return true;
     }
 
@@ -1858,7 +1858,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     source = backend.resolveThumbnailFallback(asset);
                 } catch (Exception e) {
                     Log.w(TAG, "displayFallbackSource: " + key, e);
-                    postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
+                    postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key, key);
                     if (tagOnDeadEnd) {
                         tagAssetAsIncompatible(key);
                     }
@@ -1908,7 +1908,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     });
                 } catch (Exception e) {
                     Log.w(TAG, "displayFallbackSource: " + key, e);
-                    postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
+                    postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key, key);
                     if (tagOnDeadEnd) {
                         tagAssetAsIncompatible(key);
                     }
@@ -1941,7 +1941,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         Log.w(TAG, "noteRenderSilent: " + assetKey + " put nothing on screen at every rung; showing its"
                 + " still preview instead (not tagging it — this says nothing about the file, and is"
                 + " forgotten on restart)");
-        postDebugInformation("video", "render-silent " + assetKey);
+        postDebugInformation("video", "render-silent " + assetKey, assetKey);
         return true;
     }
 
@@ -2003,7 +2003,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             Log.i(TAG, "tagAssetAsIncompatible: " + assetKey + " is held as render-silent on this"
                     + " device, not incompatible with it; leaving the backend untagged");
             postDebugInformation("Incompatible", "skipped " + assetKey
-                    + " — render-silent verdict, deliberately never tagged");
+                    + " — render-silent verdict, deliberately never tagged", assetKey);
             return;
         }
         new Thread(new Runnable() {
@@ -2012,7 +2012,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 MediaBackend backend = backendForKey(assetKey);
                 if (backend == null) {
                     Log.w(TAG, "tagAssetAsIncompatible: no backend for asset " + assetKey);
-                    postDebugInformation("Incompatible", "No backend for asset: " + assetKey);
+                    postDebugInformation("Incompatible", "No backend for asset: " + assetKey, assetKey);
                     return;
                 }
                 try {
@@ -2023,9 +2023,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     // Reported through the listener, so it reaches /logs and eo1-app.log and not
                     // only the 13-minute logcat buffer: a tag the server refused is otherwise
                     // indistinguishable from an asset that never needed one.
+                    //
+                    // Subject-named, and this is the case that forced the whole rule: this line is written
+                    // from the tag thread whenever the backend finally answers, which can be a rotation or
+                    // several after the asset left the panel. Attributing it by when it arrives would print
+                    // "Incompatible: could not flag <gone asset>" over whatever is up now — the exact false
+                    // present tense this is all meant to prevent, arriving through a door no ordering rule
+                    // could watch, because nothing in the display path knows this write is coming.
                     Log.w(TAG, "tagAssetAsIncompatible: " + assetKey, e);
                     postDebugInformation("Incompatible", "could not flag " + assetKey + " in '"
-                            + backend.getId() + "': " + e);
+                            + backend.getId() + "': " + e, assetKey);
                 }
             }
         }, "tag-incompatible-" + assetKey).start();
@@ -2106,10 +2113,23 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 -1, null, null, null, null, null, 0, 0);
     }
 
-    private void postDebugInformation(String key, String value) {
+    /**
+     * Publishes a diagnostic that describes one asset, naming which.
+     *
+     * <p>The subject is not decoration. These verdicts are written on the manager's own threads, so they
+     * land both <em>before</em> the asset they name reaches the panel (a routing or thumbnail verdict on
+     * the way to a display) and <em>after</em> it has left — {@code Incompatible}'s "could not flag" line
+     * is emitted when a backend tag call finally fails, which can be a whole rotation later. Nothing that
+     * runs on a schedule can be ordered correctly by where its write sits in the code, so each one carries
+     * the asset it is about and the board decides visibility from the panel. The durable log still gets
+     * every line either way.
+     *
+     * @param subjectKey the asset this line describes
+     */
+    private void postDebugInformation(String key, String value, String subjectKey) {
         MediaManagerListener mediaManagerListener = listener.get();
         if (mediaManagerListener != null) {
-            mediaManagerListener.debugInformationProvided(new DebugInformation(key, value));
+            mediaManagerListener.debugInformationProvided(new DebugInformation(key, value, subjectKey));
         }
     }
 
