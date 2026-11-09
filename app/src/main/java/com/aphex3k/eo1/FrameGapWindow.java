@@ -34,15 +34,20 @@ package com.aphex3k.eo1;
  * window would be unreadable for most of that lap — the interesting gap has scrolled out by the time
  * anyone asks about it.
  *
- * <p><b>The price of that choice, and it is a real one:</b> a high-water mark outlives the painting it
- * describes. Once the surface stops receiving frames the numbers stay exactly where they were, so
- * these fields belong to the clip named by {@code video.path}, which is not necessarily the thing on
- * the wall — a frame gap read while a photo is displayed is a report about the last video, and
- * measured this way it looks like a live reading. Read them together with {@code lastFrameAgeMs} (which
- * counts video frames only, and so is already large for any photo) and with {@code media.current.type}.
- * Nothing else in the {@code video} block advertises that it is stale, and a retained pair of ordinary
- * spacings is indistinguishable from a live one, so a poller that reads only these two fields can watch
- * a still image for minutes and believe it is timing laps.
+ * <p><b>The price of that choice, and it is a narrower one than it looks:</b> a retained maximum outlives
+ * the painting it describes <em>within one data source</em>. Once the surface stops receiving frames the
+ * numbers stay exactly where they were, so an unchanged {@link #getMaxGapMs()} says nothing about whether
+ * anything is arriving now — read it beside {@link #getLastGapMs()} and the caller's own last-frame stamp,
+ * which do move.
+ *
+ * <p>That retention is a fact about this tracker, not about the HTTP response, and the two are easy to
+ * conflate. {@link VideoStateJson} emits both fields only while a clip is provably on the panel and the
+ * document still owns the player it read them from, and {@link #reset()} clears the record when the player
+ * is pointed at a new source — so {@code /state} cannot quote a video that left the wall, and an absent
+ * pair there means "no clip is up", or an engine with no per-frame signal, never "spacing is fine". A
+ * consumer asking <em>which</em> content a reported pair belongs to reads {@code video.onScreen} and
+ * {@code media.screen}; {@code media.current} names what rotation <em>selected</em> and legitimately
+ * differs from the wall during a handoff, so it cannot answer that.
  *
  * <p><b>Clock contract.</b> {@code nowMs} must come from a <em>monotonic</em> clock —
  * {@code SystemClock.elapsedRealtime()}, not the wall clock. These frames are power-cycled routinely
