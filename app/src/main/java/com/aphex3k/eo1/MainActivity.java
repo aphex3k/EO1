@@ -147,6 +147,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long WEB_LOAD_TIMEOUT_MS = 30000L;
     /** Minimum gap between download-progress logcat lines. */
     private static final long DOWNLOAD_PROGRESS_LOG_INTERVAL_MS = 5000L;
+    /** Denominator of the download bar's fill. Per-mille, so any {@code Content-Length} fits. */
+    private static final int DOWNLOAD_BAR_MAX = 1000;
     /** Logcat tag matched by debug.sh follow_logcat filter. */
     private static final String TAG = "EO1";
     /** Tag the options dialog is shown under, and the idempotency key for {@link #showConfigurationUI()}. */
@@ -4841,18 +4843,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void clientProgressUpdates(long bytesRead, long contentLength, boolean done, @Nullable HttpUrl url) {
 
-        long percent =  Math.round((100.0 * bytesRead) / contentLength);
+        // An undeclared length divides by -1 (a negative percent) or by 0 (Infinity, which rounds to
+        // Long.MAX_VALUE), and either poisons the throttle below for the rest of the download.
+        long percent = contentLength > 0L ? Math.round((100.0 * bytesRead) / contentLength) : 0L;
 
-        long progressNowMs = System.currentTimeMillis();
-        if (done) {
-            downloadStartedAtMs = 0L;
-            downloadProgressAtMs = 0L;
-        } else {
-            if (downloadStartedAtMs == 0L) {
-                downloadStartedAtMs = progressNowMs;
-            }
-            downloadProgressAtMs = progressNowMs;
-        }
+        // Nothing about the clocks happens here. They are written on the UI thread, in
+        // applyDownloadBar, because this method runs on whichever thread read the bytes: a prefetch
+        // can pass MediaManager's gate, stop between here and its own UI post, and resume after the
+        // close that follows the counted download it was riding on — stamping a transfer that has
+        // already ended, which downloadInFlightMs() then reports and the next download inherits.
+        // A finish clears nothing either; the end of the window belongs to downloadCycleClosed.
 
         // OkHttp invokes this on every read() of the response body, so logging every
         // event floods logcat with repeated "download: 9%" lines. Log the content-length
@@ -4890,18 +4890,143 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // MediaManager only forwards progress events while a remote download is in
         // flight (catalog fetches and local playback never reach this callback).
-        this.runOnUiThread(() -> {
-            if (done) {
-                //reset update progress indicator UI
-                progressIndicator.setProgressCompat(0, false);
-                progressIndicator.setVisibility(View.INVISIBLE);
-            } else {
-                //Update progress indicator UI percent
-                progressIndicator.setMax(Math.toIntExact(contentLength));
-                progressIndicator.setProgressCompat(Math.toIntExact(bytesRead), true);
-                progressIndicator.setVisibility(View.VISIBLE);
+        this.runOnUiThread(() -> applyDownloadBar(bytesRead, contentLength, done));
+    }
+
+    @Override
+    public void downloadCycleClosed() {
+        // Everything a close does happens on the UI thread, behind the same live count a show is
+        // decided by. The count is raised before a download's first read and retired in a finally, so
+        // a second thread can open download B in the gap between A's decrement and this running;
+        // hiding B's bar or zeroing B's clocks from here would blank a transfer that is genuinely
+        // running and re-anchor its age to now. Standing aside strands nothing, because the close
+        // that finds the count still at zero is whichever download ends last.
+        runOnUiThread(() -> {
+            if (downloadBarAction(DownloadBarSignal.CYCLE_CLOSED, 0, downloadCountedInFlight())
+                    == DownloadBarAction.UNCHANGED) {
+                return;
             }
+            downloadStartedAtMs = 0L;
+            downloadProgressAtMs = 0L;
+            synchronized (downloadProgressLogLock) {
+                lastLoggedDownloadPercent = -1L;
+                lastDownloadProgressLogAtMs = 0L;
+            }
+            hideDownloadBar();
         });
+    }
+
+    /** Puts the bar into the state one progress event describes. UI thread. */
+    private void applyDownloadBar(long bytesRead, long contentLength, boolean done) {
+        int permille = downloadBarPermille(bytesRead, contentLength);
+        DownloadBarSignal signal = done ? DownloadBarSignal.TRANSFER_FINISHED
+                                        : DownloadBarSignal.TRANSFER_PROGRESS;
+        boolean inFlight = downloadCountedInFlight();
+        if (downloadBytesCounted(signal, inFlight)) {
+            long nowMs = System.currentTimeMillis();
+            if (downloadStartedAtMs == 0L) {
+                downloadStartedAtMs = nowMs;
+            }
+            downloadProgressAtMs = nowMs;
+        }
+        switch (downloadBarAction(signal, permille, inFlight)) {
+            case SHOW:
+                progressIndicator.setMax(DOWNLOAD_BAR_MAX);
+                progressIndicator.setProgressCompat(permille, true);
+                progressIndicator.setVisibility(View.VISIBLE);
+                break;
+            case HIDE:
+                hideDownloadBar();
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** Whether a counted download exists at this instant. UI thread. */
+    private boolean downloadCountedInFlight() {
+        MediaManager manager = mediaManager;
+        return manager != null && manager.isDownloadInFlight();
+    }
+
+    /** The three things the bar can be asked about. */
+    enum DownloadBarSignal {
+        /** A read delivered bytes; {@code permille} says how far along they got. */
+        TRANSFER_PROGRESS,
+        /** A read reached the end of its body. */
+        TRANSFER_FINISHED,
+        /** No counted download is running — the edge MediaManager retires the count on. */
+        CYCLE_CLOSED
+    }
+
+    /** What the bar should do about one signal. */
+    enum DownloadBarAction { SHOW, HIDE, UNCHANGED }
+
+    /**
+     * The download bar's whole rule, as a table rather than as an ordering.
+     *
+     * <p>Two facts decide it. Whether a counted download exists <em>now</em>, asked at the moment of
+     * drawing, is what makes an event's arrival order irrelevant instead of contested. And whether the
+     * event carries a fraction: an event with none has nothing to draw, and leaving the previous
+     * transfer's fill standing is the lesser truth — a bar frozen at someone else's 60% while this one
+     * streams is exactly what an operator reports as a stalled indicator.
+     *
+     * <p>A finish or a close that finds a download counted says nothing about it, so it changes
+     * nothing: that transfer's own events will speak, and whichever close lands with the count back at
+     * zero is the one that ends the window.
+     */
+    static DownloadBarAction downloadBarAction(DownloadBarSignal signal, int permille,
+                                               boolean inFlight) {
+        if (!inFlight) {
+            return DownloadBarAction.HIDE;
+        }
+        if (signal == DownloadBarSignal.TRANSFER_PROGRESS) {
+            return permille >= 0 ? DownloadBarAction.SHOW : DownloadBarAction.HIDE;
+        }
+        return DownloadBarAction.UNCHANGED;
+    }
+
+    /**
+     * Whether an event is evidence that bytes are moving <em>now</em>, which is what the in-flight
+     * clocks record. Same two facts as the bar's rule and the same reason: asked on the UI thread, so
+     * an event that arrives after the close that zeroed the clocks cannot re-anchor them to a transfer
+     * that has ended. Bytes from a counted download count even when its length is undeclared, and so
+     * draw no bar while still proving the transfer alive — which is why this is not the cell above.
+     */
+    static boolean downloadBytesCounted(DownloadBarSignal signal, boolean inFlight) {
+        return inFlight && signal == DownloadBarSignal.TRANSFER_PROGRESS;
+    }
+
+    /**
+     * The only place the bar is hidden. It decides nothing: whether a hide is warranted belongs to
+     * {@link #downloadBarAction}, so that a transfer with no fraction to show can clear the screen
+     * while a counted download is running, and a finish or close that belongs to some other transfer
+     * cannot. An earlier revision put the count test in here, and that is how a chunked download
+     * inherited the previous file's frozen fill.
+     *
+     * <p>Emptied before it is hidden so a later transfer starts from nothing rather than animating
+     * down from wherever the last one stopped.
+     */
+    private void hideDownloadBar() {
+        progressIndicator.setProgressCompat(0, false);
+        progressIndicator.setVisibility(View.INVISIBLE);
+    }
+
+    /**
+     * The bar's fill for one progress event, out of {@link #DOWNLOAD_BAR_MAX}, or -1 when the
+     * response declared no length.
+     *
+     * <p>A fixed max rather than the byte count for two reasons: a {@code Content-Length} over 2 GiB
+     * does not fit the int the view takes, and an unknown length arrives as -1, which is not a max at
+     * all — it is the case that left a bar on screen that could never move. Hiding for -1 says less
+     * than animating an indeterminate bar would, and this panel has no spare frames to animate with.
+     */
+    static int downloadBarPermille(long bytesRead, long contentLength) {
+        if (contentLength <= 0L) {
+            return -1;
+        }
+        long permille = (Math.max(0L, bytesRead) * DOWNLOAD_BAR_MAX) / contentLength;
+        return (int) Math.min(permille, (long) DOWNLOAD_BAR_MAX);
     }
 
     // ------------------------------------------------------------------

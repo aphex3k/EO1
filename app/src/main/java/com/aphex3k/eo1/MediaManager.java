@@ -1519,6 +1519,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             throw new MediaDownloadFailedException("Insufficient cache space for asset download");
         }
 
+        // Raised outside the try on purpose: the finally retires the count unconditionally, so a
+        // throw between the two would leave it permanently one short of the truth — and no later
+        // download would ever be seen at the zero that clears the progress bar.
         if (reportProgress) {
             activeDownloads.incrementAndGet();
         }
@@ -1602,7 +1605,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             }
         } finally {
             if (reportProgress) {
-                activeDownloads.decrementAndGet();
+                releaseActiveDownload(activeDownloads, downloadProgressListener.get());
             }
         }
 
@@ -2239,17 +2242,77 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return one.length() <= 200 ? one : one.substring(0, 200) + "...";
     }
 
+    /**
+     * Whether any download is in flight right now. The progress bar's visibility is decided against
+     * this on the UI thread, because a byte event that cleared the gate below is already off the
+     * thread that raised the count, and can therefore arrive after the close that follows it.
+     */
+    public boolean isDownloadInFlight() {
+        return activeDownloads.get() > 0;
+    }
+
     @Override
     public void clientProgressUpdates(long bytesRead, long contentLength, boolean done,
                                       @Nullable HttpUrl url) {
-        // Forward only while a download is actually in flight: local playback and catalog
-        // fetches must not move the UI progress bar.
+        // An early-out, not the guarantee. Local playback and catalog fetches must not move the bar,
+        // and skipping them here keeps a per-read callback from posting to the UI thread all day. It
+        // cannot be the rule: the listener is bound per HTTP client rather than per acquisition, so a
+        // prefetch — which never raises the count — reaches this method too, and passes whenever some
+        // other download happens to be up. The authoritative test is in MainActivity.
         if (activeDownloads.get() <= 0) {
             return;
         }
         ApiServiceGenerator.ProgressListener progressListener = downloadProgressListener.get();
         if (progressListener != null) {
             progressListener.clientProgressUpdates(bytesRead, contentLength, done, url);
+        }
+    }
+
+    /**
+     * Forwards the end of the download window to the Activity, ungated — the byte events above are
+     * gated on {@link #activeDownloads}, and by the time this arrives the count is zero, which is
+     * the very fact being reported. Dropping it here is what left a bar on screen forever.
+     *
+     * <p>Nothing calls this yet — the close is raised below, where the count is retired. It exists
+     * because {@link MediaManager} is a {@code ProgressListener} to its own backends, so it must
+     * answer whatever they can be told to report.
+     */
+    @Override
+    public void downloadCycleClosed() {
+        ApiServiceGenerator.ProgressListener progressListener = downloadProgressListener.get();
+        if (progressListener != null) {
+            progressListener.downloadCycleClosed();
+        }
+    }
+
+    /**
+     * Retires one in-flight download and, when it was the last, tells the listener to clear whatever
+     * it shows for a transfer.
+     *
+     * <p>This, not {@code done}, is the close a display can rely on. {@code done} comes only from a
+     * read that returns -1, so a body that ends any other way — a socket timeout, a reset, the write
+     * failing — never produces one, and a bar waiting for it keeps its last partial percent until
+     * some later download happens to finish cleanly.
+     *
+     * <p>Static and package-private so the ordering rule (exactly one close when the last download
+     * leaves, none while another is still up) is testable in a plain JVM with no Android context. The
+     * counter is decremented before anything is examined, including the null test below: a listener
+     * that has been collected must still retire the count, or the gate above closes for good. The
+     * call is fenced because this runs in a {@code finally} on a socket thread, where a throw would
+     * displace the download's own exception and reach a handler that exits the process.
+     */
+    static void releaseActiveDownload(AtomicInteger counter,
+                                      @Nullable ApiServiceGenerator.ProgressListener listener) {
+        if (counter.decrementAndGet() != 0) {
+            return;
+        }
+        if (listener == null) {
+            return;
+        }
+        try {
+            listener.downloadCycleClosed();
+        } catch (Throwable t) {
+            Log.w(TAG, "downloadCycleClosed listener threw", t);
         }
     }
 }
