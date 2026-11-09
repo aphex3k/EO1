@@ -311,8 +311,8 @@ public class VideoStateJsonTest {
         JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), new AnsweringProbe());
         for (String field : new String[]{"path", "stage", "rotation", "width", "height", "codec",
                 "fpsMilli", "avgFrameBytes", "peakFrameBytes", "bitRateBps", "fileDurationMs",
-                "macroblocksPerSecond", "renderSilent", "painted", "lastFrameAgeMs", "durationMs",
-                "positionMs"}) {
+                "macroblocksPerSecond", "renderSilent", "painted", "lastFrameAgeMs",
+                "frameGapMs", "frameGapMaxMs", "durationMs", "positionMs"}) {
             assertTrue("a clip is on the panel, yet the block omits " + field, video.has(field));
         }
     }

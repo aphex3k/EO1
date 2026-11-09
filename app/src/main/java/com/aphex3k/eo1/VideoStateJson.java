@@ -353,6 +353,7 @@ public final class VideoStateJson {
     static final String[] CLIP_FIELDS = {
             "path", "stage", "rotation", "width", "height", "codec", "fpsMilli", "avgFrameBytes",
             "peakFrameBytes", "bitRateBps", "fileDurationMs", "macroblocksPerSecond", "renderSilent",
-            "painted", "lastFrameAgeMs", "durationMs", "positionMs", "generation", "errors",
+            "painted", "lastFrameAgeMs", "frameGapMs", "frameGapMaxMs", "durationMs", "positionMs",
+            "generation", "errors",
             "playerCreated", "surfaceReady", "recreatingForLoop", "loopPerf"};
 }
