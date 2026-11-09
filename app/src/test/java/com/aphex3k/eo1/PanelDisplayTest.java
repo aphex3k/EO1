@@ -6,6 +6,7 @@ import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
+import static org.junit.Assert.assertTrue;
 
 import static org.junit.Assert.fail;
 
@@ -206,5 +207,35 @@ public class PanelDisplayTest {
         } catch (IllegalArgumentException expected) {
             assertEquals("clip belongs to a video and only to a video", expected.getMessage());
         }
+    }
+
+    /**
+     * Which record a video reveal may still take the panel for — and the reason an in-flight attempt is an
+     * identity rather than a report. Clearing {@code attempt} to keep a suspended frame's
+     * {@code media.attempt} off the wire made a parked clip un-revealable: the wake's first frame arrived
+     * for a record that was neither the attempt nor the panel, the surface stayed under the photograph, and
+     * the clip played unseen. Nothing in an {@code Activity} can be tested, so the rule lives here.
+     */
+    @Test
+    public void onlyTheInFlightOrTheProvenRecordMayReveal() {
+        PanelDisplay inFlight = PanelDisplay.video("b", "/b.mp4", "MediaPlayer", "ORIGINAL",
+                clip(), "codec=avc1", GEN, WHEN);
+        PanelDisplay proven = PanelDisplay.video("a", "/a.mp4", "TsPlayer", "ORIGINAL",
+                clip(), "codec=avc1", GEN - 1, WHEN - 1000L);
+        PanelDisplay gone = PanelDisplay.video("z", "/z.mp4", "TsPlayer", "ORIGINAL",
+                clip(), "codec=avc1", GEN - 9, WHEN - 9000L);
+
+        assertTrue(PanelDisplay.mayBeRevealed(inFlight, inFlight, proven));
+        assertTrue("what is already up may be re-revealed without becoming a handoff",
+                PanelDisplay.mayBeRevealed(proven, inFlight, proven));
+        assertFalse("a superseded attempt may not uncover the panel it belongs to",
+                PanelDisplay.mayBeRevealed(gone, inFlight, proven));
+
+        // The regression itself: an attempt cleared while the panel was dark left nothing for a parked
+        // display to reveal as, even though the panel still named the clip that had been up.
+        assertFalse("with the attempt cleared, a parked record has no way left to reveal",
+                PanelDisplay.mayBeRevealed(inFlight, null, proven));
+        assertTrue(PanelDisplay.mayBeRevealed(proven, null, proven));
+        assertFalse(PanelDisplay.mayBeRevealed(null, inFlight, proven));
     }
 }

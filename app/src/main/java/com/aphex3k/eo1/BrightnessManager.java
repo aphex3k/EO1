@@ -12,7 +12,8 @@ import java.lang.ref.WeakReference;
 @Keep
 public class BrightnessManager {
 
-    private boolean shouldTheScreenBeOn = true;
+    /** Read from the UI thread, the kiosk watchdog's timer, and {@code /state}'s worker. */
+    private volatile boolean shouldTheScreenBeOn = true;
 
     /**
      * Maximum brightness value (0 to 1)
@@ -368,11 +369,20 @@ public class BrightnessManager {
         listener.brightnessChanged(brightness);
     }
 
+    /**
+     * Records a light sensor's accuracy change, under the sensor's own name.
+     *
+     * <p>{@code ofFrame} is not decoration: the key here is computed, so {@code DebugBoard.FRAME_SCOPED}
+     * cannot list it, and an unlisted key is attributed to whatever the panel holds at the moment of
+     * writing. A sensor reading is about this machine's light sensor and nothing else, and a row that
+     * vanished on the next rotation would answer no question — the accuracy event happens once per boot,
+     * long before an operator asks why the panel is dim.
+     */
     private void sensorAccuracyChanged(Sensor sensor, int i) {
         BrightnessManagerListener listener = this.brightnessListener.get();
 
         if (listener != null) {
-            listener.debugInformationProvided(new DebugInformation(sensor.getName(), String.valueOf(i)));
+            listener.debugInformationProvided(DebugInformation.ofFrame(sensor.getName(), String.valueOf(i)));
         }
     }
 

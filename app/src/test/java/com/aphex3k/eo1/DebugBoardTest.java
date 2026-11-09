@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 import org.junit.Test;
 
@@ -166,6 +167,63 @@ public class DebugBoardTest {
         assertNull(DebugBoard.implicitSubject("version", HERE));
         assertEquals(HERE, DebugBoard.implicitSubject("video", HERE));
         assertEquals("", DebugBoard.implicitSubject("video", ""));
+    }
+
+    /**
+     * A light sensor reports its accuracy under {@code sensor.getName()}, so no literal in
+     * {@code FRAME_SCOPED} can name that row, and the name list alone cannot keep a frame-level diagnostic
+     * on the board. Left undeclared it is attributed to whatever photo happened to be up — a brightness
+     * diagnostic that survives until the next rotation and then answers nothing, on a sensor event that
+     * fires once per boot, long before an operator asks why the panel is dim.
+     */
+    @Test
+    public void aComputedKeyStaysAFrameRowOnlyByDeclaringItselfOne() {
+        String sensorKey = "vlw5301 ALS";
+        String nextPhoto = "d0or0000-0000-0000-0000-000000000004";
+
+        Map<String, DebugBoard.Row> undeclared =
+                rows(sensorKey, "0", DebugBoard.subject(new DebugInformation(sensorKey, "0"), HERE));
+        assertFalse("an undeclared sensor row is a brightness diagnostic, not an asset's",
+                DebugBoard.visible(undeclared, photo(nextPhoto)).containsKey(sensorKey));
+
+        Map<String, DebugBoard.Row> declared =
+                rows(sensorKey, "0", DebugBoard.subject(DebugInformation.ofFrame(sensorKey, "0"), HERE));
+        assertEquals("0", DebugBoard.visible(declared, photo(nextPhoto)).get(sensorKey));
+        assertEquals("0", DebugBoard.visible(declared, null).get(sensorKey));
+    }
+
+    /**
+     * The brightness rows whose keys <em>are</em> literals are pinned to the same rule, because the answer
+     * to "it dimmed by itself" is the one line this frame most needs to keep across a rotation.
+     */
+    @Test
+    public void everyBrightnessRowIsScopedToTheFrame() {
+        String nextPhoto = "d0or0000-0000-0000-0000-000000000004";
+        for (String key : new String[]{"Min Brightness", "Reported Light Value",
+                "Calculated Brightness Value", "brightness step"}) {
+            // Exactly how BrightnessManager writes it: a key it names, no subject it declares.
+            DebugInformation row = new DebugInformation(key, "1");
+            assertNull(key, DebugBoard.subject(row, HERE));
+            assertEquals(key, "1",
+                    DebugBoard.visible(rows(key, "1", DebugBoard.subject(row, HERE)),
+                            photo(nextPhoto)).get(key));
+        }
+    }
+
+    @Test
+    public void aWriterThatNamedItsAssetIsBelievedOverThePanel() {
+        assertEquals(GONE, DebugBoard.subject(new DebugInformation("Incompatible", "x", GONE), HERE));
+    }
+
+    /** The two declarations are opposite claims about whom a row is about, so one row cannot make both. */
+    @Test
+    public void aFrameRowCannotAlsoClaimToBeAVideoDisplay() {
+        try {
+            new DebugInformation("video", "1", HERE, true, true);
+            fail("a row is either about the frame or about a video display");
+        } catch (IllegalArgumentException expected) {
+            assertEquals("a row is about a video display or about the frame", expected.getMessage());
+        }
     }
 
     // ---------------------------------------------------------------- derived rows

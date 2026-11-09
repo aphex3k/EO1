@@ -181,6 +181,20 @@ public final class PanelDisplay {
     }
 
     /**
+     * Whether {@code record} may still take the panel: it is the display in flight, or it is what is
+     * provably up.
+     *
+     * <p>Separated from the view work it guards because the answer decides whether a clip reaches the
+     * screen at all, and the field it reads lives in an {@code Activity} no JVM test can construct. A
+     * reveal refused for a record that is neither leaves the surface it was meant for covered by whatever
+     * was up before it — which is why an in-flight attempt may be re-pointed by a newer display, but must
+     * never simply be cleared to improve what a report says. The attempt is an identity, not a report.
+     */
+    public static boolean mayBeRevealed(PanelDisplay record, PanelDisplay attempt, PanelDisplay proven) {
+        return record != null && (record == attempt || record == proven);
+    }
+
+    /**
      * The routing sentence as an operator reads it: what was measured, then the compositor that
      * <em>decision</em> produced — appended, never stored.
      *

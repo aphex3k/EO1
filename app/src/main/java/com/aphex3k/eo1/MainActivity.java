@@ -346,7 +346,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int videoPlaybackRateSamples;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
-    private BrightnessManager brightnessManager;
+    /** Read off the web server's worker ({@code /state}'s parked-attempt predicate) and the watchdog's. */
+    private volatile BrightnessManager brightnessManager;
     private HardwareCapabilities capabilities;
     private TextView debugOverlay;
     private EventManager eventManager;
@@ -430,7 +431,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String currentTrackId = null;
     private Runnable videoWatchdogRunnable;
     private String videoWatchdogAssetId = "";
-    /** The clip this watchdog was armed for, whose file length the loop seam needs for its *whole* life. *     * Reading it from the live attempt instead lost the duration the moment another display path became *     * the attempt — a render-silent asset chosen mid-playback, or a page that took the panel. */
+    /**
+     * The clip this watchdog was armed for, whose file length the loop seam needs for its <em>whole</em>
+     * life. Reading it from the live attempt instead lost the duration the moment another display path
+     * became the attempt — a render-silent asset chosen mid-playback, or a page that took the panel.
+     */
     @Nullable
     private volatile PanelDisplay videoWatchdogRecord;
     private File videoWatchdogFile;
@@ -1609,11 +1614,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView.setVisibility(View.INVISIBLE);
         // Also stops the page's JavaScript and repaints for the whole quiet window.
         hideWebView();
-        // Nothing is in flight either: every display path returns early while the panel should be dark, so an
-        // attempt left standing here would be reported for the whole quiet window as a display "putting up
-        // right now" that will not be put up for hours — media.attempt beside a blank media.screen, which
-        // reads as a stalled transition rather than a scheduled dark period.
-        attempt = null;
+        // `attempt` deliberately SURVIVES this. It is an identity, not a report: the paint poll holds the
+        // in-flight clip's record in videoPaintRecord and re-presents it to revealVideoSurface(), which
+        // accepts a record only while it is still the attempt or the panel. Nulling the attempt to keep
+        // media.attempt off a dark screen therefore stranded the reveal — the wake's first frame was
+        // refused as "superseded", the poll cancelled itself, and the photograph went on covering a clip
+        // that was playing, which is a stale panel of the exact shape this change set exists to remove.
+        // (onPause parks the same poll and never touched the attempt; that asymmetry was the tell.)
+        // What a dark window must not do is imply a transition is landing, so the report says so
+        // directly instead: media.attempt carries "parked" while painting is suspended. See buildStateJson.
         // Nothing is visible now, so nothing should be reported: a dark frame in quiet hours used to answer
         // /state with onScreen:true, its clip's measurements and its routing row, because hiding the
         // surfaces was the one panel change that never went through the derivation. The surfaces keep their
@@ -1913,12 +1922,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // The subject is what keeps a late line off the board. It is declared where the writer knows the
         // asset (the media pipeline's verdicts, the player's own callbacks) and resolved to whatever the
-        // panel holds otherwise, which is the best available answer for a display path. The durable log
+        // panel holds otherwise, which is the best available answer for a display path. A row about the
+        // machine rather than the wall says so — by key name in DebugBoard.FRAME_SCOPED, or, when the key
+        // is computed and no name could list it, through DebugInformation.ofFrame. The durable log
         // below is written unconditionally and unfiltered: it is a transcript of events, not a claim about
         // what is on the wall right now, and a verdict the board hides has to be readable somewhere.
-        final String subject = debugInformation.getAssetKey() != null
-                ? debugInformation.getAssetKey()
-                : DebugBoard.implicitSubject(debugInformation.getKey(), currentPanelAssetKey());
+        final String subject = DebugBoard.subject(debugInformation, currentPanelAssetKey());
         final boolean videoScoped =
                 DebugBoard.videoScoped(debugInformation.getKey(), debugInformation.isVideoScoped());
 
@@ -4274,13 +4283,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             controller.setVisibility(View.VISIBLE);
         } else {
             controller.setVisibility(View.INVISIBLE);
-            // The surface that was showing has just been taken away and this one will not appear until a
-            // frame is proven, so on a TsPlayer→MediaPlayer handover the wall is blank from this line —
-            // while the panel record still named the clip the outgoing engine had been drawing, and could go
-            // on doing so for the whole paint timeout if preparation never completed. Deriving now says
-            // "blank"; the later revealVideoSurface() replaces it with the clip when there is one.
-            reprovePanel();
         }
+        // Both engines, and both for the same reason: `controller.stop()` above has ended what was on this
+        // surface — for TsPlayer that is a full deletePlayer(), so the wall is a VISIBLE plane with no
+        // decoder behind it, which is the one thing this class's own derivation calls a black plane rather
+        // than a clip. Leaving the panel record untouched here made the answer depend on which thread
+        // happened to re-derive first, and a TsPlayer→TsPlayer rotation went on reporting the outgoing
+        // clip's path, measurements and routing row across the whole recreate window even though that
+        // player no longer existed to produce them. On a TsPlayer→MediaPlayer handover the wall is blank
+        // from the line above. Deriving now says what the surfaces show; the later revealVideoSurface()
+        // replaces it with the incoming clip when there is one.
+        reprovePanel();
         controller.setListener(new VideoPlayerListener() {
             @Override
             public void onVideoPrepared() {
@@ -4408,7 +4421,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // that is neither the display in flight nor the one already proven belongs to an attempt something
         // else has superseded — and hiding the photograph on its behalf would leave the wall showing a
         // surface no report describes, which is the failure this method existed to prevent.
-        if (record == null || (record != attempt && record != panel())) {
+        if (!PanelDisplay.mayBeRevealed(record, attempt, panel())) {
             Log.i(TAG, "revealVideoSurface: superseded attempt, leaving the panel as reported");
             return;
         }
@@ -4454,6 +4467,21 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoPaintActivityReference = null;
         videoPaintRecord = null;
         videoPaintAwaitingResume = false;
+    }
+
+    /**
+     * Whether the panel is not ours to paint: quiet hours or the screen toggle put it in the dark, or the
+     * Activity is paused behind a dialog.
+     *
+     * <p>One predicate for the two questions that must never disagree — the paint poll parks its deadline on
+     * this, and {@code /state} marks an attempt {@code parked} with it. Written twice they drift, and the
+     * drift is what makes a frame sitting out its quiet hours look like a frame that has stopped displaying.
+     * A manager that is not built yet counts as lit: nothing is displaying in that instant anyway, and
+     * "parked" would claim a suspension this frame has not decided on.
+     */
+    private boolean paintingSuspended() {
+        BrightnessManager manager = brightnessManager;
+        return activityPaused || (manager != null && !manager.getShouldTheScreenBeOn());
     }
 
     /**
@@ -4512,7 +4540,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             cancelVideoPaintWatchdog();
             return;
         }
-        if (!brightnessManager.getShouldTheScreenBeOn() || activityPaused) {
+        if (paintingSuspended()) {
             // Not a verdict — the panel is simply not ours to paint right now.
             pauseVideoPaintPoll();
             return;
@@ -5069,6 +5097,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // is provably up. Two facts, because they are two different moments: Glide has the new file loading
         // and the old bitmap still showing, the platform player has the clip prepared and the photograph
         // still covering it. Seeing both is what distinguishes "trying" from "stuck" from "lying".
+        //
+        // `parked` is the third of those, and the reason the attempt is not simply hidden while the panel is
+        // dark. A frame in quiet hours with an attempt that was interrupted mid-prepare is showing a display
+        // that will not land for hours, which looks exactly like a display that never lands — but the two
+        // need different answers, and hiding the attempt entirely (which an earlier revision of
+        // turnScreenOff did, by nulling it) destroyed the identity the paint poll needs to finish the reveal
+        // on waking. So the attempt stays, and says whether the panel is even allowed to paint.
         PanelDisplay pending = attempt;
         if (pending != null && pending != shown) {
             JsonObject attemptJson = new JsonObject();
@@ -5086,6 +5121,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 attemptJson.addProperty("stage", pending.stage);
             }
             attemptJson.addProperty("generation", pending.generation);
+            // The same predicate that parks the paint poll (runVideoPaintCheck), so the report says the
+            // panel is not allowed to paint exactly when the code watching it decided to stop trying.
+            attemptJson.addProperty("parked", paintingSuspended());
             media.add("attempt", attemptJson);
         }
 

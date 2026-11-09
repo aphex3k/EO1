@@ -42,6 +42,12 @@ public final class DebugBoard {
      * <p>{@code "connection status"} is not a typo to be replaced by a resource reference: it is the value
      * of {@code R.string.connection_status_key}, and this class deliberately holds no {@code android.*} so
      * the rule stays testable on a JVM host. The two must be changed together.
+     *
+     * <p>A list of names reaches every writer whose key is a literal, which is all of them but one:
+     * {@code BrightnessManager} reports a light sensor's accuracy under {@code sensor.getName()}, so no
+     * literal could name it and it declares {@link DebugInformation#ofFrame} instead. Adding a frame-scoped
+     * row with a computed key without that declaration is how a diagnostic silently stops outliving the
+     * asset that happened to be on the wall when it was written.
      */
     public static final Set<String> FRAME_SCOPED = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             // Which build is running, and who signed it.
@@ -147,6 +153,25 @@ public final class DebugBoard {
             return null;
         }
         return currentAssetKey == null || currentAssetKey.isEmpty() ? "" : currentAssetKey;
+    }
+
+    /**
+     * The subject a row gets, from what its writer declared and the board's rule for what it did not.
+     *
+     * <p>Extracted from the single write path in {@code MainActivity} because that path is an {@code Activity}
+     * behind a live panel, and the whole question — which rows survive a rotation — is answerable on a JVM
+     * host. Two declarations win over the rule, in order: a writer that named its asset, and a writer that
+     * said the row is about the frame (which is how a <em>computed</em> key — a sensor's own name — escapes
+     * a list of literal names). A writer that said neither is asked of the panel.
+     */
+    public static String subject(DebugInformation info, String currentAssetKey) {
+        if (info.isFrameScoped()) {
+            return null;
+        }
+        if (info.getAssetKey() != null) {
+            return info.getAssetKey();
+        }
+        return implicitSubject(info.getKey(), currentAssetKey);
     }
 
     /**

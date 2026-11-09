@@ -13,6 +13,13 @@ import androidx.annotation.Keep;
  *
  * <p>{@code null} means the writer did not say, and {@link DebugBoard#implicitSubject} decides — which is
  * right for the display paths and only a guess everywhere else.
+ *
+ * <p>A row about the <em>frame</em> normally needs no declaration either: {@link DebugBoard#FRAME_SCOPED}
+ * carries those key names. {@link #ofFrame} is for the case a name list cannot reach — a writer whose key
+ * is computed rather than literal, like a light sensor's accuracy reported under the sensor's own name.
+ * Left to the name list it would be treated as an unclaimed key, attributed to whatever asset the panel
+ * happened to hold, and disappear from both the overlay and {@code /state}'s {@code debug} block on the
+ * next rotation.
  */
 @Keep
 public class DebugInformation {
@@ -20,6 +27,7 @@ public class DebugInformation {
     private final String value;
     private final String assetKey;
     private final boolean videoScoped;
+    private final boolean frameScoped;
 
     /**
      * A line about this asset <em>as a video</em> — a coded size, a bitrate, a playback position.
@@ -29,7 +37,18 @@ public class DebugInformation {
      * a video over that photograph.
      */
     public static DebugInformation ofVideo(String key, String value, String assetKey) {
-        return new DebugInformation(key, value, assetKey, true);
+        return new DebugInformation(key, value, assetKey, true, false);
+    }
+
+    /**
+     * A line about the frame, stated by the writer rather than by a key the board has heard of.
+     *
+     * <p>Use it when the key is computed, so {@link DebugBoard#FRAME_SCOPED} cannot name it. Do not use it
+     * to overrule the subject a writer already knows: an asset-scoped row that never goes away is the exact
+     * stale line this board was rewritten to make impossible.
+     */
+    public static DebugInformation ofFrame(String key, String value) {
+        return new DebugInformation(key, value, null, false, true);
     }
 
     public String getKey() {
@@ -50,21 +69,31 @@ public class DebugInformation {
         return videoScoped;
     }
 
+    /** Whether the writer stated that this line is about the frame, whatever its key reads. */
+    public boolean isFrameScoped() {
+        return frameScoped;
+    }
+
     DebugInformation(String key, String value) {
-        this(key, value, null, false);
+        this(key, value, null, false, false);
     }
 
     /**
      * @param assetKey the asset the line is about; {@code null} to leave the subject to the board's rule
      */
     DebugInformation(String key, String value, String assetKey) {
-        this(key, value, assetKey, false);
+        this(key, value, assetKey, false, false);
     }
 
-    DebugInformation(String key, String value, String assetKey, boolean videoScoped) {
+    DebugInformation(String key, String value, String assetKey, boolean videoScoped,
+                     boolean frameScoped) {
         this.key = key;
         this.value = value;
         this.assetKey = assetKey;
         this.videoScoped = videoScoped;
+        this.frameScoped = frameScoped;
+        if (videoScoped && frameScoped) {
+            throw new IllegalArgumentException("a row is about a video display or about the frame");
+        }
     }
 }
