@@ -99,11 +99,19 @@ public final class PanelDisplay {
     /**
      * The routing sentence for these bytes, carried here rather than written straight to the board.
      *
-     * <p>Not a convenience: {@code routingAllowsTsPlayer} runs <em>before</em> the handoff that adopts
-     * this asset, so a line it published itself was swept away by that handoff — the routing verdict
-     * for the clip on screen missing from the board, on the one asset whose whole diagnosis is the
-     * routing. Holding it in the value means the sweep happens first and the line arrives with the
-     * asset it describes, in the order the facts were learned.
+     * <p>The board deletes nothing: every row is retained and {@link DebugBoard#visible} decides what may
+     * be printed, by whom the row is about and by what the panel holds. The routing line is not a stored row
+     * at all but a <em>derived</em> one, rendered from this record — which is only possible because the
+     * sentence travels with the clip it describes. A row a writer published would be attributed to whatever
+     * asset was up at the moment of writing, and {@code routingAllowsTsPlayer} runs <em>before</em> the
+     * handoff that adopts this one, so the verdict for the clip on screen would be filed under the clip that
+     * is leaving: the routing missing on the one asset whose whole diagnosis is the routing, and a stale one
+     * printing on the next.
+     *
+     * <p>An earlier design solved the same problem by sweeping asset-scoped rows at each handoff, and that
+     * ordering rule is what attribution replaced — it deleted verdicts that arrive <em>before</em> their
+     * asset is displayed and could not reach ones that arrive long after. Do not restore it for the reason
+     * given here.
      */
     public final String routingFacts;
     /** This attempt's creation number — <em>not</em> a count of times the panel changed. */

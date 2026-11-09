@@ -2707,9 +2707,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         activeWebAssetId = "";
         hideWebView();
         // Named with the page that failed, not blank: the asset on the panel has not changed, only the
-        // surface covering it, and an asset handoff is what sweeps the board. Stamping it as a new asset
-        // here deleted the "web: failed …" / "web: timeout …" line on the statement after it was written,
-        // which is the one sentence explaining the blank panel an operator is standing in front of.
+        // surface covering it — and nothing sweeps the board at all any more. DebugBoard.visible keeps frame
+        // rows plus rows whose subject is the asset the panel holds, so stamping this as a NEW asset would
+        // have printed the "web: failed …" / "web: timeout …" line's subject as the page that had not failed,
+        // and the sentence explaining the blank panel an operator is standing in front of would be filtered
+        // out for being about the wrong thing.
         revealPhotoView();
         // Cleared, not set to the image: the screen content changed behind the display methods'
         // same-asset check, so the next tick must be allowed to re-show this very photo.
