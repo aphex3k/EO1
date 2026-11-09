@@ -2105,6 +2105,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * knows a bitrate — but they no longer decide when the panel changed.
      */
     private PanelDisplay reproveTarget() {
+        // A wall that is switched off shows nothing, whatever its views are marked as. This has to be the
+        // first answer rather than a consequence of turnScreenOff() hiding three surfaces, because a display
+        // already in flight does not stop when the panel does: Glide's onResourceReady arrives mid-quiet-hours
+        // and makes the image view VISIBLE, onVideoPrepared makes a video surface VISIBLE, and the derivation
+        // reads visibility as the definition of "on the wall". Without this rule a frame in the dark reported
+        // the photograph that had just loaded — media.screen naming an image beside screenOn:false, with
+        // generation advancing on a panel nobody could see, and the edge-triggered off path never running
+        // again to correct it. turnScreenOn() re-derives, and the surfaces kept their content, so the truth
+        // arrives with the light rather than being remembered across the dark.
+        if (panelIsDark()) {
+            return blankPanel();
+        }
         // Walked in the order the views are actually stacked, because that order is the answer to "what is
         // on the wall". In activity_main.xml both video surfaces are declared <em>before</em> imageView, so
         // a RelativeLayout draws the image on top of them — which is why revealVideoSurface() has to hide
@@ -2810,6 +2822,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 // The wallpaper placeholder is superseded by a real image, and must not come back after it.
                 unknownPhoto = null;
             }
+        }
+        if (panelIsDark()) {
+            // Everything above still happened: the content is proven to its surface, provenPhoto remembers
+            // which photograph that is, and the durable transcript records the load as an event. What must
+            // not happen is adopting it as the panel, because a switched-off wall is showing nothing, and
+            // {@code /state} naming an image that only becomes visible at the end of quiet hours is the same
+            // mislabelled panel this change set exists to prevent. Nothing is lost by waiting: turnScreenOn()
+            // re-derives from these surfaces, which kept their content, so the wake reports the truth without
+            // any path having to remember that a load finished in the dark.
+            return;
         }
         panelNowProven(proven);
     }
@@ -4416,20 +4438,29 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * after the first video of a process, "show the image underneath" showed an empty view over a black
      * root. The next image asset clears and reloads it in {@code displayPicture} regardless.
      */
-    private void revealVideoSurface(View videoView, @Nullable PanelDisplay record) {
+    private boolean revealVideoSurface(View videoView, @Nullable PanelDisplay record) {
         // Step aside for the photo plane only while this attempt still owns the panel's future. A record
         // that is neither the display in flight nor the one already proven belongs to an attempt something
         // else has superseded — and hiding the photograph on its behalf would leave the wall showing a
         // surface no report describes, which is the failure this method existed to prevent.
         if (!PanelDisplay.mayBeRevealed(record, attempt, panel())) {
             Log.i(TAG, "revealVideoSurface: superseded attempt, leaving the panel as reported");
-            return;
+            return false;
         }
+        // Taking the other surfaces away is part of uncovering this one, exactly as it is for
+        // revealPhotoView(): the browser sits ABOVE the image and both video surfaces, so a clip "revealed"
+        // under a page that is still visible is not on the panel at all. That is not a hypothetical pairing —
+        // onVideoPrepared hides the page without touching lastVisibleView, which is what turnScreenOn()
+        // restores, so a wake from a dark interval put the page back over a clip that had taken it away
+        // before the screen went out, and the first frame then hid only the photograph. hideWebView() is
+        // idempotent, so a path that already hid it loses nothing.
+        hideWebView();
         imageView.setVisibility(View.INVISIBLE);
         lastVisibleView = videoView;
         videoPaintRevealed = true;
         videoSurfaceProven = true;
         noteDisplayProven(record);
+        return true;
     }
 
     private void startVideoPaintWatchdog(String assetId, File file,
@@ -4481,7 +4512,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private boolean paintingSuspended() {
         BrightnessManager manager = brightnessManager;
-        return activityPaused || (manager != null && !manager.getShouldTheScreenBeOn());
+        return activityPaused || panelIsDark();
+    }
+
+    /**
+     * The display is switched off — quiet hours, the operator's toggle, or the power button.
+     *
+     * <p>Not the same question as {@link #paintingSuspended()}, and the difference is a wall rather than a
+     * nuance: behind the options dialog the panel is still lit and still showing the frame's content, so a
+     * photograph that finishes loading there IS on the wall and must be reported as such. Only darkness
+     * makes a visible view show nothing.
+     */
+    private boolean panelIsDark() {
+        BrightnessManager manager = brightnessManager;
+        return manager != null && !manager.getShouldTheScreenBeOn();
     }
 
     /**
@@ -4554,8 +4598,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 debugInformationProvided(new DebugInformation("video", "painted after "
                         + (System.currentTimeMillis() - videoPaintStartMs) + "ms"));
             }
-            if (!videoPaintRevealed) {
-                revealVideoSurface(videoPlayer.getView(), videoPaintRecord);
+            if (!videoPaintRevealed && !revealVideoSurface(videoPlayer.getView(), videoPaintRecord)) {
+                // Refused, which means another display owns the wall and this obligation is finished with.
+                // Dropping it is right; dropping it silently is not, because the other path's promotion is
+                // its own business and this poll is the one place that knows a frame reached the surface just
+                // now. Deriving once here keeps the reports describing the wall rather than whichever
+                // call site last remembered to update them.
+                reprovePanel();
             }
             cancelVideoPaintWatchdog();
             return;
