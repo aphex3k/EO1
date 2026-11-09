@@ -289,6 +289,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private volatile PanelDisplay webProvenRecord;
     /**
+     * Whether the load in flight may still move the surfaces: uncover a photograph on a timeout, abandon the
+     * page on an error.
+     *
+     * <p>Turned off by {@link #retirePendingWebLoad()} when another display becomes the attempt, because a
+     * page the frame has stopped waiting for must not act on the wall any more. It says nothing about the
+     * page's <em>identity</em>, which stays live so {@code onPageFinished} can still record what the browser
+     * ended up painting. UI thread only — the WebView's callbacks and the watchdog's handler both run on the
+     * main looper.
+     */
+    private boolean webLoadOwnsSurfaces = true;
+    /**
      * The one record for "the panel is blank", so repeated reads of an unchanged blank wall are not repeated
      * handoffs. Cleared whenever something real is adopted, which lets a later blank report the time it
      * actually went blank rather than the first time it ever did.
@@ -994,8 +1005,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (webView != null && lastVisibleView == webView) {
             webView.onResume();
             // A page left mid-load by onPause gets its fall-through timer back; without it a
-            // stalled load would hold the screen with nothing on it.
-            if (!webLoadProducedPaint && !webUrlOnScreen.isEmpty()) {
+            // stalled load would hold the screen with nothing on it. Only one that still owns the
+            // surfaces, since retirement leaves the URL standing on purpose (see retirePendingWebLoad)
+            // and re-arming a superseded load would hand it the abandon it lost.
+            if (webLoadOwnsSurfaces && !webLoadProducedPaint && !webUrlOnScreen.isEmpty()) {
                 startWebLoadWatchdog();
             }
         }
@@ -2049,19 +2062,26 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
-     * Ends a page load this frame has stopped waiting for, without touching what it left on the wall.
+     * Ends a page load this frame has stopped waiting for: its deadline is cancelled and its failure path is
+     * closed, and nothing else.
      *
-     * <p>Two identities go, and they are the two the web path's three callbacks test: the record
-     * ({@code onPageFinished}) and the URL ({@code onReceivedError}, the load watchdog). Clearing one and not
-     * the other leaves a door. {@code webProvenRecord} deliberately SURVIVES — a page the browser has already
-     * painted is what the view shows when it is shown again, and that is a fact about the surface rather than
-     * about a load in flight. See {@link #hideWebView()}.
+     * <p>The distinction is the whole method. A superseded load has lost the standing to <em>change</em> the
+     * surfaces — no timeout may uncover a photograph over the display that replaced it, no error may abandon
+     * a page nobody is waiting for. It has not lost the fact that it is the page in the browser view: the
+     * WebView keeps loading and keeps painting, and often keeps covering the image view while a newer
+     * photograph is still being fetched. Clearing {@code webLoadRecord} and {@code webUrlOnScreen} here (an
+     * earlier revision of this method did) silenced {@code onPageFinished}, so {@code webProvenRecord} went on
+     * naming the PREVIOUS page while the view was painting the new one — a stale report of the kind this
+     * change set exists to eliminate, created by the fix for one. So the identities survive retirement, and
+     * {@code onPageFinished} still records its page as the browser's content and promotes it while the browser
+     * is genuinely the topmost visible surface, which is a true statement about the wall whatever the next
+     * display is fetching.
+     *
+     * <p>{@link #abandonWebPage()} does clear them, because there the page really is being given up on.
      */
     private void retirePendingWebLoad() {
         cancelWebLoadWatchdog();
-        webLoadRecord = null;
-        webUrlOnScreen = "";
-        activeWebAssetId = "";
+        webLoadOwnsSurfaces = false;
     }
 
     /**
@@ -2473,6 +2493,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // its onReceivedError would each no-op on an empty identity while the page sat there loading.
             activeWebAssetId = assetId;
             webUrlOnScreen = url;
+            // This page's obligation is live again: the retirement setPanelAttempt just ran belongs to the
+            // PREVIOUS load, and a fresh one must be allowed to abandon itself if it never renders.
+            webLoadOwnsSurfaces = true;
             // The browser client is one object reused across every page, so a callback cannot capture its
             // attempt — it has to be told which load it belongs to, and a callback for a load this frame has
             // since abandoned must not be allowed to adopt the panel for whatever is loading now.
@@ -2621,6 +2644,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         @Override
         @SuppressWarnings("deprecation") // the non-deprecated overload is API 23+
         public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+            if (!webLoadOwnsSurfaces) {
+                // A load another display superseded keeps its identity (so its completion can still say what
+                // the browser painted) but has lost the standing to give up on a page nobody is waiting for.
+                // Without this test its error uncovers the retained photograph over the video that replaced it.
+                Log.w(TAG, "web: " + failingUrl + " failed (" + errorCode + ") after being superseded; ignored");
+                return;
+            }
             if (webLoadProducedPaint || !Objects.equals(failingUrl, webUrlOnScreen)) {
                 Log.w(TAG, "web: sub-resource failure in " + failingUrl + " (" + errorCode
                         + " " + description + ") — page stays");
@@ -2662,6 +2692,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void abandonWebPage() {
         cancelWebLoadWatchdog();
         String failedAssetId = activeWebAssetId;
+        // Given up on, not merely superseded: unlike retirement this does drop the load's identities, apart
+        // from webProvenRecord — the page it painted is still what the view will show when it is next up.
+        webLoadOwnsSurfaces = false;
+        webLoadRecord = null;
         webUrlOnScreen = "";
         activeWebAssetId = "";
         hideWebView();
@@ -4917,7 +4951,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     // what the viewer was looking at — forgetting a photograph that was loading over a
                     // displayed web page leaves the page on screen, so the remaining panel is derived from
                     // the views rather than asserted here.
-                    reprovePanel();
+                    //
+                    // And the attempt is restated with it, not left behind. panelNowProven deliberately does
+                    // not touch attempt, which is right for a display and wrong here: this is the one recovery
+                    // path that cannot go through revealPhotoView() (it has to empty the drawable, and
+                    // uncovering it would put the removed photo back), so nothing else would say "nothing is
+                    // being put up any more". Left unstated, the field that answers "what is in flight" named
+                    // an asset whose bytes were unlinked under it — media.attempt printed that phantom
+                    // forever whenever no later display runs, which is this method's own stated case — and
+                    // currentPanelAssetKey() kept attributing every undeclared diagnostic to the deleted
+                    // asset, where DebugBoard.visible then filtered those rows out as not-about-the-panel.
+                    PanelDisplay remaining = reproveTarget();
+                    setPanelAttempt(remaining);
+                    panelNowProven(remaining);
                 }
                 if (mediaManager != null) {
                     mediaManager.showNextImage(MainActivity.this);
