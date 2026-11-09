@@ -195,6 +195,33 @@ public final class PanelDisplay {
     }
 
     /**
+     * The record that already holds measurements of <em>these</em> bytes, or null when nothing does.
+     *
+     * <p>A caller that re-displays one file on the other engine runs no fresh routing pass, so it needs the
+     * numbers learned the first time — and needs them from whichever field still holds them. Which field
+     * that is cannot be predicted: handing the controller to a new engine clears the owner before the
+     * replacement looks anything up, and an asset whose still preview is pending leaves the panel naming
+     * the clip underneath it while the attempt names the preview. So every live record is asked, and the
+     * answer is constrained by what makes the numbers true rather than by where they were found: the same
+     * asset, and the same rung of the ladder, because an original and the server's transcode of it share an
+     * asset key and describe different bytes.
+     *
+     * @param stage the {@link #stage} being attempted; a record from another rung is a different file
+     */
+    public static PanelDisplay carryFrom(String assetId, String stage, PanelDisplay... candidates) {
+        if (assetId == null || assetId.isEmpty()) {
+            return null;
+        }
+        for (PanelDisplay candidate : candidates) {
+            if (candidate != null && candidate.showsVideo() && assetId.equals(candidate.assetKey)
+                    && (stage == null || stage.equals(candidate.stage))) {
+                return candidate;
+            }
+        }
+        return null;
+    }
+
+    /**
      * The routing sentence as an operator reads it: what was measured, then the compositor that
      * <em>decision</em> produced — appended, never stored.
      *

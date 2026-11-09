@@ -2243,16 +2243,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * what the header probe read still describes it and only the compositor changed. For any other asset
      * there is no answer, and no answer is reported as -1 rather than as the last clip's numbers — which is
      * precisely the mistake this record was built to make impossible.
+     *
+     * <p>All three fields are asked, in the order a caller would trust them, because the handover clears the
+     * owner <em>before</em> this lookup runs ({@code selectVideoPlayer} nulls {@code videoCompositing} in the
+     * statement that releases the outgoing controller), and an asset displayed as its render-silent still
+     * leaves the panel naming the clip that is actually on the wall while the attempt names the preview. The
+     * rule itself is {@link PanelDisplay#carryFrom} so a JVM test can hold it.
      */
     @Nullable
-    private PanelDisplay carriedDisplay(String assetId) {
-        for (PanelDisplay candidate : new PanelDisplay[]{attempt, videoCompositing}) {
-            if (candidate != null && candidate.showsVideo() && assetId != null
-                    && assetId.equals(candidate.assetKey)) {
-                return candidate;
-            }
-        }
-        return null;
+    private PanelDisplay carriedDisplay(String assetId, String stage) {
+        return PanelDisplay.carryFrom(assetId, stage, attempt, videoCompositing, panel());
     }
 
     @Override
@@ -4265,7 +4265,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                         boolean allowTsFallback, DisplayStage stage,
                                         @Nullable VideoRoutingDecision routing) {
         controller.stop();
-        PanelDisplay carried = routing == null ? carriedDisplay(assetId) : null;
+        PanelDisplay carried = routing == null ? carriedDisplay(assetId, stage.name()) : null;
         PanelDisplay.ClipFacts clip = routing != null ? routing.clip
                 : (carried != null ? carried.clip : PanelDisplay.ClipFacts.UNKNOWN);
         String routingFacts = routing != null ? routing.routingFacts

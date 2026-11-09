@@ -238,4 +238,32 @@ public class PanelDisplayTest {
         assertTrue(PanelDisplay.mayBeRevealed(proven, null, proven));
         assertFalse(PanelDisplay.mayBeRevealed(null, inFlight, proven));
     }
+
+    /**
+     * Which record an engine handover may carry measurements from — and the state that made the answer
+     * wrong. Handing a file to the other controller clears the owner <em>before</em> the replacement looks
+     * anything up, so {@code videoCompositing} is already null there; and while one asset's render-silent
+     * still is pending, the attempt names that preview and the panel names the clip actually on the wall.
+     * The two fields the lookup used to consult were then both useless, and the clip reached the new engine
+     * with {@code -1} where its coded size, frame rate and bitrate had been, and no routing sentence.
+     */
+    @Test
+    public void aHandoverCarriesTheBytesItIsReplayingFromWhicheverFieldStillHoldsThem() {
+        PanelDisplay playingA = PanelDisplay.video("a", "/a.mp4", "TsPlayer", "ORIGINAL",
+                clip(), "codec=avc1 1080x1920", GEN, WHEN);
+        PanelDisplay previewB = PanelDisplay.image("b", "/b_fb.jpg", GEN + 1, WHEN + 1L);
+
+        assertSame(playingA,
+                PanelDisplay.carryFrom("a", "ORIGINAL", previewB, null, playingA));
+        assertNull("nothing in flight for another asset",
+                PanelDisplay.carryFrom("c", "ORIGINAL", previewB, null, playingA));
+        assertNull("a non-video record holds no clip measurements",
+                PanelDisplay.carryFrom("b", "ORIGINAL", previewB, null, playingA));
+
+        // Same asset, different bytes: an original and the server's transcode of it share an asset key,
+        // so the rung has to match or the numbers describe a file that is not the one being played.
+        assertNull(PanelDisplay.carryFrom("a", "FALLBACK", null, null, playingA));
+        assertNull("an empty asset id names nothing to carry for",
+                PanelDisplay.carryFrom("", "ORIGINAL", null, null, playingA));
+    }
 }
