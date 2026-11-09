@@ -398,14 +398,38 @@ public class VideoStateJsonTest {
      */
     @Test
     public void theBuilderAsksThePlayerOncePerDocument() {
+        // For a clip, not at all: paint capability comes from the engine in the record.
         AnsweringProbe probe = new AnsweringProbe();
         VideoStateJson.build(videoOnScreen(), frame(), probe);
-        assertEquals("paintSignal asked " + probe.paintSignalCalls + " times for one document",
-                1, probe.paintSignalCalls);
+        assertEquals("paintSignal asked " + probe.paintSignalCalls + " times for a clip document",
+                0, probe.paintSignalCalls);
 
+        // With no clip there is no engine being reported, so the controller's own answer is used — once.
         AnsweringProbe photoProbe = new AnsweringProbe();
         VideoStateJson.build(PanelDisplay.image("k", "/x.jpg", GEN, WHEN), frame(), photoProbe);
         assertEquals(1, photoProbe.paintSignalCalls);
+    }
+
+    /**
+     * A capability claim has to agree with the engine it is reported beside.
+     *
+     * <p>TsPlayer's native library offers no per-frame proof, so {@code engine: TsPlayer} alongside
+     * {@code paintSignal: true} is a contradiction inside one document — and unlike the live telemetry, a
+     * later ownership check cannot retract it, because it was never a measurement of the clip. The probe
+     * here answers "yes, there is a paint signal", which is what the <em>current</em> controller would say
+     * after a handover to the platform player, to prove the answer is taken from the record instead.
+     */
+    @Test
+    public void paintSignalFollowsTheReportedEngineNotTheLiveController() {
+        VideoStateJson.Frame frame = frame();
+        JsonObject ts = VideoStateJson.build(
+                videoOnScreen(VideoEngineReport.TS_PLAYER), frame, new AnsweringProbe());
+        assertFalse("a TsPlayer clip cannot prove a composited frame", ts.get("paintSignal").getAsBoolean());
+        assertEquals(VideoEngineReport.TS_PLAYER, ts.get("engine").getAsString());
+
+        JsonObject media = VideoStateJson.build(
+                videoOnScreen(VideoEngineReport.MEDIA_PLAYER), frame, new AnsweringProbe());
+        assertTrue(media.get("paintSignal").getAsBoolean());
     }
 
     /**

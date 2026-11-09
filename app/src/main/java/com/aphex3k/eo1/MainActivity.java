@@ -284,6 +284,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     @Nullable
     private volatile PanelDisplay emptyPanel;
+    /** One cached record for a visible image whose asset is not identified — see {@link #unidentifiedPhoto()}. */
+    @Nullable
+    private volatile PanelDisplay unknownPhoto;
     /** Sequence number for each display <em>attempt</em>, feeding {@link PanelDisplay#generation}. */
     private final AtomicLong panelGeneration = new AtomicLong();
     /**
@@ -2037,16 +2040,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             panelState = new PanelState(proven, (before == null ? 0L : before.changes) + 1L,
                     System.currentTimeMillis());
         }
-        // Ownership follows the panel in both directions. A surface proven on top of another ends the first
-        // one's claim — so a page abandoned mid-load cannot prove the panel later, and a player released by
-        // an image handoff cannot be quoted. And a video taking the panel <em>reclaims</em> it: an
-        // interleaved promotion by another path used to clear the owner without anything restoring it, which
-        // left the staleness test permanently true and /state silently missing every live reading of a clip
-        // that was, in fact, playing.
+        // Ownership follows the controller's <em>lifecycle</em>, not the panel's. A video taking the panel
+        // reclaims the record — an interleaved promotion by another path used to leave the staleness test
+        // permanently true, silently dropping every live reading of a clip that was in fact playing — but a
+        // non-video promotion must leave `videoCompositing` alone: the player it identifies may be merely
+        // hidden, and forgetting its identity there is what made a screen toggle during a pending preview
+        // wake to a surface that is playing again and a report that says nothing is on the panel.
+        // Invalidation happens in releaseVideoDisplay(), at the stop/release/reassignment itself.
         if (proven.showsVideo()) {
             videoCompositing = proven;
-        } else {
-            videoCompositing = null;
         }
         // A painted page becomes what the browser is showing; a pending load never does. webLoadRecord keeps
         // identifying the load in flight, for callbacks to prove against, and is untouched here.
@@ -2099,10 +2101,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return painted != null ? painted : blankPanel();
         }
         if (imageView.getVisibility() == View.VISIBLE && imageView.getDrawable() != null) {
+            // A visible image view <em>covers</em> the video surfaces below it, so this branch must not fall
+            // through to them: at startup the layout supplies a visible wallpaper before any asset has
+            // loaded, and pressing Brightness+ during the first TsPlayer preparation used to report the
+            // covered clip. An image whose asset is not identified is still an image — say that, rather than
+            // either "nothing" or a clip nobody can see.
             PanelDisplay photo = provenPhoto;
-            if (photo != null) {
-                return photo;
-            }
+            return photo != null ? photo : unidentifiedPhoto();
         }
         VideoPlayerController player = videoPlayer;
         View videoSurface = player == null ? null : player.getView();
@@ -2117,6 +2122,36 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         // Nothing on top is showing, and either the image plane is hidden or its drawable has been cleared.
         return blankPanel();
+    }
+
+    /**
+     * One record for "an image is on the wall and we cannot say which asset it is" — the layout's own
+     * wallpaper before the first display, and nothing else. Cached for the same reason {@link #blankPanel}
+     * is: promotion is decided by reference, and a fresh record per read turns a re-derive into a handoff.
+     */
+    private PanelDisplay unidentifiedPhoto() {
+        PanelDisplay photo = unknownPhoto;
+        if (photo == null) {
+            photo = PanelDisplay.image("", "", panelGeneration.incrementAndGet(),
+                    System.currentTimeMillis());
+            unknownPhoto = photo;
+        }
+        return photo;
+    }
+
+    /**
+     * Ends a video display: frees the exclusive Amlogic pipeline and drops the record that controller was
+     * handed.
+     *
+     * <p>Ownership is invalidated <em>here</em>, at the lifecycle event, and never as a side effect of some
+     * other surface being promoted. Clearing it on a non-video promotion — which an earlier revision did —
+     * throws away the identity of a player that is merely hidden: wake the screen after a toggle during a
+     * pending preview and the surface comes back while the derivation has nothing left to name it with, and
+     * reports a blank panel over a clip that is playing again.
+     */
+    private void releaseVideoDisplay() {
+        releaseVideoDisplay();
+        videoCompositing = null;
     }
 
     /** The single record for "nothing visible", so re-deriving a blank wall is not a new handoff. */
@@ -2215,8 +2250,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             try {
                 // Release so a previous fallback video frees the exclusive Amlogic video
                 // pipeline before the next asset may run on TsPlayer.
-                videoPlayer.release();
-                videoPlayer.setVisibility(View.INVISIBLE);
+                releaseVideoDisplay();
                 // Re-derive from the views rather than deciding here what the teardown uncovered. The player
                 // above has just been released and hidden, so from this line the video surface is no longer
                 // what is on the wall whatever the next asset turns out to be — and the old answer, keeping
@@ -2328,8 +2362,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // No video is active while a page shows; a stale video callback must not match.
             activeVideoAssetId = "";
             // Asset handoff: free the exclusive Amlogic video pipeline before the browser view.
-            videoPlayer.release();
-            videoPlayer.setVisibility(View.INVISIBLE);
+            releaseVideoDisplay();
             // That teardown emptied the wall of the one surface that was showing, and the page that replaces
             // it has not been created or loaded yet — so until the browser paints, the photo plane is what a
             // viewer is looking at while the panel record still named a clip and its released controller was
@@ -2637,8 +2670,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void restoreImageViewAfterVideoFailure() {
         cancelVideoWatchdog();
         cancelVideoPaintWatchdog();
-        videoPlayer.release();
-        videoPlayer.setVisibility(View.INVISIBLE);
+        releaseVideoDisplay();
         hideWebView();
         // The failed clip is off the panel from here, whatever the next rung does with it — but the
         // <em>asset</em> has not changed, only the surface covering it. Naming it that way is what lets
@@ -2730,6 +2762,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // Remembered so a later recovery can name the photograph it is uncovering rather than the asset
             // whose failure made it uncover it.
             provenPhoto = proven;
+            if (!proven.assetKey.isEmpty()) {
+                // The wallpaper placeholder is superseded by a real image, and must not come back after it.
+                unknownPhoto = null;
+            }
         }
         panelNowProven(proven);
     }
@@ -3186,8 +3222,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // reboot rungs.
             lastVisibleAsset = "";
             cancelVideoWatchdog();
-            videoPlayer.release();
-            videoPlayer.setVisibility(View.INVISIBLE);
+            releaseVideoDisplay();
             // The browser view sits above the image, so claiming the image is on screen only works
             // if the page is taken away first.
             hideWebView();

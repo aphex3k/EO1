@@ -165,10 +165,16 @@ public final class VideoStateJson {
         if (frame.tsLoadError != null) {
             video.addProperty("tsLoadError", frame.tsLoadError);
         }
-        // Asked once. Whether the engine can report a composited frame is a property of the controller
-        // class rather than of playback, so it is a frame fact — and it is also the guard on the two clip
-        // fields that need it, which must not be answered by a second, possibly different read.
-        boolean paintSignal = probe.paintSignal();
+        // Whether a composited frame can be proven at all is a property of the <em>engine</em>, not of
+        // playback, so when a clip is being reported it must be the engine that clip names: reading the live
+        // controller here let a TsPlayer→MediaPlayer handover between the two reads print
+        // `engine: TsPlayer, paintSignal: true` — a capability claim for a compositor that the same document
+        // says is not compositing, and one no later staleness check can retract, because it is not a
+        // measurement of the clip. With no clip on the panel there is no engine being reported, and the
+        // controller's own answer is the right one to print.
+        boolean paintSignal = shown != null && shown.showsVideo()
+                ? !VideoEngineReport.TS_PLAYER.equals(shown.engine)
+                : probe.paintSignal();
         video.addProperty("paintSignal", paintSignal);
         if (frame.frameOrientation != null) {
             video.addProperty("frameOrientation", frame.frameOrientation);
