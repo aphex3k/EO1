@@ -54,6 +54,10 @@ public final class DebugBoard {
             "screenHold", "screenOffWakeLock", "quietHours", "quietHoursSchedule",
             "startQuietHours", "endQuietHours",
             "Min Brightness", "Reported Light Value", "Calculated Brightness Value",
+            // Who moved the backlight, and whether it stuck. Declared, because it is the answer to "it
+            // dimmed by itself" — and left undeclared it would be attributed to whatever photo happened to
+            // be up and vanish on the next rotation, which is the row this frame most needs to keep.
+            "brightness step",
             // Network, broker, the frame's own watchdog, and the last physical key it handled. Input
             // state has nothing to do with an asset, and losing this row made a working frame look dead.
             "connection status", "mqtt", "watchdog", "vendorUpdater", "key",

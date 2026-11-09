@@ -181,15 +181,6 @@ public final class PanelDisplay {
     }
 
     /**
-     * The same display, assigned a generation at the moment it was <em>adopted</em> rather than when it was
-     * decided on.
-     *
-     * <p>A record can be created by one display path and prove itself much later, and two paths can prove
-     * in the opposite order to the one they started in. Taking the number at creation would let
-     * {@code media.screen.generation} go backwards on the wall, which is the one property that makes it
-     * worth watching.
-     */
-    /**
      * The routing sentence as an operator reads it: what was measured, then the compositor that
      * <em>decision</em> produced — appended, never stored.
      *

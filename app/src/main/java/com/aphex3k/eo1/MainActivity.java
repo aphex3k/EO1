@@ -265,6 +265,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * panel, so a released player cannot be quoted at all.
      */
     private volatile PanelDisplay videoCompositing;
+    /**
+     * Whether the video surface currently in hand has ever <em>proven</em> content, by either engine.
+     *
+     * <p>The distinction the derivation needs and a record cannot supply on its own: a clip being attempted
+     * has a surface that is VISIBLE and nothing drawn on it. Without this, any re-derivation landing inside a
+     * video→video preparation window — a Brightness+ wake, the web screen action, a quiet-hours edge — would
+     * adopt the incoming record as the panel and bump the handoff count on a wall still showing the outgoing
+     * clip's last frame. Setting it is {@code revealVideoSurface()}'s job, which is the proof point for both
+     * engines; it is cleared when a file is handed to a controller and when one is taken away.
+     */
+    private volatile boolean videoSurfaceProven;
     /** The page a load was started for, so its callbacks can prove the right thing or be ignored. */
     private volatile PanelDisplay webLoadRecord;
     /**
@@ -1598,6 +1609,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView.setVisibility(View.INVISIBLE);
         // Also stops the page's JavaScript and repaints for the whole quiet window.
         hideWebView();
+        // Nothing is in flight either: every display path returns early while the panel should be dark, so an
+        // attempt left standing here would be reported for the whole quiet window as a display "putting up
+        // right now" that will not be put up for hours — media.attempt beside a blank media.screen, which
+        // reads as a stalled transition rather than a scheduled dark period.
+        attempt = null;
         // Nothing is visible now, so nothing should be reported: a dark frame in quiet hours used to answer
         // /state with onScreen:true, its clip's measurements and its routing row, because hiding the
         // surfaces was the one panel change that never went through the derivation. The surfaces keep their
@@ -2112,15 +2128,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return drawn;
             }
         }
-        VideoPlayerController player = videoPlayer;
-        View videoSurface = player == null ? null : player.getView();
-        if (videoSurface != null && videoSurface.getVisibility() == View.VISIBLE) {
-            if (videoCompositing != null) {
-                return videoCompositing;
-            }
-            PanelDisplay pending = attempt;
-            if (pending != null && pending.showsVideo()) {
-                return pending;
+        // A video surface counts only once it has proven content. Its being VISIBLE is not that: an attempt
+        // being prepared has a live surface with nothing drawn on it, and deriving from that would adopt an
+        // unproven clip and advance the handoff count while the wall still holds the previous frame. The
+        // panel's own record is preferred while it still owns the surface, so an engine switch does not
+        // silently re-decide which clip is showing.
+        if (videoSurfaceProven) {
+            VideoPlayerController player = videoPlayer;
+            View videoSurface = player == null ? null : player.getView();
+            if (videoSurface != null && videoSurface.getVisibility() == View.VISIBLE) {
+                PanelDisplay shownNow = panel();
+                if (shownNow != null && shownNow.showsVideo() && shownNow == videoCompositing) {
+                    return shownNow;
+                }
+                if (videoCompositing != null) {
+                    return videoCompositing;
+                }
             }
         }
         // Nothing on top is showing, and either the image plane is hidden or its drawable has been cleared.
@@ -2488,7 +2511,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // look like a crash loop caused by the photo pipeline.
             webViewUnavailable = true;
             Log.e(TAG, "ensureWebView: no usable WebView provider on this device; web assets will be skipped", t);
-            debugInformationProvided(new DebugInformation("web", "WebView unavailable: " + t));
+            debugInformationProvided(new DebugInformation("displayFailure", "WebView unavailable for every web asset: " + t, null));
             return false;
         }
     }
@@ -2762,6 +2785,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         lastDisplayProvenAtMs = System.currentTimeMillis();
         displayProvenCount++;
+        // The durable "what has this frame been showing" line. Its three per-type predecessors
+        // (displayPictures / displayVideo / displayWebsite) were folded into the board's derived row during
+        // this change set, and a derived row never reaches AppLogger — so on a release build, where the
+        // board itself is compiled out, the log stopped naming any displayed file at all. That is the exact
+        // hole logDurable() was introduced to close for the routing line, left open here: after logcat's
+        // ~13 minutes roll, "what has this frame shown" was unanswerable, which is the question the durable
+        // transcript exists to answer.
+        logDurable("on screen", proven.describe());
         if (proven.type == MediaType.IMAGE) {
             // Remembered so a later recovery can name the photograph it is uncovering rather than the asset
             // whose failure made it uncover it.
@@ -3683,9 +3714,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             VideoPlayerController compositing = videoPlayer;
             boolean ownedBefore = panel() == shown
                     && (!shown.showsVideo() || videoCompositing == shown);
-            boolean paintSignal = compositing != null && compositing.supportsPaintSignal();
-            long lastFrameAtMs = compositing == null ? 0L : compositing.getLastFrameAtMs();
-            boolean painted = videoPaintProduced;
+            // Derived from the engine in the record, as /state does, for two reasons. A live read can answer
+            // for a different controller than the one being reported, and `videoPaintProduced` is
+            // deliberately initialised to "no signal" for a TsPlayer display so a silent failure is still
+            // noticed — printing it unguarded asserts a composited frame for exactly the failure the latch
+            // exists to catch, in the report an operator quotes after a power-cycle.
+            boolean paintSignal = !VideoEngineReport.TS_PLAYER.equals(shown.engine);
+            long lastFrameAtMs = paintSignal && compositing != null ? compositing.getLastFrameAtMs() : 0L;
+            boolean painted = paintSignal && videoPaintProduced;
             if (ownedBefore && panel() == shown
                     && (!shown.showsVideo() || videoCompositing == shown)) {
                 sb.append(" paintSignal=").append(paintSignal)
@@ -3952,7 +3988,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * <p>Returns what it measured instead of storing it. Every field this method wrote was written only
      * on a video display and cleared by nobody, so {@code /state} reported the last clip's codec, size,
      * rate and rotation over whatever the panel had moved on to. The measurement now travels to
-     * {@link #panelNowShowing} as one value and is read from nowhere else.
+     * {@link #setPanelAttempt} as one value and is read from nowhere else.
      */
     private VideoRoutingDecision routingAllowsTsPlayer(File file) {
         VideoHeaderProbe.Probe probe = VideoHeaderProbe.probe(file);
@@ -4126,6 +4162,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // the exclusive Amlogic video pipeline, which would starve the incoming TsPlayer.
             videoPlayer.release();
             videoPlayer.setVisibility(View.GONE);
+            // Ownership ends with the release, wherever a release happens. This site was missed when the
+            // other five were consolidated, and the gap is exactly what the ownership test exists to catch:
+            // across the span until the new controller is handed the file, panel() and videoCompositing both
+            // still name the outgoing clip while the player answering /state is a different, freshly chosen
+            // one — publishing the old clip's path beside the new player's -1 duration.
+            videoCompositing = null;
+            videoSurfaceProven = false;
         }
         videoPlayer = next;
         if (useTs) {
@@ -4213,11 +4256,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // outgoing clip <em>is</em> still the panel while the controller already belongs to the incoming
         // one, and reading its position then would pair one clip's path with another attempt's numbers.
         videoCompositing = mine;
+        // Nothing on this surface has been proven yet, whatever the view's visibility says.
+        videoSurfaceProven = false;
         // The durable copy of the routing decision. The board row is derived from the record and therefore
         // disappears with the clip; this line is what makes the decision readable a week later, and it is
         // emitted here rather than in routingAllowsTsPlayer so an engine handover re-logs the same
         // measurement under the compositor that actually took the file.
-        logDurable("videoRouting", mine.routingSentence());
+        logDurable("videoRouting", mine.pathOrUrl + " " + mine.routingSentence());
         // TsPlayer SurfaceView must be VISIBLE to get a surface; MediaPlayer TextureView can stay
         // invisible until prepared (ImageView covers both until then).
         if (controller == tsPlayerController) {
@@ -4297,10 +4342,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 }
                 // TsVideoView recreates itself for looping; calling play() here double-tears-down.
                 if (controller == tsPlayerController && tsVideoView.isRecreatingForLoop()) {
-                    debugInformationProvided(new DebugInformation("video", "loop recreate in progress", videoWatchdogAssetId));
+                    debugInformationProvided(new DebugInformation("video", "loop recreate in progress"));
                     return;
                 }
-                debugInformationProvided(new DebugInformation("video", "restart after end", videoWatchdogAssetId));
+                debugInformationProvided(new DebugInformation("video", "restart after end"));
                 if (controller != tsPlayerController) {
                     noteMediaManualLoopRestart();
                 }
@@ -4370,6 +4415,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView.setVisibility(View.INVISIBLE);
         lastVisibleView = videoView;
         videoPaintRevealed = true;
+        videoSurfaceProven = true;
         noteDisplayProven(record);
     }
 
