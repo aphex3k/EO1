@@ -44,12 +44,6 @@ public class VideoStateJsonTest {
         }
 
         @Override
-        public boolean paintSignal() {
-            // A property of the controller class, not of playback: safe to answer whatever is up.
-            return true;
-        }
-
-        @Override
         public boolean painted() {
             throw new AssertionError("asked a player whether it painted while no clip is on screen");
         }
@@ -396,18 +390,31 @@ public class VideoStateJsonTest {
      * {@code paintSignal} beside another controller's frame stamp — the halves of one document describing
      * two engines, which is the failure the hoisted local exists to prevent.
      */
+    /**
+     * The capability claim and the engine named beside it cannot come from two different moments.
+     *
+     * <p>{@code videoPlayer} is volatile and an engine switch reassigns it while a web worker is halfway
+     * through a document, so a builder that asks the controller for its paint capability after reading the
+     * engine can print {@code engine: TsPlayer} beside {@code paintSignal: true} — and a capability claim,
+     * unlike a measurement, is not something a later staleness check can retract. The no-clip path used to
+     * do exactly that, and its own test fixture had to exempt that one call from its throwing discipline
+     * because the answer was legitimately about the controller. It no longer asks, so a probe that throws on
+     * <em>every</em> player read is now a valid fixture for a panel with no clip on it.
+     */
     @Test
-    public void theBuilderAsksThePlayerOncePerDocument() {
-        // For a clip, not at all: paint capability comes from the engine in the record.
-        AnsweringProbe probe = new AnsweringProbe();
-        VideoStateJson.build(videoOnScreen(), frame(), probe);
-        assertEquals("paintSignal asked " + probe.paintSignalCalls + " times for a clip document",
-                0, probe.paintSignalCalls);
+    public void paintSignalAndEngineCannotNameDifferentEngines() {
+        VideoStateJson.Frame ts = frame();
+        ts.engine = VideoEngineReport.TS_PLAYER;
+        JsonObject photo = VideoStateJson.build(PanelDisplay.image("k", "/x.jpg", GEN, WHEN), ts,
+                new NeverAskMeAboutThePlayer());
+        assertEquals(VideoEngineReport.TS_PLAYER, photo.get("engine").getAsString());
+        assertFalse("a photograph cannot borrow a paint signal the reported engine does not have",
+                photo.get("paintSignal").getAsBoolean());
 
-        // With no clip there is no engine being reported, so the controller's own answer is used — once.
-        AnsweringProbe photoProbe = new AnsweringProbe();
-        VideoStateJson.build(PanelDisplay.image("k", "/x.jpg", GEN, WHEN), frame(), photoProbe);
-        assertEquals(1, photoProbe.paintSignalCalls);
+        JsonObject blank = VideoStateJson.build(PanelDisplay.nothing(GEN, WHEN), frame(),
+                new NeverAskMeAboutThePlayer());
+        assertEquals(VideoEngineReport.MEDIA_PLAYER, blank.get("engine").getAsString());
+        assertTrue(blank.get("paintSignal").getAsBoolean());
     }
 
     /**
@@ -455,21 +462,12 @@ public class VideoStateJsonTest {
 
     /** A probe that answers, for the cases where a clip really is up. */
     private static class AnsweringProbe implements VideoStateJson.PlayerProbe {
-        /** How many times the builder asked. One document must ask once. */
-        int paintSignalCalls;
-
         /** Flip it to model a rotation landing mid-document. */
         boolean stale;
 
         @Override
         public boolean stale() {
             return stale;
-        }
-
-        @Override
-        public boolean paintSignal() {
-            paintSignalCalls++;
-            return true;
         }
 
         @Override

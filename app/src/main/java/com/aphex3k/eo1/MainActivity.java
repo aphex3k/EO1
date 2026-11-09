@@ -5315,12 +5315,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         @Override
-        public boolean paintSignal() {
-            VideoPlayerController active = videoPlayer;
-            return active != null && active.supportsPaintSignal();
-        }
-
-        @Override
         public boolean painted() {
             return videoPaintProduced;
         }

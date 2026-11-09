@@ -77,9 +77,6 @@ public final class VideoStateJson {
          */
         boolean stale();
 
-        /** Whether the compositing engine can report a composited frame at all. */
-        boolean paintSignal();
-
         boolean painted();
 
         long lastFrameAtMs();
@@ -166,15 +163,15 @@ public final class VideoStateJson {
             video.addProperty("tsLoadError", frame.tsLoadError);
         }
         // Whether a composited frame can be proven at all is a property of the <em>engine</em>, not of
-        // playback, so when a clip is being reported it must be the engine that clip names: reading the live
-        // controller here let a TsPlayer→MediaPlayer handover between the two reads print
-        // `engine: TsPlayer, paintSignal: true` — a capability claim for a compositor that the same document
-        // says is not compositing, and one no later staleness check can retract, because it is not a
-        // measurement of the clip. With no clip on the panel there is no engine being reported, and the
-        // controller's own answer is the right one to print.
-        boolean paintSignal = shown != null && shown.showsVideo()
-                ? !VideoEngineReport.TS_PLAYER.equals(shown.engine)
-                : probe.paintSignal();
+        // playback — so it is derived from the same engine string this document printed one line above, on
+        // both paths: from the clip's own record when there is one, from the frame fact when there is not.
+        // Asking the live controller instead — which the no-clip branch used to do, with the same
+        // justification the clip branch had already abandoned — reads one fact twice, and `videoPlayer` is
+        // reassigned by an engine switch while a web worker is halfway through a document. The result was
+        // `engine: TsPlayer` beside `paintSignal: true`, a capability claim for a compositor this very
+        // document says is not compositing; and unlike a measurement, a capability cannot be retracted by a
+        // later staleness check, because it is not about a clip at all.
+        boolean paintSignal = !VideoEngineReport.TS_PLAYER.equals(onScreen ? shown.engine : frame.engine);
         video.addProperty("paintSignal", paintSignal);
         if (frame.frameOrientation != null) {
             video.addProperty("frameOrientation", frame.frameOrientation);
