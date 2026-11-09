@@ -2100,14 +2100,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             PanelDisplay painted = webProvenRecord;
             return painted != null ? painted : blankPanel();
         }
-        if (imageView.getVisibility() == View.VISIBLE && imageView.getDrawable() != null) {
-            // A visible image view <em>covers</em> the video surfaces below it, so this branch must not fall
-            // through to them: at startup the layout supplies a visible wallpaper before any asset has
-            // loaded, and pressing Brightness+ during the first TsPlayer preparation used to report the
-            // covered clip. An image whose asset is not identified is still an image — say that, rather than
-            // either "nothing" or a clip nobody can see.
-            PanelDisplay photo = provenPhoto;
-            return photo != null ? photo : unidentifiedPhoto();
+        // A visible image view <em>covers</em> the video surfaces below it, so this branch must not fall
+        // through to them: at startup the layout supplies a visible wallpaper before any asset has loaded,
+        // and pressing Brightness+ during the first TsPlayer preparation used to report the covered clip.
+        // The answer comes from the same helper the recovery paths use, so a screen and an attempt can
+        // never be two records of one surface. Drawing nothing is the one case that legitimately falls
+        // through — an ImageView without a drawable is transparent, so what is beneath it is visible.
+        if (imageView.getVisibility() == View.VISIBLE) {
+            PanelDisplay drawn = imagePlaneRecord();
+            if (drawn != null) {
+                return drawn;
+            }
         }
         VideoPlayerController player = videoPlayer;
         View videoSurface = player == null ? null : player.getView();
@@ -2150,7 +2153,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * reports a blank panel over a clip that is playing again.
      */
     private void releaseVideoDisplay() {
-        releaseVideoDisplay();
+        videoPlayer.release();
+        videoPlayer.setVisibility(View.INVISIBLE);
         videoCompositing = null;
     }
 
@@ -4555,11 +4559,29 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * no drawable is an empty panel, not an unnamed photograph.
      */
     private PanelDisplay photoPlaneNow() {
-        PanelDisplay loaded = provenPhoto;
-        if (loaded == null || imageView.getDrawable() == null) {
-            return blankPanel();
+        PanelDisplay drawn = imagePlaneRecord();
+        return drawn != null ? drawn : blankPanel();
+    }
+
+    /**
+     * What the image plane is drawing, or null when it is drawing nothing at all — the single source both
+     * the recovery paths and the panel derivation consult, because the two used to disagree.
+     *
+     * <p>{@link #revealPhotoView()} took the recovery target from one rule and {@link #reproveTarget()}
+     * proved the same visible surface by another: with no photograph ever loaded, the layout's wallpaper is
+     * what the screen actually shows, so the proof adopted an <em>unidentified image</em> while the attempt
+     * was left holding a <em>blank</em> record. Two different records for one screen means
+     * {@code media.attempt} never clears after recovery — {@code type: none} beside a visible wallpaper,
+     * forever. An image view with no drawable draws nothing, which is why that case is null (look beneath)
+     * rather than blank.
+     */
+    @Nullable
+    private PanelDisplay imagePlaneRecord() {
+        if (imageView.getDrawable() == null) {
+            return null;
         }
-        return loaded;
+        PanelDisplay loaded = provenPhoto;
+        return loaded != null ? loaded : unidentifiedPhoto();
     }
 
     @Override
