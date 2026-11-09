@@ -124,8 +124,10 @@ public final class DebugBoard {
      * some other way — a render-silent clip displayed as its still preview, most of all.
      *
      * <p>Declared here rather than passed by each writer because the answer is a property of the row, not of
-     * the call site: eleven places write {@code video} and two write {@code videoBudget}, and a rule that
-     * lives in eleven places is the rule that gets missed at the twelfth.
+     * the call site: {@code video} is written from {@code MainActivity} and {@code MediaManager} alike, at
+     * more sites than anyone will keep count of, and a rule that has to be repeated at every one of them is
+     * the rule that gets missed at the last. (No count is quoted here on purpose: it was wrong the last time
+     * a writer was added.)
      */
     public static final Set<String> VIDEO_SCOPED = Collections.unmodifiableSet(new HashSet<>(Arrays.asList(
             "video", "videoBudget")));
@@ -181,8 +183,10 @@ public final class DebugBoard {
      * are <em>derived</em> from {@code panel} rather than written into the map, so they cannot outlive the
      * display they describe and cannot disagree between the wall and {@code /state}. It is also what retires
      * a clip's measurements when the panel stops showing video — the image record that replaced it carries
-     * no routing line, so there is nothing to render, and the failure sentence explaining the switch (an
-     * {@code asset}-attributed row for the same asset) stays.
+     * no routing line, so there is nothing to render, and the sentence explaining the switch stays — because
+     * {@code displayFailure} is deliberately frame-scoped with the asset named inside its text rather than
+     * attributed to it. Attributing a failure to the clip that failed filters the explanation out at exactly
+     * the moment it is needed: after recovery has uncovered some other asset's photograph.
      *
      * @param rows         the live board, unmodified
      * @param panel        what the panel provably holds, or null before the first display

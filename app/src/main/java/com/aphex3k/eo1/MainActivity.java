@@ -302,10 +302,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * <p>Turned off by {@link #retirePendingWebLoad()} when another display becomes the attempt, because a
      * page the frame has stopped waiting for must not act on the wall any more. It says nothing about the
      * page's <em>identity</em>, which stays live so {@code onPageFinished} can still record what the browser
-     * ended up painting. UI thread only — the WebView's callbacks and the watchdog's handler both run on the
-     * main looper.
+     * ended up painting.
+     *
+     * <p>{@code volatile}, because it is written from more than one thread and read from another. The only
+     * writer is {@code setPanelAttempt} — reached on the UI thread by most display paths, but from the
+     * rotation thread by {@code displayVideo}'s render-silent branch and by the fallback paths that uncover a
+     * photograph — and the readers are the WebView's callbacks and the load watchdog, both on the main
+     * looper. An unpublished flag there lets a load this frame has retired keep believing it owns the
+     * surfaces, and its error handler then uncovers the photograph over the display that replaced it.
      */
-    private boolean webLoadOwnsSurfaces = true;
+    private volatile boolean webLoadOwnsSurfaces = true;
     /**
      * The one record for "the panel is blank", so repeated reads of an unchanged blank wall are not repeated
      * handoffs. Cleared whenever something real is adopted, which lets a later blank report the time it
@@ -2254,6 +2260,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoPlayer.release();
         videoPlayer.setVisibility(View.INVISIBLE);
         videoCompositing = null;
+        // Nothing this surface has drawn can be evidence any more. The INVISIBLE test in the derivation
+        // already covers today, which is why clearing here is about keeping the flag's promise true rather
+        // than about a reachable misreport: "proven" means this surface drew something since it was last
+        // emptied, and a released player has emptied it.
+        videoSurfaceProven = false;
     }
 
     /** The single record for "nothing visible", so re-deriving a blank wall is not a new handoff. */
@@ -2494,14 +2505,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             final PanelDisplay mine = PanelDisplay.web(assetId, url,
                     panelGeneration.incrementAndGet(), System.currentTimeMillis());
             setPanelAttempt(mine);
-            // AFTER the attempt is set, because setting it retires whatever load was still in flight — and
-            // retiring clears the URL and the asset that load was identified by. Naming this page before the
-            // call would have the retirement erase its own name, and then its watchdog, its onPageFinished and
-            // its onReceivedError would each no-op on an empty identity while the page sat there loading.
+            // AFTER the attempt is set, because setting it retires the load that was in flight, and retirement
+            // is what takes the surfaces away from a page nobody is waiting for. Raising this page's claim
+            // before that call would have the retirement pull it straight back down, and a fresh load would
+            // be unable to give up on itself if it never rendered. The two identity assignments could sit on
+            // either side — retirement no longer touches them — but they belong with the claim they go with.
             activeWebAssetId = assetId;
             webUrlOnScreen = url;
-            // This page's obligation is live again: the retirement setPanelAttempt just ran belongs to the
-            // PREVIOUS load, and a fresh one must be allowed to abandon itself if it never renders.
             webLoadOwnsSurfaces = true;
             // The browser client is one object reused across every page, so a callback cannot capture its
             // attempt — it has to be told which load it belongs to, and a callback for a load this frame has
@@ -2860,8 +2870,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * Records that content was proven on the panel. Stamped at each display path's proof point and
      * nowhere else — see {@link #lastDisplayProvenAtMs} for why the rotation clock cannot say this.
      *
-     * <p>It is also the only thing that moves the panel record, for the same reason it is the only thing
-     * that may stamp the clock: this is the moment the wall actually changed. Glide's {@code onResourceReady},
+     * <p>It is also where a display's <em>proof</em> moves the panel record, and it is the only thing that may
+     * stamp the clock, because this is the moment the wall actually changed. It is not the only mover of the
+     * record: {@link #reproveTarget()} asks the views what is visible and {@code panelNowProven} adopts that,
+     * from {@code reprovePanel()} and from {@code stepAwayFrom()}. The two answer different questions and both
+     * are honest — this one says "a display just landed", that one says "this is what the surfaces show right
+     * now, whatever landed" — and the second exists because a list of paths that must remember to promote was
+     * wrong three times over. Glide's {@code onResourceReady},
      * the browser's first painted page, and {@code revealVideoSurface} — which for an engine with no paint
      * signal runs at prepared, and for the platform player only once a frame is proven to exist — are the
      * four handoffs, and each of them calls here. Promoting the attempt rather than the decision is what
@@ -4033,6 +4048,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // saying what is actually visible; the preview's own display call proves the switch when it
             // happens. What the clip <em>cannot</em> be is the answer to "what is playing", and the
             // attempt being a still already says that.
+            //
+            // This runs on the caller's thread, and displayVideo is reached from the rotation thread (the
+            // comment below posts for its own reasons). That matters here because setting an attempt is how a
+            // superseded web load is retired: see webLoadOwnsSurfaces, which the browser's callbacks read on
+            // the main looper and which is therefore published rather than a plain field.
             setPanelAttempt(PanelDisplay.image(assetId, "",
                     panelGeneration.incrementAndGet(), System.currentTimeMillis()));
             debugInformationProvided(new DebugInformation("displayVideo", "render-silent still "
