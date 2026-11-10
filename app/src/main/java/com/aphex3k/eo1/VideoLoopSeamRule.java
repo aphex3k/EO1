@@ -89,7 +89,18 @@ package com.aphex3k.eo1;
  * word changes. The benefit exists only for tails like the 55855 above, where the position hovers
  * <em>below</em> the file's length for several polls and {@code CREEPING}'s gate can never be met;
  * replaying that recorded series through this rule restarts it two polls (~4 s) sooner, which is a
- * replay, not an observation. Two things would settle it, and the {@code gap=} field is <em>not</em>
+ * replay, not an observation — and what the corpus actually holds for that clip is one traced lap, not no
+ * data. Three seam lines across two sessions: two dated, 21:43:06 and 21:44:09 on 2026-11-06
+ * ({@code parked pos=55000}, then {@code creeping pos=56011}) in the durable log, and one in the logcat dump
+ * the operator pasted on 2026-11-08. That dump also carries seven untimed {@code getCurrentPosition}
+ * samples — {@code 49720, 51728, 53743, 55756, 55049, 55023, 56011} — and their consecutive media deltas,
+ * 2008, 2015, 2013 ms, identify them as this watchdog's own 2 s polls running at 1.004x to 1.008x (an
+ * external {@code /state} poll would step ~5.25 s of media, and nothing in this app samples faster). So one
+ * lap is traced at full resolution: its body keeps real time, and its last three polls — about 6 s of
+ * wall — advance the media 255 ms. That makes roughly 5.7 s of that lap's ~7 s deficit the crawl this branch
+ * exists to end, which is the strongest support the benefit case has, and it says the replay was never the
+ * weak part of the argument; {@code n=1} is. Zero laps of this clip have run on a build carrying this rule,
+ * and getting one means that clip reaching the panel again on a frame that rotates a shuffled pool. Two things would settle it, and the {@code gap=} field is <em>not</em>
  * one of them, for the reason given two paragraphs above. The cheap one is a lap of that clip on a
  * build carrying this rule with the position sampled at every poll rather than only at the seam, which
  * measures the stall directly instead of inferring it from four samples. The one that answers the
