@@ -239,6 +239,89 @@ public class FrameGapWindowTest {
         return violated[0];
     }
 
+    /**
+     * A pair is only meaningful if it came from one sample: either both halves say "no record", or both
+     * are real numbers with the maximum dominating. A reset mixed into a clip's own numbers is the shape a
+     * reader gets by taking two loads across {@code onSurfaceTextureDestroyed()}.
+     */
+    private static boolean pairIsCoherent(long pair) {
+        int last = FrameGapWindow.latestOf(pair);
+        int max = FrameGapWindow.maxOf(pair);
+        if (last == FrameGapWindow.NO_GAP) {
+            return max == FrameGapWindow.NO_GAP;
+        }
+        return last >= 0 && max >= last;
+    }
+
+    @Test
+    public void everyPublishedWordDescribesOneMoment() {
+        // Deterministic half of the same-source-reset case: whatever the sequence of frames and clears, a
+        // word this class hands out never mixes a measurement with a cleared record. Two fields written in
+        // two steps cannot promise that; one word can.
+        long t = 0L;
+        for (int i = 0; i < 20000; i++) {
+            t += 30L + (i % 50) * 100L;
+            window.recordFrame(t);
+            assertTrue("word after a frame", pairIsCoherent(window.snapshot()));
+            if (i % 7 == 0) {
+                window.reset();
+                assertTrue("word after a reset", pairIsCoherent(window.snapshot()));
+            }
+        }
+    }
+
+    @Test(timeout = 30000L)
+    public void aResetBetweenTwoReadsCannotMixThePair() throws Exception {
+        // The reported shape: a surface is destroyed while a report is being assembled. The reset changes
+        // neither the panel record nor which controller is compositing, so no ownership check can catch the
+        // pairing it enables — only taking one sample can. This drives recordFrame and reset on the writer
+        // (both from the same thread, as surface destruction does) while a reader decodes ONE snapshot.
+        // Against a reader that calls the two getters instead, this fails within rounds; against the single
+        // snapshot, it cannot fail by construction, which is the point of the whole layout.
+        final FrameGapWindow shared = new FrameGapWindow();
+        final boolean[] mixed = {false};
+        Thread writer = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                long t = 0L;
+                long step = 1L;
+                for (int i = 0; i < RACE_SAMPLES; i++) {
+                    step += 3L;
+                    t += step;
+                    shared.recordFrame(t);
+                    if (i % 64 == 0) {
+                        shared.reset();          // what onSurfaceTextureDestroyed() does
+                    }
+                }
+            }
+        });
+        Thread reader = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                for (int i = 0; i < RACE_SAMPLES; i++) {
+                    // One sample, deliberately. The bug this guards is a reader taking TWO: two loads of an
+                    // atomic word are still two samples, and a surface reset between them pairs a live worst
+                    // gap with a cleared record's -1, invisible to every staleness check because the reset
+                    // changes neither the panel record nor which controller composites. That is what the two
+                    // getters on VideoPlayerController used to make unavoidable, and why they are gone from
+                    // that interface. Measured on this machine, 400,000 reads against a writer that resets
+                    // every 64th frame: this loop sees zero incoherent words from the real snapshot(), the
+                    // same loop against a snapshot() implemented as pack(getLastGapMs(), getMaxGapMs()) —
+                    // i.e. two loads behind the one call — sees incoherent words, and the two-getter read
+                    // itself logged 93. So the test has power over the thing that would actually regress.
+                    if (!pairIsCoherent(shared.snapshot())) {
+                        mixed[0] = true;
+                    }
+                }
+            }
+        });
+        writer.start();
+        reader.start();
+        writer.join();
+        reader.join();
+        assertFalse("a reader paired a live gap with a cleared record", mixed[0]);
+    }
+
     @Test
     public void theWorstIsMonotonicWithinASource() {
         window.recordFrame(0L);

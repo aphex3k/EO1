@@ -81,10 +81,15 @@ public final class VideoStateJson {
 
         long lastFrameAtMs();
 
-        /** Spacing of the two most recent composited frames, and the worst since this source was set. */
-        int lastFrameGapMs();
-
-        int maxFrameGapMs();
+        /**
+         * Spacing of the two most recent composited frames and the worst since this source was set, in the
+         * one word they were published in — {@link FrameGapWindow#latestOf(long)} and
+         * {@link FrameGapWindow#maxOf(long)} decode it.
+         *
+         * <p>One method rather than two getters on purpose: the pair has to come from a single load, because
+         * a surface reset between two loads changes nothing this builder can see.
+         */
+        long gapSnapshot();
 
         int durationMs();
 
@@ -232,8 +237,12 @@ public final class VideoStateJson {
             painted = probe.painted();
             long lastFrameAtMs = probe.lastFrameAtMs();
             lastFrameAgeMs = lastFrameAtMs > 0L ? (System.currentTimeMillis() - lastFrameAtMs) : -1L;
-            lastFrameGapMs = probe.lastFrameGapMs();
-            maxFrameGapMs = probe.maxFrameGapMs();
+            // One load, two decodes. Two getter calls would be two samples of a value that a surface reset
+            // can clear between them, and nothing downstream could tell: the reset changes neither the panel
+            // record nor which controller is compositing, so the ownership re-check below accepts the pair.
+            long gaps = probe.gapSnapshot();
+            lastFrameGapMs = FrameGapWindow.latestOf(gaps);
+            maxFrameGapMs = FrameGapWindow.maxOf(gaps);
         }
         int durationMs = probe.durationMs();
         int positionMs = probe.positionMs();

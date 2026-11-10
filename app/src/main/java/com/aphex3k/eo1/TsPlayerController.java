@@ -104,14 +104,15 @@ public class TsPlayerController implements VideoPlayerController {
         return 0L;
     }
 
+    /**
+     * No per-frame signal, so no spacing: the `.so` offers nothing between frames and its reported position
+     * is wall-clock when the native clock is unusable, so watching it would measure a timer. Every frame gap
+     * reads {@link FrameGapWindow#NO_GAP} rather than a guessed zero — "this engine cannot see its own
+     * spacing" and "its spacing has always been fine" must not become the same number.
+     */
     @Override
-    public int getMaxFrameGapMs() {
-        return FrameGapWindow.NO_GAP;
-    }
-
-    @Override
-    public int getLastFrameGapMs() {
-        return FrameGapWindow.NO_GAP;
+    public long getGapSnapshot() {
+        return FrameGapWindow.emptySnapshot();
     }
 
     @Override

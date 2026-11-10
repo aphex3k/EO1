@@ -54,13 +54,8 @@ public class VideoStateJsonTest {
         }
 
         @Override
-        public int lastFrameGapMs() {
+        public long gapSnapshot() {
             throw new AssertionError("asked a released player for its frame spacing");
-        }
-
-        @Override
-        public int maxFrameGapMs() {
-            throw new AssertionError("asked a released player for its worst frame spacing");
         }
 
         @Override
@@ -491,13 +486,9 @@ public class VideoStateJsonTest {
         }
 
         @Override
-        public int lastFrameGapMs() {
-            return 33;
-        }
-
-        @Override
-        public int maxFrameGapMs() {
-            return 413;
+        public long gapSnapshot() {
+            // One word carrying the pair the two getters used to return separately: latest 33, worst 413.
+            return FrameGapWindow.pack(33, 413);
         }
 
         @Override

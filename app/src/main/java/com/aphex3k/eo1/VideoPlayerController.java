@@ -62,23 +62,24 @@ public interface VideoPlayerController {
     long getLastFrameAtMs();
 
     /**
-     * The longest interval between two successive composited frames since this controller was pointed
-     * at its current source, or {@link FrameGapWindow#NO_GAP} when there is no such record — which
-     * covers both "fewer than two frames have arrived" and an engine that reports none.
+     * The frame-spacing pair in the single word it was published in: latest interval in the high half,
+     * retained maximum in the low. Decode with {@link FrameGapWindow#latestOf(long)} and
+     * {@link FrameGapWindow#maxOf(long)}; an engine with no per-frame signal returns
+     * {@link FrameGapWindow#emptySnapshot()}.
      *
-     * <p>Where {@link #getLastFrameAtMs()} says when the last buffer arrived, this says whether buffers
-     * kept arriving at an even rate. Every other signal in the process is a clock, which is why it
-     * exists — but read it narrowly: a wide interval is positive evidence that nothing arrived, a small
-     * interval is <em>not</em> evidence that the picture changed (a producer can re-queue a frame the
-     * panel has already shown), and neither says what the panel was displaying.
-     * {@link FrameGapWindow} carries the full account.
+     * <p>There used to be a {@code getLastFrameGapMs()} and a {@code getMaxFrameGapMs()} alongside this,
+     * and they are gone on purpose: two loads of an atomic value are still two samples, and a surface reset
+     * — which {@code onSurfaceTextureDestroyed()} performs without touching the panel record or which
+     * controller is compositing — can land between them and hand a report a worst gap beside a cleared
+     * record's {@code -1}, past every staleness check there is. A caller cannot get that wrong through an
+     * interface that only offers one sample, which is why the pair is not exposed as two numbers.
+     *
+     * <p>Where {@link #getLastFrameAtMs()} says when the last buffer arrived, this says whether buffers kept
+     * arriving at an even rate. Read it narrowly: a wide interval is positive evidence that nothing arrived,
+     * a small one is <em>not</em> evidence the picture changed, and neither says what the panel showed.
+     * {@link FrameGapWindow} carries the account.
      */
-    int getMaxFrameGapMs();
-
-    /**
-     * Spacing of the two most recently composited frames, or {@link FrameGapWindow#NO_GAP}.
-     */
-    int getLastFrameGapMs();
+    long getGapSnapshot();
 
     void seekTo(int positionMs);
 

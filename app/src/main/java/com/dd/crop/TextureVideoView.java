@@ -678,19 +678,13 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         return mLastFrameAtMs;
     }
 
-    /**
-     * @return the longest gap between two successive composited frames since this view was pointed at
-     *         its current data source, or {@link FrameGapWindow#NO_GAP} until two frames have arrived
-     */
-    public int getMaxFrameGapMs() {
-        return mFrameGaps.getMaxGapMs();
-    }
+
 
     /**
-     * @return spacing of the two most recently composited frames, or {@link
-     *         FrameGapWindow#NO_GAP} until two frames have arrived
+     * @return both frame-gap numbers in the one word they were published in, so a caller reporting the
+     *         pair reads one value rather than two samples of a changing one
      */
-    public int getLastFrameGapMs() {
-        return mFrameGaps.getLastGapMs();
+    public long getGapSnapshot() {
+        return mFrameGaps.snapshot();
     }
 }

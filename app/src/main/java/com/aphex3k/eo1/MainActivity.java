@@ -3166,11 +3166,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // polls still reported a 241 ms maximum: the counter sees buffers reaching a draw pass, not
         // changes of picture.
         if (seam.restarts()) {
-            // Read once each, and print the sentinel as a word: `gap=-1/-1` in an operator's grep looks
-            // like a measurement, while -1 means "no record" — which is every TsPlayer lap and any clip
-            // under two frames. Matches the durable line's `maxFrameGap=none`.
-            int lastGapMs = videoPlayer.getLastFrameGapMs();
-            int maxGapMs = videoPlayer.getMaxFrameGapMs();
+            // Read once and decode twice — two getter calls would be two samples of a word that surface
+            // destruction can clear in between. Print the sentinel as a word: `gap=-1/-1` in an operator's
+            // grep looks like a measurement, while -1 means "no record" — which is every TsPlayer lap and
+            // any clip under two frames. Matches the durable line's `maxFrameGap=none`.
+            long gapPair = videoPlayer.getGapSnapshot();
+            int lastGapMs = FrameGapWindow.latestOf(gapPair);
+            int maxGapMs = FrameGapWindow.maxOf(gapPair);
             debugInformationProvided(new DebugInformation("video",
                     "loop restart pos=" + position + " end=" + seam.boundaryMs
                             + " (" + seam.reasonWord()
@@ -3886,7 +3888,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // discipline as the stamp above, on the same controller, so the two cannot describe different
             // displays. It says whether buffers kept arriving; it cannot say whether the picture changed,
             // and a low value must not be read as "the clip was fine" — see FrameGapWindow.
-            int maxFrameGapMs = paintSignal && compositing != null ? compositing.getMaxFrameGapMs()
+            int maxFrameGapMs = paintSignal && compositing != null
+                    ? FrameGapWindow.maxOf(compositing.getGapSnapshot())
                     : FrameGapWindow.NO_GAP;
             if (ownedBefore && panel() == shown
                     && (!shown.showsVideo() || videoCompositing == shown)) {
@@ -5398,15 +5401,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         @Override
-        public int lastFrameGapMs() {
+        public long gapSnapshot() {
+            // One controller reference, one load: reading the two gap getters would be two samples of a word
+            // that surface destruction can clear in between, and the reset is invisible to stale().
             VideoPlayerController active = videoPlayer;
-            return active == null ? FrameGapWindow.NO_GAP : active.getLastFrameGapMs();
-        }
-
-        @Override
-        public int maxFrameGapMs() {
-            VideoPlayerController active = videoPlayer;
-            return active == null ? FrameGapWindow.NO_GAP : active.getMaxFrameGapMs();
+            return active == null ? FrameGapWindow.emptySnapshot() : active.getGapSnapshot();
         }
 
         @Override

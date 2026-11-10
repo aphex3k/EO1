@@ -103,16 +103,43 @@ public final class FrameGapWindow {
      */
     private volatile long gaps = pack(NO_GAP, NO_GAP);
 
-    private static long pack(int latest, int max) {
+    /**
+     * The word that carries a pair. Public so anything without a {@code FrameGapWindow} instance — another
+     * engine's controller, a test standing in for one — can build the same shape rather than inventing a
+     * second encoding that has to agree with this one.
+     */
+    public static long pack(int latest, int max) {
         return ((long) latest << 32) | (max & 0xFFFFFFFFL);
     }
 
-    private static int latestOf(long pair) {
+    /**
+     * Both exported numbers in the one word they were published in.
+     *
+     * <p>This exists because <em>reading the two getters is two loads</em>, and two loads of an atomic word
+     * are still two samples of a changing value: a {@link #reset()} between them — which
+     * {@code onSurfaceTextureDestroyed()} performs, and which changes neither the panel record nor which
+     * controller is compositing, so no ownership check can see it — lets a caller pair this clip's worst gap
+     * with the cleared record's {@link #NO_GAP}. Take one snapshot and decode it twice instead. Every reader
+     * that wants both numbers must go through here; {@link #getLastGapMs()} and {@link #getMaxGapMs()} are
+     * for a caller that genuinely wants only one of them.
+     */
+    public long snapshot() {
+        return gaps;
+    }
+
+    /** The latest gap of a word from {@link #snapshot()}. */
+    public static int latestOf(long pair) {
         return (int) (pair >> 32);
     }
 
-    private static int maxOf(long pair) {
+    /** The retained maximum of a word from {@link #snapshot()}, or {@link #NO_GAP}. */
+    public static int maxOf(long pair) {
         return (int) pair;
+    }
+
+    /** The word a source with no record yet reports: both halves {@link #NO_GAP}. */
+    public static long emptySnapshot() {
+        return pack(NO_GAP, NO_GAP);
     }
 
     /**
@@ -192,11 +219,12 @@ public final class FrameGapWindow {
      * nothing on a path that runs inside the compositor callback, and is indivisible on this 32-bit build
      * because JLS 17.7 grants that to a {@code volatile} long.
      *
-     * <p>What remains is not a race but a semantic boundary: a caller that reads the maximum here and the
-     * latest afterwards gets two samples, and between them a {@link #reset()} can clear the record for a new
-     * data source, pairing an old worst with {@link #NO_GAP}. That is a question of ownership — which source
-     * the numbers belong to — and {@code VideoStateJson} answers it by discarding every live reading when the
-     * panel no longer belongs to the reported clip.
+     * <p>What this method alone cannot give a caller is a consistent <em>pair</em>: {@code getLastGapMs()}
+     * and {@code getMaxGapMs()} are two loads, and two loads of an atomic word are still two samples, so a
+     * {@link #reset()} between them — which surface destruction performs without changing the panel record
+     * or which controller is compositing, so the ownership re-check cannot see it — pairs one clip's worst
+     * gap with a cleared record's {@link #NO_GAP}. Readers that want both numbers take
+     * {@link #snapshot()} and decode it twice.
      */
     public int getMaxGapMs() {
         // One load of one word, so the value returned was published together with the latest gap that
