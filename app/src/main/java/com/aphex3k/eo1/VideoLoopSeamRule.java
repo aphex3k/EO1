@@ -125,9 +125,9 @@ package com.aphex3k.eo1;
  * exactly-equal reading, so a tail that steps backwards is the sole thing that ends the lap once
  * {@code REWOUNDED} cannot speak: a player that reports no duration at all
  * ({@code reportedDurationMs <= 0}, which {@link Tail#REWOUNDED} requires) still gets restarted by
- * creeping against the file's length — for any clip longer than the poll interval, which is the scope of
- * that guarantee: below it the wrap test goes silent for want of evidence, as its own paragraph says, and
- * this sentence does not extend to those clips. A clamped creeping would leave that clip reading backwards
+ * creeping against the file's length — for any clip whose player reports more than one poll interval, and
+ * that is the scope of the guarantee: at or below it the wrap test can go silent for want of evidence, as
+ * its own paragraph says, and this sentence does not extend to those readings. A clamped creeping would leave that clip reading backwards
  * forever with no seam and no stall recovery: the lap would never end and its media clock would never
  * advance again, whatever the panel happens to be showing at the time.
  * {@code backwardsTailWithoutAPlayerDurationStillRestarts} pins it.
@@ -212,8 +212,9 @@ public final class VideoLoopSeamRule {
          * <ul>
          *   <li>{@link Tail#PARKED} and {@link Tail#REWOUNDED}: the player's duration. A reading that
          *       has stopped moving, or stepped backwards, is at the end as far as the player is
-         *       concerned, and demanding the probe's number there would skip the branch and leave the
-         *       lap to the 8 s threshold.</li>
+         *       concerned, and demanding the probe's number there would skip the branch. Only the
+         *       PARKED half of that has a backstop behind it — the 8 s stall threshold is reached solely
+         *       on an exactly-equal reading, so skipping a REWOUNDED leaves the lap to nothing.</li>
          *   <li>{@link Tail#CREEPING}: the greater of the two. That is the file's length only when the
          *       probe read a <em>longer</em> one — the {@code 55855} file against a {@code 55000}
          *       player. Where the player's number is the longer one, as measured on the EO2's square
@@ -322,9 +323,21 @@ public final class VideoLoopSeamRule {
         if (cycleEndMs > 0L
                 && positionMs >= cycleEndMs
                 && positionMs - cycleEndMs <= END_SLACK_MS
-                // PARKED is exempt from the wrap test: an identical reading would need a completed lap to
-                // land on the same millisecond, and a clip hung at the end of the file is the failure this
-                // whole rule exists to end, so its evidence does not expire with the clock.
+                // PARKED is exempt from the wrap test, and the exemption does fire on healthy playback —
+                // not as a rare coincidence but whenever the media advance between two polls is a whole
+                // multiple of the lap: the phase then never moves and every reading is bit-equal. At the
+                // caller's ~2 s poll that means laps of roughly 1 s to 2.6 s (905 such lap/interval pairs
+                // in that band; enumerate the moving branches and they score zero false restarts there
+                // while PARKED scores all of them), plus any lap at any interval that happens to be an
+                // exact multiple. What it costs each time is at most fileDurationMs - reportedDurationMs,
+                // under a second, and only where the file is longer than the player's number.
+                //
+                // The exemption is kept anyway, because the reading it cannot distinguish is also the only
+                // signal that a decoder has hung at end of file across a long gap — which is what this rule
+                // exists to end, and the 8 s stall rung behind it is reachable on nothing else. Testing the
+                // exemption instead of taking it would silence the hang detector for the one class where
+                // the two cases are genuinely indistinguishable, so the trade is stated here rather than
+                // assumed away.
                 && (parked || (creeping && !aWrapCouldExplainIt))) {
             return new Decision(parked ? Tail.PARKED : Tail.CREEPING, cycleEndMs);
         }
@@ -344,14 +357,19 @@ public final class VideoLoopSeamRule {
         // millisecond, so the boundary it draws is finer than the instruments that reach it.
         //
         // What that leaves unsaid is a limit of the instrument rather than a judgement, and it should not be
-        // softened: for a clip whose whole lap is shorter than the poll interval, some readings carry no
-        // evidence in either direction and this rule is silent about them for every poll, by information
-        // rather than by caution. The caller re-posts at VIDEO_WATCHDOG_POLL_MS = 2000 ms and can only
-        // overshoot it, so every clip at or under about 2 s is in that class. What is left for one of those
-        // is PARKED -- exempt, because a bit-equal reading is not what a moving loop produces -- and, for
-        // the mirror class where the player's number is the longer of the two, the platform player's own
-        // onCompletion loop. Nothing else in the app judges a moving-position tail there: the 8 s stall rung
-        // fires only on an exactly-equal reading, and any creep at all re-arms its clock.
+        // softened -- nor keyed to the wrong quantity. The guard goes quiet for a READING, not for a clip:
+        // once the previous sample sits at or past the file's end the cost collapses to the position, so a
+        // past-end tail is silenced only while its position stays within {@code sincePreviousMs +
+        // QUANTIZATION_MS}; as soon as it drifts past that, the rule restarts it again, however short the
+        // lap is. What is true of a clip whose lap is at or below one poll is that such readings exist and
+        // recur every poll. The caller re-posts at VIDEO_WATCHDOG_POLL_MS = 2000 ms and can only overshoot,
+        // and this branch prices its positions against the PLAYER's floored duration, so under the ROM's
+        // floor law (reported = floor(file/1000)*1000) the silently-suppressed class runs to a file of
+        // 2999 ms at the nominal poll -- not "about 2 s", and a player that floored harder would widen it.
+        // For those readings what is left is PARKED (exempt, and it does fire on a harmonic loop -- see its
+        // own note) and, for the mirror class where the player's number is the longer of the two, the
+        // platform player's onCompletion loop. Nothing else judges a moving-position tail there: the 8 s
+        // stall rung fires only on an exactly-equal reading, and any creep at all re-arms its clock.
         //
         // On the class this rule was written for the test is never close: laps of 14 to 58 s against a 2 s
         // poll, where the media time a wrap would cost is more than an order of magnitude beyond one

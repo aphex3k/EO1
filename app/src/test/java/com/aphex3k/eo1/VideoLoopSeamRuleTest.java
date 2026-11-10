@@ -155,7 +155,9 @@ public class VideoLoopSeamRuleTest {
         // (2200 - 2100) + 2000 = 2100 ms of media, so 2000 ms of wall does not explain the reading: the
         // media really did step backwards and it must restart. This is the case a bound read off the
         // player's duration alone wrongly suppressed -- the interval here equals that duration exactly, so
-        // no other test in this file separates the two bounds.
+        // it separates the two bounds, as do three assertions elsewhere in this file. A note here once
+        // claimed this case was the only one that did; that was checked against the file as it stood then
+        // and not as it stands now.
         assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
                 VideoLoopSeamRule.evaluate(2000, 2100, 2000L, 2000, 2200L).tail);
     }
