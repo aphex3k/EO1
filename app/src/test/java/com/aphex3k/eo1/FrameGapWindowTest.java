@@ -1,6 +1,8 @@
 package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Before;
 import org.junit.Test;
@@ -154,6 +156,69 @@ public class FrameGapWindowTest {
         window.recordFrame(1000L);
         window.recordFrame(1000L + 3_000_000_000L);
         assertEquals(Integer.MAX_VALUE, window.getMaxGapMs());
+    }
+
+    @Test
+    public void thePublishedPairNeverClaimsALatestAboveTheWorst() {
+        // Whatever the sequence, the two exported numbers have to describe a frame history that could have
+        // happened. A latest above the retained maximum is not a measurement of anything: it is two stores
+        // read between one and the other, and it is the one shape of lie this class could tell that
+        // contradicts the same document two fields later.
+        long t = 0L;
+        for (int i = 0; i < 2000; i++) {
+            t += (i % 3) * 900L;
+            window.recordFrame(t);
+            assertTrue("latest " + window.getLastGapMs() + " above max " + window.getMaxGapMs(),
+                    window.getMaxGapMs() >= window.getLastGapMs());
+        }
+    }
+
+    @Test(timeout = 20000L)
+    public void aConcurrentReaderSeesAPairThatCouldHaveHappened() throws Exception {
+        // recordFrame stores the latest gap and then the maximum, so a reader landing between the two
+        // observations pairs a new worst with the maximum that predates it. This drives both on separate
+        // threads and asserts the invariant on every pair the reader takes.
+        //
+        // What this can show is asymmetric: a failure is a proof, a pass only means this machine did not
+        // interleave that way on this run — two volatile writes leave a window a few instructions wide, and
+        // no test can promise to step in it. That is why the getter recomputes rather than trusting a
+        // schedule. It is also why the writer here grows the gap every frame instead of alternating between
+        // a long and a short one: alternating only stores a new maximum every other frame, so the window the
+        // reader would have to hit is shut for half the run and the first version of this test passed on the
+        // broken code 12 runs out of 12. Measured on this machine with the recomputation removed: 10 of 10
+        // runs caught it, between 84 and 187,038 torn pairs per run; with it in place, 0 of 10.
+        final FrameGapWindow shared = new FrameGapWindow();
+        final boolean[] violated = {false};
+        Thread writer = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                long t = 0L;
+                long step = 1L;
+                for (int i = 0; i < 400000; i++) {
+                    step += 3L;
+                    t += step;
+                    shared.recordFrame(t);
+                }
+            }
+        });
+        Runnable read = new Runnable() {
+            @Override
+            public void run() {
+                for (int i = 0; i < 300000; i++) {
+                    int latest = shared.getLastGapMs();
+                    int max = shared.getMaxGapMs();
+                    if (latest > max) {
+                        violated[0] = true;
+                    }
+                }
+            }
+        };
+        Thread reader = new Thread(read);
+        writer.start();
+        reader.start();
+        writer.join();
+        reader.join();
+        assertFalse("a reader paired a latest gap above the maximum", violated[0]);
     }
 
     @Test

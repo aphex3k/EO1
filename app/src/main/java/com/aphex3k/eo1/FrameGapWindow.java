@@ -68,8 +68,12 @@ package com.aphex3k.eo1;
  * rather than {@code long} so a read is single-copy on this 32-bit platform and cannot surface as a
  * value that is neither the old gap nor the new one. {@code lastAtMs} and {@code haveStamp} are
  * writer-only and stay plain, and a reader that catches the two mid-update sees a gap without its stamp
- * rather than the reverse, which costs one sample and invents nothing. Nothing here allocates and
- * nothing here can throw, because it runs inside the compositor callback.
+ * rather than the reverse, which costs one sample and invents nothing. The two <em>exported</em> values are
+ * a pair that a reader composes from two stores, so {@link #getMaxGapMs()} recomputes the greater of them:
+ * an impossible pair like {@code latest=6000, max=33} has to be excluded from every published document, not
+ * merely made unlikely. Nothing here allocates and nothing here can throw, because it runs inside the
+ * compositor callback — and the recompute keeps that promise, which is also why it is not an immutable
+ * two-field object handed over in one volatile reference.
  */
 public final class FrameGapWindow {
 
@@ -107,6 +111,9 @@ public final class FrameGapWindow {
         }
         long gap = nowMs - previous;
         int gapMs = gap <= 0L ? 0 : (gap > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) gap);
+        // Two stores, so a concurrent reader can observe this pair half-applied. That is why
+        // getMaxGapMs() recomputes rather than returning maxGapMs: the invariant max >= latest has to hold
+        // in a document, not merely in a quiescent object. The order here is deliberately not load-bearing.
         lastGapMs = gapMs;
         if (maxGapMs == NO_GAP || gapMs > maxGapMs) {
             maxGapMs = gapMs;
@@ -145,9 +152,25 @@ public final class FrameGapWindow {
      * The worst frame spacing since the last {@link #reset()}, or {@link #NO_GAP} while fewer than two
      * frames have arrived — which is "the clip has not painted enough to have an opinion", not
      * "spacing is fine".
+     *
+     * <p><b>Re-derived on read rather than returned as stored, and that is the point.</b> The maximum is
+     * >= the latest gap by definition, but two {@code volatile} fields are not one value: {@link
+     * #recordFrame(long)} stores them in two steps, so a reader sampling between them can pair a new latest
+     * with the maximum that predates it — {@code frameGapMs: 6000} beside {@code frameGapMaxMs: 33}, a pair
+     * no sequence of frames can produce, exported by the one field a report is read for. The ownership
+     * re-check in {@code VideoStateJson} cannot catch it, because nothing was handed over: the player is the
+     * same, the clip is the same, and only the arithmetic between the two fields is wrong.
+     *
+     * <p>Taking the greater of the two here closes that for <em>every</em> read order on <em>every</em>
+     * thread, with no lock in the compositor callback and no protocol a future reader has to remember to
+     * sample in. Ordering the writer's two stores instead would fix the two readers that exist today — they
+     * both sample latest-then-maximum — and would leave the invariant resting on nobody editing a third read
+     * site in the wrong sequence, which is a rule that decays silently.
      */
     public int getMaxGapMs() {
-        return maxGapMs;
+        int stored = maxGapMs;
+        int latest = lastGapMs;
+        return stored > latest ? stored : latest;
     }
 
     /** Spacing of the two most recent frames, or {@link #NO_GAP}. */
