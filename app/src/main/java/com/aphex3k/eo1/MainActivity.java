@@ -2721,6 +2721,25 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
+     * Nothing in the rotation pool and no network being waited for, which KioskWatchdog holds its
+     * ladder on — an empty library is not a wedge, and a rung that restarts the app only re-seeds the
+     * wedge clock the ladder reads.
+     *
+     * <p>{@code poolKeyCount()} rather than anything reading {@code MediaManager.pool}: that list
+     * belongs to the rotation thread, and this is called on the watchdog's {@code Timer}, the one
+     * thread that has to keep working when everything it watches is stuck. The network half is
+     * {@link #offlineMs()} for the same reason — it is a field the connection callbacks already
+     * maintain, where {@code networkAvailable()} would be a binder call into a framework that may be
+     * the wedged thing. A frame that has never received a connection callback therefore reads as
+     * "not offline", which is the safe direction: it only ever withholds escalation for the seconds
+     * until that callback lands, against a ladder whose first threshold is twenty minutes.
+     */
+    @Override
+    public boolean nothingToDisplay() {
+        return mediaManager.poolKeyCount() == 0 && offlineMs() == 0L;
+    }
+
+    /**
      * Number of acknowledgements so far. A value unchanged across a whole tick interval is the
      * only evidence that counts as a dead main thread — a late acknowledgement is still proof the
      * queue drained, and this hardware legitimately needs minutes of main-thread work to start.
@@ -3352,6 +3371,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.addProperty("downloadInFlightMs", downloadInFlightMs());
         o.addProperty("offlineMs", offlineMs());
         o.addProperty("autoReboot", autoRebootEnabled());
+        // Why a stale frame can be sitting on a low rung on purpose: nothing in the pool, so every
+        // rung above the two cheap retries would only restart an app that comes back equally empty.
+        o.addProperty("nothingToDisplay", nothingToDisplay());
         return o;
     }
 

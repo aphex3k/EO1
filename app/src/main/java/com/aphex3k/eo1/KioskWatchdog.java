@@ -146,6 +146,15 @@ public final class KioskWatchdog {
         long offlineMs();
 
         /**
+         * True when the frame has nothing it could put on the panel — an empty rotation pool, with a
+         * network that is not being waited for. This is not a wedge: there is no asset for the next
+         * rotation to show, so every rung above the cheap retries restarts an app that will come back
+         * with the same empty pool, and because a restart re-seeds the wedge clock, an empty library
+         * would climb the ladder forever. See the cap in {@link #evaluate}.
+         */
+        boolean nothingToDisplay();
+
+        /**
          * A counter that increases whenever the main thread runs anything the activity tracks —
          * in practice each {@link #postProbe()} acknowledgement. Only a value that is unchanged
          * between two ticks means the loop did nothing at all in that whole minute.
@@ -379,6 +388,10 @@ public final class KioskWatchdog {
         boolean paused = host.isPaused();
         lastPausedObserved = paused;
         lastPausedObservedAtMs = now;
+        // Same reason as paused: the cap below and the heartbeat line both want one answer per tick,
+        // and the host implements it from state it already holds rather than a call that could block
+        // this thread — which is the only thread guaranteed to survive a wedged framework.
+        boolean emptyPool = host.nothingToDisplay();
         long stale = staleMs(screenOn, now, Math.max(host.lastDisplayProvenAtMs(), screenWokeAtMs),
                 host.downloadInFlightMs());
         // Progress, not promptness: a main thread that acks two minutes late has still emptied its
@@ -392,6 +405,19 @@ public final class KioskWatchdog {
         lastProgressToken = token;
         boolean mainLoopDead = probeMisses >= MAIN_LOOP_DEAD_TICKS;
         int wanted = requiredLevel(stale, host.intervalMs());
+        if (emptyPool && wanted > LEVEL_RECOVER_PLAYBACK) {
+            // Nothing in the pool, and no network being waited for. The panel cannot change, and no
+            // rung can make it: rung 1 and 2 are still worth one attempt each (a pool that came up
+            // empty in the middle of a config reload is real, and the rotation retries the fetch every
+            // tick anyway), but past them every remaining rung restarts the app into the same empty
+            // pool. That is not merely useless — a restart re-seeds the wedge clock the ladder reads,
+            // so an empty library would climb, restart, and climb again for as long as it stayed
+            // empty, and each pass replaces the photo still on the panel with a blank one. A hard
+            // reboot on top of that is the loop AGENTS.md forbids. Being offline is excluded from this
+            // by the host: a frame relaunched into a dead network has an empty pool too, and climbing
+            // to the repair and reboot rungs is the documented cure for exactly that (2026-10-13).
+            wanted = LEVEL_RECOVER_PLAYBACK;
+        }
 
         if (wanted == LEVEL_NONE && !mainLoopDead && actedLevel != LEVEL_NONE) {
             actedLevel = LEVEL_NONE;
@@ -402,7 +428,7 @@ public final class KioskWatchdog {
 
         if (now - lastHeartbeatAtMs >= HEARTBEAT_MS) {
             lastHeartbeatAtMs = now;
-            host.logWatchdogEvent(heartbeatLine(stale, now, screenOn, paused), false);
+            host.logWatchdogEvent(heartbeatLine(stale, now, screenOn, paused, emptyPool), false);
         }
 
         // Another activity is in front (settings dialog): the loop is legitimately idle, so no
@@ -446,8 +472,12 @@ public final class KioskWatchdog {
             if (actedLevel == LEVEL_REPAIR_NETWORK && !networkUp(now)) {
                 retryRepairIfDue(now, stale);
             }
-            if (actedLevel == LEVEL_REBOOT && rebootBlocked && host.autoRebootEnabled()) {
+            if (wanted >= LEVEL_REBOOT && actedLevel == LEVEL_REBOOT && rebootBlocked
+                    && host.autoRebootEnabled()) {
                 // The ladder ran out against a disabled permission; finish it once it is granted.
+                // Gated on wanted as well as on the remembered rung: a frame that went quiet after
+                // the ladder ran out — its library emptied, so the cap above pulled the age verdict
+                // back down — must not be rebooted on the strength of a decision it no longer makes.
                 act(LEVEL_REBOOT, stale, now);
             }
             return;
@@ -549,7 +579,8 @@ public final class KioskWatchdog {
         }
     }
 
-    private String heartbeatLine(long stale, long now, boolean screenOn, boolean paused) {
+    private String heartbeatLine(long stale, long now, boolean screenOn, boolean paused,
+                                 boolean emptyPool) {
         StringBuilder sb = new StringBuilder();
         sb.append("heartbeat tick=").append(ticks)
                 .append(" stale=").append(stale / 1000L).append("s")
@@ -569,6 +600,12 @@ public final class KioskWatchdog {
             // Rungs are suppressed while another activity is in front; say so, so a long pause
             // cannot be mistaken for a healthy frame.
             sb.append(" PAUSED");
+        }
+        if (emptyPool) {
+            // And say so when the ladder is holding on purpose: an empty pool keeps the age growing,
+            // so a line reading level=2 and stale=6h looks like a watchdog that stopped working
+            // unless the reason is on the same line.
+            sb.append(" NO-MEDIA");
         }
         if (lastActionAtMs > 0L) {
             sb.append(" lastActionAge=" + ((now - lastActionAtMs) / 60_000L) + "m");

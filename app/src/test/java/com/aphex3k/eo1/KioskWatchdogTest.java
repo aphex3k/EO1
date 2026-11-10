@@ -48,6 +48,8 @@ public class KioskWatchdogTest {
         long downloadInFlightMs;
         boolean networkAvailable = true;
         long offlineMs;
+        /** Assets in the pool. Non-zero by default: most cases here are a frame that has assets. */
+        int poolKeyCount = 1;
         boolean mainLoopAlive = true;
         long progressToken = 0;
         boolean autoRebootEnabled;
@@ -110,6 +112,14 @@ public class KioskWatchdogTest {
         @Override
         public long offlineMs() {
             return offlineMs;
+        }
+
+        @Override
+        public boolean nothingToDisplay() {
+            // The product's rule rather than a free boolean: an offline frame whose pool is empty is
+            // still a wedge, and a fake that could claim both at once would let the cap look safe
+            // when it is not. MainActivity.nothingToDisplay() is the same two terms.
+            return poolKeyCount == 0 && offlineMs == 0L;
         }
 
         @Override
@@ -637,6 +647,55 @@ public class KioskWatchdogTest {
         assertEquals(KioskWatchdog.LEVEL_REBOOT, watchdog.actedLevel());
         assertTrue("the reboot rung must not report a capture it did not need",
                 host.captures.isEmpty());
+    }
+
+    /**
+     * The false positive this commit would otherwise have shipped with. A frame whose pool is empty —
+     * every backend switched off, a rotated Immich password, a Flickr stream with nothing public, a
+     * local entry before anyone uploaded a file — makes no display call at all, so the wedge clock
+     * cannot advance and the age grows for a reason no rung can fix. Before the commit the tick clock
+     * pinned the age below one interval and nothing fired; with an honest clock the ladder would reach
+     * self-restart, and since a restart re-seeds the very clock the ladder reads, it would climb again
+     * every limit + 30 min forever — wiping a photo that was still on the panel to do it.
+     */
+    @Test
+    public void aFrameWithNothingInItsPoolHoldsOnTheCheapRungs() {
+        host.provenAtMs = 0L;
+        host.poolKeyCount = 0;
+        host.autoRebootEnabled = true;
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+
+        tickTogether(MINUTE, (int) ((limit + 40 * MINUTE) / MINUTE));
+
+        assertEquals("the two retries are still worth one attempt each",
+                1, count("forceRotation"));
+        assertEquals(1, count("recoverPlayback"));
+        assertEquals("a restart cannot fill a pool", 0, count("selfRestart"));
+        assertEquals("and a reboot certainly cannot", 0, count("rebootDevice"));
+        assertEquals(KioskWatchdog.LEVEL_RECOVER_PLAYBACK, watchdog.actedLevel());
+        assertTrue("the hold must be legible in the log, not look like a dead watchdog",
+                containsEvent("NO-MEDIA"));
+    }
+
+    /**
+     * The half of the previous case that must not be suppressed: a frame relaunched into a dead network
+     * has an empty pool too, and the 2026-10-13 incident is the documented reason the repair and reboot
+     * rungs exist. "Nothing to display" is therefore only a hold while the network is not the thing
+     * being waited for.
+     */
+    @Test
+    public void anEmptyPoolIsStillAWedgeWhenTheFrameHasNoNetwork() {
+        host.provenAtMs = 0L;
+        host.poolKeyCount = 0;
+        host.networkAvailable = false;
+        host.offlineMs = KioskWatchdog.OFFLINE_REPAIR_MS;
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+
+        tickTogether(MINUTE, (int) ((limit + 15 * MINUTE) / MINUTE));
+
+        assertTrue("the outage still has to be repaired, pool empty or not",
+                count("repairNetwork") >= 1);
+        assertTrue(watchdog.actedLevel() >= KioskWatchdog.LEVEL_REPAIR_NETWORK);
     }
 
     @Test
