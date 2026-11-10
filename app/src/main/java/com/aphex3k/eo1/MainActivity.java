@@ -463,8 +463,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** Start of the window the playback-rate estimate is measured across. */
     private long videoRateAnchorMs = 0L;
     private int videoRateAnchorPosition = -1;
-    /** When the watchdog last read the position, so progress can be judged per poll. */
-    private long videoWatchdogPrevPollMs = 0L;
+    /**
+     * Start of the <em>previous</em> poll's {@code getCurrentPosition()} call, so the interval handed to
+     * {@link VideoLoopSeamRule} runs from the beginning of one query to the end of the next. The stamp used
+     * to sit after the call returned, which made the interval end-to-end and short by however long the
+     * previous query had taken: a position read from a player can be as old as the call that produced it,
+     * and {@link VideoLoopSeamRule}'s wrap test treats a too-short interval as proof that a lap could not
+     * have completed — a healthy wrap reported as a rewind, on exactly the clips whose lap is near one poll.
+     */
+    private long videoWatchdogPrevQueryStartMs = 0L;
     /**
      * Watches whether the current video display attempt has produced a frame at all. The position
      * watchdog above cannot do this: it is armed from {@code onVideoPrepared} (so an attempt whose
@@ -3020,7 +3027,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogRecoverAttempted = false;
         videoRateAnchorMs = 0L;
         videoRateAnchorPosition = -1;
-        videoWatchdogPrevPollMs = 0L;
+        videoWatchdogPrevQueryStartMs = 0L;
         // No watchdog, no measurement: TsPlayer skips this arm entirely, so leaving the previous
         // MediaPlayer asset's rate standing would attribute it to a clip that was never watched.
         videoPlaybackRateX100 = -1;
@@ -3087,6 +3094,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
+        long queryStartMs = System.currentTimeMillis();
         int position = videoPlayer.getCurrentPosition();
         long now = System.currentTimeMillis();
         measurePlaybackRate(position, now);
@@ -3094,8 +3102,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // Both questions below are about the previous poll, so they have to be answered before the
         // bookkeeping replaces those readings.
         int previousPositionMs = videoWatchdogLastPosition;
-        long sincePreviousMs = now - videoWatchdogPrevPollMs;
-        videoWatchdogPrevPollMs = now;
+        // An UPPER bound on the media time between the two position values: start of the previous query to
+        // end of this one, not end to end. VideoLoopSeamRule reads this as "a completed lap could not have
+        // happened in that interval", so an interval short by the previous query's own duration reports a
+        // healthy wrap as a rewind and seeks away a lap that had already restarted itself.
+        long sincePreviousMs = now - videoWatchdogPrevQueryStartMs;
+        videoWatchdogPrevQueryStartMs = queryStartMs;
 
         int reportedMs = videoPlayer.getDuration();
         // The file's own length, from the record this watchdog was armed for and nothing else. Reading the

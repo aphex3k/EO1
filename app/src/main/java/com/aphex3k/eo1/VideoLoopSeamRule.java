@@ -225,7 +225,17 @@ public final class VideoLoopSeamRule {
      *
      * @param positionMs           position read this poll
      * @param previousPositionMs   position read last poll, or a negative value when there was none
-     * @param sincePreviousMs      wall-clock milliseconds since the previous poll
+     * @param sincePreviousMs      milliseconds between the two position readings — and it has to be an
+     *                             <em>upper</em> bound on how much media could have played between them,
+     *                             taken from the <em>start</em> of the previous position query to the
+     *                             <em>end</em> of this one. A position read back from a player can be as old
+     *                             as the call that produced it, so an end-to-end interval is short by the
+     *                             previous query's own duration, and the wrap test below reads that
+     *                             shortfall as proof that a lap could not have completed: a healthy wrap
+     *                             becomes a rewind and the restart discards the lap that had begun. The
+     *                             margin only matters where a lap is near one poll, which is the same class
+     *                             the wrap cost is decisive for; on a 37 s clip against a 2 s poll no query
+     *                             latency reaches the boundary.
      * @param reportedDurationMs   what the player says the clip is, or {@code <= 0} when unknown
      * @param fileDurationMs       what the file says, from the {@code mdhd}/{@code mvhd} probe, or
      *                             {@code <= 0} when the probe could not read one

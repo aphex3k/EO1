@@ -196,6 +196,22 @@ public class VideoLoopSeamRuleTest {
     }
 
     @Test
+    public void aSlowPositionQueryDoesNotManufactureARewind() {
+        // The pair of readings the caller can actually produce. getCurrentPosition() blocks, so the value it
+        // hands back can be older than the stamp taken after it returns: here the previous query cost 20 ms,
+        // so the media advanced 2020 ms while an end-to-end interval would record 2000. The wrap costs
+        // exactly (2200 - 2190) + 2010 = 2020 ms, so the shortfall decides the whole verdict. MainActivity
+        // therefore measures from the START of the previous query to the END of this one, and with that
+        // interval this reading is a healthy second lap: no restart.
+        assertEquals(VideoLoopSeamRule.Tail.NONE,
+                VideoLoopSeamRule.evaluate(2010, 2190, 2020L, 2000, 2200L).tail);
+        // The narrower interval is the mistake, stated as a test: it is what an end-to-end measurement of
+        // the same two samples yields, and it turns a looping clip into a seek to zero.
+        assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
+                VideoLoopSeamRule.evaluate(2010, 2190, 2000L, 2000, 2200L).tail);
+    }
+
+    @Test
     public void aHeldTailIsStillHeldAfterALatePoll() {
         // PARKED's evidence does not expire with the clock. An identical reading across an interval long
         // enough for a lap would need the wrap to land on the same millisecond, and the failure this rule
