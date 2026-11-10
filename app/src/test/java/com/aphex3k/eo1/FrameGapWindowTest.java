@@ -173,20 +173,39 @@ public class FrameGapWindowTest {
         }
     }
 
-    @Test(timeout = 20000L)
+    /** Samples per race round. Twelve rounds cost ~50 ms and detect both bugs on every run measured. */
+    private static final int RACE_SAMPLES = 250000;
+
+    /** Rounds per pattern. One long pass is not enough — see the measurement in the test below. */
+    private static final int RACE_ROUNDS = 12;
+
+    @Test(timeout = 30000L)
     public void aConcurrentReaderSeesAPairThatCouldHaveHappened() throws Exception {
-        // recordFrame stores the latest gap and then the maximum, so a reader landing between the two
-        // observations pairs a new worst with the maximum that predates it. This drives both on separate
-        // threads and asserts the invariant on every pair the reader takes.
+        // Both exported values now live in one volatile long, so this is a guard, not the proof: it fails if
+        // the class ever goes back to two independently-written fields, which is the shape that made the
+        // invariant depend on how the threads happened to interleave. Against such a version, freshly
+        // compiled, this pair of patterns was measured at 830,999 violations with 12 of 12 rounds seeing at
+        // least one (growing gaps) and 63,059 with 11 of 12 (a new maximum every other frame); against the
+        // packed field, zero violations in all 24 rounds.
         //
-        // What this can show is asymmetric: a failure is a proof, a pass only means this machine did not
-        // interleave that way on this run — two volatile writes leave a window a few instructions wide, and
-        // no test can promise to step in it. That is why the getter recomputes rather than trusting a
-        // schedule. It is also why the writer here grows the gap every frame instead of alternating between
-        // a long and a short one: alternating only stores a new maximum every other frame, so the window the
-        // reader would have to hit is shut for half the run and the first version of this test passed on the
-        // broken code 12 runs out of 12. Measured on this machine with the recomputation removed: 10 of 10
-        // runs caught it, between 84 and 187,038 torn pairs per run; with it in place, 0 of 10.
+        // Both patterns stay because neither reaches every shape of that bug. Gaps that only grow put a new
+        // maximum in front of every read, which exposes a writer that stores the latest first but never a
+        // getter that samples the maximum before its own latest read — that one needs the maximum to recede
+        // relative to a later sample, which is what the short frames in the second pattern do. And rounds
+        // rather than one long pass, because a single 4,000,000-sample sweep missed the second shape in one
+        // run of six. The asymmetry of any race test still holds — a failure is a proof, a pass only says
+        // the window did not open this time — which is exactly why the guarantee now lives in one machine
+        // word instead of in this method.
+        for (int pattern = 0; pattern < 2; pattern++) {
+            for (int round = 0; round < RACE_ROUNDS; round++) {
+                assertFalse("pattern " + pattern + " round " + round + ": a reader paired a latest gap above "
+                        + "the maximum that should bound it", tornPairObserved(pattern));
+            }
+        }
+    }
+
+    /** One writer raising gaps while one reader samples the pair; true if it ever sees an impossible pair. */
+    private static boolean tornPairObserved(final int pattern) throws Exception {
         final FrameGapWindow shared = new FrameGapWindow();
         final boolean[] violated = {false};
         Thread writer = new Thread(new Runnable() {
@@ -194,17 +213,17 @@ public class FrameGapWindowTest {
             public void run() {
                 long t = 0L;
                 long step = 1L;
-                for (int i = 0; i < 400000; i++) {
+                for (int i = 0; i < RACE_SAMPLES; i++) {
                     step += 3L;
-                    t += step;
+                    t += (pattern == 0 || i % 2 == 0) ? step : 7L;
                     shared.recordFrame(t);
                 }
             }
         });
-        Runnable read = new Runnable() {
+        Thread reader = new Thread(new Runnable() {
             @Override
             public void run() {
-                for (int i = 0; i < 300000; i++) {
+                for (int i = 0; i < RACE_SAMPLES; i++) {
                     int latest = shared.getLastGapMs();
                     int max = shared.getMaxGapMs();
                     if (latest > max) {
@@ -212,13 +231,12 @@ public class FrameGapWindowTest {
                     }
                 }
             }
-        };
-        Thread reader = new Thread(read);
+        });
         writer.start();
         reader.start();
         writer.join();
         reader.join();
-        assertFalse("a reader paired a latest gap above the maximum", violated[0]);
+        return violated[0];
     }
 
     @Test

@@ -61,19 +61,15 @@ package com.aphex3k.eo1;
  * able to paint. Without it, one trip through quiet hours would record hours of hidden interval as the
  * clip's worst gap — the exact phantom this class exists to avoid producing.
  *
- * <p><b>Thread note.</b> Written on the UI thread from {@code onSurfaceTextureUpdated}, read on the
- * web server's threads and the diagnostics collector. The two exported fields are {@code volatile}:
- * without that, a reader on another thread is permitted to keep seeing a stale gap after a hold has
- * been recorded, or to report {@code NO_GAP} forever on a clip that has stuttered. They are {@code int}
- * rather than {@code long} so a read is single-copy on this 32-bit platform and cannot surface as a
- * value that is neither the old gap nor the new one. {@code lastAtMs} and {@code haveStamp} are
- * writer-only and stay plain, and a reader that catches the two mid-update sees a gap without its stamp
- * rather than the reverse, which costs one sample and invents nothing. The two <em>exported</em> values are
- * a pair that a reader composes from two stores, so {@link #getMaxGapMs()} recomputes the greater of them:
- * an impossible pair like {@code latest=6000, max=33} has to be excluded from every published document, not
- * merely made unlikely. Nothing here allocates and nothing here can throw, because it runs inside the
- * compositor callback — and the recompute keeps that promise, which is also why it is not an immutable
- * two-field object handed over in one volatile reference.
+ * <p><b>Thread note.</b> Written on the UI thread from {@code onSurfaceTextureUpdated} — the single
+ * writer, which is what makes the read-modify-write in {@link #recordFrame(long)} sound — and read on the
+ * web server's threads and the diagnostics collector. Both exported values live in one {@code volatile long},
+ * so a reader gets a pair that was published together rather than two values it has to combine correctly:
+ * JLS 17.7 makes a volatile long indivisible even on this 32-bit build, which an ordinary long would not be.
+ * {@code lastAtMs} and {@code haveStamp} are writer-only and stay plain, and a reader that catches the two
+ * mid-update sees a gap without its stamp rather than the reverse, which costs one sample and invents
+ * nothing. Nothing here allocates and nothing here can throw, because it runs inside the compositor
+ * callback.
  */
 public final class FrameGapWindow {
 
@@ -85,8 +81,39 @@ public final class FrameGapWindow {
     // reads epoch. It also made the first two frames of a clip unreproducible in a test.
     private boolean haveStamp;
     private long lastAtMs;
-    private volatile int lastGapMs = NO_GAP;
-    private volatile int maxGapMs = NO_GAP;
+
+    /**
+     * Both exported values, in one {@code volatile long}: the latest gap in the high half and the retained
+     * maximum in the low one.
+     *
+     * <p>Two {@code volatile int}s cannot be read as a pair, and every scheme that pretends otherwise has to
+     * be honoured by each writer <em>and</em> each reader forever. Two such protocols were tried here in
+     * sequence — store the maximum before the latest, then read the latest before the maximum and re-derive
+     * the greater — and each was broken by the next review round rather than by a test, which is the actual
+     * argument for this layout. The race test does see a two-field version fail (see the note in
+     * {@code FrameGapWindowTest}), but it sees it only when the writer's pattern happens to open the window,
+     * and the first attempt to prove that with a mutation check reported a false negative of its own — the
+     * build had not recompiled. An invariant whose violation is invisible to the tooling will be violated.
+     * One word, one store, one load, and the question cannot be asked.
+     *
+     * <p>Atomicity does not depend on the platform width: JLS 17.7 gives a {@code volatile} long read and
+     * write the same indivisibility as any other volatile field, which an ordinary long would not have on this
+     * 32-bit ARM build. And no object is created, which is what keeps {@link #recordFrame(long)} legal to call
+     * from inside the compositor callback.
+     */
+    private volatile long gaps = pack(NO_GAP, NO_GAP);
+
+    private static long pack(int latest, int max) {
+        return ((long) latest << 32) | (max & 0xFFFFFFFFL);
+    }
+
+    private static int latestOf(long pair) {
+        return (int) (pair >> 32);
+    }
+
+    private static int maxOf(long pair) {
+        return (int) pair;
+    }
 
     /**
      * Record that a frame reached the surface at {@code nowMs}, on the caller's monotonic clock.
@@ -111,13 +138,12 @@ public final class FrameGapWindow {
         }
         long gap = nowMs - previous;
         int gapMs = gap <= 0L ? 0 : (gap > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) gap);
-        // Two stores, so a concurrent reader can observe this pair half-applied. That is why
-        // getMaxGapMs() recomputes rather than returning maxGapMs: the invariant max >= latest has to hold
-        // in a document, not merely in a quiescent object. The order here is deliberately not load-bearing.
-        lastGapMs = gapMs;
-        if (maxGapMs == NO_GAP || gapMs > maxGapMs) {
-            maxGapMs = gapMs;
-        }
+        // One store of one packed pair, so no reader can ever observe a half-applied update. The read of
+        // `gaps` here is a read-modify-write, and that is sound only because a single thread — the one that
+        // owns the surface — is the writer; see the thread note on the class.
+        int previousMax = maxOf(gaps);
+        int raised = (previousMax == NO_GAP || gapMs > previousMax) ? gapMs : previousMax;
+        gaps = pack(gapMs, raised);
     }
 
     /**
@@ -127,8 +153,7 @@ public final class FrameGapWindow {
     public void reset() {
         haveStamp = false;
         lastAtMs = 0L;
-        lastGapMs = NO_GAP;
-        maxGapMs = NO_GAP;
+        gaps = pack(NO_GAP, NO_GAP);
     }
 
     /**
@@ -153,28 +178,36 @@ public final class FrameGapWindow {
      * frames have arrived — which is "the clip has not painted enough to have an opinion", not
      * "spacing is fine".
      *
-     * <p><b>Re-derived on read rather than returned as stored, and that is the point.</b> The maximum is
-     * >= the latest gap by definition, but two {@code volatile} fields are not one value: {@link
-     * #recordFrame(long)} stores them in two steps, so a reader sampling between them can pair a new latest
-     * with the maximum that predates it — {@code frameGapMs: 6000} beside {@code frameGapMaxMs: 33}, a pair
-     * no sequence of frames can produce, exported by the one field a report is read for. The ownership
-     * re-check in {@code VideoStateJson} cannot catch it, because nothing was handed over: the player is the
-     * same, the clip is the same, and only the arithmetic between the two fields is wrong.
+     * <p><b>Read from the same word as the latest gap, and that is the point.</b> The maximum is >= the
+     * latest gap by definition, but two {@code volatile} fields are not one value: a reader sampling between
+     * two stores can pair a new latest with the maximum that predates it — {@code frameGapMs: 6000} beside
+     * {@code frameGapMaxMs: 33}, a pair no sequence of frames produces, exported by the one field a report is
+     * read for. The ownership re-check in {@code VideoStateJson} cannot catch it, because nothing was handed
+     * over: the player is the same, the clip is the same, and only the arithmetic between two fields is
+     * wrong.
      *
-     * <p>Taking the greater of the two here closes that for <em>every</em> read order on <em>every</em>
-     * thread, with no lock in the compositor callback and no protocol a future reader has to remember to
-     * sample in. Ordering the writer's two stores instead would fix the two readers that exist today — they
-     * both sample latest-then-maximum — and would leave the invariant resting on nobody editing a third read
-     * site in the wrong sequence, which is a rule that decays silently.
+     * <p>It is published together with the latest gap in one word (see {@link #gaps}), which is what makes
+     * that a promise rather than a hope. Two {@code volatile int}s can be kept consistent only by a protocol
+     * every writer and every reader has to honour forever; the packed pair needs no protocol, allocates
+     * nothing on a path that runs inside the compositor callback, and is indivisible on this 32-bit build
+     * because JLS 17.7 grants that to a {@code volatile} long.
+     *
+     * <p>What remains is not a race but a semantic boundary: a caller that reads the maximum here and the
+     * latest afterwards gets two samples, and between them a {@link #reset()} can clear the record for a new
+     * data source, pairing an old worst with {@link #NO_GAP}. That is a question of ownership — which source
+     * the numbers belong to — and {@code VideoStateJson} answers it by discarding every live reading when the
+     * panel no longer belongs to the reported clip.
      */
     public int getMaxGapMs() {
-        int stored = maxGapMs;
-        int latest = lastGapMs;
-        return stored > latest ? stored : latest;
+        // One load of one word, so the value returned was published together with the latest gap that
+        // shares it. Nothing here depends on the order two callers sample in, and that is the property the
+        // earlier read-order and store-order protocols could not deliver.
+        return maxOf(gaps);
     }
 
     /** Spacing of the two most recent frames, or {@link #NO_GAP}. */
     public int getLastGapMs() {
-        return lastGapMs;
+        return latestOf(gaps);
     }
+
 }
