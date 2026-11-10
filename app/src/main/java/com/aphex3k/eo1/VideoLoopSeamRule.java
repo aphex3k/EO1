@@ -71,7 +71,11 @@ package com.aphex3k.eo1;
  *
  * <p>The cost is bounded by construction and now measured. The branch is reachable only where
  * {@code fileMs > reportedDurationMs} and the position sits between the two, so the most it can
- * withhold is the sub-second remainder the player floors away — the design series loses 806 ms. Across
+ * withhold is the sub-second remainder the player floors away — the design series loses 806 ms. It is
+ * reachable only where the interval since the previous reading is shorter than that duration as well,
+ * which is what keeps a clip whose lap fits inside one poll from being restarted every poll: a position
+ * that a completed lap would explain is left alone, and {@code aWrapThatAlreadyRanPastTheEndIsNotASeamEither}
+ * pins the two sides of that line. Across
  * 22 laps of a {@code player=37000 file=37270} clip on live hardware it fired on 4, cutting 150, 150,
  * 157 and 266 ms (723 ms total, every one inside that 270 ms band). The sibling {@link Tail#PARKED}
  * branch has always cut up to 855 ms on the same fleet, so this is not a new kind of loss.
@@ -144,9 +148,11 @@ public final class VideoLoopSeamRule {
         NONE,
         /** Identical to the previous reading — finished as far as the player is concerned. */
         PARKED,
-        /** Advancing below {@link #TAIL_RATE_X100} of wall speed, forwards or not. */
+        /** Advancing below {@link #TAIL_RATE_X100} of wall speed, forwards or not — and not an interval
+         *  in which the clip could have completed a lap and come back round. */
         CREEPING,
-        /** At or past the player's own duration and below the previous reading. */
+        /** At or past the player's own duration and below the previous reading, within an interval
+         *  shorter than that duration. */
         REWOUNDED
     }
 
@@ -243,13 +249,33 @@ public final class VideoLoopSeamRule {
         if (cycleEndMs > 0L
                 && positionMs >= cycleEndMs
                 && positionMs - cycleEndMs <= END_SLACK_MS
-                && (parked || creeping)) {
+                // A creeping reading is only evidence while the media could not have completed a lap and
+                // come back round inside the interval -- see the comparison in the REWOUNDED branch, which
+                // makes the same argument against its own end. PARKED is exempt: an identical reading needs
+                // a wrap to land on the same millisecond, and a clip hung at the end of the file is the
+                // failure this whole rule exists to end, so its evidence does not expire with the clock.
+                && (parked || (creeping && sincePreviousMs < cycleEndMs))) {
             return new Decision(parked ? Tail.PARKED : Tail.CREEPING, cycleEndMs);
         }
 
         // The tail that never gets to the file's length because it went backwards instead. It still
-        // has to be past the player's own duration, so a wrap (a natively-looping clip whose position
-        // returns to 0) cannot be read as one, and inside the same slack bound as the other tests.
+        // has to be past the player's own duration, so a wrap that lands back at the start of the lap
+        // cannot be read as one, and inside the same slack bound as the other tests.
+        //
+        // A wrap is ruled out twice over, and the second is the one that matters on a short clip. Asking
+        // for a position at or past the player's duration excludes a reading near zero; but a clip whose
+        // lap is short next to the poll interval can wrap, run past the player's number again, and be
+        // read at any position the test accepts -- a 2200 ms file whose player says 2000, polled 2100 ms
+        // after a reading of 2100, legitimately reads 2000, and restarting there cuts a lap that had
+        // already begun again. Hence the elapsed bound: to read a position at or past an end B, having
+        // started anywhere in the lap, needs at least B ms of media, so an interval of B ms or more makes
+        // the reading consistent with a healthy loop and two samples say nothing. Each branch compares
+        // against the end it would restart against, which is the B in its own test. On this ROM's floor
+        // class that is never a close call -- laps of 14 to 58 s against a 2 s poll -- so the bound costs
+        // a genuine tail at most the one late poll it disqualifies. Where polls stay short next to the lap
+        // the next one judges it normally; where they do not, two samples carry no evidence either way and
+        // the clip is left to loop by itself, which is the conservative direction for a rule whose only
+        // action is to cut a lap short.
         //
         // The bound is applied to the PREVIOUS reading as well, and that is not symmetry for its own
         // sake: the caller stores whatever the position getter returned, whether or not this rule
@@ -266,7 +292,10 @@ public final class VideoLoopSeamRule {
                 // Without a real elapsed interval, "lower than before" is a statement about the clock,
                 // not the media: a backward step kills CREEPING and would leave this test as the only
                 // thing firing, at positions the cost bound above does not cover.
-                && sincePreviousMs > 0) {
+                && sincePreviousMs > 0
+                // And not an elapsed interval the media could have looped inside -- the other half of the
+                // two-sample problem above, stated against this branch's own end.
+                && sincePreviousMs < (long) reportedDurationMs) {
             return new Decision(Tail.REWOUNDED, reportedDurationMs);
         }
 

@@ -143,6 +143,44 @@ public class VideoLoopSeamRuleTest {
     }
 
     @Test
+    public void aWrapThatAlreadyRanPastTheEndIsNotASeamEither() {
+        // The shape the test above does not reach: a clip whose whole lap fits inside one poll. A 2200 ms
+        // file whose player reports 2000 was read at 2100, wrapped 100 ms later, and had run 2000 ms of the
+        // next lap by the time a poll 2100 ms on read it — so the position is at or past the player's end
+        // AND below the previous reading, which is REWOUNDED's entire test. Nothing is wrong with the clip,
+        // and a seekTo(0) here discards two seconds of a lap that had already restarted itself.
+        assertEquals(VideoLoopSeamRule.Tail.NONE,
+                VideoLoopSeamRule.evaluate(2000, 2100, 2100L, 2000, 2200L).tail);
+        // The same pair of readings at a cadence that cannot contain a lap is the tail this branch exists
+        // for: 1500 ms is less than the 2100 ms a wrap would need, so the media really did step backwards.
+        assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
+                VideoLoopSeamRule.evaluate(2000, 2100, 1500L, 2000, 2200L).tail);
+    }
+
+    @Test
+    public void aLatePollDoesNotCutACreepingTailOnAClipThatDoesNotFloor() {
+        // Where the player's number and the file agree, the same healthy wrap reaches CREEPING instead: a
+        // backwards delta is under any positive threshold, and the position clears the demanded end. One
+        // comparison against the end that branch demands is what says a lap may simply have completed. The
+        // bound is that branch's alone -- PARKED is evidence a wrap cannot imitate, so it is pinned below.
+        assertEquals(VideoLoopSeamRule.Tail.NONE,
+                VideoLoopSeamRule.evaluate(2000, 2100, 2100L, 2000, 2000L).tail);
+        assertEquals(VideoLoopSeamRule.Tail.CREEPING,
+                VideoLoopSeamRule.evaluate(2000, 2100, 1900L, 2000, 2000L).tail);
+    }
+
+    @Test
+    public void aHeldTailIsStillHeldAfterALatePoll() {
+        // PARKED's evidence does not expire with the clock. An identical reading across an interval long
+        // enough for a lap would need the wrap to land on the same millisecond, and the failure this rule
+        // exists to end is a decoder hung at the end of the file -- which is exactly what a watchdog that
+        // could not poll for three minutes finds when it comes back.
+        assertEquals(VideoLoopSeamRule.Tail.PARKED,
+                VideoLoopSeamRule.evaluate(CRAWL_PLAYER_MS, CRAWL_PLAYER_MS, 180000L,
+                        CRAWL_PLAYER_MS, CRAWL_FILE_MS).tail);
+    }
+
+    @Test
     public void anUnsettledReadingIsNeverBelieved() {
         // Two bogus shapes a freshly created player has actually produced. The slack bound carries the
         // first; the second is caught by demanding an end at all, since a small position is not near
