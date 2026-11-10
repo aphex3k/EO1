@@ -478,14 +478,18 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * between two samples and shorten the interval while leaving it positive — which is the one case the
      * rule's own {@code sincePreviousMs > 0} defence cannot see.
      *
-     * <p>The stall rung and the rate window deliberately keep the wall clock, and a step reaches them
-     * differently: {@code measurePlaybackRate} re-anchors whenever {@code now} falls behind its own anchor,
-     * so a step costs that window its samples and nothing else; the stall test is a bare
-     * {@code now - videoWatchdogLastProgressMs}, so a backward step only defers it and a forward one can
-     * bring a recovery early. That exposure is known and deliberately not touched here: this change is about
-     * the one subtraction whose error selects a {@code seekTo(0)} on the same poll, and moving two more
-     * measurements onto another clock in the pass that fixes one is how a timing change stops being
-     * reviewable.
+     * <p>The stall rung and the rate window deliberately keep the wall clock, and neither is immune to a
+     * step — saying "it re-anchors" would be the kind of half-truth this file keeps having to correct. A
+     * <em>backward</em> step is where the two differ: {@code measurePlaybackRate} re-anchors whenever
+     * {@code now} falls behind its own anchor, so it loses that window's sample, while the bare
+     * {@code now - videoWatchdogLastProgressMs} test goes negative and the stall rung simply waits. A
+     * <em>forward</em> step reaches both: the rate window's elapsed grows, so it publishes a low rate that
+     * the attempt keeps in {@code videoPlaybackRateMinX100} forever — a phantom stall in the one field that
+     * is supposed to distinguish a uniformly-late pipeline from a hitching one — and the stall test clears
+     * its threshold on a clip that was never stalled. Both exposures are pre-existing, named, and unfixed
+     * here: this change is about the one subtraction whose error selects a {@code seekTo(0)} on the same
+     * poll, and moving two more measurements onto another clock in the pass that fixes one is how a timing
+     * change stops being reviewable. The switch is one argument at one call site whenever it is wanted.
      */
     private long videoWatchdogPrevQueryStartElapsedMs = 0L;
     /**
