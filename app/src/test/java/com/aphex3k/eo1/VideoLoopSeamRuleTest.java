@@ -212,6 +212,22 @@ public class VideoLoopSeamRuleTest {
     }
 
     @Test
+    public void aWrapAtTheQuantizationEdgeIsNotJudgedByWhichWayTheFractionsFell() {
+        // The same lap, one rounding finer than the arithmetic can see. The true positions were 2199.4 and
+        // 2000.1 and the true interval 2000.7 ms: the media did wrap inside one poll. But every quantity
+        // here is a truncated integer millisecond, so the rule is handed 2199, 2000 and 2000 -- a cost of
+        // 2001 against an interval of 2000 -- and without the quantum allowance it concludes no lap fitted
+        // and discards the 200 ms still to run. The band is not a margin of safety; it is the resolution of
+        // the instruments.
+        assertEquals(VideoLoopSeamRule.Tail.NONE,
+                VideoLoopSeamRule.evaluate(2000, 2199, 2000L, 2000, 2200L).tail);
+        // A tail one quantum further out is not ambiguity and still restarts: 2 ms of forgiveness moves the
+        // decision by less than one poll, which is all it is being paid for.
+        assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
+                VideoLoopSeamRule.evaluate(2000, 2190, 2000L, 2000, 2200L).tail);
+    }
+
+    @Test
     public void aHeldTailIsStillHeldAfterALatePoll() {
         // PARKED's evidence does not expire with the clock. An identical reading across an interval long
         // enough for a lap would need the wrap to land on the same millisecond, and the failure this rule

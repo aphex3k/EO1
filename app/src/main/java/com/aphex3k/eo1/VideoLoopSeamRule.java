@@ -150,6 +150,23 @@ public final class VideoLoopSeamRule {
     public static final int END_SLACK_MS = 30000;
 
     /**
+     * The width of the band in which "could a lap have completed?" has no answer, because every quantity the
+     * question is asked with is a truncated integer millisecond.
+     *
+     * <p>{@code getCurrentPosition()} returns whole milliseconds and floors, {@code elapsedRealtime()} does
+     * the same to the interval, and the cost of a wrap is built from all of them — so a clip that wrapped
+     * 2000.7 ms ago, whose true positions were 2199.4 and 2000.1, reads as a 2000 ms interval against a cost
+     * of 2001 ms, and the verdict is decided by which way the fractions fell. Two milliseconds covers one
+     * quantum on each side of the comparison, which is the most the arithmetic can be wrong by.
+     *
+     * <p>Forgiving it costs a genuine tail 2 ms of latency — the next poll, 2 s away, decides it regardless
+     * — and buys the difference between a rule and a coin toss on the class of clip where the cost is near
+     * one poll to begin with. On a 37 s lap the two are not in the same universe of magnitude, which is why
+     * this never moves a measured case.
+     */
+    public static final int QUANTIZATION_MS = 2;
+
+    /**
      * Which tail, if any, this poll's position reading constitutes. The word is also what the
      * caller's durable log line prints, so an operator can tell which end a restart was taken
      * against from the line alone.
@@ -285,7 +302,11 @@ public final class VideoLoopSeamRule {
         // from the end alone would suppress a real tail. The first version of this guard did exactly that.
         long wrapMediaMs = (previousPositionMs >= fileEndMs ? 0L : fileEndMs - (long) previousPositionMs)
                 + (long) positionMs;
-        boolean aWrapCouldExplainIt = previousPositionMs >= 0 && sincePreviousMs >= wrapMediaMs;
+        // `sincePreviousMs` is a long and QUANTIZATION_MS an int, so this addition is done in long
+        // arithmetic; the interval can be enormous (an arming that never stamped, a three-minute pause), and
+        // widening first keeps that from overflowing into a comparison that silently says the opposite.
+        boolean aWrapCouldExplainIt = previousPositionMs >= 0
+                && sincePreviousMs + QUANTIZATION_MS >= wrapMediaMs;
 
         if (cycleEndMs > 0L
                 && positionMs >= cycleEndMs
@@ -307,7 +328,9 @@ public final class VideoLoopSeamRule {
         // position this test accepts -- a 2200 ms file whose player says 2000, polled 2100 ms after a
         // reading of 2100, legitimately reads 2000, and restarting there cuts a lap that had already begun
         // again. Hence <code>aWrapCouldExplainIt</code>, computed above from the previous reading and the
-        // file's end rather than from the duration this branch compares positions against.
+        // file's end rather than from the duration this branch compares positions against — and forgiven
+        // {@link #QUANTIZATION_MS} on top, because every term in that cost is a truncated integer
+        // millisecond, so the boundary it draws is finer than the instruments that reach it.
         //
         // What that leaves unsaid is a limit of the instrument rather than a judgement, and it should not be
         // softened: for a clip whose whole lap is shorter than the poll interval, some readings carry no
