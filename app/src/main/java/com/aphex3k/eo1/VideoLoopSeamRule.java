@@ -98,9 +98,15 @@ package com.aphex3k.eo1;
  * clock, and should not be described as a fix for a visible freeze.
  *
  * <p>The domain claim above holds unconditionally only because the test requires
- * {@code sincePreviousMs > 0}: a <em>backward</em> clock step (these frames run no time sync —
- * {@code docs/TRUST.md} gate 4) would zero that interval, silence {@code CREEPING}, and let
- * {@code REWOUNDED} fire at a position past the file's length, outside the band that bounds its cost.
+ * {@code sincePreviousMs > 0}: a <em>backward</em> clock step would zero that interval, silence
+ * {@code CREEPING}, and let {@code REWOUNDED} fire at a position past the file's length, outside the band
+ * that bounds its cost. It can also leave the interval <em>positive and shortened</em>, which is the case
+ * {@code > 0} cannot see and which is equally fatal to the wrap test — so the caller measures the interval on
+ * {@code SystemClock.elapsedRealtime()} (gate 4 of {@code docs/TRUST.md}: these frames are power-cycled and
+ * run no time sync). Both defences stay, in that order of reliance: the monotonic clock is what makes the
+ * interval trustworthy, and this rule's own {@code > 0} test is what keeps a rule honest even when a caller
+ * forgets. A contract a function cannot check is a comment, not a guarantee — {@code
+ * aBackwardsClockStepDoesNotManufactureARewind} is why the type still holds it.
  *
  * <p><b>Do not "fix" {@link Tail#CREEPING} by requiring a non-negative delta.</b> The unqualified
  * {@code <} is load-bearing in the opposite direction from the one it looks like, and
@@ -225,17 +231,21 @@ public final class VideoLoopSeamRule {
      *
      * @param positionMs           position read this poll
      * @param previousPositionMs   position read last poll, or a negative value when there was none
-     * @param sincePreviousMs      milliseconds between the two position readings — and it has to be an
-     *                             <em>upper</em> bound on how much media could have played between them,
-     *                             taken from the <em>start</em> of the previous position query to the
-     *                             <em>end</em> of this one. A position read back from a player can be as old
-     *                             as the call that produced it, so an end-to-end interval is short by the
-     *                             previous query's own duration, and the wrap test below reads that
-     *                             shortfall as proof that a lap could not have completed: a healthy wrap
-     *                             becomes a rewind and the restart discards the lap that had begun. The
-     *                             margin only matters where a lap is near one poll, which is the same class
-     *                             the wrap cost is decisive for; on a 37 s clip against a 2 s poll no query
-     *                             latency reaches the boundary.
+     * @param sincePreviousMs      milliseconds between the two position readings, measured on a
+     *                             <em>monotonic</em> clock ({@code SystemClock.elapsedRealtime()}). Two
+     *                             properties are required of it, and each has already cost a round: it has to
+     *                             be an <em>upper</em> bound on how much media could have played between the
+     *                             readings — taken from the <em>start</em> of the previous position query to
+     *                             the <em>end</em> of this one, because a value read back from a player can be
+     *                             as old as the call that produced it — and it must not be able to shrink on
+     *                             its own, because these frames are power-cycled and run no time sync
+     *                             ({@code docs/TRUST.md} gate 4), so a wall-clock correction can step it back
+     *                             between two samples and leave it positive. Every error in the shortening
+     *                             direction reads to the wrap test below as proof that no lap could have
+     *                             completed, and the rule then discards a lap that had already begun again.
+     *                             The margin only matters where a lap is near one poll, which is the same
+     *                             class the wrap cost is decisive for; on a 37 s clip against a 2 s poll
+     *                             neither effect reaches the boundary.
      * @param reportedDurationMs   what the player says the clip is, or {@code <= 0} when unknown
      * @param fileDurationMs       what the file says, from the {@code mdhd}/{@code mvhd} probe, or
      *                             {@code <= 0} when the probe could not read one

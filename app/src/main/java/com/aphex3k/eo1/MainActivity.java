@@ -464,14 +464,30 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private long videoRateAnchorMs = 0L;
     private int videoRateAnchorPosition = -1;
     /**
-     * Start of the <em>previous</em> poll's {@code getCurrentPosition()} call, so the interval handed to
-     * {@link VideoLoopSeamRule} runs from the beginning of one query to the end of the next. The stamp used
-     * to sit after the call returned, which made the interval end-to-end and short by however long the
-     * previous query had taken: a position read from a player can be as old as the call that produced it,
-     * and {@link VideoLoopSeamRule}'s wrap test treats a too-short interval as proof that a lap could not
-     * have completed — a healthy wrap reported as a rewind, on exactly the clips whose lap is near one poll.
+     * Start of the <em>previous</em> poll's {@code getCurrentPosition()} call, on
+     * {@link android.os.SystemClock#elapsedRealtime()}, so the interval handed to {@link VideoLoopSeamRule}
+     * runs from the beginning of one query to the end of the next.
+     *
+     * <p>Both halves of that sentence are load-bearing, and each was the subject of a review round.
+     * <b>Start-to-end rather than end-to-end</b> because a position read back from a player can be as old as
+     * the call that produced it: an end-to-end interval is short by the previous query's own duration, and
+     * {@link VideoLoopSeamRule}'s wrap test reads a too-short interval as proof that no lap could have
+     * completed — a healthy wrap reported as a rewind, on exactly the clips whose lap is near one poll.
+     * <b>Monotonic rather than wall</b> for the same reason at one remove: these frames are power-cycled and
+     * run no time sync ({@code docs/TRUST.md} gate 4), so a correction can step the wall clock <em>back</em>
+     * between two samples and shorten the interval while leaving it positive — which is the one case the
+     * rule's own {@code sincePreviousMs > 0} defence cannot see.
+     *
+     * <p>The stall rung and the rate window deliberately keep the wall clock, and a step reaches them
+     * differently: {@code measurePlaybackRate} re-anchors whenever {@code now} falls behind its own anchor,
+     * so a step costs that window its samples and nothing else; the stall test is a bare
+     * {@code now - videoWatchdogLastProgressMs}, so a backward step only defers it and a forward one can
+     * bring a recovery early. That exposure is known and deliberately not touched here: this change is about
+     * the one subtraction whose error selects a {@code seekTo(0)} on the same poll, and moving two more
+     * measurements onto another clock in the pass that fixes one is how a timing change stops being
+     * reviewable.
      */
-    private long videoWatchdogPrevQueryStartMs = 0L;
+    private long videoWatchdogPrevQueryStartElapsedMs = 0L;
     /**
      * Watches whether the current video display attempt has produced a frame at all. The position
      * watchdog above cannot do this: it is armed from {@code onVideoPrepared} (so an attempt whose
@@ -3027,7 +3043,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogRecoverAttempted = false;
         videoRateAnchorMs = 0L;
         videoRateAnchorPosition = -1;
-        videoWatchdogPrevQueryStartMs = 0L;
+        videoWatchdogPrevQueryStartElapsedMs = 0L;
         // No watchdog, no measurement: TsPlayer skips this arm entirely, so leaving the previous
         // MediaPlayer asset's rate standing would attribute it to a clip that was never watched.
         videoPlaybackRateX100 = -1;
@@ -3063,6 +3079,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogStage = stage;
         videoWatchdogLastPosition = -1;
         videoWatchdogLastProgressMs = System.currentTimeMillis();
+        // Stamped here rather than left at zero so the first poll's interval is a poll and not the device's
+        // uptime. Nothing can fire on that poll anyway — there is no previous reading — but an interval that
+        // means "since boot" is the kind of value a later edit would have to remember is inert.
+        videoWatchdogPrevQueryStartElapsedMs = android.os.SystemClock.elapsedRealtime();
         videoWatchdogRecoverAttempted = false;
         scheduleVideoWatchdogCheck();
     }
@@ -3094,20 +3114,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
-        long queryStartMs = System.currentTimeMillis();
+        long queryStartElapsedMs = android.os.SystemClock.elapsedRealtime();
         int position = videoPlayer.getCurrentPosition();
         long now = System.currentTimeMillis();
+        long queryEndElapsedMs = android.os.SystemClock.elapsedRealtime();
         measurePlaybackRate(position, now);
 
         // Both questions below are about the previous poll, so they have to be answered before the
         // bookkeeping replaces those readings.
         int previousPositionMs = videoWatchdogLastPosition;
         // An UPPER bound on the media time between the two position values: start of the previous query to
-        // end of this one, not end to end. VideoLoopSeamRule reads this as "a completed lap could not have
-        // happened in that interval", so an interval short by the previous query's own duration reports a
-        // healthy wrap as a rewind and seeks away a lap that had already restarted itself.
-        long sincePreviousMs = now - videoWatchdogPrevQueryStartMs;
-        videoWatchdogPrevQueryStartMs = queryStartMs;
+        // end of this one, not end to end, and on a monotonic clock. VideoLoopSeamRule reads it as "a
+        // completed lap could not have happened in that interval", so every error in the SHORTENING direction
+        // reports a healthy wrap as a rewind and seeks away a lap that had already restarted itself — and
+        // there are two ways to shorten it: a query's own duration, and a backward correction to a wall clock
+        // these frames never sync. The wall `now` above stays for the rate window and the stall rung, and
+        // videoWatchdogPrevQueryStartElapsedMs says exactly how a step reaches each of them.
+        long sincePreviousMs = queryEndElapsedMs - videoWatchdogPrevQueryStartElapsedMs;
+        videoWatchdogPrevQueryStartElapsedMs = queryStartElapsedMs;
 
         int reportedMs = videoPlayer.getDuration();
         // The file's own length, from the record this watchdog was armed for and nothing else. Reading the

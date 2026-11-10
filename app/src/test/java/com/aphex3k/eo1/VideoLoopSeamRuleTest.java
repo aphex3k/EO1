@@ -284,6 +284,13 @@ public class VideoLoopSeamRuleTest {
         // zeroes the elapsed interval and silences CREEPING; without the sincePreviousMs > 0 term this
         // test would be the only thing left firing, and it would fire on a position already past the
         // file's length -- outside the sub-second band that bounds what it can withhold.
+        //
+        // The caller no longer hands this rule a wall interval at all (it measures the poll span on
+        // SystemClock.elapsedRealtime()), and a monotonic clock cannot step backwards -- so the scenario
+        // above is unreachable from MainActivity now. This test stays anyway, and for the reason the javadoc
+        // gives: a shortened POSITIVE wall interval slips past sincePreviousMs > 0 entirely, which is what
+        // made the caller's clock a load-bearing part of the decision rather than an implementation detail.
+        // A rule that trusts an argument it cannot check has outsourced its correctness to a comment.
         assertFalse("no elapsed interval means no evidence of movement, either direction",
                 VideoLoopSeamRule.evaluate(37120, 37270, 0L, 37000, 37270L).restarts());
         assertFalse("negative elapsed interval is a clock correction, not a rewind",
