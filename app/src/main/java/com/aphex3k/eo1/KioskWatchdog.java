@@ -316,6 +316,25 @@ public final class KioskWatchdog {
     }
 
     /**
+     * Whether "nothing to display" is the honest reading of an empty rotation pool, in which case the
+     * ladder holds at its cheap retries rather than climbing (see the cap in {@link #evaluate}).
+     *
+     * <p>All three terms are needed, and the third is the one that is easy to lose. A pool with zero
+     * keys is also what a catalog pass <em>in flight</em> looks like — {@code rebuildPool()} clears the
+     * keys before it fetches — so without "has a pass finished" a hung fetch on a live link parks the
+     * frame below self-restart, the one rung that clears a stuck worker, for as long as the question
+     * goes unanswered. And an empty pool while a network is being waited for is the 2026-10-13 state,
+     * which rungs 3 and 5 exist to recover. An unknown is not a measurement.
+     *
+     * <p>Pure, for the same reason as {@link #escalationClockMs}: it is the rule, and the rule is what
+     * has to be testable outside an {@code Activity}.
+     */
+    public static boolean outOfMaterial(boolean poolEmpty, boolean catalogPassCompleted,
+                                        long offlineMs) {
+        return poolEmpty && catalogPassCompleted && offlineMs == 0L;
+    }
+
+    /**
      * Age of the last thing <em>proven</em> on the panel. Zero (healthy) while the screen should be
      * off, or before the first display. This is the pure arithmetic only — callers must not feed a
      * {@code lastDisplayProvenAtMs} older than the last time the screen legitimately turned back on
@@ -469,7 +488,16 @@ public final class KioskWatchdog {
         }
 
         if (wanted <= actedLevel) {
-            if (actedLevel == LEVEL_REPAIR_NETWORK && !networkUp(now)) {
+            if ((actedLevel == LEVEL_REPAIR_NETWORK || wanted == LEVEL_REPAIR_NETWORK)
+                    && !networkUp(now)) {
+                // Either the ladder sits on the repair rung, or the outage downgrade above just
+                // parked it there while the remembered rung is higher. Both need this call: without
+                // the second term a frame that had already reached the reboot rung and then lost its
+                // network did neither thing — no repair, because actedLevel was not REPAIR_NETWORK,
+                // and no reboot, because wanted had been lowered below REBOOT — so it sat out the rest
+                // of the outage taking no action at all, which is the one outcome the downgrade was
+                // written to avoid. Once the attempts are spent the downgrade stops applying and the
+                // reboot branch below becomes reachable again.
                 retryRepairIfDue(now, stale);
             }
             if (wanted >= LEVEL_REBOOT && actedLevel == LEVEL_REBOOT && rebootBlocked

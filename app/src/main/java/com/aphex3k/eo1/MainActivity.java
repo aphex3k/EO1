@@ -3425,11 +3425,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * maintain, where {@code networkAvailable()} would be a binder call into a framework that may be
      * the wedged thing. A frame that has never received a connection callback therefore reads as
      * "not offline", which is the safe direction: it only ever withholds escalation for the seconds
-     * until that callback lands, against a ladder whose first threshold is twenty minutes.
+     * until that callback lands, against a ladder whose first threshold is twenty minutes. The third
+     * argument is {@link MediaManager#catalogPassCompleted()}, which is what separates "the library is
+     * empty" from "the library has not been asked yet" — the rule itself is
+     * {@link KioskWatchdog#outOfMaterial}, pure, so the conjunction has a JVM test rather than living
+     * only in this call site's argument list.
      */
     @Override
     public boolean nothingToDisplay() {
-        return mediaManager.poolKeyCount() == 0 && offlineMs() == 0L;
+        return KioskWatchdog.outOfMaterial(mediaManager.poolKeyCount() == 0,
+                mediaManager.catalogPassCompleted(), offlineMs());
     }
 
     /**

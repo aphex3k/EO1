@@ -353,7 +353,7 @@ when the rung ends, so adbd is never left listening between rungs and is never s
 deciding nothing yet. With the flags off (the default), on an EO1 that means this rung logs a skip
 instead of running. This rung was for years reported as "adbd accepts the loopback connection but never answers"; that was a misreading of a protocol bug, not a property of the ROM — see `AGENTS.md`'s note on the fourcc tags and the byte-sum checksum. Verified working on an EO2 on 2026-10-23: `network-repair: svc wifi disable=ok; svc wifi enable=ok`, Wi-Fi back up on the next heartbeat. (A re-arm still restarts adbd, which drops any host `adb` session attached over USB — that part was real.) |
 | 4 self-restart | two un-acked main-thread probes, or the climb arriving at it | schedules a relaunch and kills our own process — the only rung that works when the UI thread is the wedged part |
-| 5 reboot | limit + 30 min | `reboot` via adbd. **Opt-in** via `config.autoReboot` — the *Reboot the frame if nothing else recovers it* checkbox in the options dialog, or the same field in the config editor below (trusted network + token); when off, the ladder logs that it stopped here. While there is no network it waits for rung 3's attempts to be spent first — an ISP outage is not fixed by rebooting the frame every day. Every exit of this rung leaves a **diagnostics report** behind (below): the reboot case writes one immediately before dispatching the command, and the two cases in which nothing reboots write one named `exhausted` instead |
+| 5 reboot | limit + 30 min | `reboot` via adbd. **Opt-in** via `config.autoReboot` — the *Reboot the frame if nothing else recovers it* checkbox in the options dialog, or the same field in the config editor below (trusted network + token); when off, the ladder logs that it stopped here. While there is no network it waits for rung 3's attempts to be spent first — an ISP outage is not fixed by rebooting the frame every day — and that wait re-runs the repairs even when the ladder had already climbed to this rung while the network was up and was then refused by the permission — the retry is keyed on the current verdict as well as the remembered rung, so a frame that loses its network after giving up on the reboot spends its repairs instead of sitting out the outage doing nothing. Every exit of this rung leaves a **diagnostics report** behind (below): the reboot case writes one immediately before dispatching the command, and the two cases in which nothing reboots write one named `exhausted` instead |
 
 The 2026-10-13 incident is the reason rungs 3 and 5 exist: a `SurfaceFlinger` hang put
 `system_server`'s WindowManager monitor under the system Watchdog, the Watchdog restarted the
@@ -370,9 +370,13 @@ restart roughly every limit + 30 min forever, replacing the photo still on the p
 each time. So while `watchdog.nothingToDisplay` is true the ladder is capped at rung 2 — the two cheap
 retries still get one attempt each, since a pool that came up empty in the middle of a config reload is
 real — and the heartbeat line carries `NO-MEDIA` so the hold is legible instead of looking like a
-watchdog that stopped working. Being **offline cancels the hold, and that is the load-bearing half**: a
-frame relaunched into a dead network has an empty pool too, and it is rung 3 and rung 5 that recover
-it. The hold is also why the reboot permission being granted late is checked against the *current*
+watchdog that stopped working. Two states are deliberately **not** the hold, and both would be misread as
+one if you only counted the pool: being **offline**, because a frame relaunched into a dead network has an
+empty pool too and it is rung 3 and rung 5 that recover it; and a **catalog pass still in flight**,
+because the rebuild empties the key set before it fetches, so a hung request on a live link looks exactly
+like an answered "nothing here" while being an unanswered question — holding on it would park the frame
+below the one rung (a restart) that can clear a stuck worker. The hold waits for a pass that completed
+with nothing in it. The hold is also why the reboot permission being granted late is checked against the *current*
 verdict, not only against the remembered rung: a frame whose library emptied after the ladder ran out
 must not reboot on the strength of a decision it no longer makes.
 
@@ -437,7 +441,9 @@ nothing is wrong (`tick`, `stale`, `limit`, `level`, `action`, `network`/`offlin
 to tell "loop dead", "offline", "blocked main thread" and "out of material" apart after the fact.
 `NO-MEDIA` is the one that prevents a wrong diagnosis: it marks a frame the ladder is deliberately
 holding on a low rung (nothing in the rotation pool, network not being waited for), which otherwise
-reads as a watchdog that stopped working — `stale` climbing forever beside `level=2`. A *crash* is no longer
+reads as a watchdog that stopped working — `stale` climbing forever beside `level=2`. It is only printed
+after a catalog pass has *finished* empty: an empty pool mid-fetch looks identical from the outside, and
+a frame still asking would otherwise be held as though it had been answered. A *crash* is no longer
 something you have to catch in that window: it gets its own durable report, below.
 
 ## Crash dumps

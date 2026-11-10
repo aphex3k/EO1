@@ -50,6 +50,12 @@ public class KioskWatchdogTest {
         long offlineMs;
         /** Assets in the pool. Non-zero by default: most cases here are a frame that has assets. */
         int poolKeyCount = 1;
+        /**
+         * Whether a catalog pass finished. False models a pass still in flight — {@code rebuildPool()}
+         * clears the keys before it fetches — so an empty pool then means "still asking", not "out of
+         * material", and the hold must not apply.
+         */
+        boolean catalogPassCompleted = true;
         boolean mainLoopAlive = true;
         long progressToken = 0;
         boolean autoRebootEnabled;
@@ -116,10 +122,9 @@ public class KioskWatchdogTest {
 
         @Override
         public boolean nothingToDisplay() {
-            // The product's rule rather than a free boolean: an offline frame whose pool is empty is
-            // still a wedge, and a fake that could claim both at once would let the cap look safe
-            // when it is not. MainActivity.nothingToDisplay() is the same two terms.
-            return poolKeyCount == 0 && offlineMs == 0L;
+            // The product's own rule, called rather than restated, so the fake cannot claim a state the
+            // activity cannot produce (offline, or still fetching) as "out of material".
+            return KioskWatchdog.outOfMaterial(poolKeyCount == 0, catalogPassCompleted, offlineMs);
         }
 
         @Override
@@ -274,6 +279,22 @@ public class KioskWatchdogTest {
         assertEquals(5_000L, KioskWatchdog.escalationClockMs(5_000L, 1_000L));
         assertEquals("never proven: age from the process, not from nothing",
                 1_000L, KioskWatchdog.escalationClockMs(0L, 1_000L));
+    }
+
+    /**
+     * Which empty pool counts as "nothing to display" — all three terms, because two of the three are
+     * states that look identical from the key count alone. Dropping the {@code catalogPassCompleted}
+     * argument at the call site is the plausible simplification, and it is what this pins: a frame
+     * still fetching its catalog is not a frame that has run out of material.
+     */
+    @Test
+    public void onlyACompletedEmptyPoolIsOutOfMaterial() {
+        assertTrue(KioskWatchdog.outOfMaterial(true, true, 0L));
+        assertFalse("an in-flight catalog pass leaves the pool empty; that is an unknown",
+                KioskWatchdog.outOfMaterial(true, false, 0L));
+        assertFalse("and offline is the 2026-10-13 wedge, not a lack of material",
+                KioskWatchdog.outOfMaterial(true, true, KioskWatchdog.OFFLINE_REPAIR_MS));
+        assertFalse(KioskWatchdog.outOfMaterial(false, true, 0L));
     }
 
     @Test
@@ -696,6 +717,67 @@ public class KioskWatchdogTest {
         assertTrue("the outage still has to be repaired, pool empty or not",
                 count("repairNetwork") >= 1);
         assertTrue(watchdog.actedLevel() >= KioskWatchdog.LEVEL_REPAIR_NETWORK);
+    }
+
+    /**
+     * The other half of the previous case, and the one the hold would have got wrong: an empty pool is
+     * also what a catalog pass <em>in flight</em> looks like, because {@code rebuildPool()} clears the
+     * keys before it fetches. A frame whose fetch hangs on a live link is not out of material — it is
+     * still asking — and holding its ladder below self-restart would park the exact recovery this
+     * change set exists to enable for as long as the question went unanswered.
+     */
+    @Test
+    public void aFrameStillAskingForItsCatalogIsNotOutOfMaterial() {
+        host.provenAtMs = 0L;
+        host.poolKeyCount = 0;
+        host.catalogPassCompleted = false;
+        host.autoRebootEnabled = true;
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+
+        tickTogether(MINUTE, (int) ((limit + 35 * MINUTE) / MINUTE));
+
+        assertTrue("an unanswered catalog fetch has to stay a wedge, so the climb continues",
+                acted("selfRestart"));
+        assertTrue("and it must not be reported as out of material",
+                !containsEvent("NO-MEDIA"));
+    }
+
+    /**
+     * A frame that reached the reboot rung with its network up, was refused it by the permission, and
+     * <em>then</em> lost the network: the outage downgrade lowers the verdict to the repair rung while
+     * the remembered rung stays at reboot, and the repair retry used to key on the remembered rung
+     * alone. So it did neither thing — no repair, no reboot — for the rest of the outage, which is the
+     * one outcome the downgrade exists to prevent. Pre-existing on main, but only reachable now that a
+     * ladder can actually arrive at the reboot rung.
+     */
+    @Test
+    public void aRefusedRebootStillSpendsItsRepairsWhenTheNetworkDropsAfterwards() {
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+        silentFor(limit + 31 * MINUTE);
+        climbTo(KioskWatchdog.LEVEL_REBOOT);
+        assertEquals("the ladder ran out against the disabled permission", 0, count("rebootDevice"));
+        assertEquals(0, watchdog.repairAttempts());
+
+        // The outage arrives after the ladder had already given up on it. Ticks, not climbTo: the
+        // ladder is already at the top of the climb, so the only thing changing is the network.
+        host.networkAvailable = false;
+        host.offlineMs = KioskWatchdog.OFFLINE_REPAIR_MS;
+        tickTogether(MINUTE, 4);
+
+        assertTrue("the repairs must be spent, not skipped for being out of order",
+                watchdog.repairAttempts() >= 1);
+        assertEquals("and the reboot stays refused while it is", 0, count("rebootDevice"));
+
+        // Once the attempts are spent the downgrade stops applying, so the ladder is free to finish.
+        for (int i = 0; i < 60 && watchdog.repairAttempts() < KioskWatchdog.MAX_REPAIR_ATTEMPTS; i++) {
+            host.advance(MINUTE);
+            watchdog.tick();
+        }
+        host.advance(KioskWatchdog.REPAIR_SPACING_MS);
+        watchdog.tick();
+        host.autoRebootEnabled = true;
+        watchdog.tick();
+        assertEquals("then the granted permission is acted on", 1, count("rebootDevice"));
     }
 
     @Test

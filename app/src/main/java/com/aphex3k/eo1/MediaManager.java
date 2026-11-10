@@ -2169,6 +2169,21 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
+     * Whether at least one catalog pass has run to completion, so an empty pool means <em>nothing to
+     * show</em> rather than <em>still asking</em>.
+     *
+     * <p>{@link #rebuildPool} clears {@code poolKeys} before it starts fetching and sets the
+     * fingerprint only when the pass finishes, so between those two moments the count is 0 for a pool
+     * that is merely in flight — and a fetch that hangs with the link up keeps it there indefinitely.
+     * A caller that treats 0 as an answer would hold a frame's recovery on a question it never got an
+     * answer to. Same rule this file already applies to an absent asset key: an unknown is not a
+     * measurement.
+     */
+    public boolean catalogPassCompleted() {
+        return !currentConfigurationFingerprint.isEmpty();
+    }
+
+    /**
      * Assets left in this pass. The cursor belongs to the rotation worker and is not volatile, so
      * this may answer a little behind it — which is what a report wants anyway.
      */
