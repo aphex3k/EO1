@@ -151,22 +151,48 @@ public class VideoLoopSeamRuleTest {
         // and a seekTo(0) here discards two seconds of a lap that had already restarted itself.
         assertEquals(VideoLoopSeamRule.Tail.NONE,
                 VideoLoopSeamRule.evaluate(2000, 2100, 2100L, 2000, 2200L).tail);
-        // The same pair of readings at a cadence that cannot contain a lap is the tail this branch exists
-        // for: 1500 ms is less than the 2100 ms a wrap would need, so the media really did step backwards.
+        // The same pair of readings one nominal poll apart IS the tail this branch exists for. A wrap costs
+        // (2200 - 2100) + 2000 = 2100 ms of media, so 2000 ms of wall does not explain the reading: the
+        // media really did step backwards and it must restart. This is the case a bound read off the
+        // player's duration alone wrongly suppressed -- the interval here equals that duration exactly, so
+        // no other test in this file separates the two bounds.
         assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
-                VideoLoopSeamRule.evaluate(2000, 2100, 1500L, 2000, 2200L).tail);
+                VideoLoopSeamRule.evaluate(2000, 2100, 2000L, 2000, 2200L).tail);
     }
 
     @Test
-    public void aLatePollDoesNotCutACreepingTailOnAClipThatDoesNotFloor() {
-        // Where the player's number and the file agree, the same healthy wrap reaches CREEPING instead: a
-        // backwards delta is under any positive threshold, and the position clears the demanded end. One
-        // comparison against the end that branch demands is what says a lap may simply have completed. The
-        // bound is that branch's alone -- PARKED is evidence a wrap cannot imitate, so it is pinned below.
-        assertEquals(VideoLoopSeamRule.Tail.NONE,
-                VideoLoopSeamRule.evaluate(2000, 2100, 2100L, 2000, 2000L).tail);
+    public void aShortClipTailIsStillRestartedAtTheRealPollInterval() {
+        // The class the first version of the wrap test made dark for every poll of the process: a clip whose
+        // file is no longer than one poll. Every interval the caller can produce (handler.postDelayed at
+        // VIDEO_WATCHDOG_POLL_MS = 2000, which can overrun and cannot precede) is then at or above the
+        // player's duration, so a bound read off the duration alone disqualifies every single poll, and a
+        // creeping tail on such a clip is never ended by anything -- the 8 s stall rung requires an
+        // exactly-equal reading, and a position that creeps re-arms it on every poll it fails to fire on.
+        // Costed honestly a wrap needs 0 + 2205 ms from a reading already at the end, so a nominal poll
+        // cannot produce this reading and the seam restarts.
         assertEquals(VideoLoopSeamRule.Tail.CREEPING,
-                VideoLoopSeamRule.evaluate(2000, 2100, 1900L, 2000, 2000L).tail);
+                VideoLoopSeamRule.evaluate(2205, 2200, 2000L, 2000, 2200L).tail);
+        // And on a player that reports no duration at all, where the file's own length is the only end:
+        // same class, same nominal poll, still restarted.
+        assertEquals(VideoLoopSeamRule.Tail.CREEPING,
+                VideoLoopSeamRule.evaluate(2004, 2001, 2000L, 1000, 1999L).tail);
+    }
+
+    @Test
+    public void oneOverrunPollIsEnoughToExplainAWrap() {
+        // The same short clip one poll later. With the interval overrunning to 2300 ms the 2205 ms a wrap
+        // needs fits inside it, the reading is equally consistent with a healthy loop, and the seam stands
+        // aside -- which is the ambiguity this rule cannot resolve and no longer pretends to.
+        // Both halves of this pair run at intervals the caller can actually produce, because a bound tested
+        // only below the poll interval pins behaviour that never happens on a frame.
+        assertEquals(VideoLoopSeamRule.Tail.NONE,
+                VideoLoopSeamRule.evaluate(2205, 2200, 2300L, 2000, 2200L).tail);
+        // The recorded long-clip tails are nowhere near this bound: a stalled lap that misses one very late
+        // poll is judged by the next normal one, which is the whole cost of disqualifying the late reading.
+        assertEquals(VideoLoopSeamRule.Tail.NONE,
+                VideoLoopSeamRule.evaluate(55040, 55060, 180000L, EO2_PLAYER_MS, EO2_FILE_MS).tail);
+        assertEquals(VideoLoopSeamRule.Tail.REWOUNDED,
+                VideoLoopSeamRule.evaluate(55023, 55040, POLL_MS, EO2_PLAYER_MS, EO2_FILE_MS).tail);
     }
 
     @Test

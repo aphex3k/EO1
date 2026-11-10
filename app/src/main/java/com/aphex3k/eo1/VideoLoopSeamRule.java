@@ -72,10 +72,13 @@ package com.aphex3k.eo1;
  * <p>The cost is bounded by construction and now measured. The branch is reachable only where
  * {@code fileMs > reportedDurationMs} and the position sits between the two, so the most it can
  * withhold is the sub-second remainder the player floors away — the design series loses 806 ms. It is
- * reachable only where the interval since the previous reading is shorter than that duration as well,
- * which is what keeps a clip whose lap fits inside one poll from being restarted every poll: a position
- * that a completed lap would explain is left alone, and {@code aWrapThatAlreadyRanPastTheEndIsNotASeamEither}
- * pins the two sides of that line. Across
+ * reachable only where a completed lap could not have produced the reading either: the media time such a
+ * lap needs — costed from the previous reading, across the file's end, and back to the current position —
+ * has to exceed the interval between the two samples. Not merely exceed the player's duration, which is
+ * only that cost's lower bound; a guard taken from the end alone suppresses real tails in the band between
+ * the two, and did. {@code aWrapThatAlreadyRanPastTheEndIsNotASeamEither} pins both sides of the line the
+ * exact cost draws, and {@code aShortClipTailIsStillRestartedAtTheRealPollInterval} pins the case the
+ * lower bound got wrong. Across
  * 22 laps of a {@code player=37000 file=37270} clip on live hardware it fired on 4, cutting 150, 150,
  * 157 and 266 ms (723 ms total, every one inside that 270 ms band). The sibling {@link Tail#PARKED}
  * branch has always cut up to 855 ms on the same fleet, so this is not a new kind of loss.
@@ -105,7 +108,9 @@ package com.aphex3k.eo1;
  * exactly-equal reading, so a tail that steps backwards is the sole thing that ends the lap once
  * {@code REWOUNDED} cannot speak: a player that reports no duration at all
  * ({@code reportedDurationMs <= 0}, which {@link Tail#REWOUNDED} requires) still gets restarted by
- * creeping against the file's length, and a clamped creeping would leave that clip reading backwards
+ * creeping against the file's length — for any clip longer than the poll interval, which is the scope of
+ * that guarantee: below it the wrap test goes silent for want of evidence, as its own paragraph says, and
+ * this sentence does not extend to those clips. A clamped creeping would leave that clip reading backwards
  * forever with no seam and no stall recovery: the lap would never end and its media clock would never
  * advance again, whatever the panel happens to be showing at the time.
  * {@code backwardsTailWithoutAPlayerDurationStillRestarts} pins it.
@@ -148,11 +153,11 @@ public final class VideoLoopSeamRule {
         NONE,
         /** Identical to the previous reading — finished as far as the player is concerned. */
         PARKED,
-        /** Advancing below {@link #TAIL_RATE_X100} of wall speed, forwards or not — and not an interval
-         *  in which the clip could have completed a lap and come back round. */
+        /** Advancing below {@link #TAIL_RATE_X100} of wall speed, forwards or not — and at a reading no
+         *  completed lap could have produced. */
         CREEPING,
-        /** At or past the player's own duration and below the previous reading, within an interval
-         *  shorter than that duration. */
+        /** At or past the player's own duration, below the previous reading, and at a reading no completed
+         *  lap could have produced. */
         REWOUNDED
     }
 
@@ -246,15 +251,29 @@ public final class VideoLoopSeamRule {
         // the player is concerned, and insisting on the file's length there would skip this branch
         // and fall back to the 8 s threshold this whole rule exists to avoid.
         long cycleEndMs = parked ? reportedDurationMs : Math.max((long) reportedDurationMs, fileDurationMs);
+
+        // Where a native wrap could happen: the later of the two identities, because the player's number is
+        // a floor of the media and a decoder does not wrap at a duration it merely rounded down to.
+        long fileEndMs = Math.max((long) reportedDurationMs, fileDurationMs);
+
+        // The media time a completed lap would need in order to produce THIS reading from the previous one:
+        // run from the previous position to the end, wrap, then run to where the position is now. A previous
+        // reading already at or past the end wraps immediately, so that leg is clamped, not subtracted.
+        // This is the quantity the ambiguity is decided by, and the end alone is only its lower bound -- on
+        // the 2200 ms file whose player says 2000, read at 2100 and then at 2000, a wrap costs
+        // (2200 - 2100) + 2000 = 2100 ms, so a 2000 ms poll does NOT explain the reading and a bound taken
+        // from the end alone would suppress a real tail. The first version of this guard did exactly that.
+        long wrapMediaMs = (previousPositionMs >= fileEndMs ? 0L : fileEndMs - (long) previousPositionMs)
+                + (long) positionMs;
+        boolean aWrapCouldExplainIt = previousPositionMs >= 0 && sincePreviousMs >= wrapMediaMs;
+
         if (cycleEndMs > 0L
                 && positionMs >= cycleEndMs
                 && positionMs - cycleEndMs <= END_SLACK_MS
-                // A creeping reading is only evidence while the media could not have completed a lap and
-                // come back round inside the interval -- see the comparison in the REWOUNDED branch, which
-                // makes the same argument against its own end. PARKED is exempt: an identical reading needs
-                // a wrap to land on the same millisecond, and a clip hung at the end of the file is the
-                // failure this whole rule exists to end, so its evidence does not expire with the clock.
-                && (parked || (creeping && sincePreviousMs < cycleEndMs))) {
+                // PARKED is exempt from the wrap test: an identical reading would need a completed lap to
+                // land on the same millisecond, and a clip hung at the end of the file is the failure this
+                // whole rule exists to end, so its evidence does not expire with the clock.
+                && (parked || (creeping && !aWrapCouldExplainIt))) {
             return new Decision(parked ? Tail.PARKED : Tail.CREEPING, cycleEndMs);
         }
 
@@ -262,20 +281,28 @@ public final class VideoLoopSeamRule {
         // has to be past the player's own duration, so a wrap that lands back at the start of the lap
         // cannot be read as one, and inside the same slack bound as the other tests.
         //
-        // A wrap is ruled out twice over, and the second is the one that matters on a short clip. Asking
-        // for a position at or past the player's duration excludes a reading near zero; but a clip whose
-        // lap is short next to the poll interval can wrap, run past the player's number again, and be
-        // read at any position the test accepts -- a 2200 ms file whose player says 2000, polled 2100 ms
-        // after a reading of 2100, legitimately reads 2000, and restarting there cuts a lap that had
-        // already begun again. Hence the elapsed bound: to read a position at or past an end B, having
-        // started anywhere in the lap, needs at least B ms of media, so an interval of B ms or more makes
-        // the reading consistent with a healthy loop and two samples say nothing. Each branch compares
-        // against the end it would restart against, which is the B in its own test. On this ROM's floor
-        // class that is never a close call -- laps of 14 to 58 s against a 2 s poll -- so the bound costs
-        // a genuine tail at most the one late poll it disqualifies. Where polls stay short next to the lap
-        // the next one judges it normally; where they do not, two samples carry no evidence either way and
-        // the clip is left to loop by itself, which is the conservative direction for a rule whose only
-        // action is to cut a lap short.
+        // A wrap is ruled out twice over, and the second is the one that matters on a short clip. Asking for
+        // a position at or past the player's duration excludes a reading near zero; but a clip whose lap is
+        // short next to the poll interval can wrap, run past the player's number again, and be read at any
+        // position this test accepts -- a 2200 ms file whose player says 2000, polled 2100 ms after a
+        // reading of 2100, legitimately reads 2000, and restarting there cuts a lap that had already begun
+        // again. Hence <code>aWrapCouldExplainIt</code>, computed above from the previous reading and the
+        // file's end rather than from the duration this branch compares positions against.
+        //
+        // What that leaves unsaid is a limit of the instrument rather than a judgement, and it should not be
+        // softened: for a clip whose whole lap is shorter than the poll interval, some readings carry no
+        // evidence in either direction and this rule is silent about them for every poll, by information
+        // rather than by caution. The caller re-posts at VIDEO_WATCHDOG_POLL_MS = 2000 ms and can only
+        // overshoot it, so every clip at or under about 2 s is in that class. What is left for one of those
+        // is PARKED -- exempt, because a bit-equal reading is not what a moving loop produces -- and, for
+        // the mirror class where the player's number is the longer of the two, the platform player's own
+        // onCompletion loop. Nothing else in the app judges a moving-position tail there: the 8 s stall rung
+        // fires only on an exactly-equal reading, and any creep at all re-arms its clock.
+        //
+        // On the class this rule was written for the test is never close: laps of 14 to 58 s against a 2 s
+        // poll, where the media time a wrap would cost is more than an order of magnitude beyond one
+        // interval. Every recorded tail on live hardware restarts under this bound exactly as it did
+        // without it, which is what the suite pins.
         //
         // The bound is applied to the PREVIOUS reading as well, and that is not symmetry for its own
         // sake: the caller stores whatever the position getter returned, whether or not this rule
@@ -293,9 +320,9 @@ public final class VideoLoopSeamRule {
                 // not the media: a backward step kills CREEPING and would leave this test as the only
                 // thing firing, at positions the cost bound above does not cover.
                 && sincePreviousMs > 0
-                // And not an elapsed interval the media could have looped inside -- the other half of the
-                // two-sample problem above, stated against this branch's own end.
-                && sincePreviousMs < (long) reportedDurationMs) {
+                // And not a reading a completed lap could have produced -- the other half of the two-sample
+                // problem above, costed from the previous reading rather than from this branch's end.
+                && !aWrapCouldExplainIt) {
             return new Decision(Tail.REWOUNDED, reportedDurationMs);
         }
 
