@@ -3921,7 +3921,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (mediaManager != null) {
             MediaAsset current = mediaManager.getCurrentAsset();
             sb.append("pool                : keys=").append(mediaManager.poolKeyCount())
-                    .append(" remainingThisPass=").append(mediaManager.poolRemaining())
+                    .append(" remainingThisPass=").append(mediaManager.rotationRemainingInPass())
                     .append(" rebuildFailures=").append(mediaManager.rebuildFailureCount())
                     .append('\n');
             sb.append("acquire failures    : run=").append(mediaManager.acquireFailureRun())
@@ -5199,7 +5199,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         PanelDisplay shown = panelSnapshot == null ? null : panelSnapshot.display;
 
         JsonObject media = new JsonObject();
-        media.addProperty("rotationAssets", mediaManager.rotationListSize());
+        media.addProperty("rotationAssets", mediaManager.rotationRemainingInPass());
         media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
         media.addProperty("lastDisplayAtMs", lastRotationActivityMs);
         MediaAsset currentAsset = mediaManager.getCurrentAsset();

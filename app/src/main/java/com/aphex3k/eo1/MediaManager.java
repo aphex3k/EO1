@@ -2150,27 +2150,23 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
-     * Remaining assets in the current pool.
+     * Assets the rotation has not reached yet in THIS pass — a position in the cycle, never the size of
+     * the library. A pool of 40,000 with 3 left answers 3, and an exhausted-but-healthy pool answers 0,
+     * which is the difference between a thin library and a frame rotating normally.
      *
-     * <p>Named for what it returns: the tail of this pass, not the size of the library. A pool of
-     * 40 000 assets with 3 left reads as "3" here, which is the difference between a thin library
-     * and a frame that is rotating normally.
+     * <p>It used to be called {@code rotationListSize()}, which described none of this and made the
+     * eleven assertions below it read as pool sizes; the name is the thing that was wrong, so the method
+     * is renamed rather than annotated. The {@code /state} key it fills is still {@code media.rotationAssets}
+     * — a published field name, changed only with the docs that describe it — and the durable dump calls
+     * the same value {@code remainingThisPass}, which is the honest word for it.
      */
-    int rotationListSize() {
+    public int rotationRemainingInPass() {
         return Math.max(0, pool.size() - poolCursor);
     }
 
     /** Assets in the rotation pool, from the concurrent key set. Safe to call from any thread. */
     public int poolKeyCount() {
         return poolKeys.size();
-    }
-
-    /**
-     * Assets left in this pass. The cursor belongs to the rotation worker and is not volatile, so
-     * this may answer a little behind it — which is what a report wants anyway.
-     */
-    public int poolRemaining() {
-        return rotationListSize();
     }
 
     /** How far the current cycle has walked past dead web pages. */

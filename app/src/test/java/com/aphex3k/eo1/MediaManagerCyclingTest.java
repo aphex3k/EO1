@@ -1226,7 +1226,7 @@ public class MediaManagerCyclingTest {
         assertEquals(1, l1.displayedKeys.size());
         assertEquals(l1.displayedKeys.get(0), l2.displayedKeys.get(0));
         // 5 merged assets, one shown: 4 remain.
-        assertEquals(4, m1.rotationListSize());
+        assertEquals(4, m1.rotationRemainingInPass());
     }
 
     /**
@@ -1252,7 +1252,7 @@ public class MediaManagerCyclingTest {
         assertEquals(2, mm.poolKeyCount());
         // Two distinct slots, two consumed: had the repeat been added, one asset would have
         // been shown twice before the other was shown at all.
-        assertEquals(0, mm.rotationListSize());
+        assertEquals(0, mm.rotationRemainingInPass());
         assertEquals(2, listener.displayedKeys.size());
         assertNotEquals(listener.displayedKeys.get(0), listener.displayedKeys.get(1));
         assertTrue(listener.displayedKeys.contains("fakeA:a0"));
@@ -1308,7 +1308,7 @@ public class MediaManagerCyclingTest {
         mm.showNextImageLocked(cache, uploads, directPoster, false);
 
         assertEquals(2, mm.poolKeyCount());
-        assertEquals(0, mm.rotationListSize());
+        assertEquals(0, mm.rotationRemainingInPass());
     }
 
     @Test
@@ -1326,7 +1326,7 @@ public class MediaManagerCyclingTest {
             seen.add(listener.displayedKeys.get(i));
         }
         assertEquals(5, seen.size());
-        assertEquals(0, mm.rotationListSize());
+        assertEquals(0, mm.rotationRemainingInPass());
         assertEquals(1, a.fetchCount.get());
         assertEquals(1, b.fetchCount.get());
 
@@ -1335,7 +1335,7 @@ public class MediaManagerCyclingTest {
         assertEquals(2, a.fetchCount.get());
         assertEquals(2, b.fetchCount.get());
         assertEquals(6, listener.displayedKeys.size());
-        assertEquals(4, mm.rotationListSize());
+        assertEquals(4, mm.rotationRemainingInPass());
     }
 
     @Test
@@ -1350,7 +1350,7 @@ public class MediaManagerCyclingTest {
 
         assertEquals(1, listener.displayedKeys.size());
         assertTrue(listener.displayedKeys.get(0).startsWith("fakeB:"));
-        assertEquals(1, mm.rotationListSize());
+        assertEquals(1, mm.rotationRemainingInPass());
         int failures = 0;
         for (Exception e : listener.exceptions) {
             if (e instanceof BackendUnavailableException) {
@@ -1475,7 +1475,7 @@ public class MediaManagerCyclingTest {
 
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
         assertEquals(1, a.fetchCount.get());
-        assertEquals(2, mm.rotationListSize());
+        assertEquals(2, mm.rotationRemainingInPass());
 
         // No config change: no refetch.
         mm.invalidatePoolIfStale();
@@ -2198,7 +2198,7 @@ public class MediaManagerCyclingTest {
             assertTrue(e instanceof MediaDownloadFailedException);
         }
         assertEquals(1, a.fetchCount.get());
-        assertEquals(3, mm.rotationListSize());
+        assertEquals(3, mm.rotationRemainingInPass());
         // Each of the three swept assets burned its full retry budget.
         assertEquals(9, a.openerCalls.get());
 
@@ -2208,7 +2208,7 @@ public class MediaManagerCyclingTest {
         mm.showNextImageLocked(cacheDir, uploads, directPoster, false);
         assertEquals(1, listener.displayedKeys.size());
         assertEquals(1, a.fetchCount.get());
-        assertEquals(2, mm.rotationListSize());
+        assertEquals(2, mm.rotationRemainingInPass());
         assertEquals(3, listener.exceptions.size());
     }
 
@@ -2405,7 +2405,7 @@ public class MediaManagerCyclingTest {
         for (int i = 0; i < 3; i++) {
             mm.showNextImageLocked(cache, uploads, directPoster, false);
         }
-        assertEquals(0, mm.rotationListSize());
+        assertEquals(0, mm.rotationRemainingInPass());
 
         // The tick that follows would normally refetch a fresh, reshuffled generation; the pin goes
         // back over the records this pool already holds instead.
@@ -2414,7 +2414,7 @@ public class MediaManagerCyclingTest {
 
         assertEquals(listener.displayedKeys.get(0), listener.displayedKeys.get(3));
         assertEquals(1, a.fetchCount.get());
-        assertEquals(2, mm.rotationListSize());
+        assertEquals(2, mm.rotationRemainingInPass());
     }
 
     /** Minimal {@link SettingsManagerListener} stub: real files dir, everything else no-op. */
