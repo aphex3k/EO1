@@ -808,7 +808,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
         if (pinned < 0) {
             Log.w(TAG, "showNextImage: pinned asset " + key + " is not in this cycle's pool");
-            postDebugInformation("Show", "Asset not in the rotation pool: " + key);
+            postDebugInformation("Show", "Asset not in the rotation pool: " + key, key);
             return;
         }
         int at = poolCursor;
@@ -1124,7 +1124,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         // Durable record: Log.w above is logcat-only (~13 min on the device), and once this asset
         // routes, /state's video.bitRateBps reflects the *displayed* fallback, not these bytes. So the
         // exact numbers that triggered the verdict live only in this report.
-        postDebugInformation("videoBudget", asset.key() + " - " + reason);
+        postDebugInformation("videoBudget", asset.key() + " - " + reason, asset.key());
         return true;
     }
 
@@ -1174,7 +1174,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         // Durable record, as above: /state's video block will describe the fallback this verdict put
         // on screen, so the coded size, matrix and panel shape that decided it exist nowhere
         // else once logcat has rolled over.
-        postDebugInformation("videoBudget", asset.key() + " - " + reason);
+        postDebugInformation("videoBudget", asset.key() + " - " + reason, asset.key());
         return true;
     }
 
@@ -1519,6 +1519,9 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             throw new MediaDownloadFailedException("Insufficient cache space for asset download");
         }
 
+        // Raised outside the try on purpose: the finally retires the count unconditionally, so a
+        // throw between the two would leave it permanently one short of the truth — and no later
+        // download would ever be seen at the zero that clears the progress bar.
         if (reportProgress) {
             activeDownloads.incrementAndGet();
         }
@@ -1602,7 +1605,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             }
         } finally {
             if (reportProgress) {
-                activeDownloads.decrementAndGet();
+                releaseActiveDownload(activeDownloads, downloadProgressListener.get());
             }
         }
 
@@ -1858,7 +1861,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     source = backend.resolveThumbnailFallback(asset);
                 } catch (Exception e) {
                     Log.w(TAG, "displayFallbackSource: " + key, e);
-                    postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
+                    postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key, key);
                     if (tagOnDeadEnd) {
                         tagAssetAsIncompatible(key);
                     }
@@ -1908,7 +1911,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     });
                 } catch (Exception e) {
                     Log.w(TAG, "displayFallbackSource: " + key, e);
-                    postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key);
+                    postDebugInformation("Thumbnail", "Failed to get thumbnail for asset: " + key, key);
                     if (tagOnDeadEnd) {
                         tagAssetAsIncompatible(key);
                     }
@@ -1941,7 +1944,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         Log.w(TAG, "noteRenderSilent: " + assetKey + " put nothing on screen at every rung; showing its"
                 + " still preview instead (not tagging it — this says nothing about the file, and is"
                 + " forgotten on restart)");
-        postDebugInformation("video", "render-silent " + assetKey);
+        postDebugInformation("video", "render-silent " + assetKey, assetKey);
         return true;
     }
 
@@ -2003,7 +2006,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             Log.i(TAG, "tagAssetAsIncompatible: " + assetKey + " is held as render-silent on this"
                     + " device, not incompatible with it; leaving the backend untagged");
             postDebugInformation("Incompatible", "skipped " + assetKey
-                    + " — render-silent verdict, deliberately never tagged");
+                    + " — render-silent verdict, deliberately never tagged", assetKey);
             return;
         }
         new Thread(new Runnable() {
@@ -2012,7 +2015,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 MediaBackend backend = backendForKey(assetKey);
                 if (backend == null) {
                     Log.w(TAG, "tagAssetAsIncompatible: no backend for asset " + assetKey);
-                    postDebugInformation("Incompatible", "No backend for asset: " + assetKey);
+                    postDebugInformation("Incompatible", "No backend for asset: " + assetKey, assetKey);
                     return;
                 }
                 try {
@@ -2023,9 +2026,16 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                     // Reported through the listener, so it reaches /logs and eo1-app.log and not
                     // only the 13-minute logcat buffer: a tag the server refused is otherwise
                     // indistinguishable from an asset that never needed one.
+                    //
+                    // Subject-named, and this is the case that forced the whole rule: this line is written
+                    // from the tag thread whenever the backend finally answers, which can be a rotation or
+                    // several after the asset left the panel. Attributing it by when it arrives would print
+                    // "Incompatible: could not flag <gone asset>" over whatever is up now — the exact false
+                    // present tense this is all meant to prevent, arriving through a door no ordering rule
+                    // could watch, because nothing in the display path knows this write is coming.
                     Log.w(TAG, "tagAssetAsIncompatible: " + assetKey, e);
                     postDebugInformation("Incompatible", "could not flag " + assetKey + " in '"
-                            + backend.getId() + "': " + e);
+                            + backend.getId() + "': " + e, assetKey);
                 }
             }
         }, "tag-incompatible-" + assetKey).start();
@@ -2106,10 +2116,23 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
                 -1, null, null, null, null, null, 0, 0);
     }
 
-    private void postDebugInformation(String key, String value) {
+    /**
+     * Publishes a diagnostic that describes one asset, naming which.
+     *
+     * <p>The subject is not decoration. These verdicts are written on the manager's own threads, so they
+     * land both <em>before</em> the asset they name reaches the panel (a routing or thumbnail verdict on
+     * the way to a display) and <em>after</em> it has left — {@code Incompatible}'s "could not flag" line
+     * is emitted when a backend tag call finally fails, which can be a whole rotation later. Nothing that
+     * runs on a schedule can be ordered correctly by where its write sits in the code, so each one carries
+     * the asset it is about and the board decides visibility from the panel. The durable log still gets
+     * every line either way.
+     *
+     * @param subjectKey the asset this line describes
+     */
+    private void postDebugInformation(String key, String value, String subjectKey) {
         MediaManagerListener mediaManagerListener = listener.get();
         if (mediaManagerListener != null) {
-            mediaManagerListener.debugInformationProvided(new DebugInformation(key, value));
+            mediaManagerListener.debugInformationProvided(new DebugInformation(key, value, subjectKey));
         }
     }
 
@@ -2219,17 +2242,77 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return one.length() <= 200 ? one : one.substring(0, 200) + "...";
     }
 
+    /**
+     * Whether any download is in flight right now. The progress bar's visibility is decided against
+     * this on the UI thread, because a byte event that cleared the gate below is already off the
+     * thread that raised the count, and can therefore arrive after the close that follows it.
+     */
+    public boolean isDownloadInFlight() {
+        return activeDownloads.get() > 0;
+    }
+
     @Override
     public void clientProgressUpdates(long bytesRead, long contentLength, boolean done,
                                       @Nullable HttpUrl url) {
-        // Forward only while a download is actually in flight: local playback and catalog
-        // fetches must not move the UI progress bar.
+        // An early-out, not the guarantee. Local playback and catalog fetches must not move the bar,
+        // and skipping them here keeps a per-read callback from posting to the UI thread all day. It
+        // cannot be the rule: the listener is bound per HTTP client rather than per acquisition, so a
+        // prefetch — which never raises the count — reaches this method too, and passes whenever some
+        // other download happens to be up. The authoritative test is in MainActivity.
         if (activeDownloads.get() <= 0) {
             return;
         }
         ApiServiceGenerator.ProgressListener progressListener = downloadProgressListener.get();
         if (progressListener != null) {
             progressListener.clientProgressUpdates(bytesRead, contentLength, done, url);
+        }
+    }
+
+    /**
+     * Forwards the end of the download window to the Activity, ungated — the byte events above are
+     * gated on {@link #activeDownloads}, and by the time this arrives the count is zero, which is
+     * the very fact being reported. Dropping it here is what left a bar on screen forever.
+     *
+     * <p>Nothing calls this yet — the close is raised below, where the count is retired. It exists
+     * because {@link MediaManager} is a {@code ProgressListener} to its own backends, so it must
+     * answer whatever they can be told to report.
+     */
+    @Override
+    public void downloadCycleClosed() {
+        ApiServiceGenerator.ProgressListener progressListener = downloadProgressListener.get();
+        if (progressListener != null) {
+            progressListener.downloadCycleClosed();
+        }
+    }
+
+    /**
+     * Retires one in-flight download and, when it was the last, tells the listener to clear whatever
+     * it shows for a transfer.
+     *
+     * <p>This, not {@code done}, is the close a display can rely on. {@code done} comes only from a
+     * read that returns -1, so a body that ends any other way — a socket timeout, a reset, the write
+     * failing — never produces one, and a bar waiting for it keeps its last partial percent until
+     * some later download happens to finish cleanly.
+     *
+     * <p>Static and package-private so the ordering rule (exactly one close when the last download
+     * leaves, none while another is still up) is testable in a plain JVM with no Android context. The
+     * counter is decremented before anything is examined, including the null test below: a listener
+     * that has been collected must still retire the count, or the gate above closes for good. The
+     * call is fenced because this runs in a {@code finally} on a socket thread, where a throw would
+     * displace the download's own exception and reach a handler that exits the process.
+     */
+    static void releaseActiveDownload(AtomicInteger counter,
+                                      @Nullable ApiServiceGenerator.ProgressListener listener) {
+        if (counter.decrementAndGet() != 0) {
+            return;
+        }
+        if (listener == null) {
+            return;
+        }
+        try {
+            listener.downloadCycleClosed();
+        } catch (Throwable t) {
+            Log.w(TAG, "downloadCycleClosed listener threw", t);
         }
     }
 }

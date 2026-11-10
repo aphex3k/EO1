@@ -100,6 +100,7 @@ import java.util.TimerTask;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.TimeZone;
 
 import okhttp3.HttpUrl;
@@ -146,6 +147,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long WEB_LOAD_TIMEOUT_MS = 30000L;
     /** Minimum gap between download-progress logcat lines. */
     private static final long DOWNLOAD_PROGRESS_LOG_INTERVAL_MS = 5000L;
+    /** Denominator of the download bar's fill. Per-mille, so any {@code Content-Length} fits. */
+    private static final int DOWNLOAD_BAR_MAX = 1000;
     /** Logcat tag matched by debug.sh follow_logcat filter. */
     private static final String TAG = "EO1";
     /** Tag the options dialog is shown under, and the idempotency key for {@link #showConfigurationUI()}. */
@@ -153,14 +156,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private View lastVisibleView;
     private String lastVisibleAsset = "";
     private String activeVideoAssetId = "";
-    /**
-     * Which file and which rung the current video attempt is on, readable from the web server's thread.
-     * An original and the server's degraded encode of the same clip are the same size, duration and
-     * codec — the path is the only thing on {@code /state} that tells them apart, and therefore the only
-     * thing that says whether the compatibility ladder actually descended.
-     */
-    private volatile String activeVideoPath = "";
-    private volatile String activeVideoStage = "";
     private ImageView imageView;
     private TextureVideoView mediaPlayerVideoView;
     private TsVideoView tsVideoView;
@@ -186,7 +181,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private Runnable webLoadWatchdogRunnable;
     /** Sticky: this ROM offered no usable WebView provider, so web assets are skipped from here on. */
     private boolean webViewUnavailable;
-    private VideoPlayerController videoPlayer;
+    /**
+     * The controller currently compositing video. {@code volatile} because {@code /state} reads which
+     * engine it is on the web server's thread, and a torn read there says the frame has an engine it
+     * has not been given.
+     */
+    private volatile VideoPlayerController videoPlayer;
     private MediaPlayerController mediaPlayerController;
     private TsPlayerController tsPlayerController;
     private boolean preferTsPlayer;
@@ -208,11 +208,125 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String tsLoadError;
     private String tsBoardPlatform;
     private int tsFallbackCount;
-    /** Inputs of the last video routing decision, reported in the debug /state video block. */
-    private int lastVideoRotation = -1;
-    private int lastVideoWidth;
-    private int lastVideoHeight;
-    private String lastVideoCodec;
+    /**
+     * What the panel is holding, and the only source any report may use for a per-clip fact.
+     *
+     * <p>{@code volatile} because {@code /state} builds its document on a web server worker thread, and
+     * a handoff mid-document must not be able to emit half of one asset and half of another — so
+     * {@code buildStateJson} reads this into a local <em>once</em> and answers every field from that.
+     *
+     * <p>Only ever assigned by {@link #panelNowProven}, which is called at a display path's proof point.
+     * The display <em>in flight</em> is {@link #attempt}, because deciding to show something and having it
+     * on the wall are different instants on every one of these paths.
+     */
+    /**
+     * The panel as one immutable value: what is on it, how many times it has changed hands, and when it
+     * last did.
+     *
+     * <p>One object rather than three fields because {@code /state} reads it on a web worker while the UI
+     * thread keeps rotating. Reported separately, the record and its counters can come from different
+     * moments — a handoff between the two reads prints a clip's path beside the next display's handoff
+     * timestamp, which is the same mixing this change set exists to stop, one field further down.
+     */
+    private static final class PanelState {
+        final PanelDisplay display;
+        final long changes;
+        final long changedAtMs;
+
+        PanelState(PanelDisplay display, long changes, long changedAtMs) {
+            this.display = display;
+            this.changes = changes;
+            this.changedAtMs = changedAtMs;
+        }
+    }
+
+    private volatile PanelState panelState;
+
+    /** What the panel provably holds, or null before the first display reaches it. */
+    @Nullable
+    private PanelDisplay panel() {
+        PanelState state = panelState;
+        return state == null ? null : state.display;
+    }
+    /**
+     * What a display path is currently putting on the panel, whether or not anything arrived yet.
+     *
+     * <p>Carries the routing measurement, the file and the rung of the attempt, so {@code /state} can say
+     * "this is being tried" ({@code media.attempt}) while {@code media.screen} still names what is provably
+     * up — and so the ladder's own bookkeeping (the loop seam's file duration, an engine handover's clip
+     * facts) reads the attempt it belongs to rather than a panel that may not have changed over.
+     */
+    private volatile PanelDisplay attempt;
+    /**
+     * The record the video controller was last handed, and nothing else.
+     *
+     * <p>Ownership, not currency. {@code panel} says what is displayed; this says which attempt a player's
+     * numbers describe. They differ on a video-to-video change — the outgoing clip is still the panel while
+     * the controller already plays the incoming one — and reading position from one to answer a report about
+     * the other is the mix this field exists to make impossible.
+     *
+     * <p>Its lifetime is the controller's, not the panel's: it is set when a file is handed over and cleared
+     * only by the release or reassignment itself — {@code releaseVideoDisplay()} and {@code
+     * selectVideoPlayer}'s release branch. A promotion by a photo, a page or a blank panel leaves it alone on
+     * purpose, because that player may be merely hidden and still running, and forgetting its identity there
+     * is what made a screen toggle during a pending preview wake to a clip that is playing with nothing
+     * naming it. Quoting a released player is prevented by the ownership test in the staleness check, not by
+     * clearing a field as a side effect of something else happening.
+     */
+    private volatile PanelDisplay videoCompositing;
+    /**
+     * Whether the video surface currently in hand has ever <em>proven</em> content, by either engine.
+     *
+     * <p>The distinction the derivation needs and a record cannot supply on its own: a clip being attempted
+     * has a surface that is VISIBLE and nothing drawn on it. Without this, any re-derivation landing inside a
+     * video→video preparation window — a Brightness+ wake, the web screen action, a quiet-hours edge — would
+     * adopt the incoming record as the panel and bump the handoff count on a wall still showing the outgoing
+     * clip's last frame. Setting it is {@code revealVideoSurface()}'s job, which is the proof point for both
+     * engines; it is cleared when a file is handed to a controller and when one is taken away.
+     */
+    private volatile boolean videoSurfaceProven;
+    /** The page a load was started for, so its callbacks can prove the right thing or be ignored. */
+    private volatile PanelDisplay webLoadRecord;
+    /**
+     * The page the browser is actually <em>showing</em> — which is not the page it is loading.
+     *
+     * <p>One {@code WebView} object is reused for every page, so navigating from A to B leaves A's rendered
+     * content on screen until B paints. Conflating the two made a web→web rotation adopt B the instant its
+     * view came up: both reports named a page that had not loaded, the handoff count advanced on an
+     * unchanged wall, and {@code media.attempt} disappeared because the record had been "adopted". A
+     * pending load is an attempt; a painted page is the panel.
+     */
+    private volatile PanelDisplay webProvenRecord;
+    /**
+     * Whether the load in flight may still move the surfaces: uncover a photograph on a timeout, abandon the
+     * page on an error.
+     *
+     * <p>Turned off by {@link #retirePendingWebLoad()} when another display becomes the attempt, because a
+     * page the frame has stopped waiting for must not act on the wall any more. It says nothing about the
+     * page's <em>identity</em>, which stays live so {@code onPageFinished} can still record what the browser
+     * ended up painting.
+     *
+     * <p>Main looper only, and not {@code volatile} because that would be decoration: every way into a
+     * display method is posted — {@code MediaManager} hands its display calls to a {@code UiPoster} that is
+     * {@code Activity::runOnUiThread} in production, and the fallback paths post the same way — and the
+     * writers here are {@code setPanelAttempt}, {@code displayWebsite} and {@code abandonWebPage}, while the
+     * readers are the WebView's callbacks and the load watchdog's handler. A future off-thread caller would
+     * need to post, not to publish this flag: {@code volatile} would make the write visible and leave the
+     * retirement still free to race the display it is meant to follow.
+     */
+    private boolean webLoadOwnsSurfaces = true;
+    /**
+     * The one record for "the panel is blank", so repeated reads of an unchanged blank wall are not repeated
+     * handoffs. Cleared whenever something real is adopted, which lets a later blank report the time it
+     * actually went blank rather than the first time it ever did.
+     */
+    @Nullable
+    private volatile PanelDisplay emptyPanel;
+    /** One cached record for a visible image whose asset is not identified — see {@link #unidentifiedPhoto()}. */
+    @Nullable
+    private volatile PanelDisplay unknownPhoto;
+    /** Sequence number for each display <em>attempt</em>, feeding {@link PanelDisplay#generation}. */
+    private final AtomicLong panelGeneration = new AtomicLong();
     /**
      * The panel's measured viewport, last published. Every aspect decision in this Activity reads
      * through {@link #currentPanelShape()} and this holds the same value for reporting, so the number
@@ -251,13 +365,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private long mediaManualLoopRestarts;
     private long mediaManualLoopCycleMs = -1;
     private long mediaManualLoopAtMs = -1;
-    /**
-     * Throughput of the asset last routed. Held as one immutable reference rather than four fields
-     * so the web-server thread reading /state cannot see stats from two different assets.
-     */
-    private VideoHeaderProbe.StreamStats lastVideoStats = VideoHeaderProbe.StreamStats.UNKNOWN;
-    /** The clip's real length from its own header; the player's can be shorter than this. */
-    private long lastVideoDurationMs = -1L;
     /** Measured playback rate of the playing video, x100: 100 is realtime, 60 is 0.6x slow. */
     private int videoPlaybackRateX100 = -1;
     /** Spread of the rate windows since this display was armed, and how many there were. */
@@ -266,14 +373,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private int videoPlaybackRateSamples;
     private LinearProgressIndicator progressIndicator;
     private MqttManager mqttManager;
-    private BrightnessManager brightnessManager;
+    /** Read off the web server's worker ({@code /state}'s parked-attempt predicate) and the watchdog's. */
+    private volatile BrightnessManager brightnessManager;
     private HardwareCapabilities capabilities;
     private TextView debugOverlay;
     private EventManager eventManager;
     private UpdateManager updateManager;
     private MediaManager mediaManager;
     private SettingsManager settingsManager;
-    private final Map<String, String> debugInformation = new HashMap<>();
+    /**
+     * The debug board: one row per writer's key, each carrying the asset it is about. Keys are the fixed
+     * set of writer names, so this cannot grow; what changes is which rows are printable, and that is
+     * decided by {@link DebugBoard#visible} from the panel rather than by deleting anything here.
+     */
+    private final Map<String, DebugBoard.Row> debugInformation = new HashMap<>();
     private final Handler handler = new Handler();
     private PendingIntent pendingIntent;
     private Timer quietHoursTimer = new Timer(true);
@@ -345,6 +458,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private String currentTrackId = null;
     private Runnable videoWatchdogRunnable;
     private String videoWatchdogAssetId = "";
+    /**
+     * The clip this watchdog was armed for, whose file length the loop seam needs for its <em>whole</em>
+     * life. Reading it from the live attempt instead lost the duration the moment another display path
+     * became the attempt — a render-silent asset chosen mid-playback, or a page that took the panel.
+     */
+    @Nullable
+    private volatile PanelDisplay videoWatchdogRecord;
     private File videoWatchdogFile;
     private WeakReference<MainActivity> videoWatchdogActivityReference;
     /** Which rung of the display ladder the armed watchdog is watching; see {@link DisplayStage}. */
@@ -365,6 +485,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     private Runnable videoPaintRunnable;
     private String videoPaintAssetId = "";
+    /**
+     * The record this watchdog was armed for, so a frame proving late can only promote the display it
+     * belongs to. Read from the panel-wide field instead, a superseded attempt could adopt whatever the
+     * next one had put up.
+     */
+    @Nullable
+    private volatile PanelDisplay videoPaintRecord;
     private File videoPaintFile;
     private WeakReference<MainActivity> videoPaintActivityReference;
     private DisplayStage videoPaintStage = DisplayStage.ORIGINAL;
@@ -419,7 +546,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * nothing whatsoever about whether content got on screen. It used to be the clock
      * {@link KioskWatchdog} escalated on, which is how a frame that kept ticking while drawing nothing
      * sat white for 19.8 hours with {@code autoReboot} granted — the timer refreshed the very age the
-     * ladder was measuring. See {@link #displayProvenAtMs}, and do not reconnect it to the ladder.
+     * ladder was measuring. See {@link #lastDisplayProvenAtMs}, and do not reconnect it to the ladder.
      */
     private volatile long lastRotationActivityMs = 0L;
     /**
@@ -429,10 +556,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * screen and a recovery attempt all leave it alone, because anything that runs on a schedule and
      * moves this field re-creates the self-feeding clock above.
      *
-     * <p>One exception, and it is a display rather than an attempt: {@link #noteDisplayUnchanged()},
-     * where the rotation lands on the asset already on the panel and there is therefore nothing new to
-     * prove. Zero until the first proof, which is what makes that exemption safe — a process that has
-     * never drawn anything cannot exempt itself, however many ticks it has had.
+     * <p>One exception, and it is a display rather than an attempt:
+     * {@link #noteDisplayUnchanged(String)}, where the rotation lands on the asset already on the panel
+     * and there is therefore nothing new to prove. It is not taken on that claim — it asks
+     * {@link #reproveTarget()} whether the wall still holds the content, because the retained identity
+     * can outlive it. Zero until the first proof, and a wall holding nothing matches nothing, so a
+     * process that has never drawn anything cannot exempt itself, however many ticks it has had.
      *
      * <p>What this proves is that the app handed content to its own views on a main thread that was
      * running. It cannot prove that the compositor presented them: a Glide callback fires whether or
@@ -441,7 +570,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * after one successful draw is still invisible here. That is a narrower blind spot than the one
      * this field replaced, not a closed one.
      */
-    private volatile long displayProvenAtMs = 0L;
+    private volatile long lastDisplayProvenAtMs = 0L;
     /**
      * {@link #onCreate}'s instant: what the wedge clock measures from while nothing has been proven
      * yet, so a frame that has never reached first draw ages out instead of reading as healthy. Set
@@ -851,7 +980,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             applyCurrentBrightness();
             // Loop liveness only, and it must stay that way. Stamping this before the call below
             // means the clock advances whether or not anything reaches the panel, which is exactly why
-            // KioskWatchdog reads displayProvenAtMs instead; wiring this line back into the ladder
+            // KioskWatchdog reads lastDisplayProvenAtMs instead; wiring this line back into the ladder
             // would re-create the 19.8-hour white frame of 2026-11-08.
             lastRotationActivityMs = System.currentTimeMillis();
             mediaManager.showNextImage(this);
@@ -923,8 +1052,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (webView != null && lastVisibleView == webView) {
             webView.onResume();
             // A page left mid-load by onPause gets its fall-through timer back; without it a
-            // stalled load would hold the screen with nothing on it.
-            if (!webLoadProducedPaint && !webUrlOnScreen.isEmpty()) {
+            // stalled load would hold the screen with nothing on it. Only one that still owns the
+            // surfaces, since retirement leaves the URL standing on purpose (see retirePendingWebLoad)
+            // and re-arming a superseded load would hand it the abandon it lost.
+            if (webLoadOwnsSurfaces && !webLoadProducedPaint && !webUrlOnScreen.isEmpty()) {
                 startWebLoadWatchdog();
             }
         }
@@ -1543,6 +1674,20 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         imageView.setVisibility(View.INVISIBLE);
         // Also stops the page's JavaScript and repaints for the whole quiet window.
         hideWebView();
+        // `attempt` deliberately SURVIVES this. It is an identity, not a report: the paint poll holds the
+        // in-flight clip's record in videoPaintRecord and re-presents it to revealVideoSurface(), which
+        // accepts a record only while it is still the attempt or the panel. Nulling the attempt to keep
+        // media.attempt off a dark screen therefore stranded the reveal — the wake's first frame was
+        // refused as "superseded", the poll cancelled itself, and the photograph went on covering a clip
+        // that was playing, which is a stale panel of the exact shape this change set exists to remove.
+        // (onPause parks the same poll and never touched the attempt; that asymmetry was the tell.)
+        // What a dark window must not do is imply a transition is landing, so the report says so
+        // directly instead: media.attempt carries "parked" while painting is suspended. See buildStateJson.
+        // Nothing is visible now, so nothing should be reported: a dark frame in quiet hours used to answer
+        // /state with onScreen:true, its clip's measurements and its routing row, because hiding the
+        // surfaces was the one panel change that never went through the derivation. The surfaces keep their
+        // own identities (provenPhoto, videoCompositing, webProvenRecord) so waking restores the truth.
+        reprovePanel();
     }
 
     /**
@@ -1561,6 +1706,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // hideWebView() paused the page; making it visible again would not unfreeze it.
             webView.onResume();
         }
+        // Whatever was uncovered is visible again, so the panel is re-derived rather than remembered: each
+        // surface kept its own identity while the screen was dark, and this is the half of turnScreenOff's
+        // honesty that makes the dark interval cost nothing in reporting accuracy.
+        reprovePanel();
         // A video whose first frame was still owed when quiet hours began: its surface was hidden
         // along with everything else, so the deadline resumes only once the panel can paint again.
         resumeVideoPaintPollIfPending();
@@ -1831,45 +1980,378 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     public void debugInformationProvided(@NonNull DebugInformation debugInformation) {
 
+        // The subject is what keeps a late line off the board. It is declared where the writer knows the
+        // asset (the media pipeline's verdicts, the player's own callbacks) and resolved to whatever the
+        // panel holds otherwise, which is the best available answer for a display path. A row about the
+        // machine rather than the wall says so — by key name in DebugBoard.FRAME_SCOPED, or, when the key
+        // is computed and no name could list it, through DebugInformation.ofFrame. The durable log
+        // below is written unconditionally and unfiltered: it is a transcript of events, not a claim about
+        // what is on the wall right now, and a verdict the board hides has to be readable somewhere.
+        final String subject = DebugBoard.subject(debugInformation, currentPanelAssetKey());
+        final boolean videoScoped =
+                DebugBoard.videoScoped(debugInformation.getKey(), debugInformation.isVideoScoped());
+
         this.runOnUiThread(() -> {
-            if (BuildConfig.DEBUG) {
-                synchronized (this.debugInformation) {
-                    this.debugInformation.put(debugInformation.getKey(), debugInformation.getValue());
-
-                    Set<Map.Entry<String, String>> set = this.debugInformation.entrySet();
-
-                    ArrayList<String> debugList = new ArrayList<>();
-
-                    for (Map.Entry<String, String> info : set) {
-                        StringBuilder text = new StringBuilder();
-
-                        text = text.append(info.getKey().trim()).append(": ").append(info.getValue().trim()).append("\n");
-
-                        int index = debugList.size();
-
-                        for (String s : debugList) {
-                            if (s.length() > text.length()) {
-                                index = debugList.indexOf(s);
-                                break;
-                            }
-                        }
-                        debugList.add(index, text.toString());
-                    }
-
-                    StringBuilder debugText = new StringBuilder();
-
-                    for (String text : debugList) {
-                        debugText.append(text);
-                    }
-
-                    this.debugOverlay.setText(debugText.toString().trim());
-                }
+            synchronized (this.debugInformation) {
+                this.debugInformation.put(debugInformation.getKey(),
+                        new DebugBoard.Row(debugInformation.getValue(), subject, videoScoped));
             }
+            renderDebugBoard();
         });
         Log.i(TAG, debugInformation.getKey() + ": " + debugInformation.getValue());
         if (this.appLogger != null) {
             this.appLogger.info(TAG, debugInformation.getKey() + ": " + debugInformation.getValue());
         }
+    }
+
+    /**
+     * Writes a line to the durable record and to logcat, without a board row.
+     *
+     * <p>{@code files/eo1-app.log} is promised as an unchanged transcript: every diagnostic this app emits is
+     * supposed to be readable there long after the panel moved on. Making the routing sentence a <em>derived</em>
+     * board row — which is what stops a clip's coded size and bitrate being printed over a photograph of the
+     * same asset — also stopped it being written anywhere durable at all, since derived rows never pass
+     * through a writer. Once the clip left the panel and logcat's ~13 minutes rolled over, the routing
+     * decision for it was gone from {@code /logs} and from the file alike. This is the seam between "visible
+     * on the board now" and "recorded forever", and it is not optional for anything the docs promise.
+     */
+    private void logDurable(String key, String value) {
+        Log.i(TAG, key + ": " + value);
+        if (this.appLogger != null) {
+            this.appLogger.info(TAG, key + ": " + value);
+        }
+    }
+
+    /**
+     * Records why an asset did not make it onto the panel.
+     *
+     * <p>Frame-scoped, deliberately, and with the asset named in the text rather than as the row's subject.
+     * A failure explanation is a fact about the machine, not about what is on the wall: the sentence saying
+     * "this clip put no frame on the screen in 30s" is the one an operator needs precisely <em>after</em>
+     * recovery has uncovered a photograph of some other asset, at which point a row attributed to the failed
+     * clip would be filtered out as not-about-the-panel. Keeping it asset-attributed would make every
+     * recovery swallow its own diagnosis; keeping it unattributed-but-forever would reintroduce the stale
+     * line this whole change set exists to remove. Naming the asset inside a frame-scoped row is the only
+     * combination that does neither.
+     */
+    private void noteDisplayFailure(@Nullable String assetKey, String what) {
+        debugInformationProvided(new DebugInformation("displayFailure",
+                (assetKey == null || assetKey.isEmpty() ? "(no asset)" : assetKey) + ": " + what, null));
+    }
+
+    /**
+     * Repaints the debug overlay from the rows that may be printed right now.
+     *
+     * <p>Called both when a writer adds a row and when the panel changes, because what is <em>printable</em>
+     * depends on the panel as much as on the rows: an asset's line has to appear the moment that asset is
+     * displayed and disappear the moment it is not, and only one of those two events is a write.
+     */
+    private void renderDebugBoard() {
+        if (!BuildConfig.DEBUG) {
+            return;
+        }
+        runOnUiThread(() -> {
+            Map<String, String> printable;
+            synchronized (this.debugInformation) {
+                printable = DebugBoard.visible(this.debugInformation, panel());
+            }
+            // Shortest first, as the board has always ordered itself. Inserting into a list rather than
+            // sorting is the original behaviour and is kept: the layout is read off the wall.
+            ArrayList<String> debugList = new ArrayList<>();
+            for (Map.Entry<String, String> info : printable.entrySet()) {
+                String text = info.getKey().trim() + ": " + info.getValue().trim() + "\n";
+                int index = debugList.size();
+                for (String s : debugList) {
+                    if (s.length() > text.length()) {
+                        index = debugList.indexOf(s);
+                        break;
+                    }
+                }
+                debugList.add(index, text);
+            }
+            StringBuilder debugText = new StringBuilder();
+            for (String text : debugList) {
+                debugText.append(text);
+            }
+            this.debugOverlay.setText(debugText.toString().trim());
+        });
+    }
+
+    /**
+     * Records what a display path is <em>putting on</em> the panel, without claiming it arrived.
+     *
+     * <p>The distinction is the whole point of the two fields. A display call and a visible change are not
+     * the same instant: Glide keeps the previous bitmap until the new drawable lands, {@code MediaPlayer}
+     * keeps the photograph visible until a frame is proven to exist ({@code revealVideoSurface}), and a web
+     * page renders some time after its view is shown. Stamping the panel at the decision made {@code /state}
+     * report the incoming asset while the wall still held the outgoing one — and advanced
+     * {@code media.screen.generation} on a panel that had not changed, which is the exact signal that field
+     * exists to give. The attempt carries the routing measurement and the file being tried, so a watchdog or
+     * a diagnosis can still ask what this attempt was measured at before anything is on screen.
+     */
+    private void setPanelAttempt(@NonNull PanelDisplay next) {
+        attempt = next;
+        // Every display path goes through here, which makes it the one place a superseded web load can be
+        // retired. A load that is no longer what this frame is putting up has lost its standing to change the
+        // surfaces: its watchdog calls abandonWebPage(), which uncovers the retained photograph and replaces
+        // the video's pending attempt with it, and that video's first-frame reveal then fails
+        // mayBeRevealed() — so the photo covers a clip that is playing, which is the failure this whole
+        // change set was written to make impossible, arriving from a callback about an asset nobody asked
+        // for any more.
+        PanelDisplay loading = webLoadRecord;
+        if (loading != null && loading != next) {
+            retirePendingWebLoad();
+        }
+        // A row written while this attempt is in flight is about it, not about the panel it has not yet
+        // replaced — so the printable-subject resolution has to see the attempt too. Re-render on the way
+        // in, so a verdict recorded for the incoming asset appears the moment that asset is the attempt.
+        renderDebugBoard();
+    }
+
+    /**
+     * Ends a page load this frame has stopped waiting for: its deadline is cancelled and its failure path is
+     * closed, and nothing else.
+     *
+     * <p>The distinction is the whole method. A superseded load has lost the standing to <em>change</em> the
+     * surfaces — no timeout may uncover a photograph over the display that replaced it, no error may abandon
+     * a page nobody is waiting for. It has not lost the fact that it is the page in the browser view: the
+     * WebView keeps loading and keeps painting, and often keeps covering the image view while a newer
+     * photograph is still being fetched. Clearing {@code webLoadRecord} and {@code webUrlOnScreen} here (an
+     * earlier revision of this method did) silenced {@code onPageFinished}, so {@code webProvenRecord} went on
+     * naming the PREVIOUS page while the view was painting the new one — a stale report of the kind this
+     * change set exists to eliminate, created by the fix for one. So the identities survive retirement, and
+     * {@code onPageFinished} still records its page as the browser's content and promotes it while the browser
+     * is genuinely the topmost visible surface, which is a true statement about the wall whatever the next
+     * display is fetching.
+     *
+     * <p>{@link #abandonWebPage()} does clear them, because there the page really is being given up on.
+     */
+    private void retirePendingWebLoad() {
+        cancelWebLoadWatchdog();
+        webLoadOwnsSurfaces = false;
+    }
+
+    /**
+     * The panel now holds {@code proven}, and both surfaces say so.
+     *
+     * <p>Called from {@link #noteDisplayProven()} — each display path's proof point, and nowhere else — and
+     * from the recovery paths that uncover a surface whose content is already loaded, where uncovering
+     * <em>is</em> the handoff. Promotion is what retires the previous asset's measurements: they live in the
+     * record being replaced, and a row about a departed asset stops being printable because of who it is
+     * about, not because anything deleted it.
+     */
+    private void panelNowProven(@NonNull PanelDisplay proven) {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            runOnUiThread(() -> panelNowProven(proven));
+            return;
+        }
+        // A display that is already the panel has not "changed hands", however many paths arrive at that
+        // conclusion. Counting a re-promotion as a handoff makes media.screen.generation lie about the one
+        // thing it exists to show: a video error can uncover the saved photograph from two rungs of the same
+        // descent, and the wall moved once.
+        PanelState before = panelState;
+        if (before == null || before.display != proven) {
+            // One write, so a reader can never pair this display with a later handoff's counters. Counting
+            // here rather than stamping the record keeps records copy-free — an earlier revision minted a
+            // new one at adoption, and every "does this callback still own the panel?" test silently stopped
+            // matching. `attempt` is likewise left alone: clearing it at adoption emptied every answer to
+            // "what was this clip measured at?", which is asked precisely <em>after</em> the first frame.
+            panelState = new PanelState(proven, (before == null ? 0L : before.changes) + 1L,
+                    System.currentTimeMillis());
+        }
+        // Ownership follows the controller's <em>lifecycle</em>, not the panel's. A video taking the panel
+        // reclaims the record — an interleaved promotion by another path used to leave the staleness test
+        // permanently true, silently dropping every live reading of a clip that was in fact playing — but a
+        // non-video promotion must leave `videoCompositing` alone: the player it identifies may be merely
+        // hidden, and forgetting its identity there is what made a screen toggle during a pending preview
+        // wake to a surface that is playing again and a report that says nothing is on the panel.
+        // Invalidation happens in releaseVideoDisplay(), at the stop/release/reassignment itself.
+        if (proven.showsVideo()) {
+            videoCompositing = proven;
+        }
+        // A painted page becomes what the browser is showing; a pending load never does. webLoadRecord keeps
+        // identifying the load in flight, for callbacks to prove against, and is untouched here.
+        if (proven.type == MediaType.WEB) {
+            webProvenRecord = proven;
+        }
+        if (proven.type != null) {
+            emptyPanel = null;
+        }
+        renderDebugBoard();
+    }
+
+    /**
+     * The panel, as the view tree says it is — which is the only authority on the question.
+     *
+     * <p>Seven review rounds of this change set produced the same finding over and over in a different
+     * costume: a path would release or hide a surface, and the record of what is on screen would be updated
+     * somewhere else, at some other time, by whichever call site remembered. {@code displayPicture} tears
+     * the outgoing player down <em>before</em> loading anything; {@code displayWebsite} does the same to a
+     * video and then waits for a page; a MediaPlayer display hides the browser at prepared and paints its
+     * first frame much later; {@code Glide.clear} empties the image view that a moment earlier had been
+     * reported as uncovered. Each was fixed individually, and each fix created the next finding, because the
+     * design was "every teardown must remember to promote".
+     *
+     * <p>So this asks the views instead. Whichever surface is actually visible is what the panel holds, and
+     * the record for it is the one that display path created; if the photo plane is what is left but its
+     * drawable has been cleared, the honest answer is that nothing is on the panel. It cannot go stale,
+     * because it is not stored. Callers still supply <em>measurements</em> through the records — no view
+     * knows a bitrate — but they no longer decide when the panel changed.
+     */
+    private PanelDisplay reproveTarget() {
+        // A wall that is switched off shows nothing, whatever its views are marked as. This has to be the
+        // first answer rather than a consequence of turnScreenOff() hiding three surfaces, because a display
+        // already in flight does not stop when the panel does: Glide's onResourceReady arrives mid-quiet-hours
+        // and makes the image view VISIBLE, onVideoPrepared makes a video surface VISIBLE, and the derivation
+        // reads visibility as the definition of "on the wall". Without this rule a frame in the dark reported
+        // the photograph that had just loaded — media.screen naming an image beside screenOn:false, with
+        // generation advancing on a panel nobody could see, and the edge-triggered off path never running
+        // again to correct it. turnScreenOn() re-derives, and the surfaces kept their content, so the truth
+        // arrives with the light rather than being remembered across the dark.
+        if (panelIsDark()) {
+            return blankPanel();
+        }
+        // Walked in the order the views are actually stacked, because that order is the answer to "what is
+        // on the wall". In activity_main.xml both video surfaces are declared <em>before</em> imageView, so
+        // a RelativeLayout draws the image on top of them — which is why revealVideoSurface() has to hide
+        // the photo for a clip to be seen at all, and why a VISIBLE TsPlayer surface under a VISIBLE image
+        // view is a photograph, not a video. The browser is added at indexOfChild(imageView) + 1, above the
+        // image. Top to bottom, then: browser, photo, video surfaces.
+        //
+        // Getting this order backwards was the direct cause of reports naming a covered surface — the one
+        // complaint this whole change set opened with — and the reason each check must test visibility
+        // rather than "did something load here": a surface that covers the screen is what the viewer sees
+        // whether or not it has finished its own work.
+        WebView page = webView;
+        if (page != null && page.getVisibility() == View.VISIBLE) {
+            // A visible browser shows the page it last <em>painted</em>, not the URL it was pointed at — the
+            // object is reused, so an A→B rotation shows A all the way through B's load. A browser with
+            // nothing painted yet is a black rectangle covering everything under it, which is the honest
+            // answer and not the photograph it hides.
+            PanelDisplay painted = webProvenRecord;
+            return painted != null ? painted : blankPanel();
+        }
+        // A visible image view <em>covers</em> the video surfaces below it, so this branch must not fall
+        // through to them: at startup the layout supplies a visible wallpaper before any asset has loaded,
+        // and pressing Brightness+ during the first TsPlayer preparation used to report the covered clip.
+        // The answer comes from the same helper the recovery paths use, so a screen and an attempt can
+        // never be two records of one surface. Drawing nothing is the one case that legitimately falls
+        // through — an ImageView without a drawable is transparent, so what is beneath it is visible.
+        if (imageView.getVisibility() == View.VISIBLE) {
+            PanelDisplay drawn = imagePlaneRecord();
+            if (drawn != null) {
+                return drawn;
+            }
+        }
+        // A video surface counts only once it has proven content. Its being VISIBLE is not that: an attempt
+        // being prepared has a live surface with nothing drawn on it, and deriving from that would adopt an
+        // unproven clip and advance the handoff count while the wall still holds the previous frame. The
+        // panel's own record is preferred while it still owns the surface, so an engine switch does not
+        // silently re-decide which clip is showing.
+        if (videoSurfaceProven) {
+            VideoPlayerController player = videoPlayer;
+            View videoSurface = player == null ? null : player.getView();
+            if (videoSurface != null && videoSurface.getVisibility() == View.VISIBLE) {
+                PanelDisplay shownNow = panel();
+                if (shownNow != null && shownNow.showsVideo() && shownNow == videoCompositing) {
+                    return shownNow;
+                }
+                if (videoCompositing != null) {
+                    return videoCompositing;
+                }
+            }
+        }
+        // Nothing on top is showing, and either the image plane is hidden or its drawable has been cleared.
+        return blankPanel();
+    }
+
+    /**
+     * One record for "an image is on the wall and we cannot say which asset it is" — the layout's own
+     * wallpaper before the first display, and nothing else. Cached for the same reason {@link #blankPanel}
+     * is: promotion is decided by reference, and a fresh record per read turns a re-derive into a handoff.
+     */
+    private PanelDisplay unidentifiedPhoto() {
+        PanelDisplay photo = unknownPhoto;
+        if (photo == null) {
+            photo = PanelDisplay.image("", "", panelGeneration.incrementAndGet(),
+                    System.currentTimeMillis());
+            unknownPhoto = photo;
+        }
+        return photo;
+    }
+
+    /**
+     * Ends a video display: frees the exclusive Amlogic pipeline and drops the record that controller was
+     * handed.
+     *
+     * <p>Ownership is invalidated <em>here</em>, at the lifecycle event, and never as a side effect of some
+     * other surface being promoted. Clearing it on a non-video promotion — which an earlier revision did —
+     * throws away the identity of a player that is merely hidden: wake the screen after a toggle during a
+     * pending preview and the surface comes back while the derivation has nothing left to name it with, and
+     * reports a blank panel over a clip that is playing again.
+     */
+    private void releaseVideoDisplay() {
+        videoPlayer.release();
+        videoPlayer.setVisibility(View.INVISIBLE);
+        videoCompositing = null;
+        // Nothing this surface has drawn can be evidence any more. The INVISIBLE test in the derivation
+        // already covers today, which is why clearing here is about keeping the flag's promise true rather
+        // than about a reachable misreport: "proven" means this surface drew something since it was last
+        // emptied, and a released player has emptied it.
+        videoSurfaceProven = false;
+    }
+
+    /** The single record for "nothing visible", so re-deriving a blank wall is not a new handoff. */
+    private PanelDisplay blankPanel() {
+        PanelDisplay blank = emptyPanel;
+        if (blank == null) {
+            blank = PanelDisplay.nothing(panelGeneration.incrementAndGet(), System.currentTimeMillis());
+            emptyPanel = blank;
+        }
+        return blank;
+    }
+
+    /**
+     * Re-derives the panel from the view tree and adopts that. Cheap, idempotent, and safe to call after
+     * anything that changes a surface's visibility — which is precisely the property the per-path calls to
+     * {@link #panelNowProven} never had.
+     */
+    private void reprovePanel() {
+        panelNowProven(reproveTarget());
+    }
+
+    /**
+     * The photo the panel last proved, so uncovering it can name the right asset.
+     *
+     * <p>The image view keeps its bitmap across a video or page display — that is the whole design of the
+     * layered surfaces — so when a later asset fails and its surface is torn away, what is uncovered is
+     * <em>this</em> asset's photograph, not the one that just failed. Attributing the visible photo to the
+     * failed asset would put a lie in {@code media.screen.key} and hide the failed asset's own diagnostics
+     * behind the wrong subject. Null until something has actually loaded, which is what makes an empty
+     * panel reportable rather than guessed at.
+     */
+    @Nullable
+    private volatile PanelDisplay provenPhoto;
+
+    /**
+     * The record for these very bytes, when an attempt is already in flight for them — which is how a call
+     * that did not just run the routing rule tells the measurement of this clip from the leftovers of
+     * another.
+     *
+     * <p>{@link #fallbackTsPlayerToMediaPlayer} re-displays <em>the same file</em> on the other engine, so
+     * what the header probe read still describes it and only the compositor changed. For any other asset
+     * there is no answer, and no answer is reported as -1 rather than as the last clip's numbers — which is
+     * precisely the mistake this record was built to make impossible.
+     *
+     * <p>All three fields are asked, in the order a caller would trust them, because the handover clears the
+     * owner <em>before</em> this lookup runs ({@code selectVideoPlayer} nulls {@code videoCompositing} in the
+     * statement that releases the outgoing controller), and an asset displayed as its render-silent still
+     * leaves the panel naming the clip that is actually on the wall while the attempt names the preview. The
+     * rule itself is {@link PanelDisplay#carryFrom} so a JVM test can hold it.
+     */
+    @Nullable
+    private PanelDisplay carriedDisplay(String assetId, String stage) {
+        return PanelDisplay.carryFrom(assetId, stage, attempt, videoCompositing, panel());
     }
 
     @Override
@@ -1886,7 +2368,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
             Log.i(TAG, "displayPicture: skip same asset " + assetId);
-            noteDisplayUnchanged();
+            // Settle before leaving. A display path that decides there is nothing to do still answered a
+            // display request, and whoever made that request may already have claimed an attempt for it — a
+            // render-silent clip re-selected while its preview is already on the wall minted a fresh record,
+            // resolved to the same cached `_fb.jpg`, and returned here with no load to call back. The attempt
+            // then out. revealPhotoView() is the seam for this: it takes the covering surfaces away, names
+            // the photo the view actually holds (the cached records, so nothing new is minted and no handoff
+            // is counted), and states both moments at once.
+            //
+            // Only while the panel is lit, though, and the ordering is the reason: this guard is evaluated
+            // ABOVE the screen-should-be-on check below, and revealPhotoView() makes three visibility writes.
+            // Un-hiding the photo plane during quiet hours undoes what turnScreenOff() just did, for the whole
+            // dark window — the schedule acts on edges only, so nothing would hide it again — for no benefit,
+            // because no display path mints an attempt in the dark (displayVideo returns at that same check
+            // before it gets here), so there is nothing waiting to be settled.
+            if (!panelIsDark()) {
+                revealPhotoView();
+            }
+            noteDisplayUnchanged(file.getAbsolutePath());
             return;
         }
 
@@ -1896,7 +2395,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         lastRotationActivityMs = System.currentTimeMillis();
-        debugInformationProvided(new DebugInformation("displayPictures", file.getAbsolutePath()));
 
         this.runOnUiThread(() -> {
             cancelVideoWatchdog();
@@ -1904,20 +2402,34 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // No video is active while an image shows; a stale video callback (incl. one from a
             // null-assetId fallback stream) must not match activeVideoAssetId.
             activeVideoAssetId = "";
-            // Cleared with it: a frame permanently showing a photo must not keep reporting the last
-            // video's file and rung, which is otherwise indistinguishable from a live descent.
-            activeVideoPath = "";
-            activeVideoStage = "";
+            // The attempt, not the panel: Glide leaves the previous bitmap visible until onResourceReady
+            // promotes this, and hides the browser view there too. Claiming the photograph here would
+            // report an image across a web→image transition while the page was still on the wall — and if
+            // both image rungs failed, that claim would stand for the whole interval.
+            final PanelDisplay mine = PanelDisplay.image(assetId, file.getAbsolutePath(),
+                    panelGeneration.incrementAndGet(), System.currentTimeMillis());
+            setPanelAttempt(mine);
 
             WeakReference<MainActivity> activityReference = new WeakReference<>(this);
 
             try {
                 // Release so a previous fallback video frees the exclusive Amlogic video
                 // pipeline before the next asset may run on TsPlayer.
-                videoPlayer.release();
-                videoPlayer.setVisibility(View.INVISIBLE);
+                releaseVideoDisplay();
+                // Re-derive from the views rather than deciding here what the teardown uncovered. The player
+                // above has just been released and hidden, so from this line the video surface is no longer
+                // what is on the wall whatever the next asset turns out to be — and the old answer, keeping
+                // the outgoing record until Glide finishes, reported a clip as playing from a controller that
+                // had been destroyed two statements earlier, with the staleness test still reporting it
+                // readable because its owner had never been invalidated.
+                reprovePanel();
                 if (!MainActivity.this.isDestroyed()) {
                     Glide.with(this).clear(imageView);
+                    // The image view's drawable is now gone — clearing it to release the previous asset's
+                    // memory is the point of the call — so an image→image transition has nothing visible on
+                    // it until the replacement loads. Naming the outgoing photograph through that window was
+                    // the same mistake one layer down: it describes a bitmap that is no longer in the view.
+                    reprovePanel();
 
                     if (MediaTypeHelper.isGifFile(file)) {
                         Glide.with(this)
@@ -1938,7 +2450,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                         imageView.setVisibility(View.VISIBLE);
                                         lastVisibleView = imageView;
                                         lastVisibleAsset = file.getAbsolutePath();
-                                        noteDisplayProven();
+                                        noteDisplayProven(mine);
                                         return false;
                                     }
                                 })
@@ -1960,7 +2472,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                                         imageView.setVisibility(View.VISIBLE);
                                         lastVisibleView = imageView;
                                         lastVisibleAsset = file.getAbsolutePath();
-                                        noteDisplayProven();
+                                        noteDisplayProven(mine);
                                         return false;
                                     }
                                 })
@@ -1979,14 +2491,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     // ------------------------------------------------------------- web-page assets
 
     /** How a media type is named in the {@code /state} payload. */
+    /**
+     * The word {@code /state} uses for an asset type — one mapping, shared with the video block's
+     * {@code showing} field, because two mappers is where a report starts disagreeing with itself.
+     */
     private static String mediaTypeName(@Nullable MediaType type) {
-        if (type == MediaType.VIDEO) {
-            return "video";
-        }
-        if (type == MediaType.WEB) {
-            return "web";
-        }
-        return type == MediaType.IMAGE ? "image" : "unknown";
+        return type == null ? "unknown" : VideoStateJson.mediaTypeName(type);
     }
 
     /**
@@ -2007,7 +2517,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         lastRotationActivityMs = System.currentTimeMillis();
-        debugInformationProvided(new DebugInformation("displayWebsite", url));
 
         this.runOnUiThread(() -> {
             if (isDestroyed()) {
@@ -2017,25 +2526,57 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             cancelVideoPaintWatchdog();
             // No video is active while a page shows; a stale video callback must not match.
             activeVideoAssetId = "";
-            activeVideoPath = "";
-            activeVideoStage = "";
             // Asset handoff: free the exclusive Amlogic video pipeline before the browser view.
-            videoPlayer.release();
-            videoPlayer.setVisibility(View.INVISIBLE);
+            releaseVideoDisplay();
+            // That teardown emptied the wall of the one surface that was showing, and the page that replaces
+            // it has not been created or loaded yet — so until the browser paints, the photo plane is what a
+            // viewer is looking at while the panel record still named a clip and its released controller was
+            // still considered readable. A slow page made this the common case, not an edge one.
+            reprovePanel();
 
             if (!ensureWebView()) {
+                // No browser view exists to cover anything, so the surface is whatever photo was already
+                // underneath — and the player two lines above has just been released. Stamping that here
+                // is what keeps this branch from being the one web path that leaves the record naming a
+                // clip the panel no longer holds; abandonWebPage already does exactly this for the other
+                // way a page can fail.
+                revealPhotoView();
                 mediaManager.webDisplayFailed(MainActivity.this, assetId);
                 return;
             }
 
+            webLoadProducedPaint = false;
+            // The record exists <em>before</em> the surface becomes visible. A panel re-derived from the
+            // view tree while the browser was showing but its record still named the previous page would
+            // adopt that page as what is on screen, so the ownership has to be in place the moment the
+            // surface is.
+            // The attempt: the browser view is on top, but a page that has not painted is not a page.
+            // Promotion waits for the first proof the web path has, which is the same hook every other
+            // display uses. A page that never renders is retired by abandonWebPage, which proves the photo
+            // it uncovered.
+            final PanelDisplay mine = PanelDisplay.web(assetId, url,
+                    panelGeneration.incrementAndGet(), System.currentTimeMillis());
+            setPanelAttempt(mine);
+            // AFTER the attempt is set, because setting it retires the load that was in flight, and retirement
+            // is what takes the surfaces away from a page nobody is waiting for. Raising this page's claim
+            // before that call would have the retirement pull it straight back down, and a fresh load would
+            // be unable to give up on itself if it never rendered. The two identity assignments could sit on
+            // either side — retirement no longer touches them — but they belong with the claim they go with.
             activeWebAssetId = assetId;
             webUrlOnScreen = url;
-            webLoadProducedPaint = false;
+            webLoadOwnsSurfaces = true;
+            // The browser client is one object reused across every page, so a callback cannot capture its
+            // attempt — it has to be told which load it belongs to, and a callback for a load this frame has
+            // since abandoned must not be allowed to adopt the panel for whatever is loading now.
+            webLoadRecord = mine;
             // The image stays loaded (and visible) underneath, so a page that fails to render
             // reveals the last photo instead of a black panel.
             showWebView();
             lastVisibleView = webView;
             lastVisibleAsset = url;
+            // The page is now the topmost surface, whatever it has painted yet, so it is what the panel
+            // holds: re-deriving here is what keeps a photo record from surviving a page that covers it.
+            reprovePanel();
 
             try {
                 webView.loadUrl(url);
@@ -2114,7 +2655,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // look like a crash loop caused by the photo pipeline.
             webViewUnavailable = true;
             Log.e(TAG, "ensureWebView: no usable WebView provider on this device; web assets will be skipped", t);
-            debugInformationProvided(new DebugInformation("web", "WebView unavailable: " + t));
+            debugInformationProvided(new DebugInformation("displayFailure", "WebView unavailable for every web asset: " + t, null));
             return false;
         }
     }
@@ -2135,24 +2676,57 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (!Objects.equals(url, webUrlOnScreen)) {
                 return;
             }
+            // Three further tests, because "this URL finished" is not the same claim as "this page is on the
+            // wall". The browser may have been covered since — hideWebView() ends its claim on the screen but
+            // leaves the URL standing, so a photograph that replaced a still-loading page used to be
+            // overwritten by that page's completion a few seconds later, describing a hidden browser as what
+            // is displayed. And the load in flight may no longer be this one, since the client object is
+            // reused across pages.
+            PanelDisplay loading = webLoadRecord;
+            if (loading == null || !Objects.equals(loading.pathOrUrl, url)) {
+                Log.i(TAG, "onPageFinished: " + url + " is not the load in flight; proving nothing");
+                return;
+            }
+            // Two separate claims, and they used to be one. "This page's content is now in the view" is true
+            // whether or not anyone can see the view — it is what a later showWebView() will expose — so it is
+            // recorded unconditionally. "This page is on the panel" is only true while the browser is the
+            // topmost visible surface, and promoting a hidden one would overwrite the photograph that
+            // replaced it.
+            webProvenRecord = loading;
+            // The load itself succeeded, seen or not: a page that rendered while its browser was covered has
+            // still met the watchdog's deadline, and letting the timeout fire afterwards would abandon a
+            // perfectly good page over a visibility accident.
             webLoadProducedPaint = true;
             cancelWebLoadWatchdog();
-            noteDisplayProven();
+            if (view.getVisibility() != View.VISIBLE) {
+                Log.i(TAG, "onPageFinished: " + url + " rendered while the browser is hidden; retained only");
+                return;
+            }
+            // Proves <em>this page</em>, not "the current attempt": a page that finishes loading while a
+            // photograph is being fetched would otherwise adopt the photograph on the strength of a callback
+            // about something else.
+            noteDisplayProven(loading);
             Log.i(TAG, "web: rendered " + url);
-            debugInformationProvided(new DebugInformation("web", "rendered " + url));
+            debugInformationProvided(new DebugInformation("web", "rendered " + url, activeWebAssetId));
         }
 
         @Override
         @SuppressWarnings("deprecation") // the non-deprecated overload is API 23+
         public void onReceivedError(WebView view, int errorCode, String description, String failingUrl) {
+            if (!webLoadOwnsSurfaces) {
+                // A load another display superseded keeps its identity (so its completion can still say what
+                // the browser painted) but has lost the standing to give up on a page nobody is waiting for.
+                // Without this test its error uncovers the retained photograph over the video that replaced it.
+                Log.w(TAG, "web: " + failingUrl + " failed (" + errorCode + ") after being superseded; ignored");
+                return;
+            }
             if (webLoadProducedPaint || !Objects.equals(failingUrl, webUrlOnScreen)) {
                 Log.w(TAG, "web: sub-resource failure in " + failingUrl + " (" + errorCode
                         + " " + description + ") — page stays");
                 return;
             }
             Log.w(TAG, "web: " + failingUrl + " failed (" + errorCode + "): " + description);
-            debugInformationProvided(new DebugInformation("web", "failed " + failingUrl
-                    + ": " + description));
+            noteDisplayFailure(activeWebAssetId, "page failed (" + errorCode + "): " + description + " for " + failingUrl);
             abandonWebPage();
         }
     }
@@ -2187,9 +2761,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void abandonWebPage() {
         cancelWebLoadWatchdog();
         String failedAssetId = activeWebAssetId;
+        // Given up on, not merely superseded: unlike retirement this does drop the load's identities, apart
+        // from webProvenRecord — the page it painted is still what the view will show when it is next up.
+        webLoadOwnsSurfaces = false;
+        webLoadRecord = null;
         webUrlOnScreen = "";
         activeWebAssetId = "";
         hideWebView();
+        // Named with the page that failed, not blank: the asset on the panel has not changed, only the
+        // surface covering it — and nothing sweeps the board at all any more. DebugBoard.visible keeps frame
+        // rows plus rows whose subject is the asset the panel holds, so stamping this as a NEW asset would
+        // have printed the "web: failed …" / "web: timeout …" line's subject as the page that had not failed,
+        // and the sentence explaining the blank panel an operator is standing in front of would be filtered
+        // out for being about the wrong thing.
         revealPhotoView();
         // Cleared, not set to the image: the screen content changed behind the display methods'
         // same-asset check, so the next tick must be allowed to re-show this very photo.
@@ -2225,6 +2809,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         webView.onPause();
         webView.setVisibility(View.INVISIBLE);
+        // Deliberately does NOT clear webProvenRecord. Hiding and pausing a WebView leaves its rendered page
+        // in the view — that is what onPause means here — so showing it again later exposes that page, not a
+        // blank rectangle. Dropping the identity here made a web→photo→web rotation report "nothing on the
+        // panel" for the whole of the second page's load, on a wall that was displaying the first one.
+        // Nothing covered-by-this-surface risk is introduced: reproveTarget() consults this field only when
+        // the browser is the topmost <em>visible</em> surface, which is the check that keeps a hidden page
+        // from outranking a photograph.
     }
 
     private void startWebLoadWatchdog() {
@@ -2238,7 +2829,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 }
                 Log.w(TAG, "web: " + webUrlOnScreen + " showed nothing within "
                         + WEB_LOAD_TIMEOUT_MS / 1000L + "s; advancing to the next asset");
-                debugInformationProvided(new DebugInformation("web", "timeout " + webUrlOnScreen));
+                noteDisplayFailure(activeWebAssetId, "load timed out for " + webUrlOnScreen);
                 abandonWebPage();
             }
         };
@@ -2263,10 +2854,27 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void restoreImageViewAfterVideoFailure() {
         cancelVideoWatchdog();
         cancelVideoPaintWatchdog();
-        videoPlayer.release();
-        videoPlayer.setVisibility(View.INVISIBLE);
+        releaseVideoDisplay();
         hideWebView();
+        // The failed clip is off the panel from here, whatever the next rung does with it — but the
+        // <em>asset</em> has not changed, only the surface covering it. Naming it that way is what lets
+        // the line explaining the failure survive: a ladder that dead-ends, as every local upload does
+        // because an upload has no degraded source, must not leave a video named as what is displayed.
         revealPhotoView();
+    }
+
+    /**
+     * The asset an undeclared diagnostic is about: the display in flight if one is in flight, since a
+     * writer running during an attempt is nearly always talking about that attempt and not about the older
+     * content still on the wall. Falls back to the proven panel, and to {@code ""} before either exists.
+     */
+    private String currentPanelAssetKey() {
+        PanelDisplay pending = attempt;
+        if (pending != null && !pending.assetKey.isEmpty()) {
+            return pending.assetKey;
+        }
+        PanelDisplay shown = panel();
+        return shown == null ? "" : shown.assetKey;
     }
 
     /**
@@ -2312,11 +2920,61 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
     /**
      * Records that content was proven on the panel. Stamped at each display path's proof point and
-     * nowhere else — see {@link #displayProvenAtMs} for why the rotation clock cannot say this.
+     * nowhere else — see {@link #lastDisplayProvenAtMs} for why the rotation clock cannot say this.
+     *
+     * <p>It is also where a display's <em>proof</em> moves the panel record, and it is the only thing that may
+     * stamp the clock, because this is the moment the wall actually changed. It is not the only mover of the
+     * record: {@link #reproveTarget()} asks the views what is visible and {@code panelNowProven} adopts that,
+     * from {@code reprovePanel()} and from {@code stepAwayFrom()}. The two answer different questions and both
+     * are honest — this one says "a display just landed", that one says "this is what the surfaces show right
+     * now, whatever landed" — and the second exists because a list of paths that must remember to promote was
+     * wrong three times over. Glide's {@code onResourceReady},
+     * the browser's first painted page, and {@code revealVideoSurface} — which for an engine with no paint
+     * signal runs at prepared, and for the platform player only once a frame is proven to exist — are the
+     * four handoffs, and each of them calls here. Promoting the attempt rather than the decision is what
+     * keeps {@code /state} from reporting a photograph that has not loaded and a clip that has painted
+     * nothing, and keeps {@code media.screen.generation} meaning "the panel changed".
+     *
+     * <p>The callback passes <em>the record it belongs to</em> rather than promoting whatever attempt
+     * happens to be current, and that distinction is load-bearing: a page that finishes loading while a
+     * photograph is being fetched would otherwise adopt the photograph and claim it had reached the panel
+     * on the strength of a callback about something else entirely. Each path proves its own content, and
+     * the wall is then described by whichever proof landed last — which is what the wall actually is.
      */
-    private void noteDisplayProven() {
-        displayProvenAtMs = System.currentTimeMillis();
+    private void noteDisplayProven(@Nullable PanelDisplay proven) {
+        if (proven == null) {
+            return;
+        }
+        lastDisplayProvenAtMs = System.currentTimeMillis();
         displayProvenCount++;
+        // The durable "what has this frame been showing" line. Its three per-type predecessors
+        // (displayPictures / displayVideo / displayWebsite) were folded into the board's derived row during
+        // this change set, and a derived row never reaches AppLogger — so on a release build, where the
+        // board itself is compiled out, the log stopped naming any displayed file at all. That is the exact
+        // hole logDurable() was introduced to close for the routing line, left open here: after logcat's
+        // ~13 minutes roll, "what has this frame shown" was unanswerable, which is the question the durable
+        // transcript exists to answer.
+        logDurable("on screen", proven.describe());
+        if (proven.type == MediaType.IMAGE) {
+            // Remembered so a later recovery can name the photograph it is uncovering rather than the asset
+            // whose failure made it uncover it.
+            provenPhoto = proven;
+            if (!proven.assetKey.isEmpty()) {
+                // The wallpaper placeholder is superseded by a real image, and must not come back after it.
+                unknownPhoto = null;
+            }
+        }
+        if (panelIsDark()) {
+            // Everything above still happened: the content is proven to its surface, provenPhoto remembers
+            // which photograph that is, and the durable transcript records the load as an event. What must
+            // not happen is adopting it as the panel, because a switched-off wall is showing nothing, and
+            // {@code /state} naming an image that only becomes visible at the end of quiet hours is the same
+            // mislabelled panel this change set exists to prevent. Nothing is lost by waiting: turnScreenOn()
+            // re-derives from these surfaces, which kept their content, so the wake reports the truth without
+            // any path having to remember that a load finished in the dark.
+            return;
+        }
+        panelNowProven(proven);
     }
 
     /**
@@ -2324,15 +2982,24 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      *
      * <p>This is the one non-proof that may refresh the wedge clock, and it is what keeps a
      * legitimately one-asset library (a single uploaded photo, a single looping clip) off the ladder:
-     * the panel holds content that <em>was</em> proven, and re-decoding it every interval to satisfy a
-     * watchdog would be the per-duration recreate this codebase already rejects for video. It is
-     * bounded by the same field it writes — a process that has never proven a single display gets
-     * nothing here, so a frame that never reaches first draw, which is the 2026-11-08 shape, keeps
-     * aging and keeps climbing.
+     * re-decoding it every interval to satisfy a watchdog would be the per-duration recreate this
+     * codebase already rejects for video.
+     *
+     * <p><b>The claim, however, belongs to {@code lastVisibleAsset}, and that field is retained.</b> A
+     * photograph Glide refused, a clip whose player this path released, and a web page that never
+     * painted can each leave the name pointing at content that is no longer on the wall — so renewing
+     * on the name alone lets a frame whose every display fails keep its wedge clock warm forever,
+     * which is the failure this clock exists to detect. It therefore asks the view tree:
+     * {@link #reproveTarget()} is the only authority on what is visible, and it cannot go stale because
+     * it is not stored. The clock moves only while the panel genuinely still holds this content.
+     *
+     * <p>That question subsumes the guard this method used to carry. A process that has never proven a
+     * display has nothing on the wall to match — the 2026-11-08 shape, HOME relaunched and never
+     * reaching first draw — so it keeps aging and keeps climbing.
      */
-    private void noteDisplayUnchanged() {
-        if (displayProvenAtMs != 0L) {
-            displayProvenAtMs = System.currentTimeMillis();
+    private void noteDisplayUnchanged(String pathOrUrl) {
+        if (pathOrUrl != null && pathOrUrl.equals(reproveTarget().pathOrUrl)) {
+            lastDisplayProvenAtMs = System.currentTimeMillis();
         }
     }
 
@@ -2363,6 +3030,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     + " flagging it as incompatible with this device");
             if (isVideo) {
                 restoreImageViewAfterVideoFailure();
+            } else {
+                // The image counterpart, and it matters more here than on the video path: the line below
+                // unlinks the file this asset's record points at, so without a restatement the panel
+                // report names a path that no longer exists on disk — permanently, for an upload whose
+                // backend has no degraded source to fall back to.
+                revealPhotoView();
             }
             mediaManager.tagAssetAsIncompatible(assetId);
             mediaManager.removeFromCache(file);
@@ -2387,6 +3060,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         if (isVideo) {
             restoreImageViewAfterVideoFailure();
+        } else {
+            // Same reason as on the terminal rung: the original's bytes are dropped below, and if the
+            // degraded source turns out not to exist — every local upload — the display call never runs,
+            // leaving the record pointing at the file this call just deleted.
+            revealPhotoView();
         }
         MainActivity activity = activityReference.get();
         if (activity != null) {
@@ -2404,6 +3082,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             videoWatchdogRunnable = null;
         }
         videoWatchdogAssetId = "";
+        videoWatchdogRecord = null;
         videoWatchdogFile = null;
         videoWatchdogActivityReference = null;
         videoWatchdogLastPosition = -1;
@@ -2436,6 +3115,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             debugInformationProvided(new DebugInformation("video", "watchdog skipped (TsPlayer)"));
             return;
         }
+        // The clip this player was handed — the same authority the panel derivation uses — falling back to
+        // the attempt only if ownership was already cleared by an interleaved promotion.
+        PanelDisplay playing = videoCompositing != null ? videoCompositing : attempt;
+        videoWatchdogRecord = playing != null && playing.showsVideo() && assetId.equals(playing.assetKey)
+                ? playing : null;
         videoWatchdogAssetId = assetId;
         videoWatchdogFile = file;
         videoWatchdogActivityReference = activityReference;
@@ -2513,7 +3197,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // at the shortened number without ever passing it, so demanding the file's length there
         // would skip this branch and leave the 8 s threshold to notice.
         int reportedMs = videoPlayer.getDuration();
-        long fileMs = lastVideoDurationMs;
+        // The watched clip's own length, from the record adopted when this attempt started. The guard
+        // above proves the watched asset is the active one, so this is the same file the watchdog was
+        // armed for — and never the previous clip's, which is what reading a stored field risked.
+        // The record this watchdog was armed for, and nothing else. Reading the attempt would be wrong in
+        // both directions: a clip being watched may not have reached the wall yet, and a render-silent asset
+        // chosen while this clip is still playing replaces the attempt with an image record — which reads
+        // back as "no duration known" (-1) and lets a creeping position past the player's shortened 23,000 ms
+        // trigger a restart before the file's remaining frames (23,621 ms) have finished.
+        PanelDisplay watched = videoWatchdogRecord;
+        long fileMs = watched != null && watched.clip != null ? watched.clip.fileDurationMs : -1L;
         int cycleEndMs = parked ? reportedMs : (int) Math.max((long) reportedMs, fileMs);
         // A position absurdly far past the end is a bad reading rather than a finished clip: a
         // freshly created player has been observed reporting values near the epoch, and acting on
@@ -2696,7 +3389,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      */
     @Override
     public long lastDisplayProvenAtMs() {
-        return KioskWatchdog.escalationClockMs(displayProvenAtMs, displayClockAnchorMs);
+        return KioskWatchdog.escalationClockMs(lastDisplayProvenAtMs, displayClockAnchorMs);
     }
 
     @Override
@@ -2769,11 +3462,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // self-feeding bug again, this time from inside the ladder's own rung.
             lastVisibleAsset = "";
             cancelVideoWatchdog();
-            videoPlayer.release();
-            videoPlayer.setVisibility(View.INVISIBLE);
+            releaseVideoDisplay();
             // The browser view sits above the image, so claiming the image is on screen only works
             // if the page is taken away first.
             hideWebView();
+            // Revealing the photo is a change to the panel, so it is stated as one: without this the
+            // record went on naming the clip whose plane this rung just tore down, and the /state probe
+            // kept calling into the controller that was released two lines above — on the one path a
+            // wedged frame is most likely to be diagnosed from, because this is what KioskWatchdog
+            // reaches for, and the report it collects prints the same stale record.
             revealPhotoView();
             mediaManager.showNextImage(this);
         } catch (Exception e) {
@@ -3145,10 +3842,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 .append(" (activity #").append(sActivityCreateCount)
                 .append(", self-restarts ").append(selfRestartCount).append(")\n");
         sb.append("display proven    : ")
-                .append(displayProvenAtMs == 0L
+                .append(lastDisplayProvenAtMs == 0L
                         ? "never since this Activity started — the ladder ages from that instant"
-                        : DiagnosticsReport.localTime(displayProvenAtMs)
-                                + " (" + ((now - displayProvenAtMs) / 1000L) + "s ago)")
+                        : DiagnosticsReport.localTime(lastDisplayProvenAtMs)
+                                + " (" + ((now - lastDisplayProvenAtMs) / 1000L) + "s ago)")
                 .append("  count=").append(displayProvenCount)
                 .append("  [the wedge clock: KioskWatchdog escalates on this]\n");
         sb.append("display failures  : ").append(displayFailedCount).append('\n');
@@ -3195,20 +3892,56 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         sb.append("window              : focused=").append(windowFocused)
                 .append(" view=").append(focusedView)
                 .append(" lastKey=").append(lastKeyEventCode).append('\n');
+        // This line states the frame's default engine, once per launch, and is true whatever is on the
+        // panel — which is why it says nothing about the clip. The clip is the next line's business.
         sb.append("video engine        : ").append(preferTsPlayer ? "TsPlayer" : "MediaPlayer")
                 // The panel the aspect rule compares every clip against, in the record that survives a
                 // reboot. /state carries it too, but /state is gone by the time anyone asks about a
                 // frame that has since been moved, power-cycled or re-hung — and an "unmeasured" here
                 // is the only evidence there will ever be that the rule was dark rather than wrong.
                 .append(" panel=").append(lastFrameShape == null ? "unmeasured" : lastFrameShape)
-                .append(" paintSignal=").append(videoPlayer.supportsPaintSignal())
-                .append(" painted=").append(videoPaintProduced)
-                .append(" lastFrame=")
-                .append(videoPlayer.getLastFrameAtMs() == 0L ? "never"
-                        : ((now - videoPlayer.getLastFrameAtMs()) / 1000L) + "s ago")
                 .append('\n');
-        sb.append("active video        : path=").append(activeVideoPath)
-                .append(" stage=").append(activeVideoStage).append('\n');
+        // Read once, for the same reason buildStateJson does: this collector runs on a diagnostics
+        // worker, and half of one asset and half of the next is not a report about either.
+        PanelDisplay shown = panel();
+        sb.append("on screen           : ")
+                .append(shown == null ? "nothing yet" : shown.describe()).append('\n');
+        if (shown != null && shown.showsVideo()) {
+            // Paint evidence belongs to the engine that is compositing, and only while one is. These
+            // used to be written for every launch, so a frame that had not shown a video in a week
+            // still reported the last clip's player as painted — in the record people quote.
+            sb.append("active video        : path=").append(shown.pathOrUrl)
+                    .append(" stage=").append(shown.stage)
+                    .append(" engine=").append(shown.engine);
+            // Same discipline as StatePlayerProbe, and for the same reason: this collector runs on a
+            // diagnostics worker, so a rotation between the reads and the append would print this clip's path
+            // beside the next attempt's frame stamp — in the report that outlives the reboot it describes.
+            // Ownership is therefore checked <em>after</em> the reads, and everything collected is discarded
+            // together if it changed; checking only beforehand would leave the last read free to describe a
+            // display that had already been replaced mid-report.
+            VideoPlayerController compositing = videoPlayer;
+            boolean ownedBefore = panel() == shown
+                    && (!shown.showsVideo() || videoCompositing == shown);
+            // Derived from the engine in the record, as /state does, for two reasons. A live read can answer
+            // for a different controller than the one being reported, and `videoPaintProduced` is
+            // deliberately initialised to "no signal" for a TsPlayer display so a silent failure is still
+            // noticed — printing it unguarded asserts a composited frame for exactly the failure the latch
+            // exists to catch, in the report an operator quotes after a power-cycle.
+            boolean paintSignal = !VideoEngineReport.TS_PLAYER.equals(shown.engine);
+            long lastFrameAtMs = paintSignal && compositing != null ? compositing.getLastFrameAtMs() : 0L;
+            boolean painted = paintSignal && videoPaintProduced;
+            if (ownedBefore && panel() == shown
+                    && (!shown.showsVideo() || videoCompositing == shown)) {
+                sb.append(" paintSignal=").append(paintSignal)
+                        .append(" painted=").append(painted)
+                        .append(" lastFrame=")
+                        .append(lastFrameAtMs == 0L ? "never"
+                                : ((now - lastFrameAtMs) / 1000L) + "s ago");
+            } else {
+                sb.append(" player=changed-mid-report");
+            }
+            sb.append('\n');
+        }
         // One line for the broker link, in the record that outlives logcat. "connected=false" and "connected
         // but no message for hours" are different diagnoses, and before this class reported into AppLogger
         // neither was recoverable at all — the events went to stdout, into a buffer CrashSources never reads.
@@ -3382,7 +4115,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
             Log.i(TAG, "displayVideo: skip same asset " + assetId);
-            noteDisplayUnchanged();
+            // Gated on the view tree, not on the retained name: this is the path where the claim is
+            // weakest, because a failed clip releases its player without touching lastVisibleAsset, and
+            // a clip that painted nothing must not renew the clock the ladder is climbing on.
+            noteDisplayUnchanged(file.getAbsolutePath());
             return;
         }
 
@@ -3399,9 +4135,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (stage == DisplayStage.ORIGINAL && mediaManager != null
                 && mediaManager.isRenderSilent(assetId)) {
             lastRotationActivityMs = System.currentTimeMillis();
-            activeVideoPath = "";
-            activeVideoStage = "";
             Log.i(TAG, "displayVideo: " + assetId + " renders nothing on this device; showing its still");
+            // The attempt only. Nothing has been taken off the wall yet — the preview is fetched
+            // asynchronously and the previous surface stays up until it lands — so the panel must keep
+            // saying what is actually visible; the preview's own display call proves the switch when it
+            // happens. What the clip <em>cannot</em> be is the answer to "what is playing", and the
+            // attempt being a still already says that. Setting it is also how a superseded web load is
+            // retired — see webLoadOwnsSurfaces — and like every other display path this one arrives on the
+            // main looper, because MediaManager posts its display calls rather than making them inline.
+            setPanelAttempt(PanelDisplay.image(assetId, "",
+                    panelGeneration.incrementAndGet(), System.currentTimeMillis()));
             debugInformationProvided(new DebugInformation("displayVideo", "render-silent still "
                     + assetId));
             mediaManager.showRenderSilentStill(this, assetId);
@@ -3409,7 +4152,6 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         lastRotationActivityMs = System.currentTimeMillis();
-        debugInformationProvided(new DebugInformation("displayVideo", file.getAbsolutePath()));
 
         WeakReference<MainActivity> activityReference = new WeakReference<>(this);
         activeVideoAssetId = assetId;
@@ -3421,8 +4163,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     // displayed, while ORIGINAL_REPLAY and FALLBACK are re-entries into the same
                     // attempt series. Engine memory therefore resets here and nowhere else — reset it
                     // at a re-entry and the replay rung forgets it already burned an attempt, which is
-                    // the bug this counter exists to stop. Kept inside the posted block with everything
-                    // else that touches it, because displayVideo is reached from the rotation thread.
+                    // the bug this counter exists to stop. Kept inside the posted block with everything else
+                    // that touches it. (This line used to justify that placement by saying displayVideo is
+                    // reached from the rotation thread. It is not: MediaManager posts every display call
+                    // through a UiPoster that is runOnUiThread in production, so the method enters on the main
+                    // looper whichever thread decided to rotate. The grouping below is still the reason to
+                    // keep them here — but it is a sequencing argument, and a false thread claim in a comment
+                    // is how a correct-looking race fix gets written.)
                     tsAttemptsForActiveAsset = 0;
                     mediaManualLoopRestarts = 0;
                     mediaManualLoopCycleMs = -1;
@@ -3434,10 +4181,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 // bounds belong to the thread that laid them out.
                 publishFrameShape();
                 cancelVideoWatchdog();
-                selectVideoPlayer(routingAllowsTsPlayer(file));
+                VideoRoutingDecision routing = routingAllowsTsPlayer(file);
+                selectVideoPlayer(routing.allowTsPlayer);
                 int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
                 startVideoOnController(videoPlayer, file, assetId, videoDurationMs,
-                        activityReference, true, stage);
+                        activityReference, true, stage, routing);
             } catch (Exception e) {
                 restoreImageViewAfterVideoFailure();
                 assetFallback(assetId, activityReference, true, file, stage);
@@ -3456,8 +4204,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * asks the same question of the same numbers <em>before</em> the download, because a clip this
      * path hands to MediaPlayer is composited at a magnification this hardware does not keep up
      * with — so on a two-engine frame such a clip should never arrive here as an original at all.
+     *
+     * <p>Returns what it measured instead of storing it. Every field this method wrote was written only
+     * on a video display and cleared by nobody, so {@code /state} reported the last clip's codec, size,
+     * rate and rotation over whatever the panel had moved on to. The measurement now travels to
+     * {@link #setPanelAttempt} as one value and is read from nowhere else.
      */
-    private boolean routingAllowsTsPlayer(File file) {
+    private VideoRoutingDecision routingAllowsTsPlayer(File file) {
         VideoHeaderProbe.Probe probe = VideoHeaderProbe.probe(file);
         int rotation = probe.rotationDeg;
         int width = probe.codedWidth;
@@ -3472,17 +4225,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 height = asset.height;
             }
         }
-        MediaCompatibility.PanelShape panel = currentPanelShape();
-        boolean allowTs = VideoRoutingRule.allowsTsPlayer(rotation, width, height, panel);
+        MediaCompatibility.PanelShape shape = currentPanelShape();
+        boolean allowTs = VideoRoutingRule.allowsTsPlayer(rotation, width, height, shape);
         boolean forceFallback = !allowTs;
-        lastVideoRotation = rotation;
-        lastVideoWidth = width;
-        lastVideoHeight = height;
-        lastVideoCodec = codec;
-        lastVideoStats = probe.stats;
-        lastVideoDurationMs = probe.stats.durationMs;
-        lastFrameShape = panel;
-        lastFrameOrientation = VideoRoutingRule.orientationWord(panel);
+        // The panel's own shape, not a property of the file: published from the layout listener for
+        // every frame, and deliberately left out of the clip record so a frame that has never played a
+        // video can still say whether the aspect rule is lit.
+        lastFrameShape = shape;
+        lastFrameOrientation = VideoRoutingRule.orientationWord(shape);
         // Record the verdict where it is made. ORIGINAL_REPLAY asks this same field whether TsPlayer
         // was ever a live option for these bytes, and a second derivation of that answer somewhere
         // else is how the rung ends up replaying the engine that just failed.
@@ -3492,17 +4242,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // loaded the answer it hands to selectVideoPlayer is discarded. Naming TsPlayer here while
         // MediaPlayer composites the clip is what made an EO1's log read like an EO2's.
         String engineWord = VideoEngineReport.engineWord(forceFallback, preferTsPlayer);
-        String panelWord = panel == null ? "unmeasured" : panel.toString();
+        String panelWord = shape == null ? "unmeasured" : shape.toString();
         Log.i(TAG, "displayVideo routing: codec=" + codec + " rotation=" + rotation
                 + " coded=" + width + "x" + height
                 + " panel=" + panelWord + " frame=" + lastFrameOrientation
                 + " player=" + engineWord
                 + " " + describeStream(probe));
-        debugInformationProvided(new DebugInformation("videoRouting",
+        return new VideoRoutingDecision(allowTs, engineWord,
+                new PanelDisplay.ClipFacts(rotation, width, height, codec,
+                        probe.stats.fpsMilli, probe.stats.avgFrameBytes, probe.stats.peakFrameBytes,
+                        probe.stats.bitRateBps, probe.stats.durationMs),
+                // The measurement only. The compositor is appended when the sentence is rendered, from the
+                // record that carries it, so an engine handover later in the attempt cannot leave the board
+                // saying "-> TsPlayer" beside engine=MediaPlayer.
                 "codec=" + codec + " rotation=" + rotation + " dims=" + width + "x" + height
                         + " panel=" + panelWord + " frame=" + lastFrameOrientation
-                        + " -> " + engineWord + "; " + describeStream(probe)));
-        return allowTs;
+                        + "; " + describeStream(probe));
     }
 
     /**
@@ -3627,6 +4382,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // the exclusive Amlogic video pipeline, which would starve the incoming TsPlayer.
             videoPlayer.release();
             videoPlayer.setVisibility(View.GONE);
+            // Ownership ends with the release, wherever a release happens. This site was missed when the
+            // other five were consolidated, and the gap is exactly what the ownership test exists to catch:
+            // across the span until the new controller is handed the file, panel() and videoCompositing both
+            // still name the outgoing clip while the player answering /state is a different, freshly chosen
+            // one — publishing the old clip's path beside the new player's -1 duration.
+            videoCompositing = null;
+            videoSurfaceProven = false;
         }
         videoPlayer = next;
         if (useTs) {
@@ -3637,8 +4399,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             tsVideoView.setVisibility(View.GONE);
             mediaPlayerVideoView.setVisibility(View.INVISIBLE);
         }
-        debugInformationProvided(new DebugInformation("videoPlayer",
-                useTs ? "TsPlayer" : "MediaPlayer"));
+        // No debug line here. The engine is a property of the display in hand, so it travels with it:
+        // {@link #startVideoOnController} adopts a {@link PanelDisplay} carrying this answer, the board
+        // prints it in its "on screen" row, and {@code /state} reports it as {@code video.engine}. A
+        // separate key written from here landed <em>before</em> that handoff swept the board, so on a new
+        // asset it announced an engine and then vanished — one more line whose freshness was a property
+        // of its writer rather than of the panel.
     }
 
     /**
@@ -3659,12 +4425,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
         tsFallbackCount++;
         Log.i(TAG, "TsPlayer → MediaPlayer fallback #" + tsFallbackCount);
-        debugInformationProvided(new DebugInformation("video", "TsPlayer → MediaPlayer fallback #" + tsFallbackCount));
+        debugInformationProvided(new DebugInformation("video", "TsPlayer → MediaPlayer fallback #" + tsFallbackCount, assetId));
         try {
             selectVideoPlayer(false);
             int videoDurationMs = mediaManager != null ? mediaManager.getVideoDurationMs(assetId) : -1;
+            // No fresh routing pass: these are the same bytes the record in hand was measured from,
+            // only handed to the other compositor.
             startVideoOnController(videoPlayer, file, assetId, videoDurationMs,
-                    activityReference, false, stage);
+                    activityReference, false, stage, null);
             return true;
         } catch (Exception e) {
             handleException(e);
@@ -3672,13 +4440,49 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
     }
 
+    /**
+     * Hands one file to one controller, and makes it the thing the panel is said to hold.
+     *
+     * @param routing what the routing rule measured for these bytes, or {@code null} from
+     *                {@link #fallbackTsPlayerToMediaPlayer}, which re-displays the same file on the
+     *                other engine — in which case the measurement already in the record in hand still
+     *                describes it, and anything else would be a previous clip's number
+     */
     private void startVideoOnController(VideoPlayerController controller, File file, String assetId,
                                         int durationHintMs,
                                         WeakReference<MainActivity> activityReference,
-                                        boolean allowTsFallback, DisplayStage stage) {
+                                        boolean allowTsFallback, DisplayStage stage,
+                                        @Nullable VideoRoutingDecision routing) {
         controller.stop();
-        activeVideoPath = file.getAbsolutePath();
-        activeVideoStage = stage.name();
+        PanelDisplay carried = routing == null ? carriedDisplay(assetId, stage.name()) : null;
+        PanelDisplay.ClipFacts clip = routing != null ? routing.clip
+                : (carried != null ? carried.clip : PanelDisplay.ClipFacts.UNKNOWN);
+        String routingFacts = routing != null ? routing.routingFacts
+                : (carried != null ? carried.routingFacts : "");
+        // The attempt. Where the engine can prove a frame, the photograph stays visible until it does, so
+        // promoting here would report `onScreen: true` for a clip that has painted nothing — and the
+        // panel's generation would advance on a wall that had not changed. Promotion is
+        // revealVideoSurface(), which runs at prepared on TsPlayer (no per-frame proof exists there, and
+        // the photo is stepped aside up front by design) and at the first composited frame on the platform
+        // player. The routing facts stay reachable meanwhile as media.attempt.
+        final PanelDisplay mine = PanelDisplay.video(assetId, file.getAbsolutePath(),
+                controller == tsPlayerController
+                        ? VideoEngineReport.TS_PLAYER : VideoEngineReport.MEDIA_PLAYER,
+                stage.name(), clip, routingFacts,
+                panelGeneration.incrementAndGet(), System.currentTimeMillis());
+        setPanelAttempt(mine);
+        // Which record this controller was handed. Telemetry is only reportable while that answer still
+        // matches, which is a stronger check than "is this still the panel": on a video-to-video change the
+        // outgoing clip <em>is</em> still the panel while the controller already belongs to the incoming
+        // one, and reading its position then would pair one clip's path with another attempt's numbers.
+        videoCompositing = mine;
+        // Nothing on this surface has been proven yet, whatever the view's visibility says.
+        videoSurfaceProven = false;
+        // The durable copy of the routing decision. The board row is derived from the record and therefore
+        // disappears with the clip; this line is what makes the decision readable a week later, and it is
+        // emitted here rather than in routingAllowsTsPlayer so an engine handover re-logs the same
+        // measurement under the compositor that actually took the file.
+        logDurable("videoRouting", mine.pathOrUrl + " " + mine.routingSentence());
         // TsPlayer SurfaceView must be VISIBLE to get a surface; MediaPlayer TextureView can stay
         // invisible until prepared (ImageView covers both until then).
         if (controller == tsPlayerController) {
@@ -3691,6 +4495,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         } else {
             controller.setVisibility(View.INVISIBLE);
         }
+        // Both engines, and both for the same reason: `controller.stop()` above has ended what was on this
+        // surface — for TsPlayer that is a full deletePlayer(), so the wall is a VISIBLE plane with no
+        // decoder behind it, which is the one thing this class's own derivation calls a black plane rather
+        // than a clip. Leaving the panel record untouched here made the answer depend on which thread
+        // happened to re-derive first, and a TsPlayer→TsPlayer rotation went on reporting the outgoing
+        // clip's path, measurements and routing row across the whole recreate window even though that
+        // player no longer existed to produce them. On a TsPlayer→MediaPlayer handover the wall is blank
+        // from the line above. Deriving now says what the surfaces show; the later revealVideoSurface()
+        // replaces it with the incoming clip when there is one.
+        reprovePanel();
         controller.setListener(new VideoPlayerListener() {
             @Override
             public void onVideoPrepared() {
@@ -3700,13 +4514,21 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 try {
                     if (!MainActivity.this.isDestroyed()) {
                         hideWebView();
+                        // Hiding the page is a change to the wall, and on this engine nothing else will
+                        // happen for a while: the video surface stays INVISIBLE until a frame is proven, so
+                        // a web→video transition left both reports naming a browser view that had just been
+                        // taken away. Re-deriving from the views says what is actually visible in the gap —
+                        // the photograph underneath, or an empty panel — and the later reveal replaces it.
+                        if (controller.supportsPaintSignal()) {
+                            reprovePanel();
+                        }
                         // "Prepared" is a promise about the file, not about the screen. Where the engine
                         // can prove a frame arrived, the photo stays put until it does, so an attempt
                         // that decodes to nothing leaves the picture that was already there instead of
                         // an empty black root. TsPlayer offers no such proof, so it keeps hiding the
                         // photo up front — its surface sits below the ImageView either way.
                         if (!controller.supportsPaintSignal()) {
-                            revealVideoSurface(controller.getView());
+                            revealVideoSurface(controller.getView(), mine);
                         }
                         controller.setVisibility(View.VISIBLE);
                         lastVisibleAsset = file.getAbsolutePath();
@@ -3763,8 +4585,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                     return false;
                 }
                 cancelVideoWatchdog();
-                debugInformationProvided(new DebugInformation("video",
-                        "error what=" + what + " extra=" + extra));
+                noteDisplayFailure(assetId, "player error what=" + what + " extra=" + extra + " on " + file.getName());
                 if (allowTsFallback && fallbackTsPlayerToMediaPlayer(assetId, file, activityReference, stage)) {
                     return true;
                 }
@@ -3787,12 +4608,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             }
         });
         controller.setDurationHint(durationHintMs);
-        controller.setDisplayRotation(lastVideoRotation);
+        // The rotation this attempt was routed with, read off the record just adopted rather than off a
+        // field left over from whichever clip was measured last.
+        controller.setDisplayRotation(clip.rotationDeg);
         controller.setDataSource(file.getPath());
         controller.setLooping(true);
         // Armed here, before any callback: an attempt whose prepareAsync() never returns and never
         // raises is exactly the case the prepared-armed position watchdog cannot see.
-        startVideoPaintWatchdog(assetId, file, activityReference, controller, stage);
+        startVideoPaintWatchdog(assetId, file, activityReference, controller, stage, mine);
     }
 
     /**
@@ -3804,16 +4627,35 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * after the first video of a process, "show the image underneath" showed an empty view over a black
      * root. The next image asset clears and reloads it in {@code displayPicture} regardless.
      */
-    private void revealVideoSurface(View videoView) {
+    private boolean revealVideoSurface(View videoView, @Nullable PanelDisplay record) {
+        // Step aside for the photo plane only while this attempt still owns the panel's future. A record
+        // that is neither the display in flight nor the one already proven belongs to an attempt something
+        // else has superseded — and hiding the photograph on its behalf would leave the wall showing a
+        // surface no report describes, which is the failure this method existed to prevent.
+        if (!PanelDisplay.mayBeRevealed(record, attempt, panel())) {
+            Log.i(TAG, "revealVideoSurface: superseded attempt, leaving the panel as reported");
+            return false;
+        }
+        // Taking the other surfaces away is part of uncovering this one, exactly as it is for
+        // revealPhotoView(): the browser sits ABOVE the image and both video surfaces, so a clip "revealed"
+        // under a page that is still visible is not on the panel at all. That is not a hypothetical pairing —
+        // onVideoPrepared hides the page without touching lastVisibleView, which is what turnScreenOn()
+        // restores, so a wake from a dark interval put the page back over a clip that had taken it away
+        // before the screen went out, and the first frame then hid only the photograph. hideWebView() is
+        // idempotent, so a path that already hid it loses nothing.
+        hideWebView();
         imageView.setVisibility(View.INVISIBLE);
         lastVisibleView = videoView;
         videoPaintRevealed = true;
-        noteDisplayProven();
+        videoSurfaceProven = true;
+        noteDisplayProven(record);
+        return true;
     }
 
     private void startVideoPaintWatchdog(String assetId, File file,
                                          WeakReference<MainActivity> activityReference,
-                                         VideoPlayerController controller, DisplayStage stage) {
+                                         VideoPlayerController controller, DisplayStage stage,
+                                         PanelDisplay record) {
         cancelVideoPaintWatchdog();
         if (assetId == null) {
             return;
@@ -3822,6 +4664,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoPaintFile = file;
         videoPaintActivityReference = activityReference;
         videoPaintStage = stage;
+        videoPaintRecord = record;
         videoPaintStartMs = System.currentTimeMillis();
         // An engine with no per-frame proof cannot fail this check, and must not be watched by it:
         // getLastFrameAtMs() is a constant 0 there, so arming the poll would spend 12 seconds and then
@@ -3842,7 +4685,36 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoPaintAssetId = "";
         videoPaintFile = null;
         videoPaintActivityReference = null;
+        videoPaintRecord = null;
         videoPaintAwaitingResume = false;
+    }
+
+    /**
+     * Whether the panel is not ours to paint: quiet hours or the screen toggle put it in the dark, or the
+     * Activity is paused behind a dialog.
+     *
+     * <p>One predicate for the two questions that must never disagree — the paint poll parks its deadline on
+     * this, and {@code /state} marks an attempt {@code parked} with it. Written twice they drift, and the
+     * drift is what makes a frame sitting out its quiet hours look like a frame that has stopped displaying.
+     * A manager that is not built yet counts as lit: nothing is displaying in that instant anyway, and
+     * "parked" would claim a suspension this frame has not decided on.
+     */
+    private boolean paintingSuspended() {
+        BrightnessManager manager = brightnessManager;
+        return activityPaused || panelIsDark();
+    }
+
+    /**
+     * The display is switched off — quiet hours, the operator's toggle, or the power button.
+     *
+     * <p>Not the same question as {@link #paintingSuspended()}, and the difference is a wall rather than a
+     * nuance: behind the options dialog the panel is still lit and still showing the frame's content, so a
+     * photograph that finishes loading there IS on the wall and must be reported as such. Only darkness
+     * makes a visible view show nothing.
+     */
+    private boolean panelIsDark() {
+        BrightnessManager manager = brightnessManager;
+        return manager != null && !manager.getShouldTheScreenBeOn();
     }
 
     /**
@@ -3901,7 +4773,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             cancelVideoPaintWatchdog();
             return;
         }
-        if (!brightnessManager.getShouldTheScreenBeOn() || activityPaused) {
+        if (paintingSuspended()) {
             // Not a verdict — the panel is simply not ours to paint right now.
             pauseVideoPaintPoll();
             return;
@@ -3915,8 +4787,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 debugInformationProvided(new DebugInformation("video", "painted after "
                         + (System.currentTimeMillis() - videoPaintStartMs) + "ms"));
             }
-            if (!videoPaintRevealed) {
-                revealVideoSurface(videoPlayer.getView());
+            if (!videoPaintRevealed && !revealVideoSurface(videoPlayer.getView(), videoPaintRecord)) {
+                // Refused, which means another display owns the wall and this obligation is finished with.
+                // Dropping it is right; dropping it silently is not, because the other path's promotion is
+                // its own business and this poll is the one place that knows a frame reached the surface just
+                // now. Deriving once here keeps the reports describing the wall rather than whichever
+                // call site last remembered to update them.
+                reprovePanel();
             }
             cancelVideoPaintWatchdog();
             return;
@@ -3931,8 +4808,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // activePositionMs, not the player directly: this check fires precisely when a player never
         // reached a usable state, and getCurrentPosition() throws in exactly that state — an exception
         // here would reach the global handler and restart the process over a diagnostic line.
-        debugInformationProvided(new DebugInformation("video", "no frame within "
-                + VIDEO_PAINT_TIMEOUT_MS / 1000L + "s stage=" + stage + " pos=" + activePositionMs()));
+        noteDisplayFailure(assetId, "no frame within " + VIDEO_PAINT_TIMEOUT_MS / 1000L
+                + "s stage=" + stage + " pos=" + activePositionMs()
+                + " on " + (file != null ? file.getName() : "?"));
         cancelVideoPaintWatchdog();
         if (activityReference == null || activityReference.get() == null) {
             return;
@@ -3962,10 +4840,60 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * Puts the photo plane back on screen and records it as what is showing — the one place that pairing
      * is written down, so no recovery path can uncover a view while leaving {@code lastVisibleView}
      * pointing at a video surface nobody can see.
+     *
+     * <p>It also restates the panel, and takes the panel's identity from the photo rather than from the
+     * caller. Every recovery rung that uncovers the photo is a change to what the wall shows, and four of
+     * them were written before this method existed — so each had to remember to say so, and three of them
+     * forgot, which left a torn-down clip named as what is on screen. Having each caller name the asset
+     * instead was the next mistake: the asset in hand is the one that just <em>failed</em>, while the bitmap
+     * the view is uncovering belongs to whatever last loaded successfully. So the identity comes from
+     * {@link #provenPhoto}, and an image view holding no drawable reports an empty panel rather than an
+     * unnamed photograph.
      */
     private void revealPhotoView() {
+        // Taking the other surfaces away is part of uncovering this one. The browser view sits above the
+        // image in the layout, so a photo "revealed" without hiding the page is not on the panel at all —
+        // and an image rung that fails after a displayed page reached exactly that state, reporting
+        // image/none for a whole interval while the page stayed visible. hideWebView() is idempotent, so
+        // callers that already did it lose nothing.
+        hideWebView();
         imageView.setVisibility(View.VISIBLE);
         lastVisibleView = imageView;
+        PanelDisplay target = photoPlaneNow();
+        setPanelAttempt(target);
+        reprovePanel();
+    }
+
+    /**
+     * What the photo plane actually holds: the photograph that last <em>loaded</em>, never the asset whose
+     * failure made this run — a photo A under a failed video B used to be reported as "screen: B", which
+     * mislabelled the visible asset and hid A's own diagnostics behind the wrong subject. An image view with
+     * no drawable is an empty panel, not an unnamed photograph.
+     */
+    private PanelDisplay photoPlaneNow() {
+        PanelDisplay drawn = imagePlaneRecord();
+        return drawn != null ? drawn : blankPanel();
+    }
+
+    /**
+     * What the image plane is drawing, or null when it is drawing nothing at all — the single source both
+     * the recovery paths and the panel derivation consult, because the two used to disagree.
+     *
+     * <p>{@link #revealPhotoView()} took the recovery target from one rule and {@link #reproveTarget()}
+     * proved the same visible surface by another: with no photograph ever loaded, the layout's wallpaper is
+     * what the screen actually shows, so the proof adopted an <em>unidentified image</em> while the attempt
+     * was left holding a <em>blank</em> record. Two different records for one screen means
+     * {@code media.attempt} never clears after recovery — {@code type: none} beside a visible wallpaper,
+     * forever. An image view with no drawable draws nothing, which is why that case is null (look beneath)
+     * rather than blank.
+     */
+    @Nullable
+    private PanelDisplay imagePlaneRecord() {
+        if (imageView.getDrawable() == null) {
+            return null;
+        }
+        PanelDisplay loaded = provenPhoto;
+        return loaded != null ? loaded : unidentifiedPhoto();
     }
 
     @Override
@@ -3988,18 +4916,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     @Override
     public void clientProgressUpdates(long bytesRead, long contentLength, boolean done, @Nullable HttpUrl url) {
 
-        long percent =  Math.round((100.0 * bytesRead) / contentLength);
+        // An undeclared length divides by -1 (a negative percent) or by 0 (Infinity, which rounds to
+        // Long.MAX_VALUE), and either poisons the throttle below for the rest of the download.
+        long percent = contentLength > 0L ? Math.round((100.0 * bytesRead) / contentLength) : 0L;
 
-        long progressNowMs = System.currentTimeMillis();
-        if (done) {
-            downloadStartedAtMs = 0L;
-            downloadProgressAtMs = 0L;
-        } else {
-            if (downloadStartedAtMs == 0L) {
-                downloadStartedAtMs = progressNowMs;
-            }
-            downloadProgressAtMs = progressNowMs;
-        }
+        // Nothing about the clocks happens here. They are written on the UI thread, in
+        // applyDownloadBar, because this method runs on whichever thread read the bytes: a prefetch
+        // can pass MediaManager's gate, stop between here and its own UI post, and resume after the
+        // close that follows the counted download it was riding on — stamping a transfer that has
+        // already ended, which downloadInFlightMs() then reports and the next download inherits.
+        // A finish clears nothing either; the end of the window belongs to downloadCycleClosed.
 
         // OkHttp invokes this on every read() of the response body, so logging every
         // event floods logcat with repeated "download: 9%" lines. Log the content-length
@@ -4037,18 +4963,143 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // MediaManager only forwards progress events while a remote download is in
         // flight (catalog fetches and local playback never reach this callback).
-        this.runOnUiThread(() -> {
-            if (done) {
-                //reset update progress indicator UI
-                progressIndicator.setProgressCompat(0, false);
-                progressIndicator.setVisibility(View.INVISIBLE);
-            } else {
-                //Update progress indicator UI percent
-                progressIndicator.setMax(Math.toIntExact(contentLength));
-                progressIndicator.setProgressCompat(Math.toIntExact(bytesRead), true);
-                progressIndicator.setVisibility(View.VISIBLE);
+        this.runOnUiThread(() -> applyDownloadBar(bytesRead, contentLength, done));
+    }
+
+    @Override
+    public void downloadCycleClosed() {
+        // Everything a close does happens on the UI thread, behind the same live count a show is
+        // decided by. The count is raised before a download's first read and retired in a finally, so
+        // a second thread can open download B in the gap between A's decrement and this running;
+        // hiding B's bar or zeroing B's clocks from here would blank a transfer that is genuinely
+        // running and re-anchor its age to now. Standing aside strands nothing, because the close
+        // that finds the count still at zero is whichever download ends last.
+        runOnUiThread(() -> {
+            if (downloadBarAction(DownloadBarSignal.CYCLE_CLOSED, 0, downloadCountedInFlight())
+                    == DownloadBarAction.UNCHANGED) {
+                return;
             }
+            downloadStartedAtMs = 0L;
+            downloadProgressAtMs = 0L;
+            synchronized (downloadProgressLogLock) {
+                lastLoggedDownloadPercent = -1L;
+                lastDownloadProgressLogAtMs = 0L;
+            }
+            hideDownloadBar();
         });
+    }
+
+    /** Puts the bar into the state one progress event describes. UI thread. */
+    private void applyDownloadBar(long bytesRead, long contentLength, boolean done) {
+        int permille = downloadBarPermille(bytesRead, contentLength);
+        DownloadBarSignal signal = done ? DownloadBarSignal.TRANSFER_FINISHED
+                                        : DownloadBarSignal.TRANSFER_PROGRESS;
+        boolean inFlight = downloadCountedInFlight();
+        if (downloadBytesCounted(signal, inFlight)) {
+            long nowMs = System.currentTimeMillis();
+            if (downloadStartedAtMs == 0L) {
+                downloadStartedAtMs = nowMs;
+            }
+            downloadProgressAtMs = nowMs;
+        }
+        switch (downloadBarAction(signal, permille, inFlight)) {
+            case SHOW:
+                progressIndicator.setMax(DOWNLOAD_BAR_MAX);
+                progressIndicator.setProgressCompat(permille, true);
+                progressIndicator.setVisibility(View.VISIBLE);
+                break;
+            case HIDE:
+                hideDownloadBar();
+                break;
+            default:
+                break;
+        }
+    }
+
+    /** Whether a counted download exists at this instant. UI thread. */
+    private boolean downloadCountedInFlight() {
+        MediaManager manager = mediaManager;
+        return manager != null && manager.isDownloadInFlight();
+    }
+
+    /** The three things the bar can be asked about. */
+    enum DownloadBarSignal {
+        /** A read delivered bytes; {@code permille} says how far along they got. */
+        TRANSFER_PROGRESS,
+        /** A read reached the end of its body. */
+        TRANSFER_FINISHED,
+        /** No counted download is running — the edge MediaManager retires the count on. */
+        CYCLE_CLOSED
+    }
+
+    /** What the bar should do about one signal. */
+    enum DownloadBarAction { SHOW, HIDE, UNCHANGED }
+
+    /**
+     * The download bar's whole rule, as a table rather than as an ordering.
+     *
+     * <p>Two facts decide it. Whether a counted download exists <em>now</em>, asked at the moment of
+     * drawing, is what makes an event's arrival order irrelevant instead of contested. And whether the
+     * event carries a fraction: an event with none has nothing to draw, and leaving the previous
+     * transfer's fill standing is the lesser truth — a bar frozen at someone else's 60% while this one
+     * streams is exactly what an operator reports as a stalled indicator.
+     *
+     * <p>A finish or a close that finds a download counted says nothing about it, so it changes
+     * nothing: that transfer's own events will speak, and whichever close lands with the count back at
+     * zero is the one that ends the window.
+     */
+    static DownloadBarAction downloadBarAction(DownloadBarSignal signal, int permille,
+                                               boolean inFlight) {
+        if (!inFlight) {
+            return DownloadBarAction.HIDE;
+        }
+        if (signal == DownloadBarSignal.TRANSFER_PROGRESS) {
+            return permille >= 0 ? DownloadBarAction.SHOW : DownloadBarAction.HIDE;
+        }
+        return DownloadBarAction.UNCHANGED;
+    }
+
+    /**
+     * Whether an event is evidence that bytes are moving <em>now</em>, which is what the in-flight
+     * clocks record. Same two facts as the bar's rule and the same reason: asked on the UI thread, so
+     * an event that arrives after the close that zeroed the clocks cannot re-anchor them to a transfer
+     * that has ended. Bytes from a counted download count even when its length is undeclared, and so
+     * draw no bar while still proving the transfer alive — which is why this is not the cell above.
+     */
+    static boolean downloadBytesCounted(DownloadBarSignal signal, boolean inFlight) {
+        return inFlight && signal == DownloadBarSignal.TRANSFER_PROGRESS;
+    }
+
+    /**
+     * The only place the bar is hidden. It decides nothing: whether a hide is warranted belongs to
+     * {@link #downloadBarAction}, so that a transfer with no fraction to show can clear the screen
+     * while a counted download is running, and a finish or close that belongs to some other transfer
+     * cannot. An earlier revision put the count test in here, and that is how a chunked download
+     * inherited the previous file's frozen fill.
+     *
+     * <p>Emptied before it is hidden so a later transfer starts from nothing rather than animating
+     * down from wherever the last one stopped.
+     */
+    private void hideDownloadBar() {
+        progressIndicator.setProgressCompat(0, false);
+        progressIndicator.setVisibility(View.INVISIBLE);
+    }
+
+    /**
+     * The bar's fill for one progress event, out of {@link #DOWNLOAD_BAR_MAX}, or -1 when the
+     * response declared no length.
+     *
+     * <p>A fixed max rather than the byte count for two reasons: a {@code Content-Length} over 2 GiB
+     * does not fit the int the view takes, and an unknown length arrives as -1, which is not a max at
+     * all — it is the case that left a bar on screen that could never move. Hiding for -1 says less
+     * than animating an indeterminate bar would, and this panel has no spare frames to animate with.
+     */
+    static int downloadBarPermille(long bytesRead, long contentLength) {
+        if (contentLength <= 0L) {
+            return -1;
+        }
+        long permille = (Math.max(0L, bytesRead) * DOWNLOAD_BAR_MAX) / contentLength;
+        return (int) Math.min(permille, (long) DOWNLOAD_BAR_MAX);
     }
 
     // ------------------------------------------------------------------
@@ -4134,6 +5185,32 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                         // A destroyed activity cannot clear a view; the next display replaces it.
                     }
                     imageView.setImageDrawable(null);
+                    // The photo this view was holding is gone, so no later recovery may name it as what the
+                    // panel holds. Forgetting this is how a removed asset comes back as "what is on screen"
+                    // long after the operator asked for it to be forgotten.
+                    provenPhoto = null;
+                    // The wall is empty from here, so say that. Naming no asset would leave the removed
+                    // one as what is on screen — permanently, because if this was the only asset in the
+                    // pool, every later tick fails the same way and no display method ever runs again.
+                    // It is also the one state that must not be written as an image with an empty path:
+                    // a cleared panel claiming a photograph is the same false present tense as the bug this
+                    // record was built to remove. But "blank" is only the answer when the photo plane was
+                    // what the viewer was looking at — forgetting a photograph that was loading over a
+                    // displayed web page leaves the page on screen, so the remaining panel is derived from
+                    // the views rather than asserted here.
+                    //
+                    // And the attempt is restated with it, not left behind. panelNowProven deliberately does
+                    // not touch attempt, which is right for a display and wrong here: this is the one recovery
+                    // path that cannot go through revealPhotoView() (it has to empty the drawable, and
+                    // uncovering it would put the removed photo back), so nothing else would say "nothing is
+                    // being put up any more". Left unstated, the field that answers "what is in flight" named
+                    // an asset whose bytes were unlinked under it — media.attempt printed that phantom
+                    // forever whenever no later display runs, which is this method's own stated case — and
+                    // currentPanelAssetKey() kept attributing every undeclared diagnostic to the deleted
+                    // asset, where DebugBoard.visible then filtered those rows out as not-about-the-panel.
+                    PanelDisplay remaining = reproveTarget();
+                    setPanelAttempt(remaining);
+                    panelNowProven(remaining);
                 }
                 if (mediaManager != null) {
                     mediaManager.showNextImage(MainActivity.this);
@@ -4280,6 +5357,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         network.add("wifi", DeviceTelemetry.wifi(this));
         o.add("network", network);
 
+        // One snapshot of the panel — its content, its handoff count and its timestamp, which travel in one
+        // object precisely so a read cannot take them from two different moments. Everything below that
+        // describes the display reads `shown` or `panelSnapshot`, never the field again.
+        PanelState panelSnapshot = panelState;
+        PanelDisplay shown = panelSnapshot == null ? null : panelSnapshot.display;
+
         JsonObject media = new JsonObject();
         media.addProperty("rotationAssets", mediaManager.rotationListSize());
         media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
@@ -4310,6 +5393,36 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             current.addProperty("local", currentAsset.localPath != null);
             media.add("current", current);
         }
+        // What the panel holds, kept separate from what rotation selected rather than collapsed into it.
+        // The two differ by one posted UI runnable in normal operation, and a `current` that keeps
+        // advancing while `screen.generation` stops moving is the shape of a frame that has stopped
+        // painting — which one field naming both facts can never show.
+        JsonObject screen = new JsonObject();
+        if (shown == null) {
+            screen.addProperty("type", "none");
+        } else {
+            // VideoStateJson's mapper, not this file's: the record's null type means "nothing on the
+            // panel", and media.screen and video.showing must not spell the same state two ways.
+            screen.addProperty("type", VideoStateJson.mediaTypeName(shown.type));
+            if (!shown.assetKey.isEmpty()) {
+                screen.addProperty("key", shown.assetKey);
+            }
+            if (!shown.pathOrUrl.isEmpty()) {
+                screen.addProperty("pathOrUrl", shown.pathOrUrl);
+            }
+            if (!shown.engine.isEmpty()) {
+                screen.addProperty("engine", shown.engine);
+            }
+            if (!shown.stage.isEmpty()) {
+                screen.addProperty("stage", shown.stage);
+            }
+            // Handoffs, not intentions: the record's own number counts when the display was decided on,
+            // which for an asynchronously loaded image or a preparing clip is not when it reached the wall.
+            screen.addProperty("generation", panelSnapshot.changes);
+            screen.addProperty("sinceMs", panelSnapshot.changedAtMs);
+            screen.addProperty("attemptGeneration", shown.generation);
+        }
+        media.add("screen", screen);
         o.add("media", media);
 
         JsonObject input = new JsonObject();
@@ -4333,147 +5446,175 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // and why is it black", and a release frame that cannot say which engine it chose, which rung of
         // the ladder it is on, or whether a single frame ever composited leaves an operator staring at a
         // black panel with no evidence to act on. The TsPlayer-internal counters stay debug-only.
-        JsonObject video = new JsonObject();
-        video.addProperty("active", videoPlayer == tsPlayerController ? "TsPlayer" : "MediaPlayer");
-        video.addProperty("preferTsPlayer", preferTsPlayer);
-        // "available" here means <em>usable on this frame</em>, not "the .so happened to load": the
-        // platform test is written first so a board whose silicon has no vendor player never reaches
-        // the class, and never triggers the dlopen it would fail. Quoting an UnsatisfiedLinkError as
-        // the reason on such a frame would send an operator looking for a missing file that is not
-        // what is missing.
-        // "usable here" rather than "the .so loaded", and read from the captured fields: a frame the
-        // gate denied never initialized the class, so it has no linker error to report and saying
-        // `tsAvailable: false` without `tsSupported: false` would imply the opposite.
-        boolean tsUsable = tsAllowed && tsLibraryLoaded;
-        video.addProperty("tsSupported", tsAllowed);
-        video.addProperty("tsAvailable", tsUsable);
-        // Every input to the gate, so the decision can be rebuilt from the document instead of
-        // inferred from its outcome: a frame that says only "MediaPlayer" cannot be distinguished from
-        // one that was never going to say anything else, and that difference is the whole report.
-        JsonObject tsGate = new JsonObject();
-        tsGate.addProperty("silicon", tsSilicon);
-        tsGate.addProperty("modelProfile", platform());
-        tsGate.addProperty("modelAllows", tsModelAllows);
-        tsGate.addProperty("decidedBy", tsGateAxis);
-        tsGate.addProperty("buildFlag", BuildConfig.USE_TSPLAYER);
-        tsGate.addProperty("libraryLoaded", tsLibraryLoaded);
-        video.add("tsGate", tsGate);
+        //
+        // `shown` is the snapshot taken above, shared with the media block. The builder itself lives in
+        // VideoStateJson so the rule "describe only what the panel holds" is testable at all.
+        VideoStateJson.Frame frameFacts = new VideoStateJson.Frame();
+        frameFacts.engine = videoPlayer == tsPlayerController
+                ? VideoEngineReport.TS_PLAYER : VideoEngineReport.MEDIA_PLAYER;
+        frameFacts.preferTsPlayer = preferTsPlayer;
+        frameFacts.tsSupported = tsAllowed;
+        frameFacts.tsLibraryLoaded = tsLibraryLoaded;
+        frameFacts.tsLoadError = tsLoadError;
+        frameFacts.tsSilicon = tsSilicon;
+        frameFacts.modelProfile = platform();
+        frameFacts.tsModelAllows = tsModelAllows;
+        frameFacts.tsGateAxis = tsGateAxis;
+        frameFacts.buildFlag = BuildConfig.USE_TSPLAYER;
+        frameFacts.panelShape = lastFrameShape == null ? null : lastFrameShape.toString();
+        frameFacts.frameOrientation = lastFrameOrientation;
+        frameFacts.tsFallbacks = tsFallbackCount;
+        frameFacts.playbackRateX100 = videoPlaybackRateX100;
+        frameFacts.playbackRateMinX100 = videoPlaybackRateMinX100;
+        frameFacts.playbackRateMaxX100 = videoPlaybackRateMaxX100;
+        frameFacts.playbackRateSamples = videoPlaybackRateSamples;
+        frameFacts.debugBuild = BuildConfig.DEBUG;
+        o.add("video", VideoStateJson.build(shown, frameFacts, new StatePlayerProbe(shown)));
 
-        if (tsLoadError != null) {
-            video.addProperty("tsLoadError", tsLoadError);
+        // What a display path is putting on the panel right now, present only while that differs from what
+        // is provably up. Two facts, because they are two different moments: Glide has the new file loading
+        // and the old bitmap still showing, the platform player has the clip prepared and the photograph
+        // still covering it. Seeing both is what distinguishes "trying" from "stuck" from "lying".
+        //
+        // `parked` is the third of those, and the reason the attempt is not simply hidden while the panel is
+        // dark. A frame in quiet hours with an attempt that was interrupted mid-prepare is showing a display
+        // that will not land for hours, which looks exactly like a display that never lands — but the two
+        // need different answers, and hiding the attempt entirely (which an earlier revision of
+        // turnScreenOff did, by nulling it) destroyed the identity the paint poll needs to finish the reveal
+        // on waking. So the attempt stays, and says whether the panel is even allowed to paint.
+        PanelDisplay pending = attempt;
+        if (pending != null && pending != shown) {
+            JsonObject attemptJson = new JsonObject();
+            attemptJson.addProperty("type", VideoStateJson.mediaTypeName(pending.type));
+            if (!pending.assetKey.isEmpty()) {
+                attemptJson.addProperty("key", pending.assetKey);
+            }
+            if (!pending.pathOrUrl.isEmpty()) {
+                attemptJson.addProperty("pathOrUrl", pending.pathOrUrl);
+            }
+            if (!pending.engine.isEmpty()) {
+                attemptJson.addProperty("engine", pending.engine);
+            }
+            if (!pending.stage.isEmpty()) {
+                attemptJson.addProperty("stage", pending.stage);
+            }
+            attemptJson.addProperty("generation", pending.generation);
+            // The same predicate that parks the paint poll (runVideoPaintCheck), so the report says the
+            // panel is not allowed to paint exactly when the code watching it decided to stop trying.
+            attemptJson.addProperty("parked", paintingSuspended());
+            media.add("attempt", attemptJson);
         }
-        if (!activeVideoPath.isEmpty()) {
-            video.addProperty("path", activeVideoPath);
-            video.addProperty("stage", activeVideoStage);
-        }
-        // "painted" is only a claim where the engine can actually answer it. TsPlayer has no per-frame
-        // signal, so reporting true there would be a tautology — and a tautology on the one field this
-        // block exists to answer is worse than the gap it replaces.
-        boolean paintSignal = videoPlayer.supportsPaintSignal();
-        video.addProperty("paintSignal", paintSignal);
-        if (paintSignal) {
-            video.addProperty("painted", videoPaintProduced);
-            long lastFrameAtMs = videoPlayer.getLastFrameAtMs();
-            video.addProperty("lastFrameAgeMs", lastFrameAtMs > 0L
-                    ? (System.currentTimeMillis() - lastFrameAtMs) : -1L);
-        }
-        if (currentAsset != null && currentAsset.type == MediaType.VIDEO) {
-            video.addProperty("renderSilent", mediaManager.isRenderSilent(currentAsset.key()));
-        }
-        video.addProperty("rotation", lastVideoRotation);
-        video.addProperty("width", lastVideoWidth);
-        video.addProperty("height", lastVideoHeight);
-        if (lastVideoCodec != null) {
-            video.addProperty("codec", lastVideoCodec);
-        }
-        if (lastFrameOrientation != null) {
-            video.addProperty("frameOrientation", lastFrameOrientation);
-        }
-        // The number the aspect rule actually decided against, as opposed to the word derived from
-        // it. This is the one field that separates "the new rule is working" from "the new rule is
-        // dark and every clip kept its default engine" — with an unmeasured panel the predicate
-        // returns false for everything, and the frame looks exactly as it did before.
-        MediaCompatibility.PanelShape reportedPanel = lastFrameShape;
-        video.addProperty("panelShape", reportedPanel == null ? "unmeasured" : reportedPanel.toString());
-        VideoHeaderProbe.StreamStats stream = lastVideoStats;
-        video.addProperty("fpsMilli", stream.fpsMilli);
-        video.addProperty("avgFrameBytes", stream.avgFrameBytes);
-        video.addProperty("peakFrameBytes", stream.peakFrameBytes);
-        video.addProperty("bitRateBps", stream.bitRateBps);
-        video.addProperty("fileDurationMs", stream.durationMs);
-        video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
-                lastVideoWidth, lastVideoHeight, stream.fpsMilli));
-        // From whichever player is actually showing the clip. These used to be read off
-        // tsVideoView unconditionally, so on the MediaPlayer path they reported 0 — which is
-        // how the slow-playback investigation ended up reconstructing a lap from the stall
-        // log's timestamps instead of reading the position it had already measured.
-        video.addProperty("durationMs", activeDurationMs());
-        video.addProperty("positionMs", activePositionMs());
+
         if (BuildConfig.DEBUG) {
-            video.addProperty("tsFallbacks", tsFallbackCount);
-            video.addProperty("playbackRateX100", videoPlaybackRateX100);
-            video.addProperty("playbackRateMinX100", videoPlaybackRateMinX100);
-            video.addProperty("playbackRateMaxX100", videoPlaybackRateMaxX100);
-            video.addProperty("playbackRateSamples", videoPlaybackRateSamples);
-            // The file on screen, read from the attempt rather than from one engine's view. It used to
-            // come from tsVideoView like the rest of this cluster, so a clip composited by MediaPlayer
-            // reported whichever TsPlayer file this process had last played.
-            if (activeVideoPath != null && !activeVideoPath.isEmpty()) {
-                video.addProperty("path", activeVideoPath);
-            }
-            // Everything below belongs to the engine that is actually compositing. These were read off
-            // tsVideoView unconditionally, so for a MediaPlayer clip `generation`, `playerCreated`,
-            // `surfaceReady` and the whole loop-perf object described a view that is hidden and
-            // playing nothing — and this class of clip is about to become the majority of an EO2's
-            // library, since every non-native aspect now composites here.
-            boolean tsActive = videoPlayer == tsPlayerController;
-            if (tsActive && tsVideoView != null) {
-                video.addProperty("generation", tsVideoView.getLoopGeneration());
-                video.addProperty("errors", tsVideoView.getVideoErrorCount());
-                video.addProperty("playerCreated", tsVideoView.isPlayerCreated());
-                video.addProperty("surfaceReady", tsVideoView.isSurfaceReady());
-                video.addProperty("recreatingForLoop", tsVideoView.isRecreatingForLoop());
-                JsonObject loopPerf = new JsonObject();
-                loopPerf.addProperty("engine", VideoEngineReport.TS_PLAYER);
-                loopPerf.addProperty("restartLatencyMs", tsVideoView.getLastRestartLatencyMs());
-                loopPerf.addProperty("createPlayerMs", tsVideoView.getLastCreatePlayerMs());
-                loopPerf.addProperty("setSurfaceMs", tsVideoView.getLastSetSurfaceMs());
-                loopPerf.addProperty("startMs", tsVideoView.getLastStartMs());
-                loopPerf.addProperty("restartToPlayingMs", tsVideoView.getLastRestartToPlayingMs());
-                loopPerf.addProperty("endToPlayingMs", tsVideoView.getLastEndToPlayingMs());
-                loopPerf.addProperty("loopCycleMs", tsVideoView.getLastLoopCycleMs());
-                loopPerf.addProperty("posAtTriggerMs", tsVideoView.getLastPosAtTriggerMs());
-                loopPerf.addProperty("restartMethod", tsVideoView.getLastRestartMethod());
-                video.add("loopPerf", loopPerf);
-            } else if (!tsActive) {
-                // NOT the same measurement as the TsPlayer block above, and deliberately not given
-                // the same key. With setLooping(true) the platform player loops inside itself and
-                // never reports an end of stream, so a clip that is looping perfectly produces no
-                // event here at all: these two fields count only the restarts this app issues, from
-                // onVideoEnd or the position watchdog's seam. A healthy MediaPlayer lap therefore
-                // reads manualLoopRestarts=0 and manualLoopCycleMs=-1 — which is the design, not a
-                // stall. Absence of a number is not evidence of a stopped clip; `painted` and
-                // `playbackRate*` are the liveness fields on this engine.
-                JsonObject loopPerf = new JsonObject();
-                loopPerf.addProperty("engine", VideoEngineReport.MEDIA_PLAYER);
-                loopPerf.addProperty("manualLoopRestarts", mediaManualLoopRestarts);
-                loopPerf.addProperty("manualLoopCycleMs", mediaManualLoopCycleMs);
-                video.add("loopPerf", loopPerf);
-            }
-        }
-        o.add("video", video);
-
-        if (BuildConfig.DEBUG && !debugInformation.isEmpty()) {
-            JsonObject debug = new JsonObject();
+            // The same filtered view the panel renders, so /state can never print a row about an asset the
+            // wall no longer holds while the overlay correctly omits it. One filter, two surfaces.
+            // Filtered by the <em>snapshot</em> every other panel-scoped field in this response was built
+            // from, not by re-reading the field: a handoff landing during the update/network/telemetry reads
+            // above would otherwise emit a document whose video.showing describes the outgoing clip while
+            // debug["on screen"] describes the incoming photograph — one response, two panels.
+            Map<String, String> printable;
             synchronized (debugInformation) {
-                for (Map.Entry<String, String> entry : debugInformation.entrySet()) {
+                printable = DebugBoard.visible(debugInformation, shown);
+            }
+            if (!printable.isEmpty()) {
+                JsonObject debug = new JsonObject();
+                for (Map.Entry<String, String> entry : printable.entrySet()) {
                     debug.addProperty(entry.getKey(), entry.getValue());
                 }
+                o.add("debug", debug);
             }
-            o.add("debug", debug);
         }
 
         return o.toString();
+    }
+
+    /**
+     * The live player reads {@code /state}'s video block is allowed to make, and only for a clip the
+     * panel actually holds.
+     *
+     * <p>Behind an interface so {@link VideoStateJson} can be tested without a player, and so the
+     * question "did the report touch the engine?" has one answer in the code rather than one per field.
+     * Calling these while a photograph is on the screen meant asking a released player for its position
+     * from the web server's thread, at whatever moment the UI thread was tearing it down.
+     */
+    private final class StatePlayerProbe implements VideoStateJson.PlayerProbe {
+
+        /** The record this document was built for. Anything else and the live reads below are meaningless. */
+        private final PanelDisplay subject;
+
+        StatePlayerProbe(PanelDisplay subject) {
+            this.subject = subject;
+        }
+
+        @Override
+        public boolean stale() {
+            if (panel() != subject) {
+                return true;
+            }
+            // The panel check alone is not enough for a clip. On a video-to-video change the outgoing clip
+            // is <em>still the panel</em> — the incoming one has not proven a frame yet — while the
+            // controller has already been handed the new file, so reading position now would attach the
+            // incoming attempt's numbers to the outgoing clip's path. The controller's own ownership is the
+            // only test that sees this.
+            return subject.showsVideo() && videoCompositing != subject;
+        }
+
+        @Override
+        public boolean painted() {
+            return videoPaintProduced;
+        }
+
+        @Override
+        public long lastFrameAtMs() {
+            VideoPlayerController active = videoPlayer;
+            return active == null ? 0L : active.getLastFrameAtMs();
+        }
+
+        @Override
+        public int durationMs() {
+            return activeDurationMs();
+        }
+
+        @Override
+        public int positionMs() {
+            return activePositionMs();
+        }
+
+        @Override
+        public VideoStateJson.NativeCounters nativeCounters() {
+            if (tsVideoView == null) {
+                return null;
+            }
+            VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
+            counters.generation = tsVideoView.getLoopGeneration();
+            counters.errors = tsVideoView.getVideoErrorCount();
+            counters.playerCreated = tsVideoView.isPlayerCreated();
+            counters.surfaceReady = tsVideoView.isSurfaceReady();
+            counters.recreatingForLoop = tsVideoView.isRecreatingForLoop();
+            counters.restartLatencyMs = tsVideoView.getLastRestartLatencyMs();
+            counters.createPlayerMs = tsVideoView.getLastCreatePlayerMs();
+            counters.setSurfaceMs = tsVideoView.getLastSetSurfaceMs();
+            counters.startMs = tsVideoView.getLastStartMs();
+            counters.restartToPlayingMs = tsVideoView.getLastRestartToPlayingMs();
+            counters.endToPlayingMs = tsVideoView.getLastEndToPlayingMs();
+            counters.loopCycleMs = tsVideoView.getLastLoopCycleMs();
+            counters.posAtTriggerMs = tsVideoView.getLastPosAtTriggerMs();
+            counters.restartMethod = tsVideoView.getLastRestartMethod();
+            return counters;
+        }
+
+        @Override
+        public VideoStateJson.ManualCounters manualCounters() {
+            VideoStateJson.ManualCounters counters = new VideoStateJson.ManualCounters();
+            counters.manualLoopRestarts = mediaManualLoopRestarts;
+            counters.manualLoopCycleMs = mediaManualLoopCycleMs;
+            return counters;
+        }
+
+        @Override
+        public boolean renderSilent(String assetKey) {
+            return mediaManager != null && mediaManager.isRenderSilent(assetKey);
+        }
     }
 
     @Override

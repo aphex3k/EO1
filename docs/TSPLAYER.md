@@ -191,8 +191,15 @@ container the probe cannot read (an `.mkv`, whose angle lives in a Matroska elem
 material by the engine's reading and simply unjudgeable by the fetcher's. The rotation term stays local
 to routing: it asks whether a player can turn the picture, which is not the question a source decision
 asks. The decision is
-logged and reported via `debugInformationProvided` plus the debug `/state` `video` block
-(`rotation`, `width`, `height`, `frameOrientation`; `active` shows the effective player).
+returned as a `VideoRoutingDecision` rather than stored — and reaches the log through `logDurable()` (the
+board's `videoRouting` row is derived from the record, so it retires with the clip and a derived row never
+reaches `AppLogger`) and the `/state` `video` block
+(`rotation`, `width`, `height`, `codec` and the rest of the measurement). `engine` names the effective
+player — it was called `active` until this release, which is why nothing in the block could say whether a
+clip was on screen at all. Those fields are present only while a clip *is* the thing on the panel: they
+describe the file, so a frame displaying a photograph reports none of them. `frameOrientation` and
+`panelShape` are the exception, because they describe the wall, and `panelShape: "unmeasured"` is the only
+way to tell a dark aspect rule from a working one.
 
 The fallback view performs **center-crop (aspect-fill)**: `TextureVideoView.updateTextureViewSize`
 compensates the TextureView's buffer-stretch mapping with per-axis factors (`cropScaleFactors`), so
