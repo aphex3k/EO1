@@ -338,5 +338,14 @@ public class ApiServiceGenerator {
 
     public interface ProgressListener {
         void clientProgressUpdates(long bytesRead, long contentLength, boolean done, @Nullable HttpUrl url);
+
+        /**
+         * No download is in flight any more, by any route. Says nothing about whether the last one
+         * succeeded: {@link #clientProgressUpdates}'s {@code done} is the only statement that a body
+         * reached its end, and a read that throws instead of returning -1 never produces one. A
+         * listener that shows a transfer must clear it here, or a truncated download leaves the
+         * indicator up until some later transfer happens to finish cleanly.
+         */
+        void downloadCycleClosed();
     }
 }
