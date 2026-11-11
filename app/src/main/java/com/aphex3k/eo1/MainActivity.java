@@ -539,20 +539,44 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** Liveness ladder; runs on its own timer thread, so it keeps working if we are wedged. */
     private KioskWatchdog kioskWatchdog;
     /**
-     * When the display loop last did something visible — a rotation that reached the screen, or a
-     * manual {@code next}. Deliberately also refreshed when the asset turns out to be the one
-     * already on screen: the watchdog judges loop liveness, not decodability, and a one-asset pool
-     * must not look like a wedge.
+     * When the display loop last attempted something — a rotation tick, a manual {@code next}, a
+     * display call that reached the panel's door. Diagnostic only: this is the "is the loop turning"
+     * half of the pair reported by {@code /state} and a report, and it is stamped by
+     * {@link #runOnTimer} one statement <em>before</em> {@code showNextImage} resolves, so it says
+     * nothing whatsoever about whether content got on screen. It used to be the clock
+     * {@link KioskWatchdog} escalated on, which is how a frame that kept ticking while drawing nothing
+     * sat white for 19.8 hours with {@code autoReboot} granted — the timer refreshed the very age the
+     * ladder was measuring. See {@link #lastDisplayProvenAtMs}, and do not reconnect it to the ladder.
      */
     private volatile long lastRotationActivityMs = 0L;
     /**
      * When something was last <em>proven</em> on the panel — a Glide resource ready, a page finished,
-     * a video surface revealed. Next to {@link #lastRotationActivityMs} this is the pair that makes a
-     * wedge visible: that clock is refreshed on every timer tick before {@code showNextImage} resolves
-     * (see {@link #runOnTimer}), so a frame whose rotation loop is alive and displaying nothing reports
-     * itself as fresh. Nothing here changes that clock — changing it would change when frames reboot.
+     * a video surface revealed. This is the clock {@link KioskWatchdog} escalates on, and only a proof
+     * point may advance it: a timer tick, a rotation attempt, a display call that never reached the
+     * screen and a recovery attempt all leave it alone, because anything that runs on a schedule and
+     * moves this field re-creates the self-feeding clock above.
+     *
+     * <p>One exception, and it is a display rather than an attempt:
+     * {@link #noteDisplayUnchanged(String)}, where the rotation lands on the asset already on the panel
+     * and there is therefore nothing new to prove. It is not taken on that claim — it asks
+     * {@link #reproveTarget()} whether the wall still holds the content, because the retained identity
+     * can outlive it. Zero until the first proof, and a wall holding nothing matches nothing, so a
+     * process that has never drawn anything cannot exempt itself, however many ticks it has had.
+     *
+     * <p>What this proves is that the app handed content to its own views on a main thread that was
+     * running. It cannot prove that the compositor presented them: a Glide callback fires whether or
+     * not surfaceflinger is alive. Per-frame pixel evidence exists only on the MediaPlayer video path
+     * ({@code onSurfaceTextureUpdated}), so a wedge that leaves the app healthy and the display dead
+     * after one successful draw is still invisible here. That is a narrower blind spot than the one
+     * this field replaced, not a closed one.
      */
     private volatile long lastDisplayProvenAtMs = 0L;
+    /**
+     * {@link #onCreate}'s instant: what the wedge clock measures from while nothing has been proven
+     * yet, so a frame that has never reached first draw ages out instead of reading as healthy. Set
+     * once per Activity creation and never again — see {@link KioskWatchdog#escalationClockMs}.
+     */
+    private volatile long displayClockAnchorMs = 0L;
     private volatile long displayProvenCount;
     /** Displays that fell to the next rung of the ladder. A run rate, not a verdict on the library. */
     private volatile long displayFailedCount;
@@ -776,10 +800,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         configureMqttManager();
 
         mainLoopAckAtMs = System.currentTimeMillis();
-        // Start the staleness clock at process start: a frame that has never gotten anything on
-        // screen — relaunched into a dead network, which is exactly the 2026-10-13 state — must age
-        // out and escalate too, not read as "healthy because nothing has happened yet".
+        // Start both clocks at process start. The rotation clock is a diagnostic of loop liveness;
+        // the anchor is the wedge clock until a proof point takes over, because a frame that has never
+        // gotten anything on screen — relaunched into a dead network, which is exactly the 2026-10-13
+        // state, or into a wedged surfaceflinger, which is the 2026-11-08 one — must age out and
+        // escalate too, not read as "healthy because nothing has happened yet".
         lastRotationActivityMs = mainLoopAckAtMs;
+        displayClockAnchorMs = mainLoopAckAtMs;
         this.kioskWatchdog = new KioskWatchdog(this);
         this.kioskWatchdog.start();
 
@@ -951,6 +978,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         logScreenAndTimerState();
         if (brightnessManager.getShouldTheScreenBeOn()) {
             applyCurrentBrightness();
+            // Loop liveness only, and it must stay that way. Stamping this before the call below
+            // means the clock advances whether or not anything reaches the panel, which is exactly why
+            // KioskWatchdog reads lastDisplayProvenAtMs instead; wiring this line back into the ladder
+            // would re-create the 19.8-hour white frame of 2026-11-08.
             lastRotationActivityMs = System.currentTimeMillis();
             mediaManager.showNextImage(this);
         } else {
@@ -2354,6 +2385,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             if (!panelIsDark()) {
                 revealPhotoView();
             }
+            noteDisplayUnchanged(file.getAbsolutePath());
             return;
         }
 
@@ -2946,6 +2978,32 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     /**
+     * The rotation landed on the asset already on the panel, so there was nothing new to prove.
+     *
+     * <p>This is the one non-proof that may refresh the wedge clock, and it is what keeps a
+     * legitimately one-asset library (a single uploaded photo, a single looping clip) off the ladder:
+     * re-decoding it every interval to satisfy a watchdog would be the per-duration recreate this
+     * codebase already rejects for video.
+     *
+     * <p><b>The claim, however, belongs to {@code lastVisibleAsset}, and that field is retained.</b> A
+     * photograph Glide refused, a clip whose player this path released, and a web page that never
+     * painted can each leave the name pointing at content that is no longer on the wall — so renewing
+     * on the name alone lets a frame whose every display fails keep its wedge clock warm forever,
+     * which is the failure this clock exists to detect. It therefore asks the view tree:
+     * {@link #reproveTarget()} is the only authority on what is visible, and it cannot go stale because
+     * it is not stored. The clock moves only while the panel genuinely still holds this content.
+     *
+     * <p>That question subsumes the guard this method used to carry. A process that has never proven a
+     * display has nothing on the wall to match — the 2026-11-08 shape, HOME relaunched and never
+     * reaching first draw — so it keeps aging and keeps climbing.
+     */
+    private void noteDisplayUnchanged(String pathOrUrl) {
+        if (pathOrUrl != null && pathOrUrl.equals(reproveTarget().pathOrUrl)) {
+            lastDisplayProvenAtMs = System.currentTimeMillis();
+        }
+    }
+
+    /**
      * Moves one asset one rung down the display ladder. Nothing is flagged here: an asset is
      * only incompatible with this device once its {@link DisplayStage#FALLBACK} display failed
      * too, which is the rung below.
@@ -3323,9 +3381,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         return MILLIS * Math.max(1, settingsManager.getConfiguration().interval);
     }
 
+    /**
+     * The clock the kiosk ladder escalates on. Until 2026-11-08 this returned
+     * {@link #lastRotationActivityMs}, which {@link #runOnTimer} stamps before it asks for the next
+     * asset — a clock that feeds itself, so {@code stale} could never pass one rotation interval and
+     * no rung above {@code LEVEL_NONE} was reachable on a frame that kept ticking and never drew.
+     */
     @Override
-    public long lastDisplayAtMs() {
-        return lastRotationActivityMs;
+    public long lastDisplayProvenAtMs() {
+        return KioskWatchdog.escalationClockMs(lastDisplayProvenAtMs, displayClockAnchorMs);
     }
 
     @Override
@@ -3347,6 +3411,30 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     public long offlineMs() {
         long since = offlineSinceMs;
         return since == 0L ? 0L : Math.max(0L, System.currentTimeMillis() - since);
+    }
+
+    /**
+     * Nothing in the rotation pool and no network being waited for, which KioskWatchdog holds its
+     * ladder on — an empty library is not a wedge, and a rung that restarts the app only re-seeds the
+     * wedge clock the ladder reads.
+     *
+     * <p>{@code poolKeyCount()} rather than anything reading {@code MediaManager.pool}: that list
+     * belongs to the rotation thread, and this is called on the watchdog's {@code Timer}, the one
+     * thread that has to keep working when everything it watches is stuck. The network half is
+     * {@link #offlineMs()} for the same reason — it is a field the connection callbacks already
+     * maintain, where {@code networkAvailable()} would be a binder call into a framework that may be
+     * the wedged thing. A frame that has never received a connection callback therefore reads as
+     * "not offline", which is the safe direction: it only ever withholds escalation for the seconds
+     * until that callback lands, against a ladder whose first threshold is twenty minutes. The third
+     * argument is {@link MediaManager#catalogPassCompleted()}, which is what separates "the library is
+     * empty" from "the library has not been asked yet" — the rule itself is
+     * {@link KioskWatchdog#outOfMaterial}, pure, so the conjunction has a JVM test rather than living
+     * only in this call site's argument list.
+     */
+    @Override
+    public boolean nothingToDisplay() {
+        return KioskWatchdog.outOfMaterial(mediaManager.poolKeyCount() == 0,
+                mediaManager.catalogPassCompleted(), offlineMs());
     }
 
     /**
@@ -3391,10 +3479,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void redrawCurrentAsset() {
         try {
             Log.i(TAG, "watchdog: forcing player teardown before the next display");
-            // Deliberately does not touch lastRotationActivityMs: a recovery attempt is not a
-            // display. If this rotation really lands, displayPicture/displayVideo/displayWebsite
-            // refreshes the clock; if it does not, the ladder keeps climbing to the network and
-            // reboot rungs.
+            // Deliberately touches neither clock: a recovery attempt is not a display. If this
+            // rotation really lands, the proof point in displayPicture/displayVideo (or the still it
+            // falls back to) refreshes the wedge clock; if it does not, nothing moves it and the ladder
+            // keeps climbing to the network and reboot rungs. Stamping either clock here would be the
+            // self-feeding bug again, this time from inside the ladder's own rung.
             lastVisibleAsset = "";
             cancelVideoWatchdog();
             releaseVideoDisplay();
@@ -3777,16 +3866,19 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 .append(" (activity #").append(sActivityCreateCount)
                 .append(", self-restarts ").append(selfRestartCount).append(")\n");
         sb.append("display proven    : ")
-                .append(lastDisplayProvenAtMs == 0L ? "never"
+                .append(lastDisplayProvenAtMs == 0L
+                        ? "never since this Activity started — the ladder ages from that instant"
                         : DiagnosticsReport.localTime(lastDisplayProvenAtMs)
                                 + " (" + ((now - lastDisplayProvenAtMs) / 1000L) + "s ago)")
-                .append("  count=").append(displayProvenCount).append('\n');
+                .append("  count=").append(displayProvenCount)
+                .append("  [the wedge clock: KioskWatchdog escalates on this]\n");
         sb.append("display failures  : ").append(displayFailedCount).append('\n');
         sb.append("rotation clock    : ")
                 .append(lastRotationActivityMs == 0L ? "never"
                         : DiagnosticsReport.localTime(lastRotationActivityMs)
                                 + " (" + ((now - lastRotationActivityMs) / 1000L) + "s ago)")
-                .append("  [refreshed by every timer tick — see lastDisplayProvenAtMs]\n");
+                .append("  [loop liveness only — refreshed by every timer tick, never by a display "
+                        + "reaching the panel; NOT what the ladder reads]\n");
         sb.append("rotation ticks    : ").append(timerTickCount)
                 .append("  next at ").append(nextRotationAtMs == 0L ? "unscheduled"
                         : DiagnosticsReport.localTime(nextRotationAtMs)).append('\n');
@@ -4017,6 +4109,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.addProperty("downloadInFlightMs", downloadInFlightMs());
         o.addProperty("offlineMs", offlineMs());
         o.addProperty("autoReboot", autoRebootEnabled());
+        // Why a stale frame can be sitting on a low rung on purpose: nothing in the pool, so every
+        // rung above the two cheap retries would only restart an app that comes back equally empty.
+        o.addProperty("nothingToDisplay", nothingToDisplay());
         return o;
     }
 
@@ -4047,6 +4142,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         if (file.getAbsolutePath().equals(lastVisibleAsset)) {
             Log.i(TAG, "displayVideo: skip same asset " + assetId);
+            // Gated on the view tree, not on the retained name: this is the path where the claim is
+            // weakest, because a failed clip releases its player without touching lastVisibleAsset, and
+            // a clip that painted nothing must not renew the clock the ladder is climbing on.
+            noteDisplayUnchanged(file.getAbsolutePath());
             return;
         }
 
@@ -4057,8 +4156,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
         // A video this device has already rendered nothing from, at every rung, is not worth another
         // black interval: show the still the server can make instead. Judged before the player is
-        // touched, so the clip is not even decoded on the way. Stamps the rotation clock because a
-        // still preview is a display — the kiosk watchdog must not read this as a wedge.
+        // touched, so the clip is not even decoded on the way. The stamp is loop liveness; the still
+        // itself proves on the panel through displayPicture's Glide callback, and if it never gets
+        // there the wedge clock keeps aging, which is the correct thing to report.
         if (stage == DisplayStage.ORIGINAL && mediaManager != null
                 && mediaManager.isRenderSilent(assetId)) {
             lastRotationActivityMs = System.currentTimeMillis();
@@ -5293,7 +5393,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         JsonObject media = new JsonObject();
         media.addProperty("rotationAssets", mediaManager.rotationListSize());
         media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
-        media.addProperty("lastDisplayAtMs", lastRotationActivityMs);
+        // Two clocks, two different claims, and the names say which is which: the first is the wedge
+        // clock the ladder escalates on, the second only proves the timer is turning over. A reader
+        // comparing them is reading the diagnosis — proven old while ticked fresh means a loop that is
+        // alive and displaying nothing, which is the 2026-11-08 failure.
+        media.addProperty("lastDisplayProvenAtMs", lastDisplayProvenAtMs());
+        media.addProperty("lastRotationTickAtMs", lastRotationActivityMs);
         MediaAsset currentAsset = mediaManager.getCurrentAsset();
         if (currentAsset != null) {
             JsonObject current = new JsonObject();

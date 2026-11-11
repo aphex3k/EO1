@@ -7,12 +7,21 @@ import java.util.TimerTask;
  * Liveness watchdog for an unattended frame.
  *
  * <p>Guards one invariant: <b>while the screen should be on, the frame must keep putting new
- * content on it.</b> Every display path in the app ends up in {@code MainActivity.displayPicture}
- * or {@code displayVideo}; if neither has run for {@link #staleLimitMs(long)}, something is wedged
- * — a lost timer tick, a download that never finishes, a main thread blocked in a dead framework's
- * binder call, or a network stack that never came back after a framework restart. None of those are
- * covered by the existing video watchdog, which only watches MediaPlayer position while the
- * rotation loop is already running.
+ * content on it.</b> Every display path in the app ends at a proof point — a Glide resource ready, a
+ * page finished, a video surface revealed — and if none has been reached for
+ * {@link #staleLimitMs(long)}, something is wedged: a lost timer tick, a download that never
+ * finishes, a main thread blocked in a dead framework's binder call, or a network stack that never
+ * came back after a framework restart. None of those are covered by the existing video watchdog,
+ * which only watches MediaPlayer position while the rotation loop is already running.
+ *
+ * <p>The age is therefore measured in <b>proofs, not attempts</b>, and that distinction is the whole
+ * of a 19.8-hour outage. Until 2026-11-08 the ladder read a clock that {@code MainActivity}'s
+ * rotation timer stamped one statement <em>before</em> it asked for the next asset, so on a frame
+ * whose loop was alive and whose displays all failed, every tick reset the age the ladder was
+ * measuring: {@code stale} never rose above one rotation interval against a 20-minute limit, no rung
+ * above {@code LEVEL_NONE} ever fired, and the reboot rung stayed unreachable on a frame whose
+ * operator had granted it. Only a clock that a schedule cannot advance is evidence of a wedge — see
+ * {@link Host#lastDisplayProvenAtMs()} and {@link #escalationClockMs}.
  *
  * <p>Runs on its own {@link Timer} thread rather than the activity's {@code Handler} on purpose:
  * the 2026-10-13 incident blocked the main thread for 15 minutes in a binder call into a deadlocked
@@ -117,8 +126,16 @@ public final class KioskWatchdog {
         /** Configured rotation interval in ms. */
         long intervalMs();
 
-        /** When something was last put on screen; 0 if never. */
-        long lastDisplayAtMs();
+        /**
+         * When something was last <em>proven</em> on the panel, and the only clock the ladder may
+         * escalate on. A timer tick, a rotation attempt and a recovery attempt must all leave it
+         * alone: it is the age the ladder measures, so anything that fires on a schedule and advances
+         * it pins {@link #staleMs} to that schedule's period, however completely the frame has stopped
+         * drawing. Report the instant this process started wanting a display while nothing has been
+         * proven yet — see {@link #escalationClockMs} — because a frame that has never drawn anything
+         * must age out and escalate rather than read as healthy.
+         */
+        long lastDisplayProvenAtMs();
 
         /** How long a download has been in flight; 0 when nothing is downloading. */
         long downloadInFlightMs();
@@ -127,6 +144,15 @@ public final class KioskWatchdog {
 
         /** How long we have wanted a network and not had one; 0 while connected. */
         long offlineMs();
+
+        /**
+         * True when the frame has nothing it could put on the panel — an empty rotation pool, with a
+         * network that is not being waited for. This is not a wedge: there is no asset for the next
+         * rotation to show, so every rung above the cheap retries restarts an app that will come back
+         * with the same empty pool, and because a restart re-seeds the wedge clock, an empty library
+         * would climb the ladder forever. See the cap in {@link #evaluate}.
+         */
+        boolean nothingToDisplay();
 
         /**
          * A counter that increases whenever the main thread runs anything the activity tracks —
@@ -194,7 +220,16 @@ public final class KioskWatchdog {
      * is anchored by {@code MainActivity} at {@code onCreate} instead.
      */
     private boolean lastTickScreenShouldBeOn = true;
-    /** When the screen last went from should-be-off to should-be-on; clamps how old a wedge can look. */
+    /**
+     * When the screen last went from should-be-off to should-be-on; clamps how old a wedge can look.
+     *
+     * <p>Still exactly what it was for with a proven-display clock, and more so: the clock the ladder
+     * now reads deliberately does <em>not</em> advance while the panel is dark (nothing is displayed
+     * during quiet hours, and that is the schedule working), so without this clamp the first tick
+     * after a long night would age the frame by the whole dark window and jump straight to the reboot
+     * rung. Both {@link #evaluate} and {@link #staleMsNow} apply it as a {@code max}, so the ladder and
+     * a diagnostics report can never disagree about a frame that has just woken.
+     */
     private long screenWokeAtMs = 0L;
     private int ticks = 0;
     private String lastAction = "none";
@@ -261,18 +296,57 @@ public final class KioskWatchdog {
     }
 
     /**
-     * Age of the last thing shown on screen. Zero (healthy) while the screen should be off, or
-     * before the first display. This is the pure arithmetic only — callers must not feed a
-     * {@code lastDisplayAtMs} older than the last time the screen legitimately turned back on
+     * The instant the wedge clock is measured from: the last proven display, or — while this process
+     * has never proven one — the instant it started trying.
+     *
+     * <p>The second half is why a frame that never reached first draw escalates at all:
+     * {@link #staleMs} answers 0 for a clock that has never been set, which would otherwise make
+     * "nothing has ever been displayed" indistinguishable from "healthy". Anchoring at the process
+     * start is the same choice {@code MainActivity.onCreate} made when it seeded the old rotation
+     * clock, for the same reason (the 2026-10-13 relaunch into a dead network), and it stays bounded:
+     * a process that dies before drawing anything starts its own clock over, so a crash loop is aged
+     * per process rather than accumulating toward a reboot across a hundred of them.
+     *
+     * <p>Pure, and deliberately separated from the field it reads: the clock's <em>source</em> sat
+     * inside an {@code Activity} and no JVM test could reach it, which is how a self-feeding tick
+     * clock drove the ladder for a whole release. See {@code KioskWatchdogTest}.
+     */
+    public static long escalationClockMs(long lastDisplayProvenAtMs, long processStartMs) {
+        return lastDisplayProvenAtMs != 0L ? lastDisplayProvenAtMs : processStartMs;
+    }
+
+    /**
+     * Whether "nothing to display" is the honest reading of an empty rotation pool, in which case the
+     * ladder holds at its cheap retries rather than climbing (see the cap in {@link #evaluate}).
+     *
+     * <p>All three terms are needed, and the third is the one that is easy to lose. A pool with zero
+     * keys is also what a catalog pass <em>in flight</em> looks like — {@code rebuildPool()} clears the
+     * keys before it fetches — so without "has a pass finished" a hung fetch on a live link parks the
+     * frame below self-restart, the one rung that clears a stuck worker, for as long as the question
+     * goes unanswered. And an empty pool while a network is being waited for is the 2026-10-13 state,
+     * which rungs 3 and 5 exist to recover. An unknown is not a measurement.
+     *
+     * <p>Pure, for the same reason as {@link #escalationClockMs}: it is the rule, and the rule is what
+     * has to be testable outside an {@code Activity}.
+     */
+    public static boolean outOfMaterial(boolean poolEmpty, boolean catalogPassCompleted,
+                                        long offlineMs) {
+        return poolEmpty && catalogPassCompleted && offlineMs == 0L;
+    }
+
+    /**
+     * Age of the last thing <em>proven</em> on the panel. Zero (healthy) while the screen should be
+     * off, or before the first display. This is the pure arithmetic only — callers must not feed a
+     * {@code lastDisplayProvenAtMs} older than the last time the screen legitimately turned back on
      * (see {@link #evaluate}'s {@code screenWokeAtMs} clamp), or a frame that was simply meant to
      * be dark for a while would count its whole quiet period as a wedge the moment it wakes.
      */
-    public static long staleMs(boolean screenShouldBeOn, long nowMs, long lastDisplayAtMs,
+    public static long staleMs(boolean screenShouldBeOn, long nowMs, long lastDisplayProvenAtMs,
                                long downloadInFlightMs) {
-        if (!screenShouldBeOn || lastDisplayAtMs <= 0L) {
+        if (!screenShouldBeOn || lastDisplayProvenAtMs <= 0L) {
             return 0L;
         }
-        long displayAge = Math.max(0L, nowMs - lastDisplayAtMs);
+        long displayAge = Math.max(0L, nowMs - lastDisplayProvenAtMs);
         // A download that never completes freezes the rotation no matter how recent the last
         // display was — and a stuck progress bar is exactly what a user notices.
         return Math.max(displayAge, downloadInFlightMs);
@@ -333,7 +407,11 @@ public final class KioskWatchdog {
         boolean paused = host.isPaused();
         lastPausedObserved = paused;
         lastPausedObservedAtMs = now;
-        long stale = staleMs(screenOn, now, Math.max(host.lastDisplayAtMs(), screenWokeAtMs),
+        // Same reason as paused: the cap below and the heartbeat line both want one answer per tick,
+        // and the host implements it from state it already holds rather than a call that could block
+        // this thread — which is the only thread guaranteed to survive a wedged framework.
+        boolean emptyPool = host.nothingToDisplay();
+        long stale = staleMs(screenOn, now, Math.max(host.lastDisplayProvenAtMs(), screenWokeAtMs),
                 host.downloadInFlightMs());
         // Progress, not promptness: a main thread that acks two minutes late has still emptied its
         // queue and is working. Only an unchanged counter means it never got to anything.
@@ -346,6 +424,19 @@ public final class KioskWatchdog {
         lastProgressToken = token;
         boolean mainLoopDead = probeMisses >= MAIN_LOOP_DEAD_TICKS;
         int wanted = requiredLevel(stale, host.intervalMs());
+        if (emptyPool && wanted > LEVEL_RECOVER_PLAYBACK) {
+            // Nothing in the pool, and no network being waited for. The panel cannot change, and no
+            // rung can make it: rung 1 and 2 are still worth one attempt each (a pool that came up
+            // empty in the middle of a config reload is real, and the rotation retries the fetch every
+            // tick anyway), but past them every remaining rung restarts the app into the same empty
+            // pool. That is not merely useless — a restart re-seeds the wedge clock the ladder reads,
+            // so an empty library would climb, restart, and climb again for as long as it stayed
+            // empty, and each pass replaces the photo still on the panel with a blank one. A hard
+            // reboot on top of that is the loop AGENTS.md forbids. Being offline is excluded from this
+            // by the host: a frame relaunched into a dead network has an empty pool too, and climbing
+            // to the repair and reboot rungs is the documented cure for exactly that (2026-10-13).
+            wanted = LEVEL_RECOVER_PLAYBACK;
+        }
 
         if (wanted == LEVEL_NONE && !mainLoopDead && actedLevel != LEVEL_NONE) {
             actedLevel = LEVEL_NONE;
@@ -356,7 +447,7 @@ public final class KioskWatchdog {
 
         if (now - lastHeartbeatAtMs >= HEARTBEAT_MS) {
             lastHeartbeatAtMs = now;
-            host.logWatchdogEvent(heartbeatLine(stale, now, screenOn, paused), false);
+            host.logWatchdogEvent(heartbeatLine(stale, now, screenOn, paused, emptyPool), false);
         }
 
         // Another activity is in front (settings dialog): the loop is legitimately idle, so no
@@ -397,11 +488,24 @@ public final class KioskWatchdog {
         }
 
         if (wanted <= actedLevel) {
-            if (actedLevel == LEVEL_REPAIR_NETWORK && !networkUp(now)) {
+            if ((actedLevel == LEVEL_REPAIR_NETWORK || wanted == LEVEL_REPAIR_NETWORK)
+                    && !networkUp(now)) {
+                // Either the ladder sits on the repair rung, or the outage downgrade above just
+                // parked it there while the remembered rung is higher. Both need this call: without
+                // the second term a frame that had already reached the reboot rung and then lost its
+                // network did neither thing — no repair, because actedLevel was not REPAIR_NETWORK,
+                // and no reboot, because wanted had been lowered below REBOOT — so it sat out the rest
+                // of the outage taking no action at all, which is the one outcome the downgrade was
+                // written to avoid. Once the attempts are spent the downgrade stops applying and the
+                // reboot branch below becomes reachable again.
                 retryRepairIfDue(now, stale);
             }
-            if (actedLevel == LEVEL_REBOOT && rebootBlocked && host.autoRebootEnabled()) {
+            if (wanted >= LEVEL_REBOOT && actedLevel == LEVEL_REBOOT && rebootBlocked
+                    && host.autoRebootEnabled()) {
                 // The ladder ran out against a disabled permission; finish it once it is granted.
+                // Gated on wanted as well as on the remembered rung: a frame that went quiet after
+                // the ladder ran out — its library emptied, so the cap above pulled the age verdict
+                // back down — must not be rebooted on the strength of a decision it no longer makes.
                 act(LEVEL_REBOOT, stale, now);
             }
             return;
@@ -503,7 +607,8 @@ public final class KioskWatchdog {
         }
     }
 
-    private String heartbeatLine(long stale, long now, boolean screenOn, boolean paused) {
+    private String heartbeatLine(long stale, long now, boolean screenOn, boolean paused,
+                                 boolean emptyPool) {
         StringBuilder sb = new StringBuilder();
         sb.append("heartbeat tick=").append(ticks)
                 .append(" stale=").append(stale / 1000L).append("s")
@@ -524,16 +629,22 @@ public final class KioskWatchdog {
             // cannot be mistaken for a healthy frame.
             sb.append(" PAUSED");
         }
+        if (emptyPool) {
+            // And say so when the ladder is holding on purpose: an empty pool keeps the age growing,
+            // so a line reading level=2 and stale=6h looks like a watchdog that stopped working
+            // unless the reason is on the same line.
+            sb.append(" NO-MEDIA");
+        }
         if (lastActionAtMs > 0L) {
             sb.append(" lastActionAge=" + ((now - lastActionAtMs) / 60_000L) + "m");
         }
         return sb.toString();
     }
 
-    /** How long the display loop has been silent right now (0 during quiet hours). */
+    /** How long the panel has gone unproven right now (0 during quiet hours). */
     public long staleMsNow() {
         return staleMs(host.screenShouldBeOn(), host.nowMs(),
-                Math.max(host.lastDisplayAtMs(), screenWokeAtMs), host.downloadInFlightMs());
+                Math.max(host.lastDisplayProvenAtMs(), screenWokeAtMs), host.downloadInFlightMs());
     }
 
     /**
