@@ -300,6 +300,46 @@ public class VideoStateJsonTest {
         assertFalse(video.has("loopPerf"));
     }
 
+    /**
+     * The second layer of that rule, and the one a gate on {@code onScreen} cannot express: a clip that
+     * really is on the wall still reports only what was measured about it. Two different values mean
+     * "not measured" depending on which route fed the record — {@code -1} from
+     * {@link PanelDisplay.ClipFacts#UNKNOWN}, and the {@code 0} {@code VideoHeaderProbe} reports for a
+     * size it could not parse — and either one printed beside {@code macroblocksPerSecond} or
+     * {@code bitRateBps} reads as a clip that cleared MediaCompatibility's ceiling.
+     */
+    @Test
+    public void aClipOnThePanelStillReportsOnlyWhatWasMeasuredAboutIt() {
+        JsonObject neverProbed = VideoStateJson.build(
+                PanelDisplay.video("asset-1", "/data/x/clip.mp4", VideoEngineReport.MEDIA_PLAYER,
+                        "ORIGINAL", PanelDisplay.ClipFacts.UNKNOWN, "", GEN, WHEN),
+                frame(), new AnsweringProbe());
+        assertTrue("the clip is on the panel — that is not why the numbers are missing",
+                neverProbed.get("onScreen").getAsBoolean());
+        for (String field : new String[]{"rotation", "width", "height", "codec", "fpsMilli",
+                "avgFrameBytes", "peakFrameBytes", "bitRateBps", "fileDurationMs",
+                "macroblocksPerSecond"}) {
+            assertFalse("unmeasured must read as absent, never as -1: " + field, neverProbed.has(field));
+        }
+
+        // The probe route: a header that parsed but could not yield dimensions, where the other
+        // measurements are real. Zero is not a coded width, and the derived throughput has to go with it.
+        JsonObject unreadableDims = VideoStateJson.build(
+                PanelDisplay.video("asset-1", "/data/x/clip.mp4", VideoEngineReport.MEDIA_PLAYER,
+                        "ORIGINAL", new PanelDisplay.ClipFacts(0, 0, 0, "avc1", 30_000, 120_000L,
+                                500_000L, 9_000_000L, 12_000L), "", GEN, WHEN),
+                frame(), new AnsweringProbe());
+        assertFalse("0 is what the probe reports for an unparseable size, not a size",
+                unreadableDims.has("width"));
+        assertFalse(unreadableDims.has("height"));
+        assertFalse("a product of unknown inputs is not a measurement",
+                unreadableDims.has("macroblocksPerSecond"));
+        assertTrue("the fields that were measured stay reported",
+                unreadableDims.has("bitRateBps") && unreadableDims.has("fpsMilli"));
+        assertEquals("0 is a real rotation, so it survives where 0 is not a size",
+                0, unreadableDims.get("rotation").getAsInt());
+    }
+
     /** The other half of the same rule: for a clip the panel holds, the measurement is reported. */
     @Test
     public void everyClipMeasurementIsEmittedForAClip() {

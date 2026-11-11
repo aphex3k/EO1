@@ -35,7 +35,10 @@ public final class PanelDisplay {
      *
      * <p>One value rather than six fields for the same reason {@code PanelDisplay} is one value: a
      * reader cannot see half of one asset's numbers and half of another's. {@code -1} in any numeric
-     * field means the header probe could not answer, which is a different claim from zero.
+     * field means the header probe could not answer, which is a different claim from zero — though
+     * {@link VideoStateJson} does not publish either claim: it omits a numeric field that is
+     * {@code -1} (never read) or {@code 0} (reported unreadable by {@code VideoHeaderProbe}) rather
+     * than letting a sentinel reach a reader who has no way to tell it from a measurement.
      */
     public static final class ClipFacts {
         /** A record for a clip whose header was never read: every field unknown, none of them zero. */

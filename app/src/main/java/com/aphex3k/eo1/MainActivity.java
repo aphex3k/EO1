@@ -4042,19 +4042,36 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         return null;
     }
 
+    /**
+     * The {@code /state} {@code mqtt} block, in one shape.
+     *
+     * <p>It used to have two. With no client it was flat and its {@code connected} was the literal
+     * {@code false}; with one, every client fact moved a level down under {@code client}, so the only
+     * top-level {@code connected} in the document was the one that could never be true. A reader of the
+     * documented key list found nothing on a frame whose link was up, and found {@code false} on a frame
+     * that is deliberately not dialling during quiet hours or was never configured at all — the two
+     * states the block exists to distinguish. Which shape applied was decided by whether the panel is
+     * lit, so a consumer could not read the block without first working out that.
+     *
+     * <p>Now: the three fields that are always true stand at the top, the client's own fields stand
+     * beside them when a client exists, and they are <em>absent</em> when it does not rather than
+     * answered with {@code false}/{@code -1}/{@code ""} — the same convention this branch applies to a
+     * gated player read. {@link MqttManager#stateJson()} is unchanged: this is the report's shape, not
+     * the manager's.
+     */
     private JsonObject mqttStateJson() {
         JsonObject o = new JsonObject();
         MqttManager manager = this.mqttManager;
+        o.addProperty("configured", manager != null || mqttBrokerUriFromConfig() != null);
+        o.addProperty("heldForPanel", mqttHeldForPanel);
         if (manager == null) {
-            o.addProperty("configured", mqttBrokerUriFromConfig() != null);
-            o.addProperty("connected", false);
-            o.addProperty("heldForPanel", mqttHeldForPanel);
             o.addProperty("note", mqttHeldForPanel
                     ? "held for quiet hours" : "no client for this configuration");
             return o;
         }
-        o.addProperty("configured", true);
-        o.add("client", manager.stateJson());
+        for (Map.Entry<String, JsonElement> entry : manager.stateJson().entrySet()) {
+            o.add(entry.getKey(), entry.getValue());
+        }
         return o;
     }
 

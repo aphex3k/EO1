@@ -201,19 +201,37 @@ public final class VideoStateJson {
         PanelDisplay.ClipFacts clip = shown.clip;
         video.addProperty("path", shown.pathOrUrl);
         video.addProperty("stage", shown.stage);
-        video.addProperty("rotation", clip.rotationDeg);
-        video.addProperty("width", clip.codedWidth);
-        video.addProperty("height", clip.codedHeight);
+        // Every number here is a measurement of this clip's bytes, and each one is emitted only if
+        // somebody actually measured it. The record carries two different "no measurement" values
+        // depending on which route fed it — -1 from PanelDisplay.ClipFacts.UNKNOWN, and 0 from
+        // VideoHeaderProbe, which reports unreadable dimensions as 0 — so the same key could mean the
+        // probe answered zero or never answered, with nothing in the document to tell them apart, and
+        // an unlabelled -1 sat beside the ceilings README states for the same quantity. Absence is the
+        // only answer that cannot be misread, and it is the convention this block already uses for
+        // durationMs/positionMs/painted when a player may not be consulted.
+        //
+        // rotation is the exception: 0 is a real reading there ("the display matrix leaves it upright"),
+        // so it is filtered on its own sign rather than through addMeasured.
+        if (clip.rotationDeg >= 0) {
+            video.addProperty("rotation", clip.rotationDeg);
+        }
+        addMeasured(video, "width", clip.codedWidth);
+        addMeasured(video, "height", clip.codedHeight);
         if (clip.codec != null) {
             video.addProperty("codec", clip.codec);
         }
-        video.addProperty("fpsMilli", clip.fpsMilli);
-        video.addProperty("avgFrameBytes", clip.avgFrameBytes);
-        video.addProperty("peakFrameBytes", clip.peakFrameBytes);
-        video.addProperty("bitRateBps", clip.bitRateBps);
-        video.addProperty("fileDurationMs", clip.fileDurationMs);
-        video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
-                clip.codedWidth, clip.codedHeight, clip.fpsMilli));
+        addMeasured(video, "fpsMilli", clip.fpsMilli);
+        addMeasured(video, "avgFrameBytes", clip.avgFrameBytes);
+        addMeasured(video, "peakFrameBytes", clip.peakFrameBytes);
+        addMeasured(video, "bitRateBps", clip.bitRateBps);
+        addMeasured(video, "fileDurationMs", clip.fileDurationMs);
+        // A derived number is only as measured as its inputs: with any of them unknown the product is
+        // arithmetic on a sentinel, and it reads as a throughput that can be compared against
+        // MediaCompatibility's ceiling.
+        if (clip.codedWidth > 0 && clip.codedHeight > 0 && clip.fpsMilli > 0) {
+            video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
+                    clip.codedWidth, clip.codedHeight, clip.fpsMilli));
+        }
         video.addProperty("renderSilent", probe.renderSilent(shown.assetKey));
 
         // Everything from here down is read live, so it is emitted only while the snapshot still names the
@@ -336,6 +354,21 @@ public final class VideoStateJson {
             return;
         }
         video.addProperty("tsFallbacks", frame.tsFallbacks);
+    }
+
+    /**
+     * A clip measurement, emitted only when a probe or a catalog actually produced it.
+     *
+     * <p>Both in-band "unknown" values the record can carry suppress the key: {@code -1} is what
+     * {@code PanelDisplay.ClipFacts.UNKNOWN} holds for a header that was never read, and {@code 0} is what
+     * {@code VideoHeaderProbe} reports for a size it could not parse. Neither is a possible value for any
+     * field that goes through here, so neither deserves to be printed as one; and of the two, {@code 0} is
+     * the one that did real damage, because a ceiling comparison against a zero looks like a passing clip.
+     */
+    private static void addMeasured(JsonObject video, String name, long value) {
+        if (value != -1L && value != 0L) {
+            video.addProperty(name, value);
+        }
     }
 
     /** The word {@code /state} has always used for an asset type, kept where both surfaces can share it. */
