@@ -1,8 +1,8 @@
 package com.aphex3k.immichApi;
 
 import androidx.annotation.Keep;
+import androidx.annotation.Nullable;
 import com.google.gson.annotations.SerializedName;
-import javax.annotation.Nullable;
 
 @Keep
 public class ImmichApiTagAssetResponse {

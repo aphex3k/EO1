@@ -1,8 +1,7 @@
 package com.aphex3k.eo1;
 
 import androidx.annotation.Keep;
-
-import javax.annotation.Nullable;
+import androidx.annotation.Nullable;
 
 /**
  * One configured media backend in {@link Configuration#backends}.

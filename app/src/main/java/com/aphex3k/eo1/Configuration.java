@@ -1,6 +1,7 @@
 package com.aphex3k.eo1;
 
 import androidx.annotation.Keep;
+import androidx.annotation.Nullable;
 
 import com.aphex3k.media.immich.ImmichClientRegistry;
 
@@ -8,8 +9,6 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
-
-import javax.annotation.Nullable;
 
 @Keep
 public class Configuration {

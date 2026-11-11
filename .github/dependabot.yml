@@ -16,13 +16,18 @@
 # material 1.13.0-alpha01…, navigation 2.8.0-alpha01…, constraintlayout 2.2.0-alpha01…)
 # and `>= 1.13.0` does NOT match `1.13.0-alpha14`, while `> 1.12.0` does.
 #
-# `ignore` ALSO gates SECURITY updates for gradle — there is no `applies-to` key
-# under `ignore` (that exists only under `groups`). In dependabot-core,
-# gradle/update_checker/version_finder.rb calls filter_ignored_versions on BOTH the
-# latest-version path (l.74) and the security path (l.106, after the vulnerability
-# filter). So a ceiling here also suppresses the CVE PR for anything above it. That
-# is the price of "never exceed the ceiling" and it is paid deliberately — see the
-# accepted-risk rows below and in AGENTS.md.
+# `ignore` gates the VERSION path, and there is no `applies-to` key under `ignore`
+# (that exists only under `groups`). dependabot-core's
+# gradle/update_checker/version_finder.rb calls filter_ignored_versions on the
+# latest-version path (l.74) and on the security path (l.106, after the
+# vulnerability filter) — but as measured on 2026-11-11, the SERVICE does not
+# honour that for security updates: `ignore: ["> 32.1.2"]` was on `main` for guava
+# when GHSA-xxph-c9ww-hj94 fired, and Dependabot opened security PR #113 anyway,
+# proposing 33.7.1 — which that advisory's own range (`<= 33.7.1`) says is still
+# vulnerable. So a ceiling does NOT suppress the CVE PR, and a PR that
+# clears an alert is not guaranteed by Dependabot picking a patched version.
+# Every security PR here is a human decision: compare the advisory's
+# first_patched_version with the proposed version before merging anything.
 version: 2
 updates:
   # ONE gradle entry, at the build root. Do NOT add a second `/app` block: root
@@ -131,12 +136,17 @@ updates:
         # multiDexEnabled — already true here.)
       - dependency-name: "com.google.guava:guava"
         versions: ["> 32.1.2"]
-        # No API-19 ceiling is documented (both current flavors still publish org.gradle.jvm
-        # .version=8, which D8 dexes fine). Frozen for two other reasons: 0 files in app/src
-        # import com.google.common (dead dex weight on an ~800MB device), and the -jre flavor
-        # is the one Guava's README says NOT to use on Android. Freezing costs no security
-        # coverage: every guava advisory is first_patched at or below the pin. Deleting the
-        # declaration would be the fix that needs no future re-verification (see AGENTS.md).
+        # Kept as a guard against REINTRODUCTION only — the declaration is gone from
+        # app/build.gradle (deleted 2026-11-11): 0 files in app/src imported
+        # com.google.common, ~3MB of dead dex on an ~800MB device, and -jre is the
+        # flavor Guava's README says NOT to use on Android. There was never an API-19
+        # ceiling here (both flavors publish org.gradle.jvm.version=8, which D8
+        # dexes), so the old comment claiming "every guava advisory is first_patched
+        # at or below the pin" is the one that needs retiring: CVE-2026-102554 /
+        # GHSA-xxph-c9ww-hj94 is first patched at 33.7.2, above this line. The open
+        # alerts under this name are AGP's transitive guava (28.1-android at
+        # app/build.gradle, 32.0.1-jre at the root build.gradle), scope development —
+        # build-time only, and no app-side version bump reaches them.
       - dependency-name: "com.vdurmont:semver4j"             # tip of the coordinate
         versions: ["> 3.1.0"]                                 # Maintenance moved to org.semver4j:semver4j, a
         #                                                      different name Dependabot cannot reach as an
