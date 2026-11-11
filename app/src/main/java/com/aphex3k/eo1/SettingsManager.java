@@ -574,7 +574,12 @@ public class SettingsManager {
             try {
                 File file = new File(settingsManagerListener.getFilesDir(), CONFIG_FILENAME);
 
-                Configuration loaded = new Gson().fromJson(new FileReader(file), Configuration.class);
+                // Gson's fromJson(Reader, ...) never closes the reader — verified against gson 2.10.1's
+                // bytecode, which contains no close() call at all — and this runs on every rotation tick.
+                Configuration loaded;
+                try (FileReader reader = new FileReader(file)) {
+                    loaded = new Gson().fromJson(reader, Configuration.class);
+                }
                 if (loaded != null && Configuration.normalize(loaded)) {
                     // Persist the migrated/normalized form (legacy flat host -> backends, etc.).
                     this.configuration = loaded;

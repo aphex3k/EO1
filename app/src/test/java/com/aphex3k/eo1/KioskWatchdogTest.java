@@ -29,10 +29,33 @@ public class KioskWatchdogTest {
         /** Kept out of {@link #actions} for the same reason as {@link #captures}. */
         int holdReasserts;
         long intervalMs = 15 * MINUTE;
-        long lastDisplayAtMs = now;
+        /**
+         * Pixels proven on the panel; 0 until a proof point runs, exactly as in the activity. This is
+         * the clock the ladder reads, after {@link KioskWatchdog#escalationClockMs} resolves the
+         * never-proven case to {@link #anchorMs}.
+         */
+        long provenAtMs = now;
+        /**
+         * What {@code MainActivity.lastRotationActivityMs} does: {@code runOnTimer} stamps it on every
+         * tick, before it asks for the next asset. Modelled here and deliberately <em>not</em>
+         * connected to the ladder — see {@link #tickTogether}, which refreshes it before every
+         * evaluation, so any case that walks ticks through it fails outright if the ladder ever goes
+         * back to measuring a clock the frame's own timer feeds.
+         */
+        long rotationTickAtMs = now;
+        /** This process's start: what a frame that has never drawn anything ages from. */
+        long anchorMs = now;
         long downloadInFlightMs;
         boolean networkAvailable = true;
         long offlineMs;
+        /** Assets in the pool. Non-zero by default: most cases here are a frame that has assets. */
+        int poolKeyCount = 1;
+        /**
+         * Whether a catalog pass finished. False models a pass still in flight — {@code rebuildPool()}
+         * clears the keys before it fetches — so an empty pool then means "still asking", not "out of
+         * material", and the hold must not apply.
+         */
+        boolean catalogPassCompleted = true;
         boolean mainLoopAlive = true;
         long progressToken = 0;
         boolean autoRebootEnabled;
@@ -76,8 +99,10 @@ public class KioskWatchdogTest {
         }
 
         @Override
-        public long lastDisplayAtMs() {
-            return lastDisplayAtMs;
+        public long lastDisplayProvenAtMs() {
+            // The same expression MainActivity runs, so the fake cannot quietly model a healthier
+            // frame than the product has.
+            return KioskWatchdog.escalationClockMs(provenAtMs, anchorMs);
         }
 
         @Override
@@ -93,6 +118,13 @@ public class KioskWatchdogTest {
         @Override
         public long offlineMs() {
             return offlineMs;
+        }
+
+        @Override
+        public boolean nothingToDisplay() {
+            // The product's own rule, called rather than restated, so the fake cannot claim a state the
+            // activity cannot produce (offline, or still fetching) as "out of material".
+            return KioskWatchdog.outOfMaterial(poolKeyCount == 0, catalogPassCompleted, offlineMs);
         }
 
         @Override
@@ -172,15 +204,21 @@ public class KioskWatchdogTest {
         watchdog = new KioskWatchdog(host);
     }
 
-    /** Move the clock forward so the display has been silent for exactly {@code staleMs}. */
+    /** Move the clock forward so nothing has been proven on the panel for exactly {@code staleMs}. */
     private void silentFor(long staleMs) {
         host.advance(staleMs);
-        host.lastDisplayAtMs = host.now - staleMs;
+        host.provenAtMs = host.now - staleMs;
     }
 
+    /**
+     * Walk {@code times} evaluation ticks. Each one also refreshes the rotation clock, the way
+     * {@code MainActivity.runOnTimer} does, so a case here that depends on the frame being stale is a
+     * case that would fail if the ladder ever went back to measuring a clock the timer feeds.
+     */
     private void tickTogether(long periodMs, int times) {
         for (int i = 0; i < times; i++) {
             host.advance(periodMs);
+            host.rotationTickAtMs = host.now;
             watchdog.tick();
         }
     }
@@ -198,6 +236,7 @@ public class KioskWatchdogTest {
         int guard = 0;
         while (watchdog.actedLevel() < level && guard++ < 12) {
             host.advance(MINUTE);
+            host.rotationTickAtMs = host.now;
             watchdog.tick();
         }
         assertTrue("the ladder stalled below rung " + level, watchdog.actedLevel() >= level);
@@ -227,6 +266,35 @@ public class KioskWatchdogTest {
         long now = 10 * HOUR;
         assertEquals(30 * MINUTE, KioskWatchdog.staleMs(true, now, now - 60_000L, 30 * MINUTE));
         assertEquals(3 * HOUR, KioskWatchdog.staleMs(true, now, now - 3 * HOUR, 60_000L));
+    }
+
+    /**
+     * Which of the activity's two clocks the ladder measures, in the one place that choice is now
+     * written. The 2026-11-08 frame proved the second branch is not decoration: with nothing ever
+     * proven, a clock reporting 0 makes {@link KioskWatchdog#staleMs} answer 0, which reads healthy —
+     * so a process that never reached first draw would never age at all.
+     */
+    @Test
+    public void theWedgeClockIsTheProvenDisplayOrThisProcessStart() {
+        assertEquals(5_000L, KioskWatchdog.escalationClockMs(5_000L, 1_000L));
+        assertEquals("never proven: age from the process, not from nothing",
+                1_000L, KioskWatchdog.escalationClockMs(0L, 1_000L));
+    }
+
+    /**
+     * Which empty pool counts as "nothing to display" — all three terms, because two of the three are
+     * states that look identical from the key count alone. Dropping the {@code catalogPassCompleted}
+     * argument at the call site is the plausible simplification, and it is what this pins: a frame
+     * still fetching its catalog is not a frame that has run out of material.
+     */
+    @Test
+    public void onlyACompletedEmptyPoolIsOutOfMaterial() {
+        assertTrue(KioskWatchdog.outOfMaterial(true, true, 0L));
+        assertFalse("an in-flight catalog pass leaves the pool empty; that is an unknown",
+                KioskWatchdog.outOfMaterial(true, false, 0L));
+        assertFalse("and offline is the 2026-10-13 wedge, not a lack of material",
+                KioskWatchdog.outOfMaterial(true, true, KioskWatchdog.OFFLINE_REPAIR_MS));
+        assertFalse(KioskWatchdog.outOfMaterial(false, true, 0L));
     }
 
     @Test
@@ -267,7 +335,7 @@ public class KioskWatchdogTest {
     @Test
     public void theFrameStaysQuietDuringQuietHoursHoweverLongNothingShowed() {
         host.screenShouldBeOn = false;
-        host.lastDisplayAtMs = host.now - HOUR;
+        host.provenAtMs = host.now - HOUR;
         host.advance(2 * HOUR);
         tickTogether(MINUTE, 10);
         assertEquals(10, host.actions.size());
@@ -325,18 +393,19 @@ public class KioskWatchdogTest {
     }
 
     /**
-     * The 2026-10-16 false-positive reboot: quiet hours end, {@code screenShouldBeOn} flips true,
-     * but nothing has been displayed for the whole dark window since {@code lastRotationActivityMs}
-     * only advances on an actual display or the rotation tick's screen-on branch. A watchdog tick
-     * landing in the gap before that next rotation tick would otherwise age the frame by the full
-     * length of the dark period — here, long enough to skip every lower rung straight to reboot.
+     * The 2026-10-16 false-positive reboot: quiet hours end, {@code screenShouldBeOn} flips true, and
+     * the proven clock is eight hours old, because nothing was supposed to be displayed all night. A
+     * watchdog tick landing in the gap before the first rotation after waking would otherwise age the
+     * frame by the full length of the dark period — here, long enough to skip every lower rung
+     * straight to reboot. The {@code screenWokeAtMs} clamp is what stops that, and it matters more now
+     * that the clock it clamps genuinely does not move while the panel is dark.
      */
     @Test
     public void wakingUpAfterALongQuietPeriodDoesNotCountTheDarkTimeAsStale() {
         host.screenShouldBeOn = false;
         host.autoRebootEnabled = true;
         // Last real display was right before quiet hours began, eight hours ago.
-        host.lastDisplayAtMs = host.now - 8 * HOUR;
+        host.provenAtMs = host.now - 8 * HOUR;
         tickTogether(MINUTE, 10);
         assertEquals(0, count("forceRotation"));
         assertEquals(0, count("rebootDevice"));
@@ -373,7 +442,9 @@ public class KioskWatchdogTest {
         watchdog.tick();
         assertEquals(1, count("forceRotation"));
 
-        host.lastDisplayAtMs = host.now;
+        // A display is proven on the panel: the frame has recovered, and a timer tick alone
+        // (rotationTickAtMs, refreshed by tickTogether) must not be able to say that.
+        host.provenAtMs = host.now;
         tickTogether(MINUTE, 3);
         assertEquals(KioskWatchdog.LEVEL_NONE, watchdog.actedLevel());
 
@@ -553,12 +624,160 @@ public class KioskWatchdogTest {
     public void aFrameThatHasNeverShownAnythingStillEscalates() {
         // The 2026-10-13 state: relaunched into a dead network, so no rotation ever reached the
         // screen. "Nothing has happened yet" must not read as healthy.
+        host.provenAtMs = 0L;
         host.networkAvailable = false;
         host.offlineMs = KioskWatchdog.OFFLINE_REPAIR_MS;
         tickTogether(MINUTE, 60);
         assertEquals(1, count("forceRotation"));
         assertEquals(1, count("recoverPlayback"));
         assertTrue(count("repairNetwork") >= 1);
+    }
+
+    /**
+     * The EO2 that sat white for 19.8 hours on 2026-11-08 with {@code autoReboot} granted, in the one
+     * shape that made it unhealable: its rotation timer fired on schedule all night — 125 heartbeat
+     * lines, {@code level=0 action=none}, {@code stale} never past 119 s against a 1200 s limit — and
+     * the ladder measured its age against that same timer. Home was relaunched about 80 times and
+     * never reached first draw, so nothing was ever proven, which is the only condition the old wiring
+     * could not see.
+     *
+     * <p>Here the tick is modelled as it actually ran: {@link FakeHost#rotationTickAtMs} is refreshed
+     * before every evaluation, exactly as {@code runOnTimer} does, and the proven clock never moves.
+     * The age has to grow anyway and the climb has to reach the top rung.
+     */
+    @Test
+    public void aFrameThatKeepsTickingButNeverDrawsClimbsAllTheWayToReboot() {
+        host.provenAtMs = 0L;
+        host.autoRebootEnabled = true;
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+
+        // A night's worth of minutes, each one a rotation tick that stamped its clock and proved
+        // nothing. The reboot threshold is limit + 30m, so this walks past it rather than teleporting
+        // the frame there — the teleport is what made the old bug look fine in every other case here.
+        tickTogether(MINUTE, (int) ((limit + 31 * MINUTE) / MINUTE));
+
+        // The discriminating number: with the ladder reading the timer's clock, this age could not
+        // exceed one rotation interval, so every threshold past it was unreachable by construction.
+        assertTrue("the tick clock kept pace and the age still escaped one interval: "
+                        + watchdog.staleMsNow(),
+                watchdog.staleMsNow() > host.intervalMs());
+        assertTrue("the ladder must walk the cheap rungs on the way up, not jump",
+                1 == count("forceRotation") && 1 == count("recoverPlayback"));
+        assertEquals("one reboot, once the permission was granted and every rung below spent",
+                1, count("rebootDevice"));
+        assertEquals(KioskWatchdog.LEVEL_REBOOT, watchdog.actedLevel());
+        assertTrue("the reboot rung must not report a capture it did not need",
+                host.captures.isEmpty());
+    }
+
+    /**
+     * The false positive this commit would otherwise have shipped with. A frame whose pool is empty —
+     * every backend switched off, a rotated Immich password, a Flickr stream with nothing public, a
+     * local entry before anyone uploaded a file — makes no display call at all, so the wedge clock
+     * cannot advance and the age grows for a reason no rung can fix. Before the commit the tick clock
+     * pinned the age below one interval and nothing fired; with an honest clock the ladder would reach
+     * self-restart, and since a restart re-seeds the very clock the ladder reads, it would climb again
+     * every limit + 30 min forever — wiping a photo that was still on the panel to do it.
+     */
+    @Test
+    public void aFrameWithNothingInItsPoolHoldsOnTheCheapRungs() {
+        host.provenAtMs = 0L;
+        host.poolKeyCount = 0;
+        host.autoRebootEnabled = true;
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+
+        tickTogether(MINUTE, (int) ((limit + 40 * MINUTE) / MINUTE));
+
+        assertEquals("the two retries are still worth one attempt each",
+                1, count("forceRotation"));
+        assertEquals(1, count("recoverPlayback"));
+        assertEquals("a restart cannot fill a pool", 0, count("selfRestart"));
+        assertEquals("and a reboot certainly cannot", 0, count("rebootDevice"));
+        assertEquals(KioskWatchdog.LEVEL_RECOVER_PLAYBACK, watchdog.actedLevel());
+        assertTrue("the hold must be legible in the log, not look like a dead watchdog",
+                containsEvent("NO-MEDIA"));
+    }
+
+    /**
+     * The half of the previous case that must not be suppressed: a frame relaunched into a dead network
+     * has an empty pool too, and the 2026-10-13 incident is the documented reason the repair and reboot
+     * rungs exist. "Nothing to display" is therefore only a hold while the network is not the thing
+     * being waited for.
+     */
+    @Test
+    public void anEmptyPoolIsStillAWedgeWhenTheFrameHasNoNetwork() {
+        host.provenAtMs = 0L;
+        host.poolKeyCount = 0;
+        host.networkAvailable = false;
+        host.offlineMs = KioskWatchdog.OFFLINE_REPAIR_MS;
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+
+        tickTogether(MINUTE, (int) ((limit + 15 * MINUTE) / MINUTE));
+
+        assertTrue("the outage still has to be repaired, pool empty or not",
+                count("repairNetwork") >= 1);
+        assertTrue(watchdog.actedLevel() >= KioskWatchdog.LEVEL_REPAIR_NETWORK);
+    }
+
+    /**
+     * The other half of the previous case, and the one the hold would have got wrong: an empty pool is
+     * also what a catalog pass <em>in flight</em> looks like, because {@code rebuildPool()} clears the
+     * keys before it fetches. A frame whose fetch hangs on a live link is not out of material — it is
+     * still asking — and holding its ladder below self-restart would park the exact recovery this
+     * change set exists to enable for as long as the question went unanswered.
+     */
+    @Test
+    public void aFrameStillAskingForItsCatalogIsNotOutOfMaterial() {
+        host.provenAtMs = 0L;
+        host.poolKeyCount = 0;
+        host.catalogPassCompleted = false;
+        host.autoRebootEnabled = true;
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+
+        tickTogether(MINUTE, (int) ((limit + 35 * MINUTE) / MINUTE));
+
+        assertTrue("an unanswered catalog fetch has to stay a wedge, so the climb continues",
+                acted("selfRestart"));
+        assertTrue("and it must not be reported as out of material",
+                !containsEvent("NO-MEDIA"));
+    }
+
+    /**
+     * A frame that reached the reboot rung with its network up, was refused it by the permission, and
+     * <em>then</em> lost the network: the outage downgrade lowers the verdict to the repair rung while
+     * the remembered rung stays at reboot, and the repair retry used to key on the remembered rung
+     * alone. So it did neither thing — no repair, no reboot — for the rest of the outage, which is the
+     * one outcome the downgrade exists to prevent. Pre-existing on main, but only reachable now that a
+     * ladder can actually arrive at the reboot rung.
+     */
+    @Test
+    public void aRefusedRebootStillSpendsItsRepairsWhenTheNetworkDropsAfterwards() {
+        long limit = KioskWatchdog.staleLimitMs(host.intervalMs());
+        silentFor(limit + 31 * MINUTE);
+        climbTo(KioskWatchdog.LEVEL_REBOOT);
+        assertEquals("the ladder ran out against the disabled permission", 0, count("rebootDevice"));
+        assertEquals(0, watchdog.repairAttempts());
+
+        // The outage arrives after the ladder had already given up on it. Ticks, not climbTo: the
+        // ladder is already at the top of the climb, so the only thing changing is the network.
+        host.networkAvailable = false;
+        host.offlineMs = KioskWatchdog.OFFLINE_REPAIR_MS;
+        tickTogether(MINUTE, 4);
+
+        assertTrue("the repairs must be spent, not skipped for being out of order",
+                watchdog.repairAttempts() >= 1);
+        assertEquals("and the reboot stays refused while it is", 0, count("rebootDevice"));
+
+        // Once the attempts are spent the downgrade stops applying, so the ladder is free to finish.
+        for (int i = 0; i < 60 && watchdog.repairAttempts() < KioskWatchdog.MAX_REPAIR_ATTEMPTS; i++) {
+            host.advance(MINUTE);
+            watchdog.tick();
+        }
+        host.advance(KioskWatchdog.REPAIR_SPACING_MS);
+        watchdog.tick();
+        host.autoRebootEnabled = true;
+        watchdog.tick();
+        assertEquals("then the granted permission is acted on", 1, count("rebootDevice"));
     }
 
     @Test
