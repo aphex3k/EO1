@@ -583,8 +583,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * of one failed download would look like a permanent stall.
      */
     private static final long DOWNLOAD_PROGRESS_SILENCE_MS = 120_000L;
-    /** Last ack from the main thread to a watchdog probe. */
-    private volatile long mainLoopAckAtMs = 0L;
+    /**
+     * Last ack from the main thread to a watchdog probe. Seeded at construction rather than at 0,
+     * because every reader of it is an age: {@code watchdog.mainLoopStallMs} and the durable dump both
+     * compute {@code now - this}, so an unseeded field reported the Unix epoch (~56 years) for the gap
+     * between {@code webServer.start()} binding and the baseline write in {@code onCreate} — a window
+     * that also reopens on every Activity recreation, since the field is per-instance and the server is
+     * answering {@code /state} before the baseline lands. DiagnosticsReport tells readers to treat
+     * {@code *StallMs} as an age recomputed at capture, so that value was misread by design.
+     */
+    private volatile long mainLoopAckAtMs = System.currentTimeMillis();
     /** Bumped on the main thread by every probe acknowledgement; see {@link #mainLoopProgressToken()}. */
     private volatile long mainLoopAcks = 0L;
     /** When we first noticed we had no network; 0 while connected. */
@@ -4013,6 +4021,27 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      *
      * <p>No credential appears here, and the URI is host and port only.
      */
+    /**
+     * The page URL a {@code web} backend entry holds, by backend id, for {@code media.current}.
+     *
+     * <p>{@link com.aphex3k.media.web.WebsiteBackend} gives its asset an id that is a UUID of the URL,
+     * so the pool record carries no address that can be printed; the configured entry is the only place
+     * the selection's own address still exists. Null means no such entry — omitted upstream, rather than
+     * answered with the empty string a borrowed source would have produced.
+     */
+    @Nullable
+    private String configuredWebUrl(String backendId) {
+        if (settingsManager == null || backendId == null) {
+            return null;
+        }
+        for (ConfigurationBackendEntry entry : settingsManager.getConfiguration().backendsOrEmpty()) {
+            if (entry.isWeb() && backendId.equals(entry.id)) {
+                return entry.host;
+            }
+        }
+        return null;
+    }
+
     private JsonObject mqttStateJson() {
         JsonObject o = new JsonObject();
         MqttManager manager = this.mqttManager;
@@ -4042,7 +4071,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.addProperty("paused", isPaused());
         // "Alive" is the watchdog's own verdict: the main thread advanced at the last check. A
         // large mainLoopStallMs alongside it means slow startup, not a wedge.
-        o.addProperty("mainLoopAlive", kioskWatchdog != null && kioskWatchdog.probeMisses() == 0);
+        // Absent while there is no watchdog to ask, rather than false: `false` is a claim that the main
+        // loop is not advancing, and in that window nothing has probed it yet.
+        if (kioskWatchdog != null) {
+            o.addProperty("mainLoopAlive", kioskWatchdog.probeMisses() == 0);
+        }
         o.addProperty("mainLoopStallMs", Math.max(0L, System.currentTimeMillis() - mainLoopAckAtMs));
         o.addProperty("probeMisses", kioskWatchdog != null ? kioskWatchdog.probeMisses() : 0);
         o.addProperty("downloadInFlightMs", downloadInFlightMs());
@@ -5209,7 +5242,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             current.addProperty("type", mediaTypeName(currentAsset.type));
             current.addProperty("backendId", currentAsset.backendId);
             if (currentAsset.type == MediaType.WEB) {
-                current.addProperty("url", webUrlOnScreen);
+                // The address of what rotation **selected**, which is what this object means, not the
+                // address of what the wall is showing. `webUrlOnScreen` — the obvious source — is written
+                // on the UI thread by displayWebsite, survives a page being superseded, and is blanked by
+                // abandonWebPage, so it printed one page for a selection of another, and "" for a page
+                // still selected. A web asset's id is a UUID of its URL, so the selection carries no
+                // address of its own to print; the entry that produced it does. The wall's own address is
+                // honest where it is documented: screen.pathOrUrl and attempt.pathOrUrl.
+                String selectedPage = configuredWebUrl(currentAsset.backendId);
+                if (selectedPage != null && !selectedPage.isEmpty()) {
+                    current.addProperty("url", selectedPage);
+                }
             }
             if (currentAsset.originalFileName != null) {
                 current.addProperty("originalFileName", currentAsset.originalFileName);
@@ -5591,7 +5634,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             o.addProperty("enabled", settingsManager != null && settingsManager.isTrustBundleEnabled());
             o.addProperty("bundleSize", RootBundle.size());
             o.addProperty("platformAnchors", trust.platformAnchors);
-            o.addProperty("trustedAnchors", trust.mergedAnchors);
+            // Only in MODE_MERGED is `mergedAnchors` the set this frame actually trusts. In
+            // platform-only mode the value is either -1 (never counted, bundle off, enumeration
+            // failed) or the size of a merged set the narrowing guard enumerated and then explicitly
+            // REFUSED to install — so one key carried three meanings, and the middle one reported more
+            // anchors in force than the frame has. `platformAnchors` above is that mode's honest number,
+            // which makes this key's absence a statement rather than a loss.
+            if (!trust.isPlatformOnly()) {
+                o.addProperty("trustedAnchors", trust.mergedAnchors);
+            }
             // The frame's own opinion about what time it is. Short-lived certificates make this a
             // first-class diagnostic: nothing in this app sets the clock, and a frame powered off for a
             // week can trust every anchor in the world and still reject all of them.

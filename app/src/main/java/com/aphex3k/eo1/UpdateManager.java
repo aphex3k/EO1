@@ -2245,7 +2245,15 @@ public class UpdateManager {
         JsonObject staged = new JsonObject();
         boolean present = stagedPublic.exists() || stagedMaster.exists();
         staged.addProperty("present", present);
-        staged.addProperty("bytes", stagedPublic.length());
+        // `present` is a disjunction over two names, so one length cannot describe it. The public
+        // copy is what the installer reads; the master is what survives a `public-copy-failed` stage
+        // and what survives the external-storage directory being cleared under it. Reading
+        // length() off the public copy alone reported {present: true, bytes: 0} for a frame holding
+        // a complete installable APK -- and 0 is a claim about size, not about absence, so absence
+        // is reported by omitting the key.
+        if (present) {
+            staged.addProperty("bytes", (stagedPublic.exists() ? stagedPublic : stagedMaster).length());
+        }
         // Bytes in the staging directory that no state owns. A cycle re-checking a stage runs
         // through CHECKING/DOWNLOADING/VERIFYING while the parked APK is still on disk and still
         // installable, so those states own it too — only IDLE (an interrupted swap that
