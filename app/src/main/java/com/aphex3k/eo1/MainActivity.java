@@ -54,6 +54,7 @@ import androidx.fragment.app.Fragment;
 
 import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaType;
+import com.aphex3k.media.web.WebsiteBackend;
 import com.aphex3k.eo1.mqtt.MqttManager;
 import com.aphex3k.eo1.mqtt.Payload;
 import com.aphex3k.eo1.mqtt.PlaybackListener;
@@ -4022,43 +4023,33 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * <p>No credential appears here, and the URI is host and port only.
      */
     /**
-     * The page URL a {@code web} backend entry holds, by backend id, for {@code media.current}.
+     * The page URL a {@code web} backend entry holds, when that entry's page is still the one this
+     * asset record was built from, for {@code media.current}.
      *
-     * <p>{@link com.aphex3k.media.web.WebsiteBackend} gives its asset an id that is a UUID of the URL,
-     * so the pool record carries no address that can be printed; the configured entry is the only place
-     * the selection's own address still exists. Null means no such entry — omitted upstream, rather than
-     * answered with the empty string a borrowed source would have produced.
+     * <p>{@link com.aphex3k.media.web.WebsiteBackend} gives its asset an id that is a deterministic
+     * UUID of the page URL, so the pairing is not assumed here — it is recomputed. Matching on the
+     * backend id alone would repeat, through a different door, the defect this key used to have: a
+     * configuration edit that repoints {@code web-1} from page A to page B leaves {@code currentAsset}
+     * naming A until some later selection succeeds, and an id-only lookup would print B beside A's key.
+     * Null means this record's page is not recoverable from the current configuration, which the caller
+     * reports by omitting the key.
      */
     @Nullable
-    private String configuredWebUrl(String backendId) {
-        if (settingsManager == null || backendId == null) {
+    private String configuredWebUrl(String backendId, String assetId) {
+        if (settingsManager == null || backendId == null || assetId == null) {
             return null;
         }
         for (ConfigurationBackendEntry entry : settingsManager.getConfiguration().backendsOrEmpty()) {
-            if (entry.isWeb() && backendId.equals(entry.id)) {
-                return entry.host;
+            if (entry.isWeb() && backendId.equals(entry.id) && entry.host != null) {
+                String page = WebsiteBackend.pageForAssetId(entry.host, assetId);
+                if (page != null) {
+                    return page;
+                }
             }
         }
         return null;
     }
 
-    /**
-     * The {@code /state} {@code mqtt} block, in one shape.
-     *
-     * <p>It used to have two. With no client it was flat and its {@code connected} was the literal
-     * {@code false}; with one, every client fact moved a level down under {@code client}, so the only
-     * top-level {@code connected} in the document was the one that could never be true. A reader of the
-     * documented key list found nothing on a frame whose link was up, and found {@code false} on a frame
-     * that is deliberately not dialling during quiet hours or was never configured at all — the two
-     * states the block exists to distinguish. Which shape applied was decided by whether the panel is
-     * lit, so a consumer could not read the block without first working out that.
-     *
-     * <p>Now: the three fields that are always true stand at the top, the client's own fields stand
-     * beside them when a client exists, and they are <em>absent</em> when it does not rather than
-     * answered with {@code false}/{@code -1}/{@code ""} — the same convention this branch applies to a
-     * gated player read. {@link MqttManager#stateJson()} is unchanged: this is the report's shape, not
-     * the manager's.
-     */
     private JsonObject mqttStateJson() {
         JsonObject o = new JsonObject();
         MqttManager manager = this.mqttManager;
@@ -5266,8 +5257,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 // still selected. A web asset's id is a UUID of its URL, so the selection carries no
                 // address of its own to print; the entry that produced it does. The wall's own address is
                 // honest where it is documented: screen.pathOrUrl and attempt.pathOrUrl.
-                String selectedPage = configuredWebUrl(currentAsset.backendId);
-                if (selectedPage != null && !selectedPage.isEmpty()) {
+                String selectedPage = configuredWebUrl(currentAsset.backendId, currentAsset.id);
+                if (selectedPage != null) {
                     current.addProperty("url", selectedPage);
                 }
             }

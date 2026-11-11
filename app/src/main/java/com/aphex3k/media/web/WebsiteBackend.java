@@ -75,6 +75,30 @@ public class WebsiteBackend implements MediaBackend {
         return "web page " + url;
     }
 
+    /**
+     * The configured page URL, but only if it is still the page that produced this asset id.
+     *
+     * <p>This is the check {@code /state}'s {@code media.current.url} needs and cannot make from the
+     * backend id alone: editing an entry from page A to page B leaves the asset record for A selected
+     * until some later rotation succeeds, and an id-only lookup would then print B beside A's key.
+     * Because the id is derived from the URL, the pairing is not assumed — it is recomputed with the
+     * same function, so an entry that has moved simply stops matching. Null means the configured entry
+     * cannot account for this record, and the caller reports that by omitting the key rather than
+     * guessing. The trim is the one the constructor applies, so a configured value with stray
+     * whitespace matches instead of vanishing from the report for a reason no reader can see.
+     */
+    @Nullable
+    public static String pageForAssetId(String configuredHost, String assetId) {
+        if (configuredHost == null || assetId == null) {
+            return null;
+        }
+        String page = configuredHost.trim();
+        if (page.isEmpty() || !assetId.equals(webAssetIdFor(page))) {
+            return null;
+        }
+        return page;
+    }
+
     /** Deterministic UUID derived from the page URL; stable across pool rebuilds. */
     public static String webAssetIdFor(String url) {
         return UUID.nameUUIDFromBytes(url.getBytes(Charset.forName("UTF-8"))).toString();
