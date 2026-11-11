@@ -2162,6 +2162,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * is renamed rather than annotated. The {@code /state} key it fills is still {@code media.rotationAssets}
      * — a published field name, changed only with the docs that describe it — and the durable dump calls
      * the same value {@code remainingThisPass}, which is the honest word for it.
+     *
+     * <p>{@code poolCursor} belongs to the rotation worker and is not {@code volatile}, so a read from
+     * one of {@code WebServer}'s threads — which is what fills {@code /state}, and the dump — may answer
+     * a little behind the rotation. That is what a report wants anyway: a lagging position is still a
+     * position, where the pool's total is not.
      */
     public int rotationRemainingInPass() {
         return Math.max(0, pool.size() - poolCursor);
@@ -2187,11 +2192,14 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     public boolean catalogPassCompleted() {
         return !currentConfigurationFingerprint.isEmpty();
     }
-    // `poolRemaining()` was dropped in the merge with main rather than carried: its body was
-    // `return rotationListSize();`, and this branch renamed that accessor to
-    // rotationRemainingInPass() (920de70) precisely because two names for one number let a reader take a
-    // shuffled pool's total as a position inside it. Nothing on main called the wrapper, and the one
-    // call site main had -- the durable dump's `remainingThisPass=` -- already reads the renamed method.
+
+    // Merged with main, which added this accessor alongside a `poolRemaining()` wrapper whose body was
+    // `return rotationListSize();`. The wrapper is the half that is not carried, and not because nothing
+    // called it -- main called it from the durable dump's `remainingThisPass=` line, and from
+    // `rotationAssets` through the name it wrapped. Both sites now read rotationRemainingInPass().
+    // Keeping the wrapper would have put two names back on one number, which is exactly the ambiguity
+    // 920de70 removed; deleting the call without resolving those two lines would not have compiled.
+
     /** How far the current cycle has walked past dead web pages. */
     public int webFallbackDepth() {
         return webFallbackDepth;
