@@ -368,7 +368,14 @@ Steps 1-3 and 6 assume the EO2. On an EO1, do step 7 first — the gate — and 
    file. The two disagree on a healthy EO2 — launch says `TsPlayer`, a rotated or wrong-aspect clip says
    `MediaPlayer` — and neither is more correct than the other.
 2. Play a known-good local H.264 from Immich cache full-screen
-3. Loop ≥2 minutes without surface loss **and without black flicker between passes** — the durable log's `TsPlayer createPlayer` line shows no Java recreate and `loopPerf.restartMethod=native-loop`
+3. Loop ≥2 minutes without surface loss **and without black flicker between passes**, from two sources that
+   answer it differently. `/state`'s `video.loopPerf.restartMethod` reads `native-loop` — a debug-build
+   field, present only while a TsPlayer clip is on the panel. And logcat's `TsPlayer createPlayer path=`
+   line appears **once per asset handoff, not once per pass**, which is the positive evidence that nothing
+   in Java is tearing the player down per duration. Do not look for either in `files/eo1-app.log`: that
+   `createPlayer` line is `Log.i` in `TsVideoView.startOrRestartPlayer()`, `AppLogger` does not intercept
+   Android logs, and logcat holds about thirteen minutes on these frames, so this check is a live
+   observation and not a durable record — see AGENTS.md on the durable log.
 4. Image ↔ video handoff and screen off/on
 5. HEVC (or other incompatible) plays via TsPlayer/MediaPlayer; on failure it falls back to Immich /video/playback (images: preview thumbnail)
 6. Force Ts failure (corrupt file) → log `TsPlayer → MediaPlayer fallback` then thumbnail/next asset path
