@@ -166,11 +166,17 @@ Device install (EO1 browser sideload vs EO2 `adb`) is documented in [README.md](
 `.github/dependabot.yml` turns on Dependabot **version updates** (gradle + github-actions, weekly).
 Because this app is pinned to `minSdk`/`targetSdk`/`maxSdk` = 19, Dependabot must never open a PR that
 raises a dependency above the last release that installs on KitKat — Dependabot reads no manifest SDK
-field, so every ceiling is hand-authored in the file's `ignore` blocks. **`ignore` gates BOTH the
-version and the security path for gradle** (`gradle/update_checker/version_finder.rb` calls
-`filter_ignored_versions` on both), and there is no `applies-to` under `ignore` — so a ceiling is
-unconditional, which is exactly what satisfies "never suggest past the ceiling," and is why an
-advisory fixed only above a ceiling becomes a permanent alert with no PR (see the register).
+field, so every ceiling is hand-authored in the file's `ignore` blocks. **`ignore` gates the *version*
+path, and there is no `applies-to` under `ignore`** (that key exists only under `groups`) — but it does
+**not** gate the security path, measured 2026-11-11: with `ignore: ["> 32.1.2"]` already on `main` for
+guava, Dependabot opened security PR #113 forty-four seconds after the alert fired. What the yaml
+still cites from `gradle/update_checker/version_finder.rb` (`filter_ignored_versions` on both paths)
+is not what the service did. Two consequences: an advisory fixed only above a ceiling does **not** sit
+quietly as an alert — it arrives as a PR that has to be closed by hand; and that PR may name a version
+**still inside its own advisory's range** (#113 offered `33.7.1` for a range ending `<= 33.7.1`,
+patched at `33.7.2`). So a ceiling is not a guard against mergeable-looking PRs, and the check before
+merging one is the advisory's `first_patched_version` read against the proposed version — never the
+presence of an `ignore` rule.
 Authoring rules: a bare `versions: ["X"]` is **equality** (ignores one release, silently dissolving the
 ceiling — always use an operator), and prefer `> <last known good>` over `>= <first known bad>` so the
 next line's already-published alphas are caught. Keep this table and the yaml in sync.
@@ -188,7 +194,7 @@ next line's already-published alphas are caught. Keep this table and the yaml in
 | `com.google.code.gson:gson` | 2.10.1 | README table: 2.11.0+ = API 21, 2.15.0+ = API 24 (plain jar — fails at runtime, not compile) |
 | `com.github.bumptech.glide:*` (glide+compiler) | 5.0.7 | 5.0.9 → minSdk 23 + kotlin-stdlib + minCompileSdk 37. Merged 4.16.0 → 5.0.7 in #84: its AAR manifest says minSdk 14 with no kotlin-stdlib, and `AppGlideModule`/`@GlideModule`/the annotation processor/`RequestListener` are unchanged across the major — the older note here claiming 4→5 rewrote that contract was false |
 | `com.android.tools:desugar_jdk_libs*` | 2.0.4 (frozen) | 2.1.x is API-19-safe but decides D8's java.* backfill → NoSuchMethodError at runtime; move by hand + hardware |
-| `com.google.guava:guava` | 32.1.2 (frozen) | no minSdk bound; frozen as ~3MB dead dex (0 imports) + wrong (`-jre`) flavor — delete rather than maintain |
+| `com.google.guava:guava` | **no pin — declaration deleted 2026-11-11** | never 32.1.2 for API-19 reasons: 0 files imported `com.google.common` (~3MB dead dex) and `-jre` is the flavor Guava's README says not to use on Android. **The trap that made it not-dead: guava supplied `com.google.code.findbugs:jsr305` transitively, and 4 files imported its `javax.annotation.Nullable`** — they compile against `androidx.annotation.Nullable` now (the other 28 already did). "0 imports of the declared artifact" is not "0 imports of what it drags in"; grep the annotation packages too. Measured in the debug APK afterwards: `com.google.common` class definitions dropped to exactly one — `util.concurrent.ListenableFuture`, which comes from the separate `com.google.guava:listenablefuture:1.0` stub that androidx pulls, not from this coordinate — and no `javax/annotation/*` class ships any more, so the deletion took jsr305 out of the binary too. Alerts still filed under this name are AGP's own transitive guava (`28.1-android`, `32.0.1-jre`, scope `development`), never in the APK |
 | `com.vdurmont:semver4j` | 3.1.0 | last release ever; maintenance moved to `org.semver4j` (unreachable coordinate) |
 | `org.eclipse.paho:*` | 1.2.5 | project stopped releasing; not an API-19 bound |
 | `com.android.application` / `com.android.library` (AGP) | 8.7.3 (>= 8.8.0 ignored) | not API-19 — AGP↔Gradle mutual compatibility; moves as a pair with the wrapper |
@@ -207,9 +213,18 @@ next line's already-published alphas are caught. Keep this table and the yaml in
   exists.** Real mitigation is the trust path (`MergedTrust` / `RootBundle`, [docs/TRUST.md](docs/TRUST.md))
   and the operator's LAN policy. (CVE-2023-0849 *is* fixed at 3.12.13.)
 - `com.squareup.okio:okio` — CVE-2023-3635 is patched **at** 1.17.6 → clean at the pin.
-- `com.google.code.gson:gson`, `com.google.guava:guava`, `org.eclipse.paho`, `io.netty` 4.1.x,
+- `com.google.code.gson:gson`, `org.eclipse.paho`, `io.netty` 4.1.x,
   `androidx.appcompat` (CVE-2023-2974 fixed at 1.6.1) — all patched at or below the pin, so the
   ceilings cost no security coverage.
+- `com.google.guava:guava` — the one ceiling whose "patched at or below the pin" claim went stale, and
+  the fix was deletion, not a bump: **CVE-2026-102554 / GHSA-xxph-c9ww-hj94** (HIGH, published
+  2026-10-27) covers `>= 4.0, <= 33.7.1` and is first patched at **33.7.2**, i.e. above the 32.1.2
+  freeze, and Dependabot's PR #113 offered **33.7.1 — inside the advisory's own range**, so merging it
+  would have cleared nothing. What that PR was really chasing is AGP's own transitive guava, reported
+  `relationship: transitive`, `scope: development` (`28.1-android` at `app/build.gradle`, `32.0.1-jre`
+  at the root `build.gradle`): build-time classpath, same accepted class as the unbounded build-time
+  pins above, and unreachable by any change to the app's own `implementation` lines. Deleting the
+  declaration retires the app-side exposure and the ~3MB of dead dex in one line.
 
 **Ongoing duty this file creates:** on every new advisory touching a ceilinged coordinate, a human
 decides "fixable below the ceiling?" — that is now the only path, since the automation is forbidden
