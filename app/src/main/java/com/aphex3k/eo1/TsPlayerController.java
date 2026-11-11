@@ -88,6 +88,11 @@ public class TsPlayerController implements VideoPlayerController {
      * TsPlayer renders through a SurfaceView the .so owns: there is no per-frame callback to hook, and
      * its reported position falls back to wall-clock elapsed time when the native clock is unusable
      * (TsVideoView), so anything measured against it would be measuring a timer rather than a decoder.
+     *
+     * <p>The frame-gap answers are {@code NO_GAP} for the same reason rather than a guess: "this
+     * engine cannot see its own spacing" and "this engine's spacing has always been fine" must not
+     * become the same reported number, and TsPlayer clips loop natively, so there is no platform-player
+     * end-of-file tail whose spacing would need measuring in the first place.
      */
     @Override
     public boolean supportsPaintSignal() {
@@ -97,6 +102,17 @@ public class TsPlayerController implements VideoPlayerController {
     @Override
     public long getLastFrameAtMs() {
         return 0L;
+    }
+
+    /**
+     * No per-frame signal, so no spacing: the `.so` offers nothing between frames and its reported position
+     * is wall-clock when the native clock is unusable, so watching it would measure a timer. Every frame gap
+     * reads {@link FrameGapWindow#NO_GAP} rather than a guessed zero — "this engine cannot see its own
+     * spacing" and "its spacing has always been fine" must not become the same number.
+     */
+    @Override
+    public long getGapSnapshot() {
+        return FrameGapWindow.emptySnapshot();
     }
 
     @Override

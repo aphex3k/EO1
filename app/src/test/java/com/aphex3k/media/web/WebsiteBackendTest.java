@@ -106,4 +106,25 @@ public class WebsiteBackendTest {
         MediaSource src = b.resolveOriginal(b.fetchCatalog().get(0));
         assertEquals("http://host/a/", src.url);
     }
+
+    /**
+     * The check {@code /state} uses so it cannot name a page the selected asset never came from. A web
+     * asset's id is derived from its URL, so an entry that has moved stops matching instead of being
+     * trusted — which is the whole reason the pairing can be verified rather than assumed.
+     */
+    @Test
+    public void aConfiguredPageMatchesOnlyTheAssetItProduced() {
+        WebsiteBackend b = backend("web-1", "http://lan/page-a");
+        String assetId = b.fetchCatalog().get(0).id;
+
+        assertEquals("http://lan/page-a", WebsiteBackend.pageForAssetId("http://lan/page-a", assetId));
+        // The defect this exists for: web-1 has been edited to another page, and the pool record for
+        // page A is still what rotation last selected.
+        assertNull(WebsiteBackend.pageForAssetId("http://lan/page-b", assetId));
+        assertEquals("a hand-edited config value with stray whitespace is still the same page",
+                "http://lan/page-a", WebsiteBackend.pageForAssetId("  http://lan/page-a  ", assetId));
+        assertNull(WebsiteBackend.pageForAssetId("", assetId));
+        assertNull(WebsiteBackend.pageForAssetId(null, assetId));
+        assertNull(WebsiteBackend.pageForAssetId("http://lan/page-a", null));
+    }
 }

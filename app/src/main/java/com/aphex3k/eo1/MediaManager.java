@@ -2153,13 +2153,22 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     }
 
     /**
-     * Remaining assets in the current pool.
+     * Assets the rotation has not reached yet in THIS pass — a position in the cycle, never the size of
+     * the library. A pool of 40,000 with 3 left answers 3, and an exhausted-but-healthy pool answers 0,
+     * which is the difference between a thin library and a frame rotating normally.
      *
-     * <p>Named for what it returns: the tail of this pass, not the size of the library. A pool of
-     * 40 000 assets with 3 left reads as "3" here, which is the difference between a thin library
-     * and a frame that is rotating normally.
+     * <p>It used to be called {@code rotationListSize()}, which described none of this and made the
+     * eleven assertions below it read as pool sizes; the name is the thing that was wrong, so the method
+     * is renamed rather than annotated. The {@code /state} key it fills is still {@code media.rotationAssets}
+     * — a published field name, changed only with the docs that describe it — and the durable dump calls
+     * the same value {@code remainingThisPass}, which is the honest word for it.
+     *
+     * <p>{@code poolCursor} belongs to the rotation worker and is not {@code volatile}, so a read from
+     * one of {@code WebServer}'s threads — which is what fills {@code /state}, and the dump — may answer
+     * a little behind the rotation. That is what a report wants anyway: a lagging position is still a
+     * position, where the pool's total is not.
      */
-    int rotationListSize() {
+    public int rotationRemainingInPass() {
         return Math.max(0, pool.size() - poolCursor);
     }
 
@@ -2167,6 +2176,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
     public int poolKeyCount() {
         return poolKeys.size();
     }
+
 
     /**
      * Whether at least one catalog pass has run to completion, so an empty pool means <em>nothing to
@@ -2183,13 +2193,12 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         return !currentConfigurationFingerprint.isEmpty();
     }
 
-    /**
-     * Assets left in this pass. The cursor belongs to the rotation worker and is not volatile, so
-     * this may answer a little behind it — which is what a report wants anyway.
-     */
-    public int poolRemaining() {
-        return rotationListSize();
-    }
+    // Merged with main, which added this accessor alongside a `poolRemaining()` wrapper whose body was
+    // `return rotationListSize();`. The wrapper is the half that is not carried, and not because nothing
+    // called it -- main called it from the durable dump's `remainingThisPass=` line, and from
+    // `rotationAssets` through the name it wrapped. Both sites now read rotationRemainingInPass().
+    // Keeping the wrapper would have put two names back on one number, which is exactly the ambiguity
+    // 920de70 removed; deleting the call without resolving those two lines would not have compiled.
 
     /** How far the current cycle has walked past dead web pages. */
     public int webFallbackDepth() {

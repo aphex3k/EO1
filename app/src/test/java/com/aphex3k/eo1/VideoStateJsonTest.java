@@ -54,6 +54,11 @@ public class VideoStateJsonTest {
         }
 
         @Override
+        public long gapSnapshot() {
+            throw new AssertionError("asked a released player for its frame spacing");
+        }
+
+        @Override
         public int durationMs() {
             throw new AssertionError("asked a released player for its duration");
         }
@@ -291,8 +296,48 @@ public class VideoStateJsonTest {
 
         JsonObject video = VideoStateJson.build(videoOnScreen(), frame, new AnsweringProbe());
         assertTrue(video.has("codec"));
-        assertFalse("TsPlayer-internal counters stay debug-only", video.has("generation"));
+        assertFalse("TsPlayer-internal counters stay debug-only", video.has("errors"));
         assertFalse(video.has("loopPerf"));
+    }
+
+    /**
+     * The second layer of that rule, and the one a gate on {@code onScreen} cannot express: a clip that
+     * really is on the wall still reports only what was measured about it. Two different values mean
+     * "not measured" depending on which route fed the record — {@code -1} from
+     * {@link PanelDisplay.ClipFacts#UNKNOWN}, and the {@code 0} {@code VideoHeaderProbe} reports for a
+     * size it could not parse — and either one printed beside {@code macroblocksPerSecond} or
+     * {@code bitRateBps} reads as a clip that cleared MediaCompatibility's ceiling.
+     */
+    @Test
+    public void aClipOnThePanelStillReportsOnlyWhatWasMeasuredAboutIt() {
+        JsonObject neverProbed = VideoStateJson.build(
+                PanelDisplay.video("asset-1", "/data/x/clip.mp4", VideoEngineReport.MEDIA_PLAYER,
+                        "ORIGINAL", PanelDisplay.ClipFacts.UNKNOWN, "", GEN, WHEN),
+                frame(), new AnsweringProbe());
+        assertTrue("the clip is on the panel — that is not why the numbers are missing",
+                neverProbed.get("onScreen").getAsBoolean());
+        for (String field : new String[]{"rotation", "width", "height", "codec", "fpsMilli",
+                "avgFrameBytes", "peakFrameBytes", "bitRateBps", "fileDurationMs",
+                "macroblocksPerSecond"}) {
+            assertFalse("unmeasured must read as absent, never as -1: " + field, neverProbed.has(field));
+        }
+
+        // The probe route: a header that parsed but could not yield dimensions, where the other
+        // measurements are real. Zero is not a coded width, and the derived throughput has to go with it.
+        JsonObject unreadableDims = VideoStateJson.build(
+                PanelDisplay.video("asset-1", "/data/x/clip.mp4", VideoEngineReport.MEDIA_PLAYER,
+                        "ORIGINAL", new PanelDisplay.ClipFacts(0, 0, 0, "avc1", 30_000, 120_000L,
+                                500_000L, 9_000_000L, 12_000L), "", GEN, WHEN),
+                frame(), new AnsweringProbe());
+        assertFalse("0 is what the probe reports for an unparseable size, not a size",
+                unreadableDims.has("width"));
+        assertFalse(unreadableDims.has("height"));
+        assertFalse("a product of unknown inputs is not a measurement",
+                unreadableDims.has("macroblocksPerSecond"));
+        assertTrue("the fields that were measured stay reported",
+                unreadableDims.has("bitRateBps") && unreadableDims.has("fpsMilli"));
+        assertEquals("0 is a real rotation, so it survives where 0 is not a size",
+                0, unreadableDims.get("rotation").getAsInt());
     }
 
     /** The other half of the same rule: for a clip the panel holds, the measurement is reported. */
@@ -301,21 +346,21 @@ public class VideoStateJsonTest {
         JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), new AnsweringProbe());
         for (String field : new String[]{"path", "stage", "rotation", "width", "height", "codec",
                 "fpsMilli", "avgFrameBytes", "peakFrameBytes", "bitRateBps", "fileDurationMs",
-                "macroblocksPerSecond", "renderSilent", "painted", "lastFrameAgeMs", "durationMs",
-                "positionMs"}) {
+                "macroblocksPerSecond", "renderSilent", "painted", "lastFrameAgeMs",
+                "frameGapMs", "frameGapMaxMs", "durationMs", "positionMs"}) {
             assertTrue("a clip is on the panel, yet the block omits " + field, video.has(field));
         }
     }
 
     /**
-     * The engine-specific cluster is the exception, and it is the earlier bug: `generation`,
+     * The engine-specific cluster is the exception, and it is the earlier bug: `errors`,
      * `playerCreated` and friends describe the native view, so a clip the platform player composites
      * must not carry them.
      */
     @Test
     public void theNativeClusterIsAbsentForAPlatformCompositedClip() {
         JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), new AnsweringProbe());
-        for (String field : new String[]{"generation", "errors", "playerCreated", "surfaceReady",
+        for (String field : new String[]{"errors", "playerCreated", "surfaceReady",
                 "recreatingForLoop"}) {
             assertFalse("a hidden view must not be reported as this clip's state: " + field,
                     video.has(field));
@@ -327,8 +372,9 @@ public class VideoStateJsonTest {
         JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), new AnsweringProbe());
         JsonObject loopPerf = video.getAsJsonObject("loopPerf");
         assertEquals(VideoEngineReport.MEDIA_PLAYER, loopPerf.get("engine").getAsString());
-        // Not the same measurement as the native player's loopCycleMs, and deliberately not sharing its
-        // key: a platform clip that loops perfectly reads 0 / -1 here forever.
+        // Named `manual*` on purpose: it counts restarts this app issues, which is not what the native
+        // player's loop-cycle timing ever measured (that key is gone — its producer was deleted by
+        // ee409ef). A platform clip that loops perfectly reads 0 / -1 here forever, and that is the design.
         assertEquals(0L, loopPerf.get("manualLoopRestarts").getAsLong());
         assertEquals(-1L, loopPerf.get("manualLoopCycleMs").getAsLong());
     }
@@ -342,17 +388,17 @@ public class VideoStateJsonTest {
                     @Override
                     public VideoStateJson.NativeCounters nativeCounters() {
                         VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
-                        counters.generation = 4;
+                        counters.errors = 4;
                         counters.playerCreated = true;
-                        counters.loopCycleMs = 8_000L;
+                        counters.startMs = 8_000L;
                         return counters;
                     }
                 });
-        assertEquals(4, video.get("generation").getAsInt());
+        assertEquals(4, video.get("errors").getAsInt());
         assertEquals(VideoEngineReport.TS_PLAYER, video.get("engine").getAsString());
         JsonObject loopPerf = video.getAsJsonObject("loopPerf");
         assertEquals(VideoEngineReport.TS_PLAYER, loopPerf.get("engine").getAsString());
-        assertEquals(8_000L, loopPerf.get("loopCycleMs").getAsLong());
+        assertEquals(8_000L, loopPerf.get("startMs").getAsLong());
         assertFalse(loopPerf.has("manualLoopRestarts"));
     }
 
@@ -457,7 +503,7 @@ public class VideoStateJsonTest {
         assertFalse(video.has("painted"));
         assertFalse(video.has("lastFrameAgeMs"));
         assertFalse(video.has("loopPerf"));
-        assertFalse(video.has("generation"));
+        assertFalse(video.has("errors"));
     }
 
     /** A probe that answers, for the cases where a clip really is up. */
@@ -481,6 +527,12 @@ public class VideoStateJsonTest {
         }
 
         @Override
+        public long gapSnapshot() {
+            // One word carrying the pair the two getters used to return separately: latest 33, worst 413.
+            return FrameGapWindow.pack(33, 413);
+        }
+
+        @Override
         public int durationMs() {
             return 23_000;
         }
@@ -499,12 +551,11 @@ public class VideoStateJsonTest {
         @Override
         public VideoStateJson.NativeCounters nativeCounters() {
             VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
-            counters.generation = 9;
             counters.errors = 3;
             counters.playerCreated = true;
             counters.surfaceReady = true;
             counters.recreatingForLoop = true;
-            counters.loopCycleMs = 8_000L;
+            counters.startMs = 8_000L;
             return counters;
         }
 

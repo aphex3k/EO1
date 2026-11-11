@@ -54,6 +54,7 @@ import androidx.fragment.app.Fragment;
 
 import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaType;
+import com.aphex3k.media.web.WebsiteBackend;
 import com.aphex3k.eo1.mqtt.MqttManager;
 import com.aphex3k.eo1.mqtt.Payload;
 import com.aphex3k.eo1.mqtt.PlaybackListener;
@@ -119,18 +120,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * it is misread as stalled.
      */
     private static final long VIDEO_RATE_WINDOW_MS = 5000L;
-    /**
-     * Media progress below this (x100) counts as making no headway. Past the end of a clip the
-     * position inches rather than stopping — measured at 0.00x to 0.02x — so anything above this is
-     * still genuinely playing and must not be cut short.
-     */
-    private static final int LOOP_TAIL_RATE_X100 = 50;
-    /**
-     * How far past the end a position may sit and still be believed. Measured restarts land 5 to
-     * 375 ms past the file's own length; anything orders of magnitude beyond that is a bogus read
-     * from a player that has not settled, not a clip that has finished.
-     */
-    private static final int LOOP_END_SLACK_MS = 30000;
+    // The seam's own thresholds (a tail's headway bound and how far past the end a reading is still
+    // believed) moved to VideoLoopSeamRule with the decision they tune.
     /**
      * How long a video may take to put its first frame on screen. A clip whose bytes are accepted but
      * never composited raises no error and stops no clock, so a deadline on the picture is the only way
@@ -475,8 +466,35 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     /** Start of the window the playback-rate estimate is measured across. */
     private long videoRateAnchorMs = 0L;
     private int videoRateAnchorPosition = -1;
-    /** When the watchdog last read the position, so progress can be judged per poll. */
-    private long videoWatchdogPrevPollMs = 0L;
+    /**
+     * Start of the <em>previous</em> poll's {@code getCurrentPosition()} call, on
+     * {@link android.os.SystemClock#elapsedRealtime()}, so the interval handed to {@link VideoLoopSeamRule}
+     * runs from the beginning of one query to the end of the next.
+     *
+     * <p>Both halves of that sentence are load-bearing, and each was the subject of a review round.
+     * <b>Start-to-end rather than end-to-end</b> because a position read back from a player can be as old as
+     * the call that produced it: an end-to-end interval is short by the previous query's own duration, and
+     * {@link VideoLoopSeamRule}'s wrap test reads a too-short interval as proof that no lap could have
+     * completed — a healthy wrap reported as a rewind, on exactly the clips whose lap is near one poll.
+     * <b>Monotonic rather than wall</b> for the same reason at one remove: these frames are power-cycled and
+     * run no time sync ({@code docs/TRUST.md} gate 4), so a correction can step the wall clock <em>back</em>
+     * between two samples and shorten the interval while leaving it positive — which is the one case the
+     * rule's own {@code sincePreviousMs > 0} defence cannot see.
+     *
+     * <p>The stall rung and the rate window deliberately keep the wall clock, and neither is immune to a
+     * step — saying "it re-anchors" would be the kind of half-truth this file keeps having to correct. A
+     * <em>backward</em> step is where the two differ: {@code measurePlaybackRate} re-anchors whenever
+     * {@code now} falls behind its own anchor, so it loses that window's sample, while the bare
+     * {@code now - videoWatchdogLastProgressMs} test goes negative and the stall rung simply waits. A
+     * <em>forward</em> step reaches both: the rate window's elapsed grows, so it publishes a low rate that
+     * the attempt keeps in {@code videoPlaybackRateMinX100} forever — a phantom stall in the one field that
+     * is supposed to distinguish a uniformly-late pipeline from a hitching one — and the stall test clears
+     * its threshold on a clip that was never stalled. Both exposures are pre-existing, named, and unfixed
+     * here: this change is about the one subtraction whose error selects a {@code seekTo(0)} on the same
+     * poll, and moving two more measurements onto another clock in the pass that fixes one is how a timing
+     * change stops being reviewable. The switch is one argument at one call site whenever it is wanted.
+     */
+    private long videoWatchdogPrevQueryStartElapsedMs = 0L;
     /**
      * Watches whether the current video display attempt has produced a frame at all. The position
      * watchdog above cannot do this: it is armed from {@code onVideoPrepared} (so an attempt whose
@@ -592,8 +610,16 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * of one failed download would look like a permanent stall.
      */
     private static final long DOWNLOAD_PROGRESS_SILENCE_MS = 120_000L;
-    /** Last ack from the main thread to a watchdog probe. */
-    private volatile long mainLoopAckAtMs = 0L;
+    /**
+     * Last ack from the main thread to a watchdog probe. Seeded at construction rather than at 0,
+     * because every reader of it is an age: {@code watchdog.mainLoopStallMs} and the durable dump both
+     * compute {@code now - this}, so an unseeded field reported the Unix epoch (~56 years) for the gap
+     * between {@code webServer.start()} binding and the baseline write in {@code onCreate} — a window
+     * that also reopens on every Activity recreation, since the field is per-instance and the server is
+     * answering {@code /state} before the baseline lands. DiagnosticsReport tells readers to treat
+     * {@code *StallMs} as an age recomputed at capture, so that value was misread by design.
+     */
+    private volatile long mainLoopAckAtMs = System.currentTimeMillis();
     /** Bumped on the main thread by every probe acknowledgement; see {@link #mainLoopProgressToken()}. */
     private volatile long mainLoopAcks = 0L;
     /** When we first noticed we had no network; 0 while connected. */
@@ -3090,7 +3116,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogRecoverAttempted = false;
         videoRateAnchorMs = 0L;
         videoRateAnchorPosition = -1;
-        videoWatchdogPrevPollMs = 0L;
+        videoWatchdogPrevQueryStartElapsedMs = 0L;
         // No watchdog, no measurement: TsPlayer skips this arm entirely, so leaving the previous
         // MediaPlayer asset's rate standing would attribute it to a clip that was never watched.
         videoPlaybackRateX100 = -1;
@@ -3126,6 +3152,10 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         videoWatchdogStage = stage;
         videoWatchdogLastPosition = -1;
         videoWatchdogLastProgressMs = System.currentTimeMillis();
+        // Stamped here rather than left at zero so the first poll's interval is a poll and not the device's
+        // uptime. Nothing can fire on that poll anyway — there is no previous reading — but an interval that
+        // means "since boot" is the kind of value a later edit would have to remember is inert.
+        videoWatchdogPrevQueryStartElapsedMs = android.os.SystemClock.elapsedRealtime();
         videoWatchdogRecoverAttempted = false;
         scheduleVideoWatchdogCheck();
     }
@@ -3157,67 +3187,68 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
+        long queryStartElapsedMs = android.os.SystemClock.elapsedRealtime();
         int position = videoPlayer.getCurrentPosition();
         long now = System.currentTimeMillis();
+        long queryEndElapsedMs = android.os.SystemClock.elapsedRealtime();
         measurePlaybackRate(position, now);
 
         // Both questions below are about the previous poll, so they have to be answered before the
         // bookkeeping replaces those readings.
         int previousPositionMs = videoWatchdogLastPosition;
-        long sincePreviousMs = now - videoWatchdogPrevPollMs;
-        videoWatchdogPrevPollMs = now;
+        // An UPPER bound on the media time between the two position values: start of the previous query to
+        // end of this one, not end to end, and on a monotonic clock. VideoLoopSeamRule reads it as "a
+        // completed lap could not have happened in that interval", so every error in the SHORTENING direction
+        // reports a healthy wrap as a rewind and seeks away a lap that had already restarted itself — and
+        // there are two ways to shorten it: a query's own duration, and a backward correction to a wall clock
+        // these frames never sync. The wall `now` above stays for the rate window and the stall rung, and
+        // videoWatchdogPrevQueryStartElapsedMs says exactly how a step reaches each of them.
+        long sincePreviousMs = queryEndElapsedMs - videoWatchdogPrevQueryStartElapsedMs;
+        videoWatchdogPrevQueryStartElapsedMs = queryStartElapsedMs;
 
-        boolean parked = position == previousPositionMs;
-        // Media advanced less than half as fast as the clock across one poll interval. Measured per
-        // poll rather than from the rate window, which needs VIDEO_RATE_WINDOW_MS to fill and so
-        // left the seam open for seconds even after the crawl had begun.
-        boolean creeping = !parked && previousPositionMs >= 0 && sincePreviousMs > 0
-                && (position - previousPositionMs) * 100L < sincePreviousMs * LOOP_TAIL_RATE_X100;
+        int reportedMs = videoPlayer.getDuration();
+        // The file's own length, from the record this watchdog was armed for and nothing else. Reading the
+        // attempt would be wrong in both directions: a clip being watched may not have reached the wall yet,
+        // and a render-silent asset chosen while this clip is still playing replaces the attempt with an
+        // image record — which reads back as "no duration known" (-1) and lets a creeping position past the
+        // player's shortened 23,000 ms trigger a restart before the file's remaining 23,621 ms have played.
+        PanelDisplay watched = videoWatchdogRecord;
+        long fileMs = watched != null && watched.clip != null ? watched.clip.fileDurationMs : -1L;
+        // The seam decision, its thresholds and the measured position series that shaped them live in
+        // VideoLoopSeamRule — which is also the only place they can be tested.
+        VideoLoopSeamRule.Decision seam = VideoLoopSeamRule.evaluate(
+                position, previousPositionMs, sincePreviousMs, reportedMs, fileMs);
 
-        if (!parked) {
+        // Any movement at all re-arms the stall clock, so the 8 s threshold below can only ever be
+        // reached by a position that is exactly equal across polls. That is why the seam rule has to
+        // notice a tail that creeps or steps backwards: for those there is no backstop behind it.
+        if (position != previousPositionMs) {
             videoWatchdogLastPosition = position;
             videoWatchdogLastProgressMs = now;
             videoWatchdogRecoverAttempted = false;
         }
 
-        // The end of the cycle, announced here because nothing else announces it. A clip whose last
-        // frames sit past the duration the player reports never raises onCompletion, so
-        // setLooping(true) has no end-of-stream to loop on and play() is a no-op while the player
-        // still believes it is PLAY — on an EO2 that read as a decoder hung for 8.4 s every lap.
-        //
-        // Two things hide that boundary. The player's duration is shorter than the media it is
-        // holding (23000 ms reported for a 23621 ms file, because the QuickTime mvhd timescale of
-        // 600 cannot divide the frame period evenly), so ending on the player's number truncates
-        // frames still running. And past that point the position does not freeze, it creeps
-        // (23011, 23169, 23374, 23879 ms) — so "did not move between polls" is never true either,
-        // and every change-based test re-arms the stall threshold instead of firing. Hence the
-        // file's own length where the probe could read one, and no headway meaning stopped OR
-        // creeping. Which end to demand depends on which of the two was seen: a position that has
-        // not moved at all is at the end as far as the player is concerned, and some files stop dead
-        // at the shortened number without ever passing it, so demanding the file's length there
-        // would skip this branch and leave the 8 s threshold to notice.
-        int reportedMs = videoPlayer.getDuration();
-        // The watched clip's own length, from the record adopted when this attempt started. The guard
-        // above proves the watched asset is the active one, so this is the same file the watchdog was
-        // armed for — and never the previous clip's, which is what reading a stored field risked.
-        // The record this watchdog was armed for, and nothing else. Reading the attempt would be wrong in
-        // both directions: a clip being watched may not have reached the wall yet, and a render-silent asset
-        // chosen while this clip is still playing replaces the attempt with an image record — which reads
-        // back as "no duration known" (-1) and lets a creeping position past the player's shortened 23,000 ms
-        // trigger a restart before the file's remaining frames (23,621 ms) have finished.
-        PanelDisplay watched = videoWatchdogRecord;
-        long fileMs = watched != null && watched.clip != null ? watched.clip.fileDurationMs : -1L;
-        int cycleEndMs = parked ? reportedMs : (int) Math.max((long) reportedMs, fileMs);
-        // A position absurdly far past the end is a bad reading rather than a finished clip: a
-        // freshly created player has been observed reporting values near the epoch, and acting on
-        // one every poll would turn the loop into a restart storm.
-        if (cycleEndMs > 0 && position >= cycleEndMs
-                && position - cycleEndMs <= LOOP_END_SLACK_MS && (parked || creeping)) {
+        // The end of the cycle, announced here because nothing else announces it: this is the one line
+        // that says the app, not the player, decided to wrap the lap. The gap pair is spacing since the
+        // data source was set — read FrameGapWindow before interpreting it. On the first run that carried
+        // it, no interval anywhere exceeded 345 ms, and a lap whose position was bit-identical between
+        // polls still reported a 241 ms maximum: the counter sees buffers reaching a draw pass, not
+        // changes of picture.
+        if (seam.restarts()) {
+            // Read once and decode twice — two getter calls would be two samples of a word that surface
+            // destruction can clear in between. Print the sentinel as a word: `gap=-1/-1` in an operator's
+            // grep looks like a measurement, while -1 means "no record" — which is every TsPlayer lap and
+            // any clip under two frames. Matches the durable line's `maxFrameGap=none`.
+            long gapPair = videoPlayer.getGapSnapshot();
+            int lastGapMs = FrameGapWindow.latestOf(gapPair);
+            int maxGapMs = FrameGapWindow.maxOf(gapPair);
             debugInformationProvided(new DebugInformation("video",
-                    "loop restart pos=" + position + " end=" + cycleEndMs
-                            + " (" + (parked ? "parked" : "creeping")
+                    "loop restart pos=" + position + " end=" + seam.boundaryMs
+                            + " (" + seam.reasonWord()
                             + " player=" + reportedMs + " file=" + fileMs + ")"
-                            + " rate=" + describePlaybackRate()));
+                            + " rate=" + describePlaybackRate()
+                            + " gap=" + (lastGapMs < 0 ? "none" : Integer.toString(lastGapMs))
+                            + "/" + (maxGapMs < 0 ? "none" : Integer.toString(maxGapMs))));
             noteMediaManualLoopRestart();
             try {
                 videoPlayer.seekTo(0);
@@ -3232,7 +3263,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             return;
         }
 
-        if (!parked) {
+        // Reached only by a reading that is exactly equal to the last one: anything else returned
+        // above, and anything the seam rule calls a tail was already restarted there.
+        if (position != previousPositionMs) {
             scheduleVideoWatchdogCheck();
             return;
         }
@@ -3954,13 +3987,22 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             boolean paintSignal = !VideoEngineReport.TS_PLAYER.equals(shown.engine);
             long lastFrameAtMs = paintSignal && compositing != null ? compositing.getLastFrameAtMs() : 0L;
             boolean painted = paintSignal && videoPaintProduced;
+            // Worst frame spacing this engine recorded for the clip in hand. Read under exactly the same
+            // discipline as the stamp above, on the same controller, so the two cannot describe different
+            // displays. It says whether buffers kept arriving; it cannot say whether the picture changed,
+            // and a low value must not be read as "the clip was fine" — see FrameGapWindow.
+            int maxFrameGapMs = paintSignal && compositing != null
+                    ? FrameGapWindow.maxOf(compositing.getGapSnapshot())
+                    : FrameGapWindow.NO_GAP;
             if (ownedBefore && panel() == shown
                     && (!shown.showsVideo() || videoCompositing == shown)) {
                 sb.append(" paintSignal=").append(paintSignal)
                         .append(" painted=").append(painted)
                         .append(" lastFrame=")
                         .append(lastFrameAtMs == 0L ? "never"
-                                : ((now - lastFrameAtMs) / 1000L) + "s ago");
+                                : ((now - lastFrameAtMs) / 1000L) + "s ago")
+                        .append(" maxFrameGap=")
+                        .append(maxFrameGapMs < 0 ? "none" : maxFrameGapMs + "ms");
             } else {
                 sb.append(" player=changed-mid-report");
             }
@@ -3982,7 +4024,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         if (mediaManager != null) {
             MediaAsset current = mediaManager.getCurrentAsset();
             sb.append("pool                : keys=").append(mediaManager.poolKeyCount())
-                    .append(" remainingThisPass=").append(mediaManager.poolRemaining())
+                    .append(" remainingThisPass=").append(mediaManager.rotationRemainingInPass())
                     .append(" rebuildFailures=").append(mediaManager.rebuildFailureCount())
                     .append('\n');
             sb.append("acquire failures    : run=").append(mediaManager.acquireFailureRun())
@@ -4074,19 +4116,47 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      *
      * <p>No credential appears here, and the URI is host and port only.
      */
+    /**
+     * The page URL a {@code web} backend entry holds, when that entry's page is still the one this
+     * asset record was built from, for {@code media.current}.
+     *
+     * <p>{@link com.aphex3k.media.web.WebsiteBackend} gives its asset an id that is a deterministic
+     * UUID of the page URL, so the pairing is not assumed here — it is recomputed. Matching on the
+     * backend id alone would repeat, through a different door, the defect this key used to have: a
+     * configuration edit that repoints {@code web-1} from page A to page B leaves {@code currentAsset}
+     * naming A until some later selection succeeds, and an id-only lookup would print B beside A's key.
+     * Null means this record's page is not recoverable from the current configuration, which the caller
+     * reports by omitting the key.
+     */
+    @Nullable
+    private String configuredWebUrl(String backendId, String assetId) {
+        if (settingsManager == null || backendId == null || assetId == null) {
+            return null;
+        }
+        for (ConfigurationBackendEntry entry : settingsManager.getConfiguration().backendsOrEmpty()) {
+            if (entry.isWeb() && backendId.equals(entry.id) && entry.host != null) {
+                String page = WebsiteBackend.pageForAssetId(entry.host, assetId);
+                if (page != null) {
+                    return page;
+                }
+            }
+        }
+        return null;
+    }
+
     private JsonObject mqttStateJson() {
         JsonObject o = new JsonObject();
         MqttManager manager = this.mqttManager;
+        o.addProperty("configured", manager != null || mqttBrokerUriFromConfig() != null);
+        o.addProperty("heldForPanel", mqttHeldForPanel);
         if (manager == null) {
-            o.addProperty("configured", mqttBrokerUriFromConfig() != null);
-            o.addProperty("connected", false);
-            o.addProperty("heldForPanel", mqttHeldForPanel);
             o.addProperty("note", mqttHeldForPanel
                     ? "held for quiet hours" : "no client for this configuration");
             return o;
         }
-        o.addProperty("configured", true);
-        o.add("client", manager.stateJson());
+        for (Map.Entry<String, JsonElement> entry : manager.stateJson().entrySet()) {
+            o.add(entry.getKey(), entry.getValue());
+        }
         return o;
     }
 
@@ -4103,7 +4173,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.addProperty("paused", isPaused());
         // "Alive" is the watchdog's own verdict: the main thread advanced at the last check. A
         // large mainLoopStallMs alongside it means slow startup, not a wedge.
-        o.addProperty("mainLoopAlive", kioskWatchdog != null && kioskWatchdog.probeMisses() == 0);
+        // Absent while there is no watchdog to ask, rather than false: `false` is a claim that the main
+        // loop is not advancing, and in that window nothing has probed it yet.
+        if (kioskWatchdog != null) {
+            o.addProperty("mainLoopAlive", kioskWatchdog.probeMisses() == 0);
+        }
         o.addProperty("mainLoopStallMs", Math.max(0L, System.currentTimeMillis() - mainLoopAckAtMs));
         o.addProperty("probeMisses", kioskWatchdog != null ? kioskWatchdog.probeMisses() : 0);
         o.addProperty("downloadInFlightMs", downloadInFlightMs());
@@ -5391,7 +5465,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         PanelDisplay shown = panelSnapshot == null ? null : panelSnapshot.display;
 
         JsonObject media = new JsonObject();
-        media.addProperty("rotationAssets", mediaManager.rotationListSize());
+        media.addProperty("rotationAssets", mediaManager.rotationRemainingInPass());
         media.addProperty("screenOn", brightnessManager.getShouldTheScreenBeOn());
         // Two clocks, two different claims, and the names say which is which: the first is the wedge
         // clock the ladder escalates on, the second only proves the timer is turning over. A reader
@@ -5406,7 +5480,17 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             current.addProperty("type", mediaTypeName(currentAsset.type));
             current.addProperty("backendId", currentAsset.backendId);
             if (currentAsset.type == MediaType.WEB) {
-                current.addProperty("url", webUrlOnScreen);
+                // The address of what rotation **selected**, which is what this object means, not the
+                // address of what the wall is showing. `webUrlOnScreen` — the obvious source — is written
+                // on the UI thread by displayWebsite, survives a page being superseded, and is blanked by
+                // abandonWebPage, so it printed one page for a selection of another, and "" for a page
+                // still selected. A web asset's id is a UUID of its URL, so the selection carries no
+                // address of its own to print; the entry that produced it does. The wall's own address is
+                // honest where it is documented: screen.pathOrUrl and attempt.pathOrUrl.
+                String selectedPage = configuredWebUrl(currentAsset.backendId, currentAsset.id);
+                if (selectedPage != null) {
+                    current.addProperty("url", selectedPage);
+                }
             }
             if (currentAsset.originalFileName != null) {
                 current.addProperty("originalFileName", currentAsset.originalFileName);
@@ -5598,6 +5682,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
 
         @Override
+        public long gapSnapshot() {
+            // One controller reference, one load: reading the two gap getters would be two samples of a word
+            // that surface destruction can clear in between, and the reset is invisible to stale().
+            VideoPlayerController active = videoPlayer;
+            return active == null ? FrameGapWindow.emptySnapshot() : active.getGapSnapshot();
+        }
+
+        @Override
         public int durationMs() {
             return activeDurationMs();
         }
@@ -5613,19 +5705,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return null;
             }
             VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
-            counters.generation = tsVideoView.getLoopGeneration();
             counters.errors = tsVideoView.getVideoErrorCount();
             counters.playerCreated = tsVideoView.isPlayerCreated();
             counters.surfaceReady = tsVideoView.isSurfaceReady();
             counters.recreatingForLoop = tsVideoView.isRecreatingForLoop();
-            counters.restartLatencyMs = tsVideoView.getLastRestartLatencyMs();
             counters.createPlayerMs = tsVideoView.getLastCreatePlayerMs();
             counters.setSurfaceMs = tsVideoView.getLastSetSurfaceMs();
             counters.startMs = tsVideoView.getLastStartMs();
-            counters.restartToPlayingMs = tsVideoView.getLastRestartToPlayingMs();
-            counters.endToPlayingMs = tsVideoView.getLastEndToPlayingMs();
-            counters.loopCycleMs = tsVideoView.getLastLoopCycleMs();
-            counters.posAtTriggerMs = tsVideoView.getLastPosAtTriggerMs();
             counters.restartMethod = tsVideoView.getLastRestartMethod();
             return counters;
         }
@@ -5786,7 +5872,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             o.addProperty("enabled", settingsManager != null && settingsManager.isTrustBundleEnabled());
             o.addProperty("bundleSize", RootBundle.size());
             o.addProperty("platformAnchors", trust.platformAnchors);
-            o.addProperty("trustedAnchors", trust.mergedAnchors);
+            // Only in MODE_MERGED is `mergedAnchors` the set this frame actually trusts. In
+            // platform-only mode the value is either -1 (never counted, bundle off, enumeration
+            // failed) or the size of a merged set the narrowing guard enumerated and then explicitly
+            // REFUSED to install — so one key carried three meanings, and the middle one reported more
+            // anchors in force than the frame has. `platformAnchors` above is that mode's honest number,
+            // which makes this key's absence a statement rather than a loss.
+            if (!trust.isPlatformOnly()) {
+                o.addProperty("trustedAnchors", trust.mergedAnchors);
+            }
             // The frame's own opinion about what time it is. Short-lived certificates make this a
             // first-class diagnostic: nothing in this app sets the clock, and a frame powered off for a
             // week can trust every anchor in the world and still reject all of them.

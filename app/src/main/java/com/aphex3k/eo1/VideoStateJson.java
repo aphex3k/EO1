@@ -81,6 +81,16 @@ public final class VideoStateJson {
 
         long lastFrameAtMs();
 
+        /**
+         * Spacing of the two most recent composited frames and the worst since this source was set, in the
+         * one word they were published in — {@link FrameGapWindow#latestOf(long)} and
+         * {@link FrameGapWindow#maxOf(long)} decode it.
+         *
+         * <p>One method rather than two getters on purpose: the pair has to come from a single load, because
+         * a surface reset between two loads changes nothing this builder can see.
+         */
+        long gapSnapshot();
+
         int durationMs();
 
         int positionMs();
@@ -95,21 +105,22 @@ public final class VideoStateJson {
         boolean renderSilent(String assetKey);
     }
 
-    /** The native player's per-loop counters. Every value is the engine's own measurement. */
+    /**
+     * The native player's per-loop counters. Every value is the engine's own measurement, and every field
+     * here has a writer: the six that {@code ee409ef} orphaned when TsPlayer looping moved into the .so
+     * ({@code generation}, {@code restartLatencyMs}, {@code restartToPlayingMs}, {@code endToPlayingMs},
+     * {@code loopCycleMs}, {@code posAtTriggerMs}) were deleted rather than left emitting a constant 0 or
+     * -1 — a field that is correctly gated and correctly attributed can still be a lie, and the only thing
+     * that made those six discoverable as lies was grepping for who writes them.
+     */
     public static final class NativeCounters {
-        public int generation;
         public int errors;
         public boolean playerCreated;
         public boolean surfaceReady;
         public boolean recreatingForLoop;
-        public long restartLatencyMs;
         public long createPlayerMs;
         public long setSurfaceMs;
         public long startMs;
-        public long restartToPlayingMs;
-        public long endToPlayingMs;
-        public long loopCycleMs;
-        public long posAtTriggerMs;
         public String restartMethod = "";
     }
 
@@ -190,19 +201,37 @@ public final class VideoStateJson {
         PanelDisplay.ClipFacts clip = shown.clip;
         video.addProperty("path", shown.pathOrUrl);
         video.addProperty("stage", shown.stage);
-        video.addProperty("rotation", clip.rotationDeg);
-        video.addProperty("width", clip.codedWidth);
-        video.addProperty("height", clip.codedHeight);
+        // Every number here is a measurement of this clip's bytes, and each one is emitted only if
+        // somebody actually measured it. The record carries two different "no measurement" values
+        // depending on which route fed it — -1 from PanelDisplay.ClipFacts.UNKNOWN, and 0 from
+        // VideoHeaderProbe, which reports unreadable dimensions as 0 — so the same key could mean the
+        // probe answered zero or never answered, with nothing in the document to tell them apart, and
+        // an unlabelled -1 sat beside the ceilings README states for the same quantity. Absence is the
+        // only answer that cannot be misread, and it is the convention this block already uses for
+        // durationMs/positionMs/painted when a player may not be consulted.
+        //
+        // rotation is the exception: 0 is a real reading there ("the display matrix leaves it upright"),
+        // so it is filtered on its own sign rather than through addMeasured.
+        if (clip.rotationDeg >= 0) {
+            video.addProperty("rotation", clip.rotationDeg);
+        }
+        addMeasured(video, "width", clip.codedWidth);
+        addMeasured(video, "height", clip.codedHeight);
         if (clip.codec != null) {
             video.addProperty("codec", clip.codec);
         }
-        video.addProperty("fpsMilli", clip.fpsMilli);
-        video.addProperty("avgFrameBytes", clip.avgFrameBytes);
-        video.addProperty("peakFrameBytes", clip.peakFrameBytes);
-        video.addProperty("bitRateBps", clip.bitRateBps);
-        video.addProperty("fileDurationMs", clip.fileDurationMs);
-        video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
-                clip.codedWidth, clip.codedHeight, clip.fpsMilli));
+        addMeasured(video, "fpsMilli", clip.fpsMilli);
+        addMeasured(video, "avgFrameBytes", clip.avgFrameBytes);
+        addMeasured(video, "peakFrameBytes", clip.peakFrameBytes);
+        addMeasured(video, "bitRateBps", clip.bitRateBps);
+        addMeasured(video, "fileDurationMs", clip.fileDurationMs);
+        // A derived number is only as measured as its inputs: with any of them unknown the product is
+        // arithmetic on a sentinel, and it reads as a throughput that can be compared against
+        // MediaCompatibility's ceiling.
+        if (clip.codedWidth > 0 && clip.codedHeight > 0 && clip.fpsMilli > 0) {
+            video.addProperty("macroblocksPerSecond", MediaCompatibility.videoMacroblocksPerSecond(
+                    clip.codedWidth, clip.codedHeight, clip.fpsMilli));
+        }
         video.addProperty("renderSilent", probe.renderSilent(shown.assetKey));
 
         // Everything from here down is read live, so it is emitted only while the snapshot still names the
@@ -221,10 +250,18 @@ public final class VideoStateJson {
         // this point returns.
         boolean painted = false;
         long lastFrameAgeMs = -1L;
+        int lastFrameGapMs = FrameGapWindow.NO_GAP;
+        int maxFrameGapMs = FrameGapWindow.NO_GAP;
         if (paintSignal) {
             painted = probe.painted();
             long lastFrameAtMs = probe.lastFrameAtMs();
             lastFrameAgeMs = lastFrameAtMs > 0L ? (System.currentTimeMillis() - lastFrameAtMs) : -1L;
+            // One load, two decodes. Two getter calls would be two samples of a value that a surface reset
+            // can clear between them, and nothing downstream could tell: the reset changes neither the panel
+            // record nor which controller is compositing, so the ownership re-check below accepts the pair.
+            long gaps = probe.gapSnapshot();
+            lastFrameGapMs = FrameGapWindow.latestOf(gaps);
+            maxFrameGapMs = FrameGapWindow.maxOf(gaps);
         }
         int durationMs = probe.durationMs();
         int positionMs = probe.positionMs();
@@ -247,6 +284,14 @@ public final class VideoStateJson {
         if (paintSignal) {
             video.addProperty("painted", painted);
             video.addProperty("lastFrameAgeMs", lastFrameAgeMs);
+            // Spacing, which the age is not: the age says when the last buffer arrived, these say how far
+            // apart they came. Deliberately NOT behind frame.debugBuild, because the hold they exist to
+            // catch happens on shipped builds. Read FrameGapWindow before trusting a small value — the
+            // counter sees buffers reaching a draw pass, not changes of picture, so a wide value is
+            // evidence of a stall while a narrow one is not evidence that the image changed. -1 is "no
+            // record": TsPlayer has none, and neither does a clip under two frames.
+            video.addProperty("frameGapMs", lastFrameGapMs);
+            video.addProperty("frameGapMaxMs", maxFrameGapMs);
         }
         video.addProperty("durationMs", durationMs);
         video.addProperty("positionMs", positionMs);
@@ -264,28 +309,22 @@ public final class VideoStateJson {
         addDebugFrameFields(video, frame);
 
         // These belong to the engine compositing this clip, and were once read off the TsPlayer view
-        // unconditionally — so for a platform-player clip `generation`, `playerCreated`, `surfaceReady` and
-        // the whole loop-perf object described a hidden view playing nothing. They are taken above, before
+        // unconditionally — so for a platform-player clip `playerCreated`, `surfaceReady` and the whole
+        // loop-perf object described a hidden view playing nothing. They are taken above, before
         // the ownership revalidation, and never re-read here: a second pass of live calls after that check
         // would put the reads it is meant to guard back outside it.
         if (frame.debugBuild) {
             NativeCounters counters = nativeCounters;
             if (counters != null) {
-                video.addProperty("generation", counters.generation);
                 video.addProperty("errors", counters.errors);
                 video.addProperty("playerCreated", counters.playerCreated);
                 video.addProperty("surfaceReady", counters.surfaceReady);
                 video.addProperty("recreatingForLoop", counters.recreatingForLoop);
                 JsonObject loopPerf = new JsonObject();
                 loopPerf.addProperty("engine", VideoEngineReport.TS_PLAYER);
-                loopPerf.addProperty("restartLatencyMs", counters.restartLatencyMs);
                 loopPerf.addProperty("createPlayerMs", counters.createPlayerMs);
                 loopPerf.addProperty("setSurfaceMs", counters.setSurfaceMs);
                 loopPerf.addProperty("startMs", counters.startMs);
-                loopPerf.addProperty("restartToPlayingMs", counters.restartToPlayingMs);
-                loopPerf.addProperty("endToPlayingMs", counters.endToPlayingMs);
-                loopPerf.addProperty("loopCycleMs", counters.loopCycleMs);
-                loopPerf.addProperty("posAtTriggerMs", counters.posAtTriggerMs);
                 loopPerf.addProperty("restartMethod", counters.restartMethod);
                 video.add("loopPerf", loopPerf);
             } else {
@@ -317,6 +356,21 @@ public final class VideoStateJson {
         video.addProperty("tsFallbacks", frame.tsFallbacks);
     }
 
+    /**
+     * A clip measurement, emitted only when a probe or a catalog actually produced it.
+     *
+     * <p>Both in-band "unknown" values the record can carry suppress the key: {@code -1} is what
+     * {@code PanelDisplay.ClipFacts.UNKNOWN} holds for a header that was never read, and {@code 0} is what
+     * {@code VideoHeaderProbe} reports for a size it could not parse. Neither is a possible value for any
+     * field that goes through here, so neither deserves to be printed as one; and of the two, {@code 0} is
+     * the one that did real damage, because a ceiling comparison against a zero looks like a passing clip.
+     */
+    private static void addMeasured(JsonObject video, String name, long value) {
+        if (value != -1L && value != 0L) {
+            video.addProperty(name, value);
+        }
+    }
+
     /** The word {@code /state} has always used for an asset type, kept where both surfaces can share it. */
     static String mediaTypeName(com.aphex3k.media.MediaType type) {
         if (type == null) {
@@ -336,6 +390,7 @@ public final class VideoStateJson {
     static final String[] CLIP_FIELDS = {
             "path", "stage", "rotation", "width", "height", "codec", "fpsMilli", "avgFrameBytes",
             "peakFrameBytes", "bitRateBps", "fileDurationMs", "macroblocksPerSecond", "renderSilent",
-            "painted", "lastFrameAgeMs", "durationMs", "positionMs", "generation", "errors",
+            "painted", "lastFrameAgeMs", "frameGapMs", "frameGapMaxMs", "durationMs", "positionMs",
+            "errors",
             "playerCreated", "surfaceReady", "recreatingForLoop", "loopPerf"};
 }

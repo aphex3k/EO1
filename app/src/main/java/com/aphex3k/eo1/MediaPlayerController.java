@@ -121,6 +121,11 @@ public class MediaPlayerController implements VideoPlayerController {
     }
 
     @Override
+    public long getGapSnapshot() {
+        return videoView.getGapSnapshot();
+    }
+
+    @Override
     public void seekTo(int positionMs) {
         videoView.seekTo(positionMs);
     }

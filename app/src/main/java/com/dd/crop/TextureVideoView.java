@@ -7,14 +7,17 @@ import android.graphics.SurfaceTexture;
 import android.media.MediaMetadataRetriever;
 import android.media.MediaPlayer;
 import android.net.Uri;
+import android.os.SystemClock;
 import android.util.AttributeSet;
 import android.util.Log;
 import android.view.Surface;
 import android.view.TextureView;
+import android.view.View;
 
 import androidx.annotation.NonNull;
 
 import com.aphex3k.eo1.BuildConfig;
+import com.aphex3k.eo1.FrameGapWindow;
 
 import java.io.IOException;
 
@@ -68,6 +71,12 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
     // evidence the app can get that pixels reached the screen: a player that reports a position and an
     // error-free prepare while painting nothing leaves every other signal looking healthy.
     private volatile long mLastFrameAtMs;
+
+    // Spacing between the buffers behind that stamp. The stamp alone says only when the last one
+    // arrived, so it cannot separate a long interval with nothing new on the surface from a clip that
+    // stopped painting. The media clock settles neither question either: it can run at 1.00x, or stall
+    // outright the way the one recorded tail stalled. FrameGapWindow states what each reading proves.
+    private final FrameGapWindow mFrameGaps = new FrameGapWindow();
 
     private State mState;
 
@@ -201,6 +210,7 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
         mVideoWidth = 0;
         mVideoHeight = 0;
         mLastFrameAtMs = 0L;
+        mFrameGaps.reset();
         mState = State.UNINITIALIZED;
     }
 
@@ -602,12 +612,62 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
             mVideoSurface = null;
         }
         mIsViewAvailable = false;
+        // The surface is gone, so any interval measured across this point belongs to whichever
+        // surface replaces it rather than to the clip in hand.
+        mFrameGaps.reset();
         return false;
     }
 
     @Override
     public void onSurfaceTextureUpdated(@NonNull SurfaceTexture surface) {
+        // Runs on every composited frame: no allocation, nothing that can throw, no lock.
+        //
+        // Two clocks on purpose. The age stamp wants the wall clock, because /state and the diagnostics
+        // report compare it against other wall-clock times; the spacing wants a monotonic one, because
+        // these frames run no time sync and a forward correction would land in the retained maximum as
+        // a stutter that never happened. See FrameGapWindow's clock contract.
+        // Deliberately unguarded, unlike the visibility paths: a frame cannot reach a surface before
+        // the view is attached and drawn, so mFrameGaps is initialised here by construction. Adding a
+        // null test would imply a hazard that does not exist on this path.
         mLastFrameAtMs = System.currentTimeMillis();
+        mFrameGaps.recordFrame(SystemClock.elapsedRealtime());
+    }
+
+    @Override
+    protected void onVisibilityChanged(@NonNull View changedView, int visibility) {
+        super.onVisibilityChanged(changedView, visibility);
+        suspendFrameGapSampling();
+    }
+
+    @Override
+    protected void onWindowVisibilityChanged(int visibility) {
+        super.onWindowVisibilityChanged(visibility);
+        suspendFrameGapSampling();
+    }
+
+    /**
+     * Any change in either kind of visibility means the interval across it says nothing about the clip:
+     * the app hides this view for quiet hours and on pause, and an {@code INVISIBLE} TextureView
+     * composites no frames at all. Without suspension, the first frame after the panel comes back would
+     * record the whole dark window as the clip's worst gap and keep it there for the rest of the source.
+     *
+     * <p><b>Why the null test stays.</b> This view is declared {@code android:visibility="invisible"} in
+     * {@code activity_main.xml}, and {@code View}'s {@code (Context, AttributeSet)} constructor routes
+     * that through {@code setFlags()}, which can reach these callbacks — so whether it fires before
+     * field initializers run is a real question, and a wrong answer is an NPE inside
+     * {@code LayoutInflater.inflate} on an unattended frame. Measured rather than assumed: disassembling
+     * this ROM's {@code framework.jar} shows {@code View.setFlags} branching on
+     * {@code mParent instanceof ViewGroup} <em>before</em> its {@code dispatchVisibilityChanged} call,
+     * and {@code mParent} is necessarily null while a constructor runs because {@code LayoutInflater}
+     * builds children before attaching them. So on API 19 as shipped here neither path can precede
+     * initialisation — but that ordering is a private detail of one vendor build, not a documented
+     * contract, and this APK runs on boards nobody has measured. Skipping is also the semantically
+     * right answer where it does fire early: nothing has been recorded, so there is no stamp to drop.
+     */
+    private void suspendFrameGapSampling() {
+        if (mFrameGaps != null) {
+            mFrameGaps.suspendSampling();
+        }
     }
 
     /**
@@ -616,5 +676,15 @@ public class TextureVideoView extends TextureView implements TextureView.Surface
      */
     public long getLastFrameAtMs() {
         return mLastFrameAtMs;
+    }
+
+
+
+    /**
+     * @return both frame-gap numbers in the one word they were published in, so a caller reporting the
+     *         pair reads one value rather than two samples of a changing one
+     */
+    public long getGapSnapshot() {
+        return mFrameGaps.snapshot();
     }
 }

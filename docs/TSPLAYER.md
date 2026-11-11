@@ -96,8 +96,10 @@ clip for the life of the process on the strength of the app's own visibility boo
 Each poll reads `getCurrentPosition()`; any movement resets the stall clock, so 8 s of a position frozen
 at one value buys one recovery `seekTo` (to 0 when the read sits within a second of the reported end,
 otherwise to where it stalled) and a fresh threshold. A second 8 s of nothing hands the same file to
-MediaPlayer if TsPlayer was serving it, and otherwise descends one rung. It also owns the loop seam: last frames
-past the duration the player reports are detected here (`parked`/`creeping`), because nothing raises
+MediaPlayer if TsPlayer was serving it, and otherwise descends one rung. It also owns the loop seam: a
+lap's end is detected here against both the duration the player reports and the file's own length, under
+three reasons — `parked`, `creeping`, and `rewound` (at or past the player's duration but below the
+previous reading) — because nothing raises
 `onCompletion`. It cannot see a decoder that advances and paints nothing — that is the whole reason the
 paint deadline exists. Unlike the paint poll it **cancels** rather than parks when the screen is off or
 the video view is not visible, and is re-armed by the next display attempt.
@@ -366,7 +368,14 @@ Steps 1-3 and 6 assume the EO2. On an EO1, do step 7 first — the gate — and 
    file. The two disagree on a healthy EO2 — launch says `TsPlayer`, a rotated or wrong-aspect clip says
    `MediaPlayer` — and neither is more correct than the other.
 2. Play a known-good local H.264 from Immich cache full-screen
-3. Loop ≥2 minutes without surface loss **and without black flicker between passes** — `/state` shows `loopGen=0` and `lastRestartMethod=native-loop` (no Java recreate)
+3. Loop ≥2 minutes without surface loss **and without black flicker between passes**, from two sources that
+   answer it differently. `/state`'s `video.loopPerf.restartMethod` reads `native-loop` — a debug-build
+   field, present only while a TsPlayer clip is on the panel. And logcat's `TsPlayer createPlayer path=`
+   line appears **once per asset handoff, not once per pass**, which is the positive evidence that nothing
+   in Java is tearing the player down per duration. Do not look for either in `files/eo1-app.log`: that
+   `createPlayer` line is `Log.i` in `TsVideoView.startOrRestartPlayer()`, `AppLogger` does not intercept
+   Android logs, and logcat holds about thirteen minutes on these frames, so this check is a live
+   observation and not a durable record — see AGENTS.md on the durable log.
 4. Image ↔ video handoff and screen off/on
 5. HEVC (or other incompatible) plays via TsPlayer/MediaPlayer; on failure it falls back to Immich /video/playback (images: preview thumbnail)
 6. Force Ts failure (corrupt file) → log `TsPlayer → MediaPlayer fallback` then thumbnail/next asset path
@@ -413,6 +422,26 @@ To force MediaPlayer only: set `buildConfigField "boolean", "USE_TSPLAYER", "fal
   ten times a second, which is *why* the app keeps a durable on-disk log
   ([WEBSERVER.md](WEBSERVER.md#logs--past-state)) — and video still paints, so the sysfs path is not
   load-bearing for playback.
+- A live 2026-11 EO2 dump shows a **second** state of that service, and it is the opposite one: the
+  service answers and denies itself. `E/SystemWriteService(  589): java.io.FileNotFoundException:
+  /sys/class/tv/policy_fr_auto: open failed: EACCES` from `SystemWriteService.writeSysfs`, four times
+  per video lap, clustered at player lifecycle edges (`play()`, a `seekTo(0)`, `disconnect`,
+  `release`) rather than per frame, and always in system_server's pid.
+  **This app is not the client.** That node's string is in the ROM's own `libamplayer.so`, reached via
+  `libamavutils.so`'s `amSystemWriteWriteSysfs`; the shipped `libTsPlayer-jni.so` contains no `policy`
+  substring and no `/sys/class/tv` path among its 43 `/sys/*` strings (it does import
+  `amSystemWriteWriteSysfs` for other nodes, so the exoneration is path-specific, not blanket), and
+  `EO2/data/backup/init.amlogic.board.rc:45` writes `policy_fr_auto` as root at boot while no `.rc` in
+  the dump grants anyone else write.
+  It is therefore benign and unreachable from here — a denied `open()` changes no per-frame work — but
+  it is the line an operator will point at when a stutter report says "the log files show exceptions",
+  and it is not the stutter. What the loop seam (`VideoLoopSeamRule`) was doing on that frame is
+  documented in the code and in PR #106: across the one lap ever sampled at its tail, about 5.9 s of wall
+  passed in which the media clock advanced 255 ms — roughly 0.04x, against 1.00x through the body of the
+  same lap. **Whether the panel held a frozen picture during that interval has never been observed**, and
+  the `rate=1.00x` printed beside it is not the media clock but `MainActivity.measurePlaybackRate`'s 5 s
+  window, which re-anchors on every backwards position step. Do not revive the closed section below over
+  it, and do not describe that interval as a frozen frame without new evidence.
 
 ## TsPlayer on the EO1: closed
 
@@ -459,6 +488,14 @@ For contrast, a *registered but deaf* service is harmless and is the normal stat
 `readSysfs could not contact remote` about ten times a second ([WEBSERVER.md](WEBSERVER.md#logs--past-state)
 is why) while its video paints fine. So the sysfs path is not load-bearing for playback; the
 unregistered case was the only dangerous one, and on EO1 it is moot.
+
+Note that "deaf" is not the only non-fatal answer on offer. The same service on a 2026-11 EO2 is
+registered, reachable, and **self-denying** — it accepts the Binder call and then cannot open
+`/sys/class/tv/policy_fr_auto` for itself, printing a full Java stack trace from `writeSysfs` in
+system_server several times a lap. That string belongs to the ROM's `libamplayer.so`, not to this
+app's blob (see the inventory above), and it is a third state to recognise rather than a new failure to
+fix: `readSysfs could not contact remote` is the *client-side* complaint and appears zero times in that
+dump, so reading one log line as proof of the other's state is how a frame gets misdiagnosed.
 
 ## Two axes, because a model name cannot answer a silicon question
 

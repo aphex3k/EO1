@@ -61,20 +61,16 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     private boolean recreatingForLoop;
     private boolean awaitingSurfaceForStart;
     private int lastLoggedStatus = Integer.MIN_VALUE;
-    private int loopGeneration;
 
     // --- DEBUG telemetry: loop-gap / playback performance ---------------------------------
-    // Updated on the UI thread. Counters persist in all builds; latencies are recorded for
-    // DEBUG (logcat + /state "video" object). -1 means "not measured yet".
+    // Updated on the UI thread. What survives here is what still has a writer: ee409ef moved
+    // looping into the .so and deleted the Java per-duration restart that produced loopGeneration and
+    // the restart/end/loopCycle/posAtTrigger timings, and those fields went with it rather than staying
+    // behind as permanent zeros and -1s in /state. -1 still means "not measured yet" for what remains.
     private int videoErrorCount;
-    private int lastRestartLatencyMs = -1;      // rewind trigger -> restart done
     private int lastCreatePlayerMs = -1;        // native createPlayer() cost
     private int lastSetSurfaceMs = -1;          // native setSurface() cost
     private int lastStartMs = -1;               // native start() cost
-    private int lastRestartToPlayingMs = -1;    // restart done -> next pass playing
-    private int lastEndToPlayingMs = -1;        // rewind trigger -> next pass playing (headline)
-    private int lastLoopCycleMs = -1;           // previous pass start -> this one
-    private int lastPosAtTriggerMs = -1;        // position read when the loop timer fired
     private String lastRestartMethod;           // "native-loop" (no Java restart) | "seek-restart"
     private long lastPassStartUptime;           // SystemClock.uptimeMillis at last (re)start
 
@@ -193,10 +189,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
     }
 
     // --- DEBUG telemetry getters (consumed by MainActivity /state + logcat) ----------------
-    public int getLoopGeneration() {
-        return loopGeneration;
-    }
-
     public int getVideoErrorCount() {
         return videoErrorCount;
     }
@@ -213,10 +205,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
         return activePath;
     }
 
-    public int getLastRestartLatencyMs() {
-        return lastRestartLatencyMs;
-    }
-
     public int getLastCreatePlayerMs() {
         return lastCreatePlayerMs;
     }
@@ -227,22 +215,6 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
 
     public int getLastStartMs() {
         return lastStartMs;
-    }
-
-    public int getLastRestartToPlayingMs() {
-        return lastRestartToPlayingMs;
-    }
-
-    public int getLastEndToPlayingMs() {
-        return lastEndToPlayingMs;
-    }
-
-    public int getLastLoopCycleMs() {
-        return lastLoopCycleMs;
-    }
-
-    public int getLastPosAtTriggerMs() {
-        return lastPosAtTriggerMs;
     }
 
     public String getLastRestartMethod() {
@@ -324,8 +296,7 @@ public class TsVideoView extends SurfaceView implements SurfaceHolder.Callback {
                     durationMs = readDurationMs(path);
                 }
             }
-            Log.i("EO1", "TsPlayer createPlayer path=" + path + " durationMs=" + durationMs
-                    + " loopGen=" + loopGeneration);
+            Log.i("EO1", "TsPlayer createPlayer path=" + path + " durationMs=" + durationMs);
             long tCreate = SystemClock.uptimeMillis();
             if (!TsPlayerNative.createPlayer(path)) {
                 Log.e("EO1", "TsPlayer createPlayer failed");

@@ -394,8 +394,9 @@ public final class DiagnosticsReport {
 
     /**
      * The six lines a stranger reads before any data. Each one exists because the absence of it
-     * produced a wrong diagnosis in review: the staleness caveat, because the watchdog's own headline
-     * number is refreshed by the very loop it measures; and the clock caveat, because half of what a
+     * produced a wrong diagnosis in review: the staleness caveat, because the watchdog's headline
+     * number is the age of proven pixels while the loop keeps a clock of its own, and
+     * confusing the two is what let a frame sit white for 19.8 hours looking healthy; and the clock caveat, because half of what a
      * report holds was written by the thread that stopped writing.
      */
     static final String BANNER =
@@ -408,9 +409,10 @@ public final class DiagnosticsReport {
             + "Values from an Activity or MediaManager field were written by the thread being\n"
             + "diagnosed: where mainLoopStallMs is large, they are as of that long ago, not as of\n"
             + "Requested-At. Anything named *Age or *StallMs is recomputed at capture time.\n"
-            + "A live rotation loop refreshes the watchdog's stale= clock on every tick, so stale=0\n"
-            + "alongside displayFailedCount rising is a wedge the ladder cannot see - trust\n"
-            + "lastDisplaySucceededAtMs, not stale.\n"
+            + "stale= is the age of the last thing PROVEN on the panel, not the age of the\n"
+            + "rotation loop: a frame that keeps ticking and never draws makes stale= climb.\n"
+            + "The two clocks are printed in section 1 as `display proven :` (what the ladder\n"
+            + "escalates on) and `rotation clock :` (loop liveness only).\n"
             + "Before publishing this on a public issue, you may want to blank: network.wifi.ssid,\n"
             + "network.wifi.ip, device.name, media.current.originalFileName. No credential of any\n"
             + "kind is in here: the configuration document and SharedPreferences are read by none\n"
