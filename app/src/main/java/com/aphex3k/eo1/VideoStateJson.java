@@ -105,21 +105,22 @@ public final class VideoStateJson {
         boolean renderSilent(String assetKey);
     }
 
-    /** The native player's per-loop counters. Every value is the engine's own measurement. */
+    /**
+     * The native player's per-loop counters. Every value is the engine's own measurement, and every field
+     * here has a writer: the six that {@code ee409ef} orphaned when TsPlayer looping moved into the .so
+     * ({@code generation}, {@code restartLatencyMs}, {@code restartToPlayingMs}, {@code endToPlayingMs},
+     * {@code loopCycleMs}, {@code posAtTriggerMs}) were deleted rather than left emitting a constant 0 or
+     * -1 — a field that is correctly gated and correctly attributed can still be a lie, and the only thing
+     * that made those six discoverable as lies was grepping for who writes them.
+     */
     public static final class NativeCounters {
-        public int generation;
         public int errors;
         public boolean playerCreated;
         public boolean surfaceReady;
         public boolean recreatingForLoop;
-        public long restartLatencyMs;
         public long createPlayerMs;
         public long setSurfaceMs;
         public long startMs;
-        public long restartToPlayingMs;
-        public long endToPlayingMs;
-        public long loopCycleMs;
-        public long posAtTriggerMs;
         public String restartMethod = "";
     }
 
@@ -290,28 +291,22 @@ public final class VideoStateJson {
         addDebugFrameFields(video, frame);
 
         // These belong to the engine compositing this clip, and were once read off the TsPlayer view
-        // unconditionally — so for a platform-player clip `generation`, `playerCreated`, `surfaceReady` and
-        // the whole loop-perf object described a hidden view playing nothing. They are taken above, before
+        // unconditionally — so for a platform-player clip `playerCreated`, `surfaceReady` and the whole
+        // loop-perf object described a hidden view playing nothing. They are taken above, before
         // the ownership revalidation, and never re-read here: a second pass of live calls after that check
         // would put the reads it is meant to guard back outside it.
         if (frame.debugBuild) {
             NativeCounters counters = nativeCounters;
             if (counters != null) {
-                video.addProperty("generation", counters.generation);
                 video.addProperty("errors", counters.errors);
                 video.addProperty("playerCreated", counters.playerCreated);
                 video.addProperty("surfaceReady", counters.surfaceReady);
                 video.addProperty("recreatingForLoop", counters.recreatingForLoop);
                 JsonObject loopPerf = new JsonObject();
                 loopPerf.addProperty("engine", VideoEngineReport.TS_PLAYER);
-                loopPerf.addProperty("restartLatencyMs", counters.restartLatencyMs);
                 loopPerf.addProperty("createPlayerMs", counters.createPlayerMs);
                 loopPerf.addProperty("setSurfaceMs", counters.setSurfaceMs);
                 loopPerf.addProperty("startMs", counters.startMs);
-                loopPerf.addProperty("restartToPlayingMs", counters.restartToPlayingMs);
-                loopPerf.addProperty("endToPlayingMs", counters.endToPlayingMs);
-                loopPerf.addProperty("loopCycleMs", counters.loopCycleMs);
-                loopPerf.addProperty("posAtTriggerMs", counters.posAtTriggerMs);
                 loopPerf.addProperty("restartMethod", counters.restartMethod);
                 video.add("loopPerf", loopPerf);
             } else {
@@ -363,6 +358,6 @@ public final class VideoStateJson {
             "path", "stage", "rotation", "width", "height", "codec", "fpsMilli", "avgFrameBytes",
             "peakFrameBytes", "bitRateBps", "fileDurationMs", "macroblocksPerSecond", "renderSilent",
             "painted", "lastFrameAgeMs", "frameGapMs", "frameGapMaxMs", "durationMs", "positionMs",
-            "generation", "errors",
+            "errors",
             "playerCreated", "surfaceReady", "recreatingForLoop", "loopPerf"};
 }

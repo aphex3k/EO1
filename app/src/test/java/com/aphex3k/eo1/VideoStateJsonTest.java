@@ -296,7 +296,7 @@ public class VideoStateJsonTest {
 
         JsonObject video = VideoStateJson.build(videoOnScreen(), frame, new AnsweringProbe());
         assertTrue(video.has("codec"));
-        assertFalse("TsPlayer-internal counters stay debug-only", video.has("generation"));
+        assertFalse("TsPlayer-internal counters stay debug-only", video.has("errors"));
         assertFalse(video.has("loopPerf"));
     }
 
@@ -313,14 +313,14 @@ public class VideoStateJsonTest {
     }
 
     /**
-     * The engine-specific cluster is the exception, and it is the earlier bug: `generation`,
+     * The engine-specific cluster is the exception, and it is the earlier bug: `errors`,
      * `playerCreated` and friends describe the native view, so a clip the platform player composites
      * must not carry them.
      */
     @Test
     public void theNativeClusterIsAbsentForAPlatformCompositedClip() {
         JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), new AnsweringProbe());
-        for (String field : new String[]{"generation", "errors", "playerCreated", "surfaceReady",
+        for (String field : new String[]{"errors", "playerCreated", "surfaceReady",
                 "recreatingForLoop"}) {
             assertFalse("a hidden view must not be reported as this clip's state: " + field,
                     video.has(field));
@@ -332,8 +332,9 @@ public class VideoStateJsonTest {
         JsonObject video = VideoStateJson.build(videoOnScreen(), frame(), new AnsweringProbe());
         JsonObject loopPerf = video.getAsJsonObject("loopPerf");
         assertEquals(VideoEngineReport.MEDIA_PLAYER, loopPerf.get("engine").getAsString());
-        // Not the same measurement as the native player's loopCycleMs, and deliberately not sharing its
-        // key: a platform clip that loops perfectly reads 0 / -1 here forever.
+        // Named `manual*` on purpose: it counts restarts this app issues, which is not what the native
+        // player's loop-cycle timing ever measured (that key is gone — its producer was deleted by
+        // ee409ef). A platform clip that loops perfectly reads 0 / -1 here forever, and that is the design.
         assertEquals(0L, loopPerf.get("manualLoopRestarts").getAsLong());
         assertEquals(-1L, loopPerf.get("manualLoopCycleMs").getAsLong());
     }
@@ -347,17 +348,17 @@ public class VideoStateJsonTest {
                     @Override
                     public VideoStateJson.NativeCounters nativeCounters() {
                         VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
-                        counters.generation = 4;
+                        counters.errors = 4;
                         counters.playerCreated = true;
-                        counters.loopCycleMs = 8_000L;
+                        counters.startMs = 8_000L;
                         return counters;
                     }
                 });
-        assertEquals(4, video.get("generation").getAsInt());
+        assertEquals(4, video.get("errors").getAsInt());
         assertEquals(VideoEngineReport.TS_PLAYER, video.get("engine").getAsString());
         JsonObject loopPerf = video.getAsJsonObject("loopPerf");
         assertEquals(VideoEngineReport.TS_PLAYER, loopPerf.get("engine").getAsString());
-        assertEquals(8_000L, loopPerf.get("loopCycleMs").getAsLong());
+        assertEquals(8_000L, loopPerf.get("startMs").getAsLong());
         assertFalse(loopPerf.has("manualLoopRestarts"));
     }
 
@@ -462,7 +463,7 @@ public class VideoStateJsonTest {
         assertFalse(video.has("painted"));
         assertFalse(video.has("lastFrameAgeMs"));
         assertFalse(video.has("loopPerf"));
-        assertFalse(video.has("generation"));
+        assertFalse(video.has("errors"));
     }
 
     /** A probe that answers, for the cases where a clip really is up. */
@@ -510,12 +511,11 @@ public class VideoStateJsonTest {
         @Override
         public VideoStateJson.NativeCounters nativeCounters() {
             VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
-            counters.generation = 9;
             counters.errors = 3;
             counters.playerCreated = true;
             counters.surfaceReady = true;
             counters.recreatingForLoop = true;
-            counters.loopCycleMs = 8_000L;
+            counters.startMs = 8_000L;
             return counters;
         }
 

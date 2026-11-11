@@ -5424,19 +5424,13 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 return null;
             }
             VideoStateJson.NativeCounters counters = new VideoStateJson.NativeCounters();
-            counters.generation = tsVideoView.getLoopGeneration();
             counters.errors = tsVideoView.getVideoErrorCount();
             counters.playerCreated = tsVideoView.isPlayerCreated();
             counters.surfaceReady = tsVideoView.isSurfaceReady();
             counters.recreatingForLoop = tsVideoView.isRecreatingForLoop();
-            counters.restartLatencyMs = tsVideoView.getLastRestartLatencyMs();
             counters.createPlayerMs = tsVideoView.getLastCreatePlayerMs();
             counters.setSurfaceMs = tsVideoView.getLastSetSurfaceMs();
             counters.startMs = tsVideoView.getLastStartMs();
-            counters.restartToPlayingMs = tsVideoView.getLastRestartToPlayingMs();
-            counters.endToPlayingMs = tsVideoView.getLastEndToPlayingMs();
-            counters.loopCycleMs = tsVideoView.getLastLoopCycleMs();
-            counters.posAtTriggerMs = tsVideoView.getLastPosAtTriggerMs();
             counters.restartMethod = tsVideoView.getLastRestartMethod();
             return counters;
         }
