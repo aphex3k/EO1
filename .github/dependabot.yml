@@ -144,9 +144,12 @@ updates:
         # dexes), so the old comment claiming "every guava advisory is first_patched
         # at or below the pin" is the one that needs retiring: CVE-2026-102554 /
         # GHSA-xxph-c9ww-hj94 is first patched at 33.7.2, above this line. The open
-        # alerts under this name are AGP's transitive guava (28.1-android at
-        # app/build.gradle, 32.0.1-jre at the root build.gradle), scope development —
-        # build-time only, and no app-side version bump reaches them.
+        # alerts under this name are two transitives, each named by reading
+        # its own graph: 28.1-android under com.github.bumptech.glide:compiler
+        # (annotationProcessorClasspath; it carries a second jsr305 too) and
+        # 32.0.1-jre under com.android.tools:common:31.7.3, i.e. AGP 8.7.3's
+        # own tooling, on its _internal-unified-test-platform-* configs. Both
+        # scope development, never dexed, and no app-side bump reaches either.
       - dependency-name: "com.vdurmont:semver4j"             # tip of the coordinate
         versions: ["> 3.1.0"]                                 # Maintenance moved to org.semver4j:semver4j, a
         #                                                      different name Dependabot cannot reach as an
