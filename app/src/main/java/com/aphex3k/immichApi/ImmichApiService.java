@@ -66,7 +66,8 @@ public interface ImmichApiService {
      * A one-byte range request against the endpoint {@link #playAssetVideo} streams from, so the
      * response's own length can be read without fetching the file. {@code @Streaming} is load-bearing
      * here rather than an optimisation: if a server ignores {@code Range} and starts sending the
-     * whole asset, a buffered body would be a 158 MB allocation on an 800 MB device.
+     * whole asset, a buffered body would be a 158 MB allocation against a Dalvik heap whose ceiling is
+     * a small fraction of that (read it as {@code telemetry.memory.heapMaxBytes} on the frame).
      */
     @Keep
     @GET("/api/assets/{id}/video/playback")

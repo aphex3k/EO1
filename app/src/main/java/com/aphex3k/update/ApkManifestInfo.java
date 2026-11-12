@@ -19,8 +19,8 @@ import java.util.zip.Inflater;
  * make that unreliable, while the central directory is authoritative. Stored entries are read
  * in place, deflated ones are inflated. Only the
  * string-pool chunk and the root start-element chunk (attributes are embedded in it, not
- * separate chunks) are parsed. The manifest is capped at a few MB of memory — cheap on the
- * ~800 MB frame. Fails closed: any missing piece, malformed structure, or a versionCode
+ * separate chunks) are parsed. The manifest is capped at a few MB of memory — cheap against the
+ * frame's Dalvik heap ceiling. Fails closed: any missing piece, malformed structure, or a versionCode
  * that is not a plain int (e.g. a resource reference) yields {@code null}.
  */
 public final class ApkManifestInfo {

@@ -2619,7 +2619,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
      * Creates the browser view on first use, inserted just above {@link #imageView} so a page is
      * never covered by the wallpaper while staying underneath the debug overlay and progress bar.
      * Deliberately not in the layout file: a frame with no web backend must never pay for a WebView
-     * (it drags in the ROM's browser provider on an ~800MB device).
+     * (it drags in the ROM's browser provider on a frame whose whole RAM budget is ~814 MB).
      *
      * @return false when this ROM has no usable WebView provider; remembered, so the failure does
      *         not repeat on every tick

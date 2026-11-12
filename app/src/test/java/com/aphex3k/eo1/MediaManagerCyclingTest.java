@@ -865,7 +865,7 @@ public class MediaManagerCyclingTest {
         assertEquals(0, marked.get());
 
         // A duplicate already on disk is removed, not merely avoided from here on: 158 MB of nothing
-        // competing with useful files for eviction on a device with about a gigabyte free. This case
+        // competing with useful files for eviction on a partition already full of media. This case
         // needs its own assertion because the asset is already marked as having no transcode, so the
         // cycle that follows never walks the fallback path that discovered the duplication — which is
         // exactly how an old file would otherwise sit there forever.
@@ -953,13 +953,16 @@ public class MediaManagerCyclingTest {
     }
 
     /**
-     * A source that reports no size must not reserve the per-file ceiling. This hardware has less free
-     * space than {@link MediaManager#MAX_ASSET_BYTES}, so asking for ceiling+margin can never be
-     * satisfied: {@code ensureSpace} evicts the whole shared cache — including other backends' originals
+     * A source that reports no size must not reserve the per-file ceiling. A working frame's free space is
+     * usually below {@link MediaManager#MAX_ASSET_BYTES} — not because the partition is that small (an EO2's
+     * {@code /data} is 4.8 GB) but because this app's own cache filled it down to its margin — so asking for
+     * ceiling+margin frequently cannot be satisfied: {@code ensureSpace} evicts the whole shared cache —
+     * including other backends' originals
      * that were fine — and then fails with an error that carries no cause, which the ladder reads as
      * "this asset is broken" and ends in an incompatibility verdict about a healthy file.
      *
-     * <p>The free-space figure is what {@code df /data} reported on a live EO2 on 2026-10-26.
+     * <p>The free-space figure is what {@code df /data} reported on a live EO2 on 2026-10-26 (4.8 GB total,
+     * 4.1 GB used, of which 3.9 GB was {@code /data/data/com.aphex3k.eo1}).
      */
     @Test
     public void unknownSourceSizeReservesWhatFitsAndEvictsNothing() throws Exception {

@@ -23,7 +23,7 @@ in the wrong place.
 
 - **Physical frame attached** (serial usually `20061229`) → use it: `adb -s <serial> …`.
 - **No device attached** → start a headless `EO1_API21` AVD (API 21, arm64-v8a, 1024 MB, 1080p
-  — the closest match to the ~800 MB API-19 hardware a macOS/Apple-Silicon host can run; arm64
+  — the closest match to the 814 MB-RAM API-19 hardware a macOS/Apple-Silicon host can run; arm64
   emulation starts at API 21):
 
   ```bash

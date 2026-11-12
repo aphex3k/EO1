@@ -48,7 +48,8 @@ import java.util.zip.ZipFile;
  * </ol>
  *
  * <p>All digest computation streams through 32 KB buffers; only the (small) manifest, signature
- * files and certificate blobs are held in memory, so verification is safe on the ~800 MB device.
+ * files and certificate blobs are held in memory, so verification is bounded by the frame's Dalvik
+ * heap ceiling — not by the size of the partition it is installing onto.
  */
 public final class ApkSignatureVerifier {
 

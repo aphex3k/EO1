@@ -1,9 +1,9 @@
 # EO2 Capabilities Investigation
 
 - **Date:** 2026-10-01
-- **Device:** Electric Objects EO2 (adb serial `20061229`), Android 4.4.2 (API 19), Amlogic meson8, 1920×1080 @ 240 dpi, ~814 MB RAM
+- **Device:** Electric Objects EO2 (adb serial `20061229`), Android 4.4.2 (API 19), Amlogic meson8, 1920×1080 @ 240 dpi, 814 MB RAM (`MemTotal` 833868 kB, re-read 2026-11-11, on a board whose bootloader reports `hw.ddr.size=1024`)
 - **App under test:** `com.aphex3k.eo1` v1.3.0.1 (debug build, HOME role, TsPlayer active)
-- **Methods:** app source analysis, `getprop`/`getevent -lp`, `dumpsys` (window/input/sensorservice/power), `logcat`, `screencap`, `adb shell input keyevent`, LAN web control (via `adb forward` to localhost:8080)
+- **Methods:** app source analysis, `getprop`/`getevent -lp`, `dumpsys` (window/input/sensorservice/power), `logcat`, `screencap`, `adb shell input keyevent`, LAN web control (via `adb forward` to localhost:8080), `df` and `/proc/meminfo`
 
 ## 1. Input device inventory (`getevent -lp`)
 

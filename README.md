@@ -413,7 +413,10 @@ own — [docs/UPDATING.md](docs/UPDATING.md).
 
 - **Android 4.4 / API 19 is a product constraint, not laziness.** Java only, no Kotlin, and the
   dependency pins exist for that SDK. The browser inside it is Chromium 33.
-- **About 800 MB of usable storage, and nothing is transcoded or resized on the device.** There is no
+- **A few gigabytes of storage, and nothing is transcoded or resized on the device.** An EO2's `/data`
+  partition measures 4.8 GB and an EO1 carries a 4 GB eMMC; what is *free* on any given frame is mostly
+  this app's own media cache, which revolves to keep at least 128 MB free, so read it from `/state`'s
+  `telemetry.storage` rather than from any figure a document quotes. There is no
   on-device FFmpeg. The per-file ceiling is the smaller of 1 GiB and your free space.
 - **Video:** 1080p30 is the practical ceiling, and on a portrait frame 1080p video has to actually *be*
   portrait — or carry a display matrix that says so; HEVC, AV1, VVC, Dolby-Vision, and every HEIF or AVIF

@@ -161,7 +161,7 @@ public class FlickrMediaBackend implements MediaBackend {
     /**
      * Pages the stream into compact records. Bounded by {@link FlickrClient#MAX_ASSETS} rather than by a
      * page count, because a page ceiling at 100 per page would license a pool of hundreds of thousands
-     * of records held for the life of the process on a device with about a gigabyte free. A build that
+     * of records held for the life of the process on a frame whose heap is a fraction of a gigabyte. A build that
      * hit the ceiling says so through {@link #describeVersion()} instead of looking complete.
      */
     @Override

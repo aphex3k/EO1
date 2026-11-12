@@ -55,7 +55,11 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
 
     private static final String TAG = "EO1";
 
-    /** Device memory ceiling for downloaded originals (mirrors {@code ImmichMediaBackend}). */
+    /**
+     * Per-file ceiling for downloaded originals (mirrors {@code ImmichMediaBackend}). A storage figure,
+     * not a memory one: the partition is gigabytes, and what a download must really fit inside is the free
+     * space {@code MediaCacheManager} has left after its margin, or the heap if it were buffered.
+     */
     public static final long MAX_ASSET_BYTES = 1073741824L;
 
     /**
@@ -1068,7 +1072,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
         }
         if (asset.sizeBytes != null && asset.sizeBytes > MAX_ASSET_BYTES) {
             Log.w(TAG, "acquireAsset: " + key + " original is " + asset.sizeBytes
-                    + " bytes, beyond this device's " + MAX_ASSET_BYTES
+                    + " bytes, beyond this app's " + MAX_ASSET_BYTES
                     + " byte ceiling; routing to the fallback source");
             return OriginalSkip.ORIGINAL_UNUSABLE;
         }
@@ -1219,7 +1223,7 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
      * fallback survives to say otherwise.
      *
      * <p>A duplicate under the {@code _fb} name is pure loss twice over: it doubles the bytes on a
-     * device with about a gigabyte of free space, and because the cache keys eviction on file name it
+     * partition already crowded with the media worth keeping, and because the cache keys eviction on file name it
      * competes for that space with files that decode differently. It also buys nothing — those bytes
      * are the same stream the original already failed to keep up with. So it is not merely avoided
      * going forward: an existing one, left by an earlier build or by a probe the server could not
@@ -1505,10 +1509,13 @@ public class MediaManager implements MediaManagerInterface, ApiServiceGenerator.
             deleteCachedFile(cacheFile);
         }
 
-        // An unknown size is not a licence to reserve the ceiling: on this hardware free space is
-        // smaller than MAX_ASSET_BYTES, so asking ensureSpace for ceiling+margin can never be
-        // satisfied — it evicts the whole shared cache, including other backends' originals, and then
-        // fails with a cause-less error the ladder reads as "this asset is broken". Asking for
+        // An unknown size is not a licence to reserve the ceiling: ceiling+margin is ~1.15 GB, which is
+        // more than a working frame keeps free, because this app's own cache fills the /data partition
+        // (4.8 GB on an EO2, nearly all of it media — the "~800 MB" figure this line used to cite as the
+        // partition's size is its RAM). So the ask is satisfiable only by evicting several hundred MB of
+        // wanted originals — the whole shared cache, including other backends' — and on a pool with
+        // nothing left to evict it fails with a cause-less error the ladder reads as
+        // "this asset is broken". Asking for
         // everything that fits instead triggers no eviction at all, and a genuinely full disk still
         // surfaces as the IOException the write below already turns it into.
         long bytesNeeded = source.expectedBytes != null && source.expectedBytes > 0
