@@ -114,11 +114,14 @@ public final class DeviceTelemetry {
         try {
             if (dir != null) {
                 StatFs sf = new StatFs(dir.getAbsolutePath());
-                // getAvailableBlocks, not getFreeBlocks: this is the quantity MediaCacheManager
-                // compares SAFETY_MARGIN_BYTES against, so the two are directly comparable here.
-                long blockSize = (long) sf.getBlockSize();
-                totalBytes = blockSize * (long) sf.getBlockCount();
-                availBytes = blockSize * (long) sf.getAvailableBlocks();
+                // The byte getters rather than blocks x blockSize: they are long on their own, so there
+                // is no int block count to truncate and no product to widen, and getAvailableBytes is
+                // the quantity File.getUsableSpace() returns — the same one MediaCacheManager compares
+                // SAFETY_MARGIN_BYTES against. So marginBytes and availBytes name one measurement
+                // rather than two ways of computing it. Both are API 9, verified against the android-19
+                // jar, so no NewApi risk on this floor.
+                totalBytes = sf.getTotalBytes();
+                availBytes = sf.getAvailableBytes();
             }
         } catch (Throwable ignored) {
         }
