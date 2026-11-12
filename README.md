@@ -461,6 +461,16 @@ it was the answer to "where do the pictures come from now" for the people who ha
 vendor cloud — and it stays a good one, especially for a library you already maintain on a phone. It is
 no longer the premise. The frame carrying its own files is.
 
+This repository is not the only answer to that. [EO1bian](https://github.com/eo1bian/eo1bian) boots a Debian
+system on an EO1 from a USB stick, on its own terms: the frame's boot chip is never written, Android stays on
+the frame and stays startable, and nothing it displays depends on a vendor server or a cloud. A stick and
+something to put it in the frame's micro-USB port is the whole requirement. It is one board's work, the EO1's
+i.MX6 — what an Amlogic EO2 will boot is still an open question here, carried as a lead in
+[the research log](docs/RESEARCH.md), and nobody has tried it.
+The credit runs both ways: EO1bian names this repository among the projects it stands on, and its author
+opened [aphex3k/EO1#109](https://github.com/aphex3k/EO1/issues/109) to say so. Two efforts sharing a frame,
+not a plan — and neither one's code is in the other.
+
 ## Further Reading
 
 1. [Installing the APK](docs/SETUP.md) — EO1 and EO2 bootstrap, and writing config by hand
