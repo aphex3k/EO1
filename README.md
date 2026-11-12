@@ -466,13 +466,15 @@ no longer the premise. The frame carrying its own files is.
 
 This repository is not the only answer to that. [EO1bian](https://github.com/eo1bian/eo1bian) boots a Debian
 system on an EO1 from a USB stick, on its own terms: the frame's boot chip is never written, Android stays on
-the frame and stays startable, and nothing it displays depends on a vendor server or a cloud. A stick and
-something to put it in the frame's micro-USB port is the whole requirement. It is one board's work, the EO1's
-i.MX6 — what an Amlogic EO2 will boot is still an open question here, carried as a lead in
-[the research log](docs/RESEARCH.md), and nobody has tried it.
-The credit runs both ways: EO1bian names this repository among the projects it stands on, and its author
-opened [aphex3k/EO1#109](https://github.com/aphex3k/EO1/issues/109) to say so. Two efforts sharing a frame,
-not a plan — and neither one's code is in the other.
+the frame and stays startable, and no vendor server stands between the frame and its pictures. The hardware
+half is a stick and something to put it in the frame's micro-USB port; what you send from a phone lands on the
+frame's own storage and plays with no internet at all. Its two conveniences are optional and are named where
+they live: a gallery is a repository in your own GitHub account, and a live remote talks through a relay that
+only ever sees encrypted bytes. It is one board's work, the EO1's i.MX6 — what an Amlogic EO2 will boot is
+still an open question here, carried as a lead in [the research log](docs/RESEARCH.md), and nobody has tried
+it. The credit runs both ways: EO1bian names this repository among the projects it stands on, and its author
+opened [aphex3k/EO1#109](https://github.com/aphex3k/EO1/issues/109) to say so. Two efforts sharing a frame, not
+a plan — and neither one's code is in the other.
 
 ## Further Reading
 

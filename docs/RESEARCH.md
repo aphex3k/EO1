@@ -103,15 +103,15 @@ All of this is in `EO2/data/backup/` already; it is "new" only in the sense of n
 | `cache/recovery/last_log` | references `fw_setenv`, `/dev/block/env`, `wipe_data`, and update cache under `http://www.geniatech.net/down-eng/upgrade/stvm8b_4.4/` | Recovery can rewrite the bootloader environment, and the vendor's own OTA image path was `stvm8b_4.4` - the Amlogic **reference** image name for this board, which is what a stock image for an unbrick would be sought under. That host no longer resolves. [measured] |
 | file listing | `/system/lib/libTsPlayer-jni.so`, `/system/lib/libxwalkcore.so`, `/system/lib/libxwalkdummy.so` | Confirms the repo's claim that the `.so` this app ships by LFS is the same one in the EO2 ROM, and shows Crosswalk in the **system** partition, not only the app's. |
 | file listing | `/system/bin/remotecfg`, `/system/etc/remote.conf`, `/system/app/RemoteIME.apk`, `/system/priv-app/IpRemote.apk` | The ROM carries an IR/remote configuration tool and a remote-driven input method. `remotecfg` with `remote.conf` is how a vendor maps a physical remote to keycodes on Amlogic Android - a candidate for giving an EO2 real buttons, and it emits ordinary key events, so `EventManager` would need no new plumbing. Cost of checking: `adb shell remotecfg --help`. [measured: presence] |
-| `system/etc/security/cacerts` | 156 files | Matches the "156 anchors measured on a live EO2" claim in `docs/TRUST.md` against the dump rather than the device. [measured]
-| `cache/recovery/last_log` | `Creating filesystem with parameters: Size: 5347704832` for `/data` — 1 305 592 blocks × 4096 | **The `/data` partition is ~5 GB, not the "about 800 MB of usable storage" this repo's own README and `AGENTS.md` quoted for months.** The recovery log states the size it formatted, so the capacity claim was checkable from the dump alone. `MediaCacheManager` fills that partition and keeps ≥128 MiB free by evicting, which is why a working frame *does* show a few hundred MB free and the wrong number looked right. [measured]
+| `system/etc/security/cacerts` | 156 files | Matches the "156 anchors measured on a live EO2" claim in `docs/TRUST.md` against the dump rather than the device. [measured] |
+| `cache/recovery/last_log` | `Creating filesystem with parameters: Size: 5347704832` for `/data` — 1 305 592 blocks × 4096 | **The `/data` filesystem is 4.98 GiB — not the "about 800 MB of usable storage" this repo's own README and `AGENTS.md` quoted for months.** (`df` and `StatFs` answer 4.8 GB for the same filesystem, the difference being ext4's reserved blocks, so quote whichever with its source.) The recovery log states the size it formatted, so the capacity claim was checkable from the dump alone. `MediaCacheManager` fills that partition and keeps ≥128 MiB free by evicting, which is why a working frame *does* show a few hundred MB free and the wrong number looked right. [measured] |
 
 Re-read live on the same device rather than from the dump, 2026-11-11 (`adb -s 20061229 shell df /data`,
 `cat /proc/meminfo`, `du -k /data/data/com.aphex3k.eo1`): `/data` 4.8 GB total / 4.1 GB used / **757 MB
 free**, `MemTotal` 833 868 kB = **814 MiB**, and this app's own directory holding **3.88 GB** of that 4.1 GB
 used. So on this hardware an ~800 MB figure describes **RAM**, and the frame disproves the storage reading by
 holding nearly 4 GB of media — every frame's real free space is now readable from `/state`'s
-`telemetry.storage` rather than quoted here, because a quoted byte count is stale the week it ships. |
+`telemetry.storage` rather than quoted here, because a quoted byte count is stale the week it ships.
 
 ## 3. Log capture is UID-filtered on this platform, which changes what `/crashes` can hold
 
@@ -263,6 +263,20 @@ reports, not Linux on an EO1 as such.
   package is bigger and unmeasured. The coincidence of magnitude is how the quantities got conflated here. The panel
   statement is the first claim from outside this repo about which way the EO1 wants its pixels, and it is
   unmeasured here. [primary: their README]
+- **"4-core i.MX6", against this repo's die photograph.** Their hardware paragraph says four cores; §1 reads
+  `MCIMX6D5EYM10AC` off `_img/eo1-processor-fullwidth.jpg` and the 5khz teardown, which is an i.MX6**Dual**.
+  NXP's part code puts the variant in the letter after `MCIMX6` - `D` for Dual, `Q` for Quad - so on the
+  evidence in this repository their figure is the wrong one, but that letter mapping is recalled from the
+  naming convention rather than read from a datasheet in this pass. One `cat /proc/cpuinfo` on a live EO1
+  settles it, and §8 item 1 already asks for that line. [measured: the die marking] [lead: the part-code
+  mapping, and therefore which side is mistaken]
+- **Its third-party legs, named rather than waved away.** Everything sent from a phone is stored on the frame
+  and plays with no internet; the gallery source is a repository in the owner's own GitHub account, whose
+  Actions workflow pre-rotates the art to the panel's landscape shape, read back with a fine-grained
+  read-only token; the live remote publishes encrypted bytes over an ntfy relay, by default one the author
+  hosts. Their own claim is the narrow one - "no company server that can go dark and take your frame with it" -
+  and it is not the same sentence as "no cloud". Worth writing down because the wider version is what a
+  reader remembers, and it is the one this repo almost printed. [primary: their README and SECURITY.md]
 
 What none of this settles is the EO2. An i.MX6 boot script says nothing about what meson8 will start, and the
 Amlogic USB-Burning-Tool idea carried as a lead in Sources below stays exactly that.
