@@ -6,9 +6,12 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.wifi.WifiInfo;
 import android.net.wifi.WifiManager;
+import android.os.StatFs;
 import android.os.SystemClock;
 
 import com.google.gson.JsonObject;
+
+import java.io.File;
 
 /**
  * Lazy device-telemetry collectors for the web server's {@code /state} endpoint. Nothing here polls;
@@ -20,12 +23,15 @@ public final class DeviceTelemetry {
     }
 
     /**
-     * Builds the telemetry fragment of the {@code /state} JSON: battery, memory, wifi, uptime.
+     * Builds the telemetry fragment of the {@code /state} JSON: battery, memory, storage, wifi, uptime.
+     * {@code memory} is RAM and this process's heap; {@code storage} is the partition the media lives
+     * on. Both are on demand, and neither is a capacity claim the docs can go stale against.
      */
     public static JsonObject snapshot(Context context) {
         JsonObject o = new JsonObject();
         o.add("battery", battery(context));
         o.add("memory", memory(context));
+        o.add("storage", storage(context.getFilesDir()));
         o.add("wifi", wifi(context));
         long uptimeMs = SystemClock.elapsedRealtime();
         JsonObject up = new JsonObject();
@@ -62,7 +68,14 @@ public final class DeviceTelemetry {
     }
 
     /**
-     * Reads available/total memory.
+     * Reads available/total RAM, and separately this process's Dalvik heap.
+     *
+     * <p>The heap keys are named {@code heap*} rather than folded into {@code availBytes}/{@code
+     * totalBytes} because the two have been quoted as one figure: an allocation that is too big is
+     * refused by the heap ceiling ({@code dalvik.vm.heapsize}, raised to its full value by
+     * {@code android:largeHeap}), not by the size of the partition. The expressions match
+     * {@code CrashReporter.deviceFacts}, which must not be able to disagree with this about what the
+     * same two numbers mean.
      */
     public static JsonObject memory(Context context) {
         JsonObject o = new JsonObject();
@@ -76,6 +89,58 @@ public final class DeviceTelemetry {
                 o.addProperty("lowMemory", mi.lowMemory);
             }
         } catch (Exception ignored) {
+        }
+        try {
+            Runtime rt = Runtime.getRuntime();
+            o.addProperty("heapUsedBytes", rt.totalMemory() - rt.freeMemory());
+            o.addProperty("heapMaxBytes", rt.maxMemory());
+        } catch (Exception ignored) {
+        }
+        return o;
+    }
+
+    /**
+     * Reads the filesystem {@code dir} lives on — in practice the {@code /data} partition the media
+     * cache and uploads occupy. Sibling of {@link #memory(Context)} under deliberately parallel key
+     * names, so RAM and disk cannot be read as one quantity.
+     *
+     * <p>One {@code statfs}, no binder and no directory walk: this runs on a web-server worker thread,
+     * one of three, and a recursive size of the cache would occupy it for as long as the media pipeline
+     * needs the thread that answers {@code /state}.
+     */
+    public static JsonObject storage(File dir) {
+        long totalBytes = -1L;
+        long availBytes = -1L;
+        try {
+            if (dir != null) {
+                StatFs sf = new StatFs(dir.getAbsolutePath());
+                // The byte getters rather than blocks x blockSize: they are long on their own, so there
+                // is no int block count to truncate and no product to widen, and getAvailableBytes is
+                // the quantity File.getUsableSpace() returns — the same one MediaCacheManager compares
+                // SAFETY_MARGIN_BYTES against. So marginBytes and availBytes name one measurement
+                // rather than two ways of computing it. Both are API 9, verified against the android-19
+                // jar, so no NewApi risk on this floor.
+                totalBytes = sf.getTotalBytes();
+                availBytes = sf.getAvailableBytes();
+            }
+        } catch (Throwable ignored) {
+        }
+        return storageJson(totalBytes, availBytes);
+    }
+
+    /**
+     * Pure half of {@link #storage(File)}: a negative is "the statfs did not answer", and then the key is
+     * absent rather than {@code -1} or {@code 0} — a zero free-space reading is exactly what a partition
+     * full of media says, and it must not also be what an unreadable one says.
+     */
+    static JsonObject storageJson(long totalBytes, long availBytes) {
+        JsonObject o = new JsonObject();
+        if (totalBytes >= 0L) {
+            o.addProperty("totalBytes", totalBytes);
+        }
+        if (availBytes >= 0L) {
+            o.addProperty("availBytes", availBytes);
+            o.addProperty("marginBytes", MediaCacheManager.SAFETY_MARGIN_BYTES);
         }
         return o;
     }

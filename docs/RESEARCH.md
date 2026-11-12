@@ -104,6 +104,14 @@ All of this is in `EO2/data/backup/` already; it is "new" only in the sense of n
 | file listing | `/system/lib/libTsPlayer-jni.so`, `/system/lib/libxwalkcore.so`, `/system/lib/libxwalkdummy.so` | Confirms the repo's claim that the `.so` this app ships by LFS is the same one in the EO2 ROM, and shows Crosswalk in the **system** partition, not only the app's. |
 | file listing | `/system/bin/remotecfg`, `/system/etc/remote.conf`, `/system/app/RemoteIME.apk`, `/system/priv-app/IpRemote.apk` | The ROM carries an IR/remote configuration tool and a remote-driven input method. `remotecfg` with `remote.conf` is how a vendor maps a physical remote to keycodes on Amlogic Android - a candidate for giving an EO2 real buttons, and it emits ordinary key events, so `EventManager` would need no new plumbing. Cost of checking: `adb shell remotecfg --help`. [measured: presence] |
 | `system/etc/security/cacerts` | 156 files | Matches the "156 anchors measured on a live EO2" claim in `docs/TRUST.md` against the dump rather than the device. [measured] |
+| `cache/recovery/last_log` | `Creating filesystem with parameters: Size: 5347704832` for `/data` — 1 305 592 blocks × 4096 | **The `/data` filesystem is 4.98 GiB — not the "about 800 MB of usable storage" this repo's own README and `AGENTS.md` quoted for months.** (`df` and `StatFs` answer 4.8 GB for the same filesystem, the difference being ext4's reserved blocks, so quote whichever with its source.) The recovery log states the size it formatted, so the capacity claim was checkable from the dump alone. `MediaCacheManager` fills that partition and keeps ≥128 MiB free by evicting, which is why a working frame *does* show a few hundred MB free and the wrong number looked right. [measured] |
+
+Re-read live on the same device rather than from the dump, 2026-11-11 (`adb -s 20061229 shell df /data`,
+`cat /proc/meminfo`, `du -k /data/data/com.aphex3k.eo1`): `/data` 4.8 GB total / 4.1 GB used / **757 MB
+free**, `MemTotal` 833 868 kB = **814 MiB**, and this app's own directory holding **3.88 GB** of that 4.1 GB
+used. So on this hardware an ~800 MB figure describes **RAM**, and the frame disproves the storage reading by
+holding nearly 4 GB of media — every frame's real free space is now readable from `/state`'s
+`telemetry.storage` rather than quoted here, because a quoted byte count is stale the week it ships.
 
 ## 3. Log capture is UID-filtered on this platform, which changes what `/crashes` can hold
 
@@ -163,7 +171,7 @@ plus the files it left on the EO2: [measured: presence and names; interpretation
   whose honest limitation is "Android 4.4's Chromium 33 … the shipped root bundle does not reach this
   browser, because Chromium validates inside its own engine". A bundled Crosswalk would bring its own
   newer engine *and its own CA bundle*, which is the one way to make an `https://` page with a 2026
-  certificate render on a frame. The cost is 37 MB of the ~800 MB budget and a second browser to keep
+  certificate render on a frame. The cost is 37 MB of installed storage and a second browser to keep
   patched, so it is an option to weigh, not a fix to apply. [measured: presence in the dump]
 - `libpl_droidsonroids_gif.so` and the `electricobjects` GitHub org's `android-gif-drawable` fork - the
   vendor decoded animated GIFs with a maintained native library instead of the framework `Movie` class.
@@ -248,9 +256,13 @@ reports, not Linux on an EO1 as such.
   and THIRD-PARTY.md]
 - **Its own hardware numbers.** 1 GB memory, 4 GB eMMC, about 800 MB of that memory free while playing, and a
   panel it describes as landscape, with art pre-rotated to it before the frame draws it. The 4 GB half agrees
-  with the teardown's `EMMC04G-S100`; the 800 MB half is *its* memory figure and is not this app's ~800 MB,
-  which is storage - keep them apart when quoting either. The panel statement is the first claim from outside
-  this repo about which way the EO1 wants its pixels, and it is unmeasured here. [primary: their README]
+  with the teardown's `EMMC04G-S100`. Their 800 MB is a free-RAM figure on *their* build, and this repo's own
+  "about 800 MB of usable storage" was the same digits attached to the wrong quantity: §2's live re-read of an
+  EO2 says 4.8 GB of `/data` and 814 MiB of RAM. Note the two frames' storage is not the same size - the EO1's
+  4 GB is the whole eMMC per the teardown, while the EO2's `/data` alone is already 4.98 GiB, so that board's
+  package is bigger and unmeasured. The coincidence of magnitude is how the quantities got conflated here. The panel
+  statement is the first claim from outside this repo about which way the EO1 wants its pixels, and it is
+  unmeasured here. [primary: their README]
 - **"4-core i.MX6", against this repo's die photograph.** Their hardware paragraph says four cores; §1 reads
   `MCIMX6D5EYM10AC` off `_img/eo1-processor-fullwidth.jpg` and the 5khz teardown, which is an i.MX6**Dual**.
   NXP's part code puts the variant in the letter after `MCIMX6` - `D` for Dual, `Q` for Quad - so on the

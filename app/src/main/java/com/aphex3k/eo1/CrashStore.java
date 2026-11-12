@@ -165,7 +165,8 @@ public final class CrashStore {
      * (or the copied text), the log lead-up, then a JSON block for tooling.
      *
      * <p>The trace is streamed straight into {@code w} rather than formatted into a {@link String}:
-     * this runs inside a crash handler on a device with ~800 MB of storage and a small heap, and a
+     * this runs inside a crash handler on a device with a small Dalvik heap and less than a gigabyte of
+     * RAM, and a
      * 10 000-deep cause chain materialized as text could itself be what fails.
      */
     static void render(Writer w, DumpContent c) throws IOException {
@@ -191,7 +192,7 @@ public final class CrashStore {
             budget.write('\n');
         } else if (c.source != null) {
             // A copied ANR trace or dropbox entry can be megabytes; stream it past the budget
-            // instead of holding it in memory on an 800 MB device.
+            // instead of holding it in memory the frame's heap may not have to spare.
             Reader r = null;
             try {
                 java.io.InputStream raw = new FileInputStream(c.source);

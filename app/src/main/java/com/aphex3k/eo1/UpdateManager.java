@@ -274,7 +274,7 @@ public class UpdateManager {
     /**
      * Removes every intermediate file, named or legacy. Used by a reset and by construction, where
      * sweeping is right and deleting one known path would be arbitrary: abandoned temps from a killed
-     * process are otherwise permanent on a device with about a gigabyte free.
+     * process are otherwise permanent on a partition the media cache is already filling.
      *
      * <p>Unconditional, and run before the worker starts — which is all the ordering rule the
      * once-per-process flag used to need ever was: that flag existed only because a second manager
