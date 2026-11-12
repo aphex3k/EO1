@@ -219,7 +219,43 @@ style, and the device name and time zone it needs are already stored.
   [measured: absence of any `entrust-*.pem` from the bundle; the public distrust timeline was **not**
   confirmed by a primary source in this pass, so treat the date half of that sentence as [lead].]
 
-## 6. Gaps this pass did not close
+## 6. EO1bian: an independent read of how the EO1 starts
+
+Not part of the 2026-11-05 pass. Added 2026-11-11 from [aphex3k/EO1#109](https://github.com/aphex3k/EO1/issues/109)
+and the project it announces, [eo1bian/eo1bian](https://github.com/eo1bian/eo1bian) by `speville` (MIT): a
+Debian image that boots an EO1 from a USB stick. Read here as evidence about the board, not as a rival to the
+APK: it publishes reads of the EO1's boot chain from the Linux side, which neither the teardown nor this repo
+has. ([Lumenary](https://github.com/RichN001/lumenary-eo1), which installs over Android, and Charlie
+Harrington's [writeup](https://charlieharrington.com/run-linux-on-electric-objects-eo1-wall-computer/) put
+Linux on an EO1 before it - both credited by EO1bian itself - so what is new is the boot chain and what it
+reports, not Linux on an EO1 as such.
+
+- **The boot program looks at the USB port first.** The whole no-brick argument rests on that, and on never
+  writing the chip that starts the frame: a stick boots whatever the eMMC holds, and pulling it out restores
+  Android. Their own hedge is worth carrying, because it is a hedge and not a proof: "On the EO1s we know of,
+  that program looks at the USB port first." [primary: their README] [lead: no EO1 boot contents have ever
+  been read in this repo, and the teardown is silent on it]
+- **The boot artefacts are Nitrogen6x's.** The stick carries a `6x_bootscript` - the Boundary Devices
+  Nitrogen6x U-Boot bootscript - and its device tree starts from that board. Independent corroboration of §1
+  item 4 (the `boundarydevices/imx-android-r13.4-ga` firmware lineage) and of the NITROGEN6X name the frame
+  enumerates as over USB, from someone with no stake in this repo's reading of the board. [primary]
+- **The i.MX6 video processor needs NXP firmware, and that firmware is not redistributable.** EO1bian does
+  not ship it; the frame copies it at every start out of its own Android system partition - "the copy
+  Electric Objects licensed and shipped with your frame", and it never leaves the device. So the VPU is
+  firmware-loaded on this board, and no "Linux for the EO1" download can be complete without the frame's own
+  storage. An app on the Android side never learns this - whatever the ROM's player does with that firmware is
+  invisible from one - which is why it appears in a research note and not in the code. [primary: their README
+  and THIRD-PARTY.md]
+- **Its own hardware numbers.** 1 GB memory, 4 GB eMMC, about 800 MB of that memory free while playing, and a
+  panel it describes as landscape, with art pre-rotated to it before the frame draws it. The 4 GB half agrees
+  with the teardown's `EMMC04G-S100`; the 800 MB half is *its* memory figure and is not this app's ~800 MB,
+  which is storage - keep them apart when quoting either. The panel statement is the first claim from outside
+  this repo about which way the EO1 wants its pixels, and it is unmeasured here. [primary: their README]
+
+What none of this settles is the EO2. An i.MX6 boot script says nothing about what meson8 will start, and the
+Amlogic USB-Burning-Tool idea carried as a lead in Sources below stays exactly that.
+
+## 7. Gaps this pass did not close
 
 Reporting these as gaps rather than guesses matters, because two of the four research packets this run
 wanted to delegate were blocked, and web search returned no results at all in this session - so the items
@@ -253,7 +289,7 @@ below are *question lists with named sources to check*, not findings.
    §1 that session is reachable: plug the frame into a host, attach a mouse on the OTG port, and accept the
    adb authorization dialog when it appears on the panel.
 
-## 7. Action list, cheapest payoff first
+## 8. Action list, cheapest payoff first
 
 | # | Action | Cost | What it buys |
 |---|---|---|---|
@@ -275,6 +311,9 @@ below are *question lists with named sources to check*, not findings.
 - [boundarydevices/imx-android-r13.4-ga](https://github.com/boundarydevices/imx-android-r13.4-ga) and
   [the Electric Objects employee's fork](https://github.com/ksarantakos/imx-android-r13.4-ga)
 - [Immich v3.3.6 release notes (2026-11-04)](https://github.com/immich-app/immich/releases/tag/v3.3.6)
+- [eo1bian/eo1bian](https://github.com/eo1bian/eo1bian) — a Debian-from-USB revival for the EO1, read
+  2026-11-11 (its README and `THIRD-PARTY.md`), reached through
+  [aphex3k/EO1#109](https://github.com/aphex3k/EO1/issues/109)
 - Local evidence, in this repository: `EO2/data/backup/system/build.prop`,
   `EO2/data/backup/system/etc/media_codecs.xml`, `EO2/data/backup/cache/recovery/last_log`,
   `EO2/data/files.txt`, `EO2/data/backup/system/etc/security/cacerts`,
