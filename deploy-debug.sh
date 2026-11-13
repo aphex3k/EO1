@@ -95,9 +95,33 @@ esac
 
 # The one signing source app/build.gradle reads is rootProject.file('local.properties'), so asking
 # that file is asking the real question — no gradle.properties path can sign this variant.
+#
+# Written with awk, not with `grep 'x=.+'`: grep's default is POSIX BRE, where a bare '+' is a
+# LITERAL plus sign, so 'store.file=.+' matched nothing on a correctly configured host and the
+# precheck reported real signing props as missing. (It appeared to work under ugrep, which is not
+# what the script's own PATH prefix resolves — main puts /usr/bin first, so /usr/bin/grep decides
+# this. Name the regex flavour, or use a tool that has one.) The value is parsed with the latitude
+# java.util.Properties allows — whitespace around the separator, ':' as well as '=' — because
+# Gradle accepts those and a check stricter than the consumer fails builds that would have worked.
 release_signing_configured() {
-  local props="${ROOT}/local.properties"
-  [[ -r "$props" ]] && grep -q '^eo1\.signing\.store\.file=.+' "$props"
+  local props="${ROOT}/local.properties" keystore="" resolved=""
+  if [[ ! -r "$props" ]]; then
+    echo "error: ${props} is missing or unreadable. A git worktree has no local.properties of its own — copy it from the main checkout." >&2
+    return 1
+  fi
+  keystore="$(awk '/^[[:space:]]*eo1\.signing\.store\.file[[:space:]]*[=:]/ { sub(/^[[:space:]]*eo1\.signing\.store\.file[[:space:]]*[=:][[:space:]]*/, ""); print; exit }' "$props" | tr -d '\r')"
+  if [[ -z "$keystore" ]]; then
+    echo "error: ${props} has no eo1.signing.store.file entry." >&2
+    return 1
+  fi
+  resolved="$keystore"
+  [[ "$resolved" != /* ]] && resolved="${ROOT}/${resolved}"
+  if [[ ! -e "$resolved" ]]; then
+    echo "error: eo1.signing.store.file is '${keystore}', which does not exist (looked at ${resolved})." >&2
+    return 1
+  fi
+  log "Release signing: ${props} -> keystore ${resolved}"
+  return 0
 }
 
 usage() {
@@ -1015,7 +1039,7 @@ if [[ "$VARIANT" == "release" ]] && ! release_signing_configured; then
   if [[ "${EO1_DEPLOY_ALLOW_UNSIGNED:-0}" == "1" ]]; then
     log "WARNING: no eo1.signing.store.file in ${ROOT}/local.properties - the release APK will be UNSIGNED and no device will install it."
   else
-    die "No signing config found: ${ROOT}/local.properties is missing or has no eo1.signing.store.file. assembleRelease would produce an UNSIGNED APK that no device accepts, and a worktree has no local.properties of its own - copy it from the main checkout. (Set EO1_DEPLOY_ALLOW_UNSIGNED=1 to build anyway.)"
+    die "Not signing this build: see the line above. assembleRelease produces an UNSIGNED APK - which no device will install - unless local.properties carries eo1.signing.store.file / .store.password / .key.alias / .key.password. (Set EO1_DEPLOY_ALLOW_UNSIGNED=1 to build anyway.)"
   fi
 fi
 
