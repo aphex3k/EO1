@@ -445,12 +445,18 @@ git lfs pull          # the Amlogic TsPlayer native library
 Modern Android Studio no longer supports the Gradle/SDK pins this project needs for IDE debugging. Use:
 
 ```bash
-./debug.sh
+./deploy-debug.sh
 ```
 
-That builds the debug APK (armeabi-v7a carries the Amlogic TsPlayer `.so`; arm64-v8a is a native-lib-free emulator fallback), creates or reuses an AVD named `EO1` (API 19) constrained like the real hardware, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator.
+That builds the debug APK (armeabi-v7a carries the Amlogic TsPlayer `.so`; arm64-v8a is a native-lib-free emulator fallback), creates or reuses an AVD named `EO1` (API 19) constrained like the real hardware, installs and launches the app, then attaches to logcat. Press **Ctrl+C** to stop and quit the emulator. A physical frame attached over USB wins over the emulator — that is the usual path.
 
 On **Apple Silicon**, API 19 images generally cannot boot, and 32-bit ARM emulators are unsupported. After API 19 fails, the script falls back to AVD `EO1_API21` (`system-images;android-21;default;arm64-v8a`). The committed LFS TsPlayer `.so` is **armeabi-v7a** only (EO1 hardware); the arm64-v8a fallback has no native player, so the app falls back to `MediaPlayer` there. That path is an approximation for development, not EO1 fidelity. Debug APKs omit `maxSdk` so they can install on the fallback AVD; **release** builds still use `maxSdk 19` and armeabi-v7a only for real devices.
+
+```bash
+./deploy-release.sh
+```
+
+The same flow with `assembleRelease` — one implementation, selected by `VARIANT` inside `deploy-debug.sh`, because the logcat filter and the adb timeout policy are each one rule, not two. It differs where the variant differs, and the script says so when it hits each: it needs the `eo1.signing.*` keys in `local.properties` (a worktree has none — copy it over), it installs on real hardware or an API 19 AVD only (the arm64 fallback AVD cannot take an armeabi-v7a / `maxSdk 19` APK), it passes `VERSION_CODE=…` through as `-PVERSION_CODE` since a bare release build is `versionCode 1` and a frame running a published build would refuse it as a downgrade, and it **asks** before uninstalling the debug-signed build that blocks a release install — an uninstall takes the frame's `configuration.json`, its SharedPreferences, uploaded media and `files/eo1-app.log` with it. It deploys to a device; publishing a version for frames to download is [`./publish-update.sh`](docs/UPDATING.md#publishing-a-new-version-operator-side).
 
 Releases are built and signed locally — there is no CI. See
 [Publishing a new version](docs/UPDATING.md#publishing-a-new-version-operator-side).
