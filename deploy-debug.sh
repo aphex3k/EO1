@@ -39,11 +39,12 @@ CLEANED_UP=0
 USING_EMULATOR=0
 SYSTEM_IMAGE=""
 TIMEOUT_BIN=""
-ASSUME_YES=0
+NO_UNINSTALL=0
 PUSH_CONFIG=1
 INSTALL_OUT=""
 INSTALL_RC=0
 UNINSTALLED_APP=0
+BACKUP_DIR=""
 
 die() {
   echo "error: $*" >&2
@@ -68,10 +69,14 @@ log() {
 #   * versionCode defaults to 1 unless -PVERSION_CODE is passed (app/build.gradle), so a plain
 #     release deploy is a downgrade over any published build already on the frame and pm refuses it.
 #     VERSION_CODE is passed through when set, and a refused downgrade is retried with `install -d`.
-#   * a release APK never replaces a debug-signed install in place, and the other way round: pm
-#     answers INSTALL_FAILED_UPDATE_INCOMPATIBLE. The only way past that is an uninstall, which
-#     discards the frame's configuration.json (its credentials), SharedPreferences, uploaded media,
-#     files/eo1-app.log and the crash/report stores — so it is asked for, never assumed.
+#   * a release APK never replaces a debug-signed install in place, and the other way round — nor do
+#     any two keystores. This ROM says INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES, which sits in
+#     the PARSE_FAILED family even though nothing is wrong with the file. The only route is an
+#     uninstall, which discards the frame's configuration.json (its credentials), its
+#     SharedPreferences, uploaded media, the media cache, files/eo1-app.log and the crash/report
+#     stores. On a deploy that removal happens rather than being asked about — configuration.json and
+#     the SharedPreferences are copied to deploy-backups/ on the host first, the rest is too big or
+#     too incidental to drag over USB — and --no-uninstall turns it back into a refusal.
 #   * release is R8-minified: the on-screen debug board and /state's debug-gated fields are off and
 #     a crash trace names obfuscated classes until retraced against app/build/outputs/mapping/.
 VARIANT="${VARIANT:-debug}"
@@ -126,30 +131,36 @@ release_signing_configured() {
 
 usage() {
   cat >&2 <<'USAGE'
-usage: ./deploy-debug.sh [--yes] [--no-config]
-       ./deploy-release.sh [--yes] [--no-config]
+usage: ./deploy-debug.sh [--no-uninstall] [--no-config]
+       ./deploy-release.sh [--no-uninstall] [--no-config]
 
 Builds the variant's APK with Gradle, installs it on a connected physical device
 (PREFERRED_PHYSICAL_SERIAL, default 20061229) or on an API 19 AVD named EO1, starts the app,
 and streams logcat until Ctrl+C.
 
-  --yes        allow the one destructive step: uninstalling the frame's app when its signature
-               does not match this APK (debug and release builds never replace each other)
-  --no-config  do not push this checkout's configuration.json to the device
+  --no-uninstall  stop instead of removing the installed build when its certificate differs from
+                  this APK's. Removing it is the default because it is the only route a clash has on
+                  a deploy: configuration.json and the app's SharedPreferences are copied to
+                  deploy-backups/ on the host first, but uploads, the media cache and the logs are
+                  not, and they go with the package.
+  --no-config     do not push this checkout's configuration.json to the device
+  --yes           accepted and does nothing now; removing a clashing build needs no approval
 
 Environment: PREFERRED_PHYSICAL_SERIAL, BOOT_TIMEOUT_SEC, ADB_CMD_TIMEOUT_SEC,
-ADB_INSTALL_TIMEOUT_SEC, VARIANT (debug|release).
+ADB_INSTALL_TIMEOUT_SEC, VARIANT (debug|release), EO1_DEPLOY_BACKUP_DIR (where an uninstall backs up
+to; default <checkout>/deploy-backups).
 release only: VERSION_CODE — pass it ABOVE the versionCode the frame's update manifest publishes,
-so the frame does not replace this deploy with the published build (VERSION_CODE=215
+so the frame does not replace this deploy with the published build (VERSION_CODE=19
 ./deploy-release.sh); EO1_DEPLOY_ALLOW_UNSIGNED=1 builds an unsigned APK anyway (no device will
-take it); EO1_DEPLOY_UNINSTALL=1 answers the uninstall prompt the way --yes does.
+take it).
 USAGE
 }
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      -y|--yes) ASSUME_YES=1 ;;
+      -y|--yes) : ;;                      # the uninstall it used to approve is now the default
+      -u|--no-uninstall) NO_UNINSTALL=1 ;;
       --no-config) PUSH_CONFIG=0 ;;
       -h|--help) usage; exit 0 ;;
       *) usage; die "unknown argument: $1" ;;
@@ -759,9 +770,18 @@ push_configuration_if_present() {
     return
   fi
 
+  # If this run removed the package, the frame is missing its config because of us. Then the file to
+  # push back is the one taken off the device moments ago, not a working copy that may be years old —
+  # and if there is no such copy, say so in the same breath rather than leaving an unconfigured frame
+  # with a log line nobody re-reads.
   if [[ ! -f "$local_cfg" ]]; then
-    log "No ${local_cfg}; skipping config push"
-    return
+    if [[ -n "$BACKUP_DIR" && -f "${BACKUP_DIR}/configuration.json" ]]; then
+      local_cfg="${BACKUP_DIR}/configuration.json"
+      log "Restoring the frame's own configuration.json (taken off ${SERIAL} before the uninstall)"
+    else
+      log "No ${local_cfg} and nothing backed up this run; skipping config push"
+      return
+    fi
   fi
 
   # This is the working copy's file, not the frame's. It matters most after an uninstall, which is
@@ -796,9 +816,11 @@ push_configuration_if_present() {
 
 # `adb install` on these ROMs answers with a Failure line on stdout while still exiting 0 often
 # enough that neither signal alone is trustworthy, so both are recorded; INSTALL_OUT is what the
-# classifier reads, because the *text* is the only thing that distinguishes a signing problem from a
-# signature clash from a versionCode downgrade — and the right response to those three is "fix the
-# build", "uninstall (destructive)" and "retry with -d" respectively.
+# classifier reads, because the *text* is the only thing that distinguishes an unsigned file from a
+# certificate clash from a corrupt file from a versionCode downgrade — and the right response to those
+# four is "fix the signing", "remove the old build and retry", "rebuild" and "retry with -d". They
+# share the PARSE_FAILED prefix in places, so the branches are ordered by specificity, not by
+# narrative — that ordering is what a reordering edit silently breaks.
 attempt_install() {
   local out rc=0
   out="$(adb_cmd "$ADB_INSTALL_TIMEOUT_SEC" install "$@" "$APK_PATH" 2>&1)" || rc=$?
@@ -807,39 +829,77 @@ attempt_install() {
   printf '%s\n' "$out"
 }
 
-# An uninstall on a frame is not a restart: it takes the operator's credentials, uploads, durable log
-# and diagnostics stores with it. So it is asked for, and it is only answerable from a terminal
-# unless --yes / EO1_DEPLOY_UNINSTALL=1 already said yes.
-confirm_uninstall() {
-  local why="$1"
-  if [[ "$ASSUME_YES" -eq 1 || "${EO1_DEPLOY_UNINSTALL:-0}" == "1" ]]; then
-    log "Uninstalling ${PACKAGE_ID} without asking (--yes / EO1_DEPLOY_UNINSTALL=1): ${why}"
+# The two artifacts on the frame that cannot be re-derived from anywhere else: the backend
+# credentials, and the per-device settings that never live in configuration.json (trusted network and
+# its token, device name, brightness floor, MQTT client id, the Immich session mirror). Both are
+# small, both are pulled to the host before an uninstall, and neither pull is allowed to fail the
+# deploy — a frame whose /data is not readable by adb root still has to be deployable.
+backup_before_uninstall() {
+  local dest="${EO1_DEPLOY_BACKUP_DIR:-${ROOT}/deploy-backups}/${SERIAL}-$(date +%Y%m%d-%H%M%S)"
+  if ! mkdir -p "$dest" 2>/dev/null; then
+    echo "warning: could not create ${dest} - the frame's configuration.json will NOT be backed up." >&2
     return 0
   fi
-  local config_note
-  if [[ "$PUSH_CONFIG" -eq 1 && -f "${ROOT}/configuration.json" ]]; then
-    config_note="This checkout's configuration.json will be pushed back afterwards - it is this working copy's file, not necessarily what the frame was running."
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" root >/dev/null 2>&1 || true
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" wait-for-device >/dev/null 2>&1 || true
+  # Believe the file, not the exit status: this ROM's adbd has been observed reporting a successful
+  # pull while writing zero bytes, and a backup promise that turns out to name an empty directory is
+  # worse than no promise, because the next step decides whether to tell the operator their config is
+  # gone. So every count below is an -s / non-empty test on what landed on the host.
+  local saved=0
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" pull "/data/data/${PACKAGE_ID}/files/configuration.json" \
+    "${dest}/configuration.json" >/dev/null 2>&1 || true
+  if [[ -s "${dest}/configuration.json" ]]; then
+    saved=$((saved + 1))
   else
-    config_note="No configuration.json is being pushed, so the frame will come up with no backends configured."
+    echo "warning: could not read /data/data/${PACKAGE_ID}/files/configuration.json off ${SERIAL}." >&2
   fi
-  cat >&2 <<EOF
-error: ${why}
-
-The only way to deploy this APK is to uninstall ${PACKAGE_ID} on ${SERIAL}. That discards
-everything the app keeps on the frame: configuration.json (its backend credentials), the app's
-SharedPreferences (trusted network, device name, brightness floor, MQTT client id, update state),
-media uploaded through the web page, the downloaded media cache (usually the largest part of it),
-files/eo1-app.log, and the crash and diagnostics stores.
-${config_note}
-
-Uninstall and continue? [y/N]
-EOF
-  local answer=""
-  if ! read -r answer </dev/tty; then
-    die "No terminal to ask on. Re-run with --yes (or EO1_DEPLOY_UNINSTALL=1) to allow the uninstall, or deploy the variant that matches what the frame already runs."
+  adb_cmd "$ADB_CMD_TIMEOUT_SEC" pull "/data/data/${PACKAGE_ID}/shared_prefs" \
+    "${dest}/shared_prefs" >/dev/null 2>&1 || true
+  if [[ -d "${dest}/shared_prefs" && -n "$(ls -A "${dest}/shared_prefs" 2>/dev/null)" ]]; then
+    saved=$((saved + 1))
   fi
-  if [[ "$answer" != [yY]* ]]; then
-    die "Not uninstalling; the device was left exactly as it was."
+  if [[ $saved -eq 0 ]]; then
+    echo "warning: nothing could be read back off ${SERIAL} (adb root refused?), so this uninstall" >&2
+    echo "warning: is not recoverable from the host. If the frame's configuration matters, stop now" >&2
+    echo "warning: and copy it out through the web page (/config/download) first." >&2
+  else
+    echo "warning: copied ${saved} item(s) to ${dest} - configuration.json and the app's SharedPreferences." >&2
+    echo "warning: NOT copied: uploaded media, the downloaded media cache, files/eo1-app.log, crashes, reports." >&2
+  fi
+  BACKUP_DIR="$dest"
+}
+
+# A certificate clash has exactly one route on a deploy: remove what is installed. That used to be
+# gated behind a y/N prompt, which turned "install the release build on the frame that has the debug
+# build" into a manual two-step and, worse, into a failure an operator reads as a broken APK. The
+# intent to replace this device's build is already in the command line they typed, so it removes —
+# after saying what goes with the package and taking what it can back to the host. --no-uninstall
+# restores the refusal.
+replace_installed_build() {
+  local why="$1"
+  if [[ "$NO_UNINSTALL" -eq 1 ]]; then
+    die "${why} Uninstalling was refused (--no-uninstall). Nothing was changed on the device; deploy the variant whose signature matches what ${SERIAL} already runs."
+  fi
+  echo "warning: ${why}" >&2
+  echo "warning: Removing ${PACKAGE_ID} from ${SERIAL} to make room for this APK. An uninstall discards" >&2
+  echo "warning: everything the app keeps on the frame: configuration.json (its backend credentials)," >&2
+  echo "warning: the app's SharedPreferences (trusted network, device name, brightness floor, MQTT" >&2
+  echo "warning: client id, update state), media uploaded through the web page, the downloaded media" >&2
+  echo "warning: cache (usually the largest part of it), files/eo1-app.log, and the crash and" >&2
+  echo "warning: diagnostics stores." >&2
+  backup_before_uninstall
+  if [[ "$PUSH_CONFIG" -ne 1 ]]; then
+    log "--no-config: the frame's configuration.json goes with the package and will NOT be put back by this run. The copy taken above is in ${BACKUP_DIR:-no backup directory}."
+  elif [[ -f "${ROOT}/configuration.json" ]]; then
+    log "This checkout's configuration.json will be pushed after the install - it is this working copy's file, not necessarily what the frame was running; the frame's own copy is kept in ${BACKUP_DIR:-no backup directory}."
+  elif [[ -n "$BACKUP_DIR" && -f "${BACKUP_DIR}/configuration.json" ]]; then
+    log "No configuration.json in this checkout; the frame's own copy, taken off it a moment ago, goes back after the install."
+  else
+    log "No configuration.json in this checkout and none could be read off the device: the frame will come up with no backends configured."
+  fi
+  if ! uninstall_app; then
+    die "Stopped here without deploying. Nothing was destroyed: ${PACKAGE_ID} and its data are still on ${SERIAL}."
   fi
 }
 
@@ -888,31 +948,35 @@ install_apk() {
       exit 1
     fi
     case "$INSTALL_OUT" in
-      # NO_CERTIFICATES is tested before PARSE_FAILED because the real string is
-      # INSTALL_PARSE_FAILED_NO_CERTIFICATES: one broad PARSE_FAILED branch would send an operator at a
-      # corrupt APK to the signing file, which is the wrong door.
+      # A clash with the certificate on the device. Branch order here is load-bearing twice: this ROM
+      # reports the clash as INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES — inside the PARSE_FAILED
+      # family, which is why a generic PARSE_FAILED branch above it misdiagnosed a healthy APK as a
+      # corrupt file and sent the operator to rebuild something that needed no rebuilding — and
+      # NO_CERTIFICATES has to stay ahead of PARSE_FAILED for the same reason, because a genuinely
+      # unsigned APK answers INSTALL_PARSE_FAILED_NO_CERTIFICATES.
+      *INCONSISTENT_CERTIFICATES*|*UPDATE_INCOMPATIBLE*|*"signatures do not match"*)
+        if [[ $tried_uninstall -eq 0 ]]; then
+          tried_uninstall=1
+          replace_installed_build "The build on ${SERIAL} is signed with a different certificate than this ${VARIANT} APK - debug and release builds never replace each other, and neither does any two keystores."
+          attempt_install -r
+          continue
+        fi
+        ;;
       *NO_CERTIFICATES*)
         report_uninstalled_frame
-        die "adb install refused ${APK_PATH}: the APK is not signed. assembleRelease signs only when local.properties carries eo1.signing.store.file / .store.password / .key.alias / .key.password, and a worktree has no local.properties of its own - copy it from the main checkout."
+        die "adb install refused ${APK_PATH}: the APK carries no signature at all. assembleRelease signs only when local.properties carries eo1.signing.store.file / .store.password / .key.alias / .key.password - and note that a *wrong* password lands here too, not only a missing one."
         ;;
-      *PARSE_FAILED*|*INVALID_APK*)
+      *INVALID_APK*)
         report_uninstalled_frame
-        die "adb install could not parse ${APK_PATH} (rc=${INSTALL_RC}): ${INSTALL_OUT} - that is the file, not the signing config. Rebuild it."
+        die "adb install refused ${APK_PATH} (rc=${INSTALL_RC}): ${INSTALL_OUT}"
+        ;;
+      *PARSE_FAILED*)
+        report_uninstalled_frame
+        die "adb install could not parse ${APK_PATH} (rc=${INSTALL_RC}): ${INSTALL_OUT} - that is the file, not the signing config or the installed build. Rebuild it."
         ;;
       *OLDER_SDK*|*NO_MATCHING_ABIS*|*UNSUPPORTED_ABIS*)
         report_uninstalled_frame
         die "adb install refused ${APK_PATH}: ${SERIAL} cannot take the ${VARIANT} APK (release is armeabi-v7a only and maxSdk 19, so the API 21 arm64 emulator is not a target). Attach an EO1/EO2, or deploy the debug variant on the emulator."
-        ;;
-      *UPDATE_INCOMPATIBLE*|*"signatures do not match"*)
-        if [[ $tried_uninstall -eq 0 ]]; then
-          tried_uninstall=1
-          confirm_uninstall "The build on ${SERIAL} is signed with a different certificate than this ${VARIANT} APK - debug and release builds never replace each other."
-          if ! uninstall_app; then
-            die "Stopped here without deploying. Nothing was destroyed: ${PACKAGE_ID} and its data are still on ${SERIAL}."
-          fi
-          attempt_install -r
-          continue
-        fi
         ;;
       *VERSION_DOWNGRADE*)
         if [[ $tried_downgrade -eq 0 ]]; then

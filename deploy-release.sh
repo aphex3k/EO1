@@ -15,10 +15,14 @@
 #   * Target. release is armeabi-v7a only and app/src/release/AndroidManifest.xml sets maxSdk 19, so
 #     it installs on real EO hardware or an API 19 AVD — never on the arm64 API 21 fallback AVD that
 #     debug uses on Apple Silicon. With no frame attached on Apple Silicon this script stops.
-#   * It will not replace the debug build already on the frame: pm answers
-#     INSTALL_FAILED_UPDATE_INCOMPATIBLE, and the only way past that is an uninstall, which discards
-#     configuration.json (the frame's credentials), its SharedPreferences, uploaded media,
-#     files/eo1-app.log and the crash/report stores. The script asks; --yes answers.
+#   * It will not replace the debug build already on the frame — this ROM answers
+#     INSTALL_PARSE_FAILED_INCONSISTENT_CERTIFICATES, and the only way past that is an uninstall,
+#     which discards configuration.json (the frame's credentials), its SharedPreferences, uploaded
+#     media, the media cache, files/eo1-app.log and the crash/report stores. The script removes the
+#     old build and installs the new one in one pass — nothing to answer, and the failure it replaces
+#     was easy to misread as a broken APK. configuration.json and the SharedPreferences are copied to
+#     deploy-backups/ on the host first; uploads, the cache and the logs are not, so if the frame's
+#     library matters, take the long way: /config/download from the web page, then --no-uninstall.
 #   * versionCode. It defaults to 1 (app/build.gradle) unless VERSION_CODE=… is passed, so against a
 #     frame running a published build the install is a refused downgrade; the script retries it with
 #     `install -d`, but pass VERSION_CODE=<above the published code> instead, for the next reason:
