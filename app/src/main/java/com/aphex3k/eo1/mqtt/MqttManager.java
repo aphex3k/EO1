@@ -181,14 +181,24 @@ public class MqttManager implements MqttCallbackExtended {
     private volatile boolean suspended;
 
     /**
-     * Plain Gson, deliberately: there is no {@code TypeAdapterFactory} and no naming strategy here, whatever
-     * the older comments in this package said. The coordinator's lowercase keys match {@link Payload}'s field
-     * names as written, and the nested UPPERCASE keys are pinned by {@code @SerializedName} on {@link TTrack}
-     * and {@link EnqueuedMetadata}. Reading these types by reflection is what makes the keep rules in
-     * {@code app/proguard-rules.pro} load-bearing: with no Java statement constructing them, an unminified
-     * debug build works and a release build used to fail on every message.
+     * Plain Gson plus two readers. There is no naming strategy and no {@code TypeAdapterFactory} here,
+     * whatever the older comments in this package claimed: {@link Payload}'s own keys match its field names
+     * exactly, and the two nested documents whose spelling the coordinator controls are read by
+     * {@link TTrack.Reader} and {@link EnqueuedMetadata.Reader}, which match keys ignoring case. That is what
+     * makes a bridge that writes {@code UpnpClass} today and {@code UPNPClass} tomorrow a non-event — the
+     * casing this package had annotated did not match the wire at all, and the failure was invisible.
+     *
+     * <p>{@link Payload} is still built reflectively, which is why it carries {@code @Keep}: with no Java
+     * statement constructing it, R8 merged it away and only release frames noticed (app/proguard-rules.pro).
      */
-    private static final Gson gson = new GsonBuilder().create();
+    private static Gson newStateGson() {
+        return new GsonBuilder()
+                .registerTypeAdapter(TTrack.class, new TTrack.Reader())
+                .registerTypeAdapter(EnqueuedMetadata.class, new EnqueuedMetadata.Reader())
+                .create();
+    }
+
+    private static final Gson gson = newStateGson();
 
     private final PlaybackListener playbackListener;
     @Nullable
@@ -423,24 +433,24 @@ public class MqttManager implements MqttCallbackExtended {
     }
 
     /**
-     * A state document that names a track and resolves to no title and no artist is the signature of a
-     * mapping that does not match the wire, and this feature has been wrong about that mapping in two
-     * directions at once: R8 merged {@link Payload} into an abstract shell so nothing parsed at all (see
-     * app/proguard-rules.pro), and the other candidate is a coordinator whose nested keys are spelled
-     * differently from {@link TTrack}'s {@code @SerializedName} set. Neither shows up on a wall — a banner
-     * with no text is indistinguishable from a house with no music playing, which is how the first one went
-     * unseen on every release build until it was read off a durable log. So say what the document actually
-     * contained. Re-parsing costs one tree, and only on the path that is already broken: a track that
-     * resolved to text never reaches this code.
+     * A state document that names a track and from which this app reads nothing at all is the signature of a
+     * mapping that no longer matches the wire, and this feature has been wrong about that mapping twice for
+     * two unrelated reasons: R8 merged {@link Payload} into an abstract shell so nothing parsed at all (see
+     * app/proguard-rules.pro), and {@link TTrack}'s annotations pinned {@code UPNPClass}/{@code ItemID} while
+     * the coordinator writes {@code UpnpClass}/{@code ItemId} — a mismatch that blanked the banner on debug
+     * builds too. Neither shows up on a wall: a banner with no text is indistinguishable from a house with no
+     * music, which is how both went unseen until something read a durable log. So say what the document
+     * actually contained. Re-parsing costs one tree, and only on the path that is already broken — a track
+     * that mapped anything at all never reaches this code, and a state whose track simply has no text in it
+     * (line-in, radio, a queue mid-change) is not a fault either.
      */
     private void reportBlankBanner(String topic, String json, int bodyOffset, Payload state) {
         try {
             if (state.currentTrack == null) {
-                // No track named at all is a legitimate state — line-in, radio, a queue that has not answered
-                // yet. There is no key spelling to complain about.
+                // No track named at all is a legitimate state. There is no key spelling to complain about.
                 return;
             }
-            if (hasText(state.currentTrack.title) || hasText(state.currentTrack.artist)) {
+            if (trackReadable(state.currentTrack)) {
                 return;
             }
             JsonElement root = JsonParser.parseString(json.substring(bodyOffset));
@@ -449,7 +459,7 @@ public class MqttManager implements MqttCallbackExtended {
             }
             JsonObject stateObject = root.getAsJsonObject();
             StringBuilder keys = new StringBuilder("a " + state.transportState
-                    + " state named a track that resolved to no title and no artist — keys in the document: ");
+                    + " state named a track this app read nothing from — keys in the document: ");
             appendKeyNames(keys, stateObject);
             JsonElement track = stateObject.get("currentTrack");
             if (track != null && track.isJsonObject()) {
@@ -480,6 +490,18 @@ public class MqttManager implements MqttCallbackExtended {
             }
             into.append(name);
         }
+    }
+
+    /**
+     * Did any of this track survive the mapping? Not "is there a title" — a coordinator with nothing queued
+     * legitimately sends a track with no text in it — but whether a single field landed. That is the
+     * difference between a quiet house and a document this app can no longer read.
+     */
+    private static boolean trackReadable(TTrack track) {
+        return hasText(track.album) || hasText(track.artist) || hasText(track.albumArtURI)
+                || hasText(track.title) || hasText(track.upnpClass) || hasText(track.duration)
+                || hasText(track.itemID) || hasText(track.parentID) || hasText(track.trackURI)
+                || hasText(track.protocolInfo);
     }
 
     private static boolean hasText(String value) {

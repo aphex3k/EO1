@@ -10,7 +10,11 @@ public class Payload {
     public String model;
     public String name;
     public String groupName;
-    public String coordinatorUUID;
+    // coordinatorUuid, as the coordinator writes it — this field used to be spelled
+    // coordinatorUUID, and since Payload carries no @SerializedName at all, Gson's exact-name
+    // match silently left it null. Key names here are wire facts, read off a live frame on
+    // 2026-11-14; TTrack explains the nested documents, whose casing is not this consistent.
+    public String coordinatorUuid;
     public Volume volume;
     public Mute mute;
     public Long bass;

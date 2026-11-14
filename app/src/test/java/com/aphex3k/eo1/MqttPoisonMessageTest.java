@@ -1,6 +1,8 @@
 package com.aphex3k.eo1;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -33,8 +35,11 @@ public class MqttPoisonMessageTest {
     private static class Recorder implements PlaybackListener {
         final List<String> started = new ArrayList<String>();
         final List<String> stopped = new ArrayList<String>();
+        /** The last payload handed over, for the cases that assert on what actually mapped. */
+        Payload last;
 
         @Override public void onPlaybackStarted(Payload payload) {
+            last = payload;
             started.add(payload == null ? "null" : payload.transportState);
         }
 
@@ -168,35 +173,76 @@ public class MqttPoisonMessageTest {
         List<String> reports = new ArrayList<String>();
         Recorder r = new Recorder();
         MqttManager m = manager(r, reports);
-        // "Title", not "title". TTrack maps its fields through @SerializedName, so the uppercase spelling is
-        // the one this app reads off the wire, and the fixture has to carry it: with the lowercase key nothing
-        // resolves into the DTO, so the test was asserting a banner drew while passing on one that drew
-        // nothing. Same reason the reports assertion below is now meaningful.
+        // The fixture carries a key that actually resolves. TTrack.Reader folds case, so either
+        // spelling maps — which matters, because this package's annotations pinned UPNPClass and
+        // ItemID while the coordinator writes UpnpClass and ItemId, and the older lowercase "title"
+        // fixture here resolved to nothing at all: the case was asserting a banner drew while
+        // passing on one that had no text to draw.
         deliver(m, "  {\"transportState\":\"PLAYING\",\"currentTrack\":{\"Title\":\"x\"}}\t\n");
         assertEquals("padding must not cost the banner", 1, r.started.size());
         assertTrue(reports.isEmpty());
     }
 
     /**
-     * The diagnostic this feature now carries, and the reason it exists: a state document that names a track
-     * and resolves to no text is invisible from the wall — a banner with no title looks exactly like a house
-     * with no music. So the line has to name the keys the document actually used, which is the only fact that
-     * distinguishes "nothing is playing" from "the DTO and the wire disagree".
+     * The keys this app is actually served, quoted by the frame's own durable log on 2026-11-14
+     * (v2.0.1.20): the coordinator writes MixedCase — UpnpClass, ItemId, ParentId, TrackUri,
+     * ProtocolInfo — where TTrack pinned UPNPClass, ItemID, ParentID, TrackURI. Gson matches
+     * names exactly, so every one of those fields stayed null on debug builds as well as on
+     * release ones, and the only symptom was a banner with no text on it.
      */
     @Test
-    public void aTrackThatResolvesToNoTextNamesTheKeysItWasGiven() throws Exception {
+    public void theKeysTheCoordinatorActuallySendsMapIntoTheTrack() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        Recorder r = new Recorder();
+        deliver(manager(r, reports), "{\"transportState\":\"PLAYING\",\"groupName\":\"Kitchen\","
+                + "\"currentTrack\":{"
+                + "\"UpnpClass\":\"object.item.audioItem.musicTrack\","
+                + "\"ItemId\":\"S100_A00001\",\"ParentId\":\"S100\","
+                + "\"TrackUri\":\"x-rincon-playcontainer://RINCON_000E0FFFFF#S100_A00001\","
+                + "\"ProtocolInfo\":\"http-get:*:audio/mpeg:*\"}}");
+        assertEquals("the banner still gets its state", 1, r.started.size());
+        assertNotNull("a payload that reached the listener", r.last);
+        assertEquals("object.item.audioItem.musicTrack", r.last.currentTrack.upnpClass);
+        assertEquals("S100_A00001", r.last.currentTrack.itemID);
+        assertEquals("S100", r.last.currentTrack.parentID);
+        assertEquals("http-get:*:audio/mpeg:*", r.last.currentTrack.protocolInfo);
+        assertTrue("a document this app can read must not be reported: " + reports, reports.isEmpty());
+    }
+
+    /** Case folding is tolerance, not one spelling replacing another. */
+    @Test
+    public void theUppercaseSpellingStillMapsToo() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        Recorder r = new Recorder();
+        deliver(manager(r, reports), "{\"transportState\":\"PLAYING\",\"currentTrack\":"
+                + "{\"UPNPClass\":\"object.item.audioItem.musicTrack\",\"ItemID\":\"X1\","
+                + "\"Title\":\"A Title\",\"Duration\":\"0:03:45\"}}");
+        assertNotNull(r.last);
+        assertEquals("X1", r.last.currentTrack.itemID);
+        assertEquals("A Title", r.last.currentTrack.title);
+        assertEquals("0:03:45", r.last.currentTrack.duration);
+        assertTrue("a readable track is not a fault: " + reports, reports.isEmpty());
+    }
+
+    /**
+     * The diagnostic, and why it exists: a state that names a track and yields nothing this app can read is
+     * invisible from a wall — a banner with no text looks exactly like a house with no music, which is how
+     * both the R8 merge and the casing mismatch stayed unnoticed. So the line names the keys the document
+     * used: the one fact that tells "nothing is playing" apart from "the mapping and the wire have drifted".
+     */
+    @Test
+    public void aTrackThisAppCannotReadNamesTheKeysTheCoordinatorUsed() throws Exception {
         List<String> reports = new ArrayList<String>();
         MqttManager m = manager(new Recorder(), reports);
         deliver(m, "{\"transportState\":\"PLAYING\",\"groupName\":\"Kitchen\","
-                + "\"currentTrack\":{\"TrackURI\":\"x-rincon-contents#Kitchen\",\"Title\":\"a title nobody published\"}}");
-        assertEquals("one line for a banner that would draw nothing: " + reports, 1, reports.size());
+                + "\"currentTrack\":{\"MediaName\":\"a title nobody published\",\"Ordinal\":3}}");
+        assertEquals("one line for a track nothing could be read from: " + reports, 1, reports.size());
         String line = reports.get(0);
         assertTrue("the line must say what it saw: " + line, line.contains("keys in currentTrack:"));
-        assertTrue("and name the keys: " + line, line.contains("TrackURI") && line.contains("Title"));
-        // Names, never values: this line lands in files/eo1-app.log, which the LAN web page serves, and a
+        assertTrue("and name the keys: " + line, line.contains("MediaName") && line.contains("Ordinal"));
+        // Names, never values: this line lands in files/eo1-app.log, which the LAN page serves, and a
         // house's listening history has no business being in it.
-        assertFalse("values must not be quoted: " + line,
-                line.contains("x-rincon") || line.contains("a title nobody published"));
+        assertFalse("values must not be quoted: " + line, line.contains("nobody published"));
     }
 
     @Test
