@@ -1,7 +1,10 @@
 package com.aphex3k.eo1.mqtt;
 
+import androidx.annotation.Keep;
+
 import com.google.gson.annotations.SerializedName;
 
+@Keep
 public class EnqueuedMetadata {
     @SerializedName("Title")
     public String title;
@@ -13,4 +16,5 @@ public class EnqueuedMetadata {
     public String parentID;
 }
 
-// No changes needed; mapping handled by custom TypeAdapterFactory
+// UPPERCASE keys pinned by @SerializedName above; see TTrack for why that matters, and
+// Payload for what forgetting @Keep did to this package.

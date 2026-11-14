@@ -152,7 +152,8 @@ to; default <checkout>/deploy-backups).
 release only: VERSION_CODE — pass it ABOVE the versionCode the frame's update manifest publishes,
 so the frame does not replace this deploy with the published build (VERSION_CODE=19
 ./deploy-release.sh); EO1_DEPLOY_ALLOW_UNSIGNED=1 builds an unsigned APK anyway (no device will
-take it).
+take it); EO1_SKIP_REFLECTION_CHECK=1 installs over check-release-reflection.sh finding types Gson
+builds by reflection missing from the APK (a release-only failure: debug frames keep working).
 USAGE
 }
 
@@ -1118,6 +1119,22 @@ fi
 
 if [[ "$VARIANT" == "release" ]]; then
   log "Release build: R8-minified, so the on-screen debug board and /state's debug-gated fields are off; the trace this session streams names obfuscated classes until retraced (the durable record is still files/eo1-app.log)."
+
+  # R8 cannot see a reflective construction, so a DTO nothing in Java constructs is a class it
+  # is free to merge away — and a merged DTO is one feature that works on debug frames and says
+  # nothing on release frames. That is how the Sonos banner shipped, so the same question
+  # publish-update.sh asks is asked here too, before anything reaches a wall. The deploy is
+  # explicitly the operator's call, so this one gate can be stepped past rather than only
+  # stepped past at publish time: EO1_SKIP_REFLECTION_CHECK=1.
+  if [[ "${EO1_SKIP_REFLECTION_CHECK:-}" == "1" ]]; then
+    log "Skipping the reflection gate (EO1_SKIP_REFLECTION_CHECK=1) — a DTO R8 merged away would work only on debug builds."
+  elif [[ -x "${ROOT}/check-release-reflection.sh" ]]; then
+    if ! "${ROOT}/check-release-reflection.sh" "$APK_PATH" "app/build/outputs/mapping/release/mapping.txt"; then
+      die "this release build is missing types Gson builds by reflection (see the lines above). Nothing was installed; re-run with EO1_SKIP_REFLECTION_CHECK=1 if the gate itself is what is wrong."
+    fi
+  else
+    log "WARNING: ${ROOT}/check-release-reflection.sh is not runnable — nothing checked this build for DTOs R8 merged away."
+  fi
 
   # A deployed-but-unpublished release has no entry in publish-update.sh's versionCode -> mapping
   # ledger, and app/build/outputs/mapping/release/mapping.txt is overwritten by the very next

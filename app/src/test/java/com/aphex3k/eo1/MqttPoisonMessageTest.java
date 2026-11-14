@@ -168,9 +168,45 @@ public class MqttPoisonMessageTest {
         List<String> reports = new ArrayList<String>();
         Recorder r = new Recorder();
         MqttManager m = manager(r, reports);
-        deliver(m, "  {\"transportState\":\"PLAYING\",\"currentTrack\":{\"title\":\"x\"}}\t\n");
+        // "Title", not "title". TTrack maps its fields through @SerializedName, so the uppercase spelling is
+        // the one this app reads off the wire, and the fixture has to carry it: with the lowercase key nothing
+        // resolves into the DTO, so the test was asserting a banner drew while passing on one that drew
+        // nothing. Same reason the reports assertion below is now meaningful.
+        deliver(m, "  {\"transportState\":\"PLAYING\",\"currentTrack\":{\"Title\":\"x\"}}\t\n");
         assertEquals("padding must not cost the banner", 1, r.started.size());
         assertTrue(reports.isEmpty());
+    }
+
+    /**
+     * The diagnostic this feature now carries, and the reason it exists: a state document that names a track
+     * and resolves to no text is invisible from the wall — a banner with no title looks exactly like a house
+     * with no music. So the line has to name the keys the document actually used, which is the only fact that
+     * distinguishes "nothing is playing" from "the DTO and the wire disagree".
+     */
+    @Test
+    public void aTrackThatResolvesToNoTextNamesTheKeysItWasGiven() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        MqttManager m = manager(new Recorder(), reports);
+        deliver(m, "{\"transportState\":\"PLAYING\",\"groupName\":\"Kitchen\","
+                + "\"currentTrack\":{\"TrackURI\":\"x-rincon-contents#Kitchen\",\"Title\":\"a title nobody published\"}}");
+        assertEquals("one line for a banner that would draw nothing: " + reports, 1, reports.size());
+        String line = reports.get(0);
+        assertTrue("the line must say what it saw: " + line, line.contains("keys in currentTrack:"));
+        assertTrue("and name the keys: " + line, line.contains("TrackURI") && line.contains("Title"));
+        // Names, never values: this line lands in files/eo1-app.log, which the LAN web page serves, and a
+        // house's listening history has no business being in it.
+        assertFalse("values must not be quoted: " + line,
+                line.contains("x-rincon") || line.contains("a title nobody published"));
+    }
+
+    @Test
+    public void aTrackThatResolvesToTextStaysSilent() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        Recorder r = new Recorder();
+        MqttManager m = manager(r, reports);
+        deliver(m, "{\"transportState\":\"PLAYING\",\"currentTrack\":{\"Title\":\"Real\",\"Artist\":\"Someone\"}}");
+        assertEquals("the banner still gets its state", 1, r.started.size());
+        assertTrue("a healthy document must not be reported at all: " + reports, reports.isEmpty());
     }
 
     @Test

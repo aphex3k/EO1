@@ -4,17 +4,11 @@ import android.content.Context;
 
 import androidx.annotation.Nullable;
 
-import com.google.gson.FieldNamingStrategy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonSyntaxException;
-import com.google.gson.TypeAdapter;
-import com.google.gson.TypeAdapterFactory;
-import com.google.gson.reflect.TypeToken;
-
-import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
@@ -186,7 +180,14 @@ public class MqttManager implements MqttCallbackExtended {
     private final Object lifecycle = new Object();
     private volatile boolean suspended;
 
-    // Custom TypeAdapterFactory to apply UPPERCASE mapping only to nested objects
+    /**
+     * Plain Gson, deliberately: there is no {@code TypeAdapterFactory} and no naming strategy here, whatever
+     * the older comments in this package said. The coordinator's lowercase keys match {@link Payload}'s field
+     * names as written, and the nested UPPERCASE keys are pinned by {@code @SerializedName} on {@link TTrack}
+     * and {@link EnqueuedMetadata}. Reading these types by reflection is what makes the keep rules in
+     * {@code app/proguard-rules.pro} load-bearing: with no Java statement constructing them, an unminified
+     * debug build works and a release build used to fail on every message.
+     */
     private static final Gson gson = new GsonBuilder().create();
 
     private final PlaybackListener playbackListener;
@@ -400,11 +401,17 @@ public class MqttManager implements MqttCallbackExtended {
         }
 
         try {
-            if (payloadObj != null && playbackListener != null) {
-                if (Arrays.asList(PLAY_STATES).contains(payloadObj.transportState)) {
-                    playbackListener.onPlaybackStarted(payloadObj);
-                } else if (Arrays.asList(STOP_STATES).contains(payloadObj.transportState)) {
-                    playbackListener.onPlaybackStopped(payloadObj);
+            if (payloadObj != null) {
+                // Ahead of the state dispatch, and for every state: a document that yields no track text is
+                // the same mapping failure whichever state it claims, and a paused house is exactly when
+                // nobody is looking at the banner.
+                reportBlankBanner(topic, payload, body, payloadObj);
+                if (playbackListener != null) {
+                    if (Arrays.asList(PLAY_STATES).contains(payloadObj.transportState)) {
+                        playbackListener.onPlaybackStarted(payloadObj);
+                    } else if (Arrays.asList(STOP_STATES).contains(payloadObj.transportState)) {
+                        playbackListener.onPlaybackStopped(payloadObj);
+                    }
                 }
             }
         } catch (Throwable t) {
@@ -413,6 +420,70 @@ public class MqttManager implements MqttCallbackExtended {
             // dropped session.
             report("a " + topic + " message drew no banner (" + t + ") — staying connected", true);
         }
+    }
+
+    /**
+     * A state document that names a track and resolves to no title and no artist is the signature of a
+     * mapping that does not match the wire, and this feature has been wrong about that mapping in two
+     * directions at once: R8 merged {@link Payload} into an abstract shell so nothing parsed at all (see
+     * app/proguard-rules.pro), and the other candidate is a coordinator whose nested keys are spelled
+     * differently from {@link TTrack}'s {@code @SerializedName} set. Neither shows up on a wall — a banner
+     * with no text is indistinguishable from a house with no music playing, which is how the first one went
+     * unseen on every release build until it was read off a durable log. So say what the document actually
+     * contained. Re-parsing costs one tree, and only on the path that is already broken: a track that
+     * resolved to text never reaches this code.
+     */
+    private void reportBlankBanner(String topic, String json, int bodyOffset, Payload state) {
+        try {
+            if (state.currentTrack == null) {
+                // No track named at all is a legitimate state — line-in, radio, a queue that has not answered
+                // yet. There is no key spelling to complain about.
+                return;
+            }
+            if (hasText(state.currentTrack.title) || hasText(state.currentTrack.artist)) {
+                return;
+            }
+            JsonElement root = JsonParser.parseString(json.substring(bodyOffset));
+            if (!root.isJsonObject()) {
+                return;
+            }
+            JsonObject stateObject = root.getAsJsonObject();
+            StringBuilder keys = new StringBuilder("a " + state.transportState
+                    + " state named a track that resolved to no title and no artist — keys in the document: ");
+            appendKeyNames(keys, stateObject);
+            JsonElement track = stateObject.get("currentTrack");
+            if (track != null && track.isJsonObject()) {
+                keys.append(" | keys in currentTrack: ");
+                appendKeyNames(keys, track.getAsJsonObject());
+            }
+            report(keys.toString() + " — the banner would draw nothing", true);
+        } catch (Throwable ignored) {
+            // A diagnostic that cannot read the document has nothing to say, and it must never be the
+            // reason a message is reported as failed. The drop line above, if there was one, already spoke.
+        }
+    }
+
+    /**
+     * Key names only, capped: the point is the spelling, not the content, and one coordinator document is
+     * over a kilobyte. Values are never quoted here — this line reaches files/eo1-app.log, and a house's
+     * listening history has no business being in a log that the web page serves.
+     */
+    private static void appendKeyNames(StringBuilder into, JsonObject object) {
+        int emitted = 0;
+        for (String name : object.keySet()) {
+            if (emitted++ > 0) {
+                into.append(',');
+            }
+            if (emitted > 30) {
+                into.append("…");
+                return;
+            }
+            into.append(name);
+        }
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isEmpty();
     }
 
     public boolean isConnected() {
