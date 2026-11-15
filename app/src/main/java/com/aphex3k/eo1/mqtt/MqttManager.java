@@ -4,17 +4,11 @@ import android.content.Context;
 
 import androidx.annotation.Nullable;
 
-import com.google.gson.FieldNamingStrategy;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
-import com.google.gson.JsonSyntaxException;
-import com.google.gson.TypeAdapter;
-import com.google.gson.TypeAdapterFactory;
-import com.google.gson.reflect.TypeToken;
-
-import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
 import org.eclipse.paho.client.mqttv3.MqttCallbackExtended;
@@ -186,8 +180,25 @@ public class MqttManager implements MqttCallbackExtended {
     private final Object lifecycle = new Object();
     private volatile boolean suspended;
 
-    // Custom TypeAdapterFactory to apply UPPERCASE mapping only to nested objects
-    private static final Gson gson = new GsonBuilder().create();
+    /**
+     * Plain Gson plus two readers. There is no naming strategy and no {@code TypeAdapterFactory} here,
+     * whatever the older comments in this package claimed: {@link Payload}'s own keys match its field names
+     * exactly, and the two nested documents whose spelling the coordinator controls are read by
+     * {@link TTrack.Reader} and {@link EnqueuedMetadata.Reader}, which match keys ignoring case. That is what
+     * makes a bridge that writes {@code UpnpClass} today and {@code UPNPClass} tomorrow a non-event — the
+     * casing this package had annotated did not match the wire at all, and the failure was invisible.
+     *
+     * <p>{@link Payload} is still built reflectively, which is why it carries {@code @Keep}: with no Java
+     * statement constructing it, R8 merged it away and only release frames noticed (app/proguard-rules.pro).
+     */
+    private static Gson newStateGson() {
+        return new GsonBuilder()
+                .registerTypeAdapter(TTrack.class, new TTrack.Reader())
+                .registerTypeAdapter(EnqueuedMetadata.class, new EnqueuedMetadata.Reader())
+                .create();
+    }
+
+    private static final Gson gson = newStateGson();
 
     private final PlaybackListener playbackListener;
     @Nullable
@@ -400,11 +411,17 @@ public class MqttManager implements MqttCallbackExtended {
         }
 
         try {
-            if (payloadObj != null && playbackListener != null) {
-                if (Arrays.asList(PLAY_STATES).contains(payloadObj.transportState)) {
-                    playbackListener.onPlaybackStarted(payloadObj);
-                } else if (Arrays.asList(STOP_STATES).contains(payloadObj.transportState)) {
-                    playbackListener.onPlaybackStopped(payloadObj);
+            if (payloadObj != null) {
+                // Ahead of the state dispatch, and for every state: a document that yields no track text is
+                // the same mapping failure whichever state it claims, and a paused house is exactly when
+                // nobody is looking at the banner.
+                reportBlankBanner(topic, payload, body, payloadObj);
+                if (playbackListener != null) {
+                    if (Arrays.asList(PLAY_STATES).contains(payloadObj.transportState)) {
+                        playbackListener.onPlaybackStarted(payloadObj);
+                    } else if (Arrays.asList(STOP_STATES).contains(payloadObj.transportState)) {
+                        playbackListener.onPlaybackStopped(payloadObj);
+                    }
                 }
             }
         } catch (Throwable t) {
@@ -413,6 +430,89 @@ public class MqttManager implements MqttCallbackExtended {
             // dropped session.
             report("a " + topic + " message drew no banner (" + t + ") — staying connected", true);
         }
+    }
+
+    /**
+     * A state document that names a track and from which this app reads nothing at all is the signature of a
+     * mapping that no longer matches the wire, and this feature has been wrong about that mapping twice for
+     * two unrelated reasons: R8 merged {@link Payload} into an abstract shell so nothing parsed at all (see
+     * app/proguard-rules.pro), and {@link TTrack}'s annotations pinned {@code UPNPClass}/{@code ItemID} while
+     * the coordinator writes {@code UpnpClass}/{@code ItemId} — a mismatch that blanked the banner on debug
+     * builds too. Neither shows up on a wall: a banner with no text is indistinguishable from a house with no
+     * music, which is how both went unseen until something read a durable log. So say what the document
+     * actually contained. Re-parsing costs one tree, and only on the path that is already broken — a track
+     * that mapped anything at all never reaches this code, and a state whose track simply has no text in it
+     * (line-in, radio, a queue mid-change) is not a fault either.
+     */
+    private void reportBlankBanner(String topic, String json, int bodyOffset, Payload state) {
+        try {
+            if (state.currentTrack == null) {
+                // No track named at all is a legitimate state. There is no key spelling to complain about.
+                return;
+            }
+            if (trackReadable(state.currentTrack)) {
+                return;
+            }
+            JsonElement root = JsonParser.parseString(json.substring(bodyOffset));
+            if (!root.isJsonObject()) {
+                return;
+            }
+            JsonObject stateObject = root.getAsJsonObject();
+            JsonElement track = stateObject.get("currentTrack");
+            if (track == null || !track.isJsonObject() || track.getAsJsonObject().entrySet().isEmpty()) {
+                // A track object the coordinator sent empty names no track at all: there was
+                // nothing here for any mapping to read, so this is a state change, not a
+                // drift between the wire and this package. The rule that keeps the diagnostic
+                // useful is about values, not key names — the versionCode 19 casing mismatch
+                // had perfectly recognisable keys (`UpnpClass`, `ItemId`) and still mapped to
+                // nothing, and a key-name test would have stayed silent through it.
+                return;
+            }
+            StringBuilder keys = new StringBuilder("a " + state.transportState
+                    + " state named a track this app read nothing from — keys in the document: ");
+            appendKeyNames(keys, stateObject);
+            keys.append(" | keys in currentTrack: ");
+            appendKeyNames(keys, track.getAsJsonObject());
+            report(keys.toString() + " — the banner would draw nothing", true);
+        } catch (Throwable ignored) {
+            // A diagnostic that cannot read the document has nothing to say, and it must never be the
+            // reason a message is reported as failed. The drop line above, if there was one, already spoke.
+        }
+    }
+
+    /**
+     * Key names only, capped: the point is the spelling, not the content, and one coordinator document is
+     * over a kilobyte. Values are never quoted here — this line reaches files/eo1-app.log, and a house's
+     * listening history has no business being in a log that the web page serves.
+     */
+    private static void appendKeyNames(StringBuilder into, JsonObject object) {
+        int emitted = 0;
+        for (String name : object.keySet()) {
+            if (emitted++ > 0) {
+                into.append(',');
+            }
+            if (emitted > 30) {
+                into.append("…");
+                return;
+            }
+            into.append(name);
+        }
+    }
+
+    /**
+     * Did any of this track survive the mapping? Not "is there a title" — a coordinator with nothing queued
+     * legitimately sends a track with no text in it — but whether a single field landed. That is the
+     * difference between a quiet house and a document this app can no longer read.
+     */
+    private static boolean trackReadable(TTrack track) {
+        return hasText(track.album) || hasText(track.artist) || hasText(track.albumArtURI)
+                || hasText(track.title) || hasText(track.upnpClass) || hasText(track.duration)
+                || hasText(track.itemID) || hasText(track.parentID) || hasText(track.trackURI)
+                || hasText(track.protocolInfo);
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isEmpty();
     }
 
     public boolean isConnected() {

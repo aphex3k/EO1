@@ -140,7 +140,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private static final long DOWNLOAD_PROGRESS_LOG_INTERVAL_MS = 5000L;
     /** Denominator of the download bar's fill. Per-mille, so any {@code Content-Length} fits. */
     private static final int DOWNLOAD_BAR_MAX = 1000;
-    /** Logcat tag matched by debug.sh follow_logcat filter. */
+    /** Logcat tag matched by deploy-debug.sh / deploy-release.sh follow_logcat filter. */
     private static final String TAG = "EO1";
     /** Tag the options dialog is shown under, and the idempotency key for {@link #showConfigurationUI()}. */
     private static final String OPTIONS_DIALOG_TAG = "OptionsDialog";

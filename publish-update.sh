@@ -18,6 +18,12 @@
 #                      one. Unset (default) makes a missing mapping a hard error: release is always
 #                      minified, so without an archived mapping a crash dump from this build can
 #                      never be decoded.
+#   EO1_UPDATE_REFLECTION_OPTIONAL
+#                      Set to publish over a release whose APK no longer carries the types Gson
+#                      builds by reflection. Unset (default) makes that a hard error after the build:
+#                      R8 merges a class nothing in Java constructs, and a DTO it merged away is a
+#                      feature that silently stops working on release frames only. Needs a dexdump
+#                      (ANDROID_HOME/build-tools, or set DEXDUMP=/path/to/dexdump).
 #   EO1_UPDATE_ROOTS_OPTIONAL
 #                      Set to publish over an unverifiable CA root bundle. Unset (default) makes a
 #                      bundle that does not regenerate from certs/roots, disagrees with its manifest,
@@ -219,6 +225,48 @@ fi
 APK="$ROOT/app/build/outputs/apk/release/app-release.apk"
 if [ ! -f "$APK" ]; then
     echo "ERROR: build did not produce $APK" >&2; exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# The reflection gate — ./check-release-reflection.sh, in the repo root.
+#
+# Nothing in Java constructs this app's DTOs — Gson does, reflectively, and R8
+# cannot see a reflective call — so a DTO with no `new` site meets R8's "no live
+# constructor" test, and its horizontal class merging folds such classes into one
+# borrowed shell. In the versionCode 19 APK that is what happened to all five
+# classes in com.aphex3k.eo1.mqtt: Payload came out PUBLIC ABSTRACT with no
+# instance fields and 101 other people's static methods, and TTrack,
+# EnqueuedMetadata, Volume and Mute had no mapping entry at all. Every `sonos/+`
+# message on every release frame then failed with "Abstract classes can't be
+# instantiated!", while debug builds (minifyEnabled=false) and the JVM suite (the
+# test task never runs R8) stayed green — and a banner that draws nothing is
+# invisible from a wall, which is how it survived every release that had the
+# feature in it.
+#
+# So the release asks its own binary. The script derives the reflective types from
+# the source (class literals at fromJson calls, plus anything declaring a
+# @SerializedName field — which is how the Retrofit-converted immichApi DTOs get
+# covered without being named anywhere) and checks each against the APK for the
+# four things Gson needs: present, concrete, a no-argument constructor, and the
+# field names the wire is matched against. Seconds after the build, and it needs
+# nobody to remember which classes are reflective.
+#
+# EO1_UPDATE_REFLECTION_OPTIONAL=1 skips it, same shape as the roots and mapping
+# gates.
+# ---------------------------------------------------------------------------
+if [ -n "${EO1_UPDATE_REFLECTION_OPTIONAL:-}" ]; then
+    echo "WARNING: skipping the reflection gate (EO1_UPDATE_REFLECTION_OPTIONAL is set)." >&2
+    echo "         A DTO R8 merged away makes one feature work only on debug builds." >&2
+else
+    REFLECT_MAPPING="$ROOT/app/build/outputs/mapping/release/mapping.txt"
+    if ! GATE_OUT="$("$ROOT/check-release-reflection.sh" "$APK" "$REFLECT_MAPPING" 2>&1)"; then
+        printf '%s\n' "$GATE_OUT" >&2
+        echo "ERROR: refusing to publish. If the gate itself is wrong — a type it" >&2
+        echo "       mis-resolves, a dexdump it cannot find — fix the script, or re-run" >&2
+        echo "       with EO1_UPDATE_REFLECTION_OPTIONAL=1 after reading what it said." >&2
+        exit 1
+    fi
+    printf '%s\n' "$GATE_OUT"
 fi
 
 if command -v shasum >/dev/null 2>&1; then

@@ -46,3 +46,33 @@
 # build fails with MissingResourceException("Error locating the logging class").
 -keep class com.aphex3k.eo1.mqtt.MqttManager$NoOpLogger { public <init>(); }
 
+# Nothing here protects the app's Gson DTOs, and that absence is deliberate: they are
+# protected by @Keep on the class declaration, which androidx.annotation's own consumer
+# rule expands into `-keep @androidx.annotation.Keep class * { *; }` — the class and every
+# member, name and all. Forty types in app/src/main/java carry it, and every Gson family in
+# this app depends on it: the immichApi DTOs (through Retrofit's converter), UpdateManifest,
+# UpdateState, Configuration, and since this file grew a comment the five in
+# app/src/main/java/com/aphex3k/eo1/mqtt/ as well.
+#
+# Those five did not, and that is what broke release frames up to versionCode 19. Nothing in
+# Java constructs them — Gson does, reflectively, which R8 cannot see — so they met R8's
+# "no live constructor" test and its horizontal class merging folded all five into one
+# class. Read out of that build's APK with build-tools' dexdump:
+#
+#   Lq0/b;                    <- com.aphex3k.eo1.mqtt.Payload
+#     Access flags      : 0x0401 (PUBLIC ABSTRACT)
+#     Instance fields   : none
+#     Direct + Virtual methods : 101, all of them other people's static utilities
+#
+# and mapping.txt carries no class entry at all for TTrack, EnqueuedMetadata, Volume or
+# Mute. Gson asked for the state document, found an abstract class with no fields to fill,
+# and every `sonos/+` message on every release frame failed with "Abstract classes can't be
+# instantiated! … Class name: q0.b". Debug builds were fine (minifyEnabled=false) and the
+# JVM suite was fine (the test task never runs R8), so it survived on every release shipped
+# with that package in it.
+#
+# Which leaves the rule for the next person: when a Gson type misbehaves on a release frame
+# and not on a debug one, the question is "does its class say @Keep", not "which rule is
+# missing from this file". ./publish-update.sh now asks the built APK that question directly
+# (its reflection gate), so a missing @Keep costs a release rather than a wall.
+
