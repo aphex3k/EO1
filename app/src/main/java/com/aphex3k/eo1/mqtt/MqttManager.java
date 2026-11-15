@@ -458,14 +458,21 @@ public class MqttManager implements MqttCallbackExtended {
                 return;
             }
             JsonObject stateObject = root.getAsJsonObject();
+            JsonElement track = stateObject.get("currentTrack");
+            if (track == null || !track.isJsonObject() || track.getAsJsonObject().entrySet().isEmpty()) {
+                // A track object the coordinator sent empty names no track at all: there was
+                // nothing here for any mapping to read, so this is a state change, not a
+                // drift between the wire and this package. The rule that keeps the diagnostic
+                // useful is about values, not key names — the versionCode 19 casing mismatch
+                // had perfectly recognisable keys (`UpnpClass`, `ItemId`) and still mapped to
+                // nothing, and a key-name test would have stayed silent through it.
+                return;
+            }
             StringBuilder keys = new StringBuilder("a " + state.transportState
                     + " state named a track this app read nothing from — keys in the document: ");
             appendKeyNames(keys, stateObject);
-            JsonElement track = stateObject.get("currentTrack");
-            if (track != null && track.isJsonObject()) {
-                keys.append(" | keys in currentTrack: ");
-                appendKeyNames(keys, track.getAsJsonObject());
-            }
+            keys.append(" | keys in currentTrack: ");
+            appendKeyNames(keys, track.getAsJsonObject());
             report(keys.toString() + " — the banner would draw nothing", true);
         } catch (Throwable ignored) {
             // A diagnostic that cannot read the document has nothing to say, and it must never be the

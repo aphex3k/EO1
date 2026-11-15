@@ -1129,7 +1129,9 @@ if [[ "$VARIANT" == "release" ]]; then
   if [[ "${EO1_SKIP_REFLECTION_CHECK:-}" == "1" ]]; then
     log "Skipping the reflection gate (EO1_SKIP_REFLECTION_CHECK=1) — a DTO R8 merged away would work only on debug builds."
   elif [[ -x "${ROOT}/check-release-reflection.sh" ]]; then
-    if ! "${ROOT}/check-release-reflection.sh" "$APK_PATH" "app/build/outputs/mapping/release/mapping.txt"; then
+    # Absolute paths, not the engine's relative ones: the gate is a separate process and an
+    # unresolved mapping.txt would silently downgrade it to assuming no class was renamed.
+    if ! "${ROOT}/check-release-reflection.sh" "${ROOT}/${APK_PATH}" "${ROOT}/app/build/outputs/mapping/release/mapping.txt"; then
       die "this release build is missing types Gson builds by reflection (see the lines above). Nothing was installed; re-run with EO1_SKIP_REFLECTION_CHECK=1 if the gate itself is what is wrong."
     fi
   else

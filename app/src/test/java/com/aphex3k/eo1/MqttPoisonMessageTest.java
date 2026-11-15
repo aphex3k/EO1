@@ -245,6 +245,22 @@ public class MqttPoisonMessageTest {
         assertFalse("values must not be quoted: " + line, line.contains("nobody published"));
     }
 
+    /**
+     * The other half of that rule: a coordinator that sends an empty track object has no track to name,
+     * which is a state change and not a mapping failure. What decides is the values, not the key names —
+     * the casing mismatch this PR fixes had entirely recognisable keys ({@code UpnpClass}, {@code ItemId})
+     * and still mapped to nothing, so a key-name rule would have stayed silent through the bug that
+     * motivated the line.
+     */
+    @Test
+    public void anEmptyTrackObjectIsNotReported() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        Recorder r = new Recorder();
+        deliver(manager(r, reports), "{\"transportState\":\"PLAYING\",\"currentTrack\":{}}");
+        assertEquals("the state still reaches the listener", 1, r.started.size());
+        assertTrue("an empty currentTrack is not a fault: " + reports, reports.isEmpty());
+    }
+
     @Test
     public void aTrackThatResolvesToTextStaysSilent() throws Exception {
         List<String> reports = new ArrayList<String>();

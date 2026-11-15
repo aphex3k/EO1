@@ -117,12 +117,12 @@ reflective_targets() {
     } | sort -u
 }
 
-# Field declarations in one source file, as "<name>\t<annotated>\t<type>", where annotated
+# Field declarations in one source file, as "<name>\t<annotated>\t<types>", where annotated
 # means a @SerializedName sits on the line above it and therefore the Java name is not the
-# wire name. Methods, statics and initialiser values are not fields: `public int mqttPort =
-# 1883;` declares `mqttPort`, so everything from the `=` on is dropped before the name is
-# read. The type keeps its leading identifier only (`List<String>` → `List`), because it is
-# used to find the class file, not to type-check anything.
+# wire name, and <types> is every identifier in the declared type — the base, its type
+# arguments and an array component — comma separated. Methods, statics and initialiser
+# values are not fields: `public int mqttPort = 1883;` declares `mqttPort`, so everything
+# from the `=` on is dropped before the name is read.
 source_fields() {
     awk '
         /@SerializedName/                               { ann = 1; next }
@@ -133,9 +133,19 @@ source_fields() {
             sub(/;$/, "", decl)
             n = split(decl, parts, /[[:space:]]+/)
             name = parts[n]
-            type = parts[n-1]; sub(/<.*/, "", type); sub(/\[\].*/, "", type)
-            if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && type ~ /^[A-Za-z_][A-Za-z0-9_]*$/)
-                print name "\t" ann "\t" type
+            # Everything between the modifier and the field name is the type. A document
+            # reached only as `List<Foo>` is still a document Gson has to build, so a gate
+            # that looked only at the outer `List` would be checking nothing — which is what
+            # a first version of this script did.
+            expr = ""
+            for (i = 2; i < n; i++) expr = expr " " parts[i]
+            types = ""
+            while (match(expr, /[A-Za-z_][A-Za-z0-9_]*/)) {
+                if (types != "") types = types ","
+                types = types substr(expr, RSTART, RLENGTH)
+                expr = substr(expr, RSTART + RLENGTH)
+            }
+            if (name ~ /^[A-Za-z_][A-Za-z0-9_]*$/ && types != "") print name "\t" ann "\t" types
             ann = 0; next
         }
         { ann = 0 }
@@ -160,7 +170,11 @@ hand_built() {
 # them on the way in and no Java statement names them — and the two ways a type gets onto
 # the list (a fromJson class literal, a @SerializedName declaration) miss exactly the plain
 # ones: TTrack is found because it annotates its fields, while Volume and Mute annotate
-# nothing and were two of the five classes R8 had merged away in versionCode 19.
+# nothing and were two of the five classes R8 had merged away in versionCode 19. The
+# expansion reads the whole declared type, so a document reached only through a generic
+# (`List<Foo>`, `Map<String, Foo>`) is on the list as well — `Foo` is exactly the kind of
+# type nothing in Java constructs. Names that resolve to no file under app/src/main/java
+# (String, List, Date) drop out here rather than becoming a finding.
 TARGETS="$(reflective_targets)"
 SEEN=" $(printf '%s\n' "$TARGETS" | tr '\n' ' ') "
 WORK="$TARGETS"
@@ -179,7 +193,7 @@ $nested"
             TARGETS="$TARGETS
 $nested"
         fi
-    done < <(source_fields "$current_file" | cut -f3 | sort -u)
+    done < <(source_fields "$current_file" | cut -f3 | tr ',' '\n' | sort -u)
 done
 
 PROBLEM=""
@@ -285,6 +299,9 @@ if [ -n "$PROBLEM" ]; then
     echo >&2
     echo "Fix the type, not the symptom: @Keep on the class is what the other Gson types in" >&2
     echo "this app use (androidx.annotation ships -keep @androidx.annotation.Keep class * { *; })." >&2
+    echo "If a finding above says a class is absent while the source still has it, check that the" >&2
+    echo "mapping passed as the second argument was produced by THIS build — a mapping from another" >&2
+    echo "commit makes a kept-but-renamed class look removed. Pass none to assume no renaming." >&2
     echo "Re-read the binary yourself with:" >&2
     echo "  unzip -p '$APK' classes.dex | '$DEXDUMP_BIN' | grep -A6 '$desc'" >&2
     exit 1

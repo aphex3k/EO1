@@ -37,20 +37,4 @@ final class WireFields {
         }
         return null;
     }
-
-    /**
-     * True when the object carries at least one key this app knows how to read, ignoring
-     * case. Used only to decide whether a track document is one the bridge wrote in a new
-     * shape (worth naming in the log) or simply one that has no track in it.
-     */
-    static boolean matchesAny(JsonObject object, String... names) {
-        for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
-            for (String name : names) {
-                if (entry.getKey().equalsIgnoreCase(name)) {
-                    return true;
-                }
-            }
-        }
-        return false;
-    }
 }
