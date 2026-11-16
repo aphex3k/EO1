@@ -53,6 +53,23 @@ public interface WebController {
      */
     String setDeviceName(String requested);
 
+    /**
+     * This frame's font-scale multiplier, in percent (100 = as designed). Per-device display state like
+     * {@link #deviceName()}: never part of the configuration document, so importing a configuration cannot
+     * resize another frame's text.
+     */
+    int frameFontScalePercent();
+
+    /**
+     * Replaces this frame's font-scale multiplier and restates the text sizes on the panel. Persisted and
+     * sanitised by the implementor — an out-of-range request changes nothing — and applied to the running
+     * display without a restart, since the value is a calibration an operator reads off the wall.
+     *
+     * @param requested the multiplier in percent, as parsed from the request.
+     * @return the scale now in effect, which is the previous one when {@code requested} was refused.
+     */
+    int setFrameFontScalePercent(int requested);
+
     /** Builds the full {@code /state} JSON document. */
     String buildStateJson();
 

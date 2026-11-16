@@ -63,6 +63,12 @@ public class WebServer {
      * sanitiser), so a rejected request can never be a silently truncated name.
      */
     public static final long MAX_DEVICE_NAME_BODY_BYTES = 512L;
+    /**
+     * Body cap for POST /fontscale: the largest accepted spelling is a handful of characters
+     * ({@code 1.25}, {@code 125%}), so anything bigger is not an attempt to set a font size. Kept well
+     * above what parses so an oversized body is a transport problem, never a silently truncated number.
+     */
+    public static final long MAX_FONT_SCALE_BODY_BYTES = 64L;
 
     private static final int PORTS[] = {80, 8080};
     private static final int READ_TIMEOUT_MS = 60000;
@@ -327,6 +333,9 @@ public class WebServer {
         }
         if (path.equals("/devicename")) {
             return "deviceName";
+        }
+        if (path.equals("/fontscale")) {
+            return "fontScale";
         }
         if (path.equals("/forget")) {
             return "forgetMedia";
@@ -832,6 +841,27 @@ public class WebServer {
                 break;
             }
 
+            case "fontScale": {
+                // The same gate as the device name, for the same reason: it changes what this frame's
+                // display looks like, and it is per-device state that must not be reachable from a page
+                // the operator happened to visit. POST-only because it persists.
+                if (!method.equals("POST")) {
+                    send(os, 405, "text/plain", "method not allowed");
+                    return;
+                }
+                String scaleGate = configGateError(params);
+                if (scaleGate != null) {
+                    sendJson(os, 403, errorJson(scaleGate));
+                    return;
+                }
+                if (!configWriteAllowed(headers, boundPort)) {
+                    sendJson(os, 403, errorJson("cross-origin request rejected"));
+                    return;
+                }
+                handleFontScalePost(headers, is, os);
+                break;
+            }
+
             case "forgetMedia": {
                 // The honoured form of a service's removal request. POST-only and same-origin like the
                 // other writes, and behind the configuration token: it deletes media this frame fetched
@@ -1070,6 +1100,51 @@ public class WebServer {
     }
 
     /**
+     * Applies a {@code POST /fontscale} body as this frame's font-scale multiplier. The value travels in the
+     * body rather than the query string for the reason given on {@link #handleDeviceNamePost}. Parsing and
+     * the bounds are {@link FrameTypography}'s — one rule for the web page, the options dialog if one ever
+     * grows one, and the stored value — and the response echoes the scale that is now <em>in effect</em>,
+     * which is not necessarily the one that was sent: a request the frame refuses comes back with the
+     * previous value beside {@code requestedPercent}, so the page can say so instead of the operator
+     * watching a wall that did not change and assuming the button did nothing.
+     */
+    private void handleFontScalePost(Map<String, String> headers, InputStream is, OutputStream os)
+            throws IOException {
+        long declared = parseLongLenient(headers.get("content-length"));
+        if (declared > MAX_FONT_SCALE_BODY_BYTES) {
+            sendJson(os, 413, errorJson("font scale exceeds " + MAX_FONT_SCALE_BODY_BYTES + " bytes"));
+            return;
+        }
+        byte[] body = declared >= 0
+                ? readAll(is, declared) : readBounded(is, MAX_FONT_SCALE_BODY_BYTES);
+        if (body.length > MAX_FONT_SCALE_BODY_BYTES) {
+            sendJson(os, 413, errorJson("font scale exceeds " + MAX_FONT_SCALE_BODY_BYTES + " bytes"));
+            return;
+        }
+        int requested = FrameTypography.parsePercent(new String(body, UTF_8));
+        if (requested == FrameTypography.INVALID) {
+            sendJson(os, 400, errorJson("font scale must be a multiplier from "
+                    + (FrameTypography.MIN_PERCENT / 100f) + " to " + (FrameTypography.MAX_PERCENT / 100f)
+                    + " (e.g. 1.25), or the same range as a percentage with a trailing % sign (e.g. 125%)"));
+            return;
+        }
+        int applied;
+        try {
+            applied = controller.setFrameFontScalePercent(requested);
+        } catch (Exception e) {
+            Log.e(TAG, "font scale write failed", e);
+            sendJson(os, 500, errorJson("internal error: " + e.getClass().getSimpleName()));
+            return;
+        }
+        JsonObject o = new JsonObject();
+        o.addProperty("ok", true);
+        o.addProperty("requestedPercent", requested);
+        o.addProperty("percent", applied);
+        o.addProperty("pxPerSp", FrameTypography.pxPerSp(applied));
+        sendJson(os, 200, o);
+    }
+
+    /**
      * Reads the whole request body into memory, stopping just past {@code limit} bytes so an
      * oversized body is detected (and rejected by the caller) instead of pinning the socket or
      * exhausting the heap.
@@ -1206,6 +1281,9 @@ public class WebServer {
         sb.append(renderDiagnosticsSection());
         sb.append(renderConfigurationSection());
         sb.append(renderDeviceNameSection());
+        // After the configuration section on purpose: its JavaScript defines rememberToken() and its token
+        // field, both of which this editor reaches for.
+        sb.append(renderFontScaleSection());
         sb.append(renderUpdateSection());
 
         sb.append("<script>");
@@ -1464,6 +1542,87 @@ public class WebServer {
                 + "st.textContent=(x.j.cleared?'name cleared':'name saved')+', reloading...';"
                 + "setTimeout(function(){location.reload();},600);})"
                 + ".catch(function(e){document.getElementById('devNameStatus').textContent='failed: '+e;});}";
+    }
+
+    /**
+     * This frame's font-scale multiplier, read defensively: like {@link #deviceName()} a page must still
+     * render when the store will not answer, and the honest fallback is the default the frame is already
+     * rendering at.
+     */
+    private int fontScalePercent() {
+        try {
+            int percent = controller.frameFontScalePercent();
+            return FrameTypography.isAllowed(percent) ? percent : FrameTypography.DEFAULT_PERCENT;
+        } catch (Throwable t) {
+            return FrameTypography.DEFAULT_PERCENT;
+        }
+    }
+
+    /**
+     * The text-size section of the index page, offered only with trusted network on — the same gate as the
+     * device name, because what it changes is one box.
+     */
+    private String renderFontScaleSection() {
+        StringBuilder sb = new StringBuilder();
+        sb.append("<h2>Text size</h2>");
+        if (!trustedNetwork()) {
+            sb.append("<p>The multiplier that scales every font this frame draws is editable only with "
+                    + "<i>Trusted Network</i> on and the configuration token. Until then it is at its "
+                    + "default; the value in effect is in <a href=\"/state\">state</a> under "
+                    + "<code>font</code>.</p>");
+            return sb.toString();
+        }
+        int percent = fontScalePercent();
+        sb.append("<p>A multiplier on <b>every</b> text size this frame draws — the debug board, the "
+                + "now-playing banner, the options dialog. It applies immediately, with no restart. This is "
+                + "per-frame state, not part of the configuration document: what it corrects is what "
+                + "<i>this</i> frame's ROM reports about its own panel, so importing a configuration here "
+                + "cannot resize another frame's text.</p>");
+        sb.append("<p>One <code>sp</code> currently costs ")
+                .append(FrameTypography.pxPerSp(percent)).append(" px on this frame ")
+                .append("(the design size for every frame is ")
+                .append(FrameTypography.pxPerSp(FrameTypography.DEFAULT_PERCENT))
+                .append(" px). Send a multiplier (<code>1.25</code>) or a percentage "
+                        + "(<code>125%</code>), from ")
+                .append(FrameTypography.MIN_PERCENT / 100f).append(" to ")
+                .append(FrameTypography.MAX_PERCENT / 100f).append(".</p>");
+        sb.append("<p><input id=\"fontScale\" type=\"text\" size=\"8\" value=\"")
+                .append(percent / 100f)
+                .append("\" placeholder=\"1.0\"> ")
+                .append("<button onclick=\"setFontScale()\">Set</button>")
+                .append(" <button onclick=\"setFontScale('1')\">Reset to 1.0</button></p>");
+        sb.append("<div id=\"fontScaleStatus\"></div>");
+        sb.append("<script>");
+        sb.append(fontScaleSectionJs());
+        sb.append("</script>");
+        return sb.toString();
+    }
+
+    /**
+     * The text-size editor's JavaScript. Package-private for the routing test, which asserts the write is a
+     * POST to the token-gated endpoint and reaches for the same remembered token the configuration editor
+     * stores it under. The page is server-rendered, so the value shown after a change is only honest once the
+     * page has been re-read — same reason the device-name editor reloads.
+     */
+    static String fontScaleSectionJs() {
+        return "function setFontScale(v){"
+                + "if(typeof v!=='string'){v=document.getElementById('fontScale').value;}"
+                + "var t=(document.getElementById('cfgToken').value||'').trim();"
+                + "if(!t){try{t=localStorage.getItem('eo1.cfg.token')||'';}catch(e){}}"
+                + "if(!t){alert('Enter the configuration token first (options dialog on the frame).');return;}"
+                + "document.getElementById('fontScaleStatus').textContent='applying...';"
+                + "fetch('/fontscale?token='+encodeURIComponent(t),{method:'POST',body:v})"
+                + ".then(function(r){return r.json().then(function(j){return {s:r.status,j:j};});})"
+                + ".then(function(x){"
+                + "var st=document.getElementById('fontScaleStatus');"
+                + "if(!x.j||!x.j.ok){st.textContent='rejected: '+((x.j&&x.j.msg)||('HTTP '+x.s));return;}"
+                + "rememberToken(t);"
+                + "document.getElementById('fontScale').value=x.j.percent/100;"
+                + "var msg=(x.j.percent===x.j.requestedPercent?'set to ':'refused, still ')+"
+                + "x.j.percent+'% ('+x.j.pxPerSp+' px per sp)';"
+                + "st.textContent=msg+', reloading...';"
+                + "setTimeout(function(){location.reload();},600);})"
+                + ".catch(function(e){document.getElementById('fontScaleStatus').textContent='failed: '+e;});}";
     }
 
     /**

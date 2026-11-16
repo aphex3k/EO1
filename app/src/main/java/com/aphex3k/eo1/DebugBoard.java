@@ -53,8 +53,9 @@ public final class DebugBoard {
             // Which build is running, and who signed it.
             "version",
             // Per-device identity and its configuration problems. "device name" is the value of
-            // SettingsManager.DEBUG_KEY_DEVICE_NAME, spelled out for the same reason as above.
-            "device name",
+            // SettingsManager.DEBUG_KEY_DEVICE_NAME, spelled out for the same reason as above; "font scale"
+            // is SettingsManager.DEBUG_KEY_FONT_SCALE and describes the panel's text size, not an asset.
+            "device name", "font scale",
             "Failed to delete outdated configuration file",
             // The panel and its schedule — none of which cares what is displayed on it.
             "screenHold", "screenOffWakeLock", "quietHours", "quietHoursSchedule",

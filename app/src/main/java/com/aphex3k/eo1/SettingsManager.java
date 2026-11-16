@@ -335,6 +335,135 @@ public class SettingsManager {
     }
 
     /**
+     * SharedPreferences key for the operator's font-scale multiplier for <em>this</em> frame, stored as a
+     * percentage (100 = as designed). Per-device display state, on the same footing as
+     * {@code min_brightness_step}: what needs correcting is what <em>this ROM</em> claims about its panel
+     * (see {@link FrameTypography}), so carrying the value into another frame through
+     * {@code /config/download} or {@code /config/import} would mis-set that one. Never part of
+     * {@code configuration.json}, never exported.
+     */
+    private static final String PREF_FONT_SCALE_PERCENT = "font_scale_percent";
+    /** Overlay line the scale is reported under, shared between the write path and the resume seed. */
+    static final String DEBUG_KEY_FONT_SCALE = "font scale";
+
+    /**
+     * The font scale in effect on this frame: {@link FrameTypography#isAllowed(int)} is always true of the
+     * result, because an out-of-range value in the preferences file — edited there by an {@code adb shell},
+     * or written by a build with different bounds — is not something to render, and a default is.
+     * {@link #fontScaleStoreState()} says which case this is.
+     */
+    public int fontScalePercent() {
+        int stored = readFontScaleRaw();
+        return FrameTypography.isAllowed(stored) ? stored : FrameTypography.DEFAULT_PERCENT;
+    }
+
+    /** The key is not in the store: nobody has ever set a scale on this frame. A real answer. */
+    private static final int SCALE_ABSENT = -1;
+    /**
+     * The store would not say — no host activity, no preferences, or a read that threw. Not the same fact
+     * as {@link #SCALE_ABSENT}, and collapsing them is what makes "this frame is at its default" and "this
+     * frame lost its setting" one sentence on {@code /state}.
+     */
+    private static final int SCALE_UNREADABLE = -2;
+
+    /**
+     * One of {@code "value"}, {@code "absent"}, {@code "invalid"}, {@code "unreadable"} — whether the store
+     * answered, said nobody had set a scale, answered something out of bounds, or would not say. Reported in
+     * {@code /state} beside the number, so a frame rendering at the default can be told apart from a frame
+     * whose scale was set and lost.
+     */
+    public String fontScaleStoreState() {
+        int stored = readFontScaleRaw();
+        if (FrameTypography.isAllowed(stored)) {
+            return "value";
+        }
+        if (stored == SCALE_ABSENT) {
+            return "absent";
+        }
+        return stored == SCALE_UNREADABLE ? "unreadable" : "invalid";
+    }
+
+    /**
+     * Stores {@code requested} as this frame's font scale.
+     *
+     * <p>Refuses an out-of-range request rather than clamping it: a caller that asked for 16x asked for
+     * something this frame will not do, and echoing back the value that was actually kept tells the operator
+     * so. Written with {@code commit()} for the reason given on {@link #setMinimumBrightnessStep(int)} —
+     * these frames are power-cycled moments after a change, and a scale that lived only in memory comes back
+     * at the default on the next boot, which is precisely the report "it reset itself" would become.
+     *
+     * @return the scale now in effect, whether or not the write happened.
+     */
+    public int setFontScalePercent(int requested) {
+        if (!FrameTypography.isAllowed(requested)) {
+            Log.w(TAG, "font scale rejected, out of range: " + requested + "% (allowed "
+                    + FrameTypography.MIN_PERCENT + ".." + FrameTypography.MAX_PERCENT + "%)");
+            return fontScalePercent();
+        }
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            Log.e(TAG, "font scale NOT persisted: settings store has no host activity");
+            return FrameTypography.DEFAULT_PERCENT;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs == null) {
+                Log.e(TAG, "font scale NOT persisted: no default shared preferences");
+                return FrameTypography.DEFAULT_PERCENT;
+            }
+            if (!prefs.edit().putInt(PREF_FONT_SCALE_PERCENT, requested).commit()) {
+                Log.e(TAG, "font scale NOT persisted: the preferences write failed");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "font scale NOT persisted", e);
+        }
+        // Re-read rather than echo the argument, so under a concurrent write from another surface the
+        // caller is told what the frame is actually going to render.
+        return fontScalePercent();
+    }
+
+    /** The stored scale, exactly: an int in range, {@link #SCALE_ABSENT}, or {@link #SCALE_UNREADABLE}. */
+    private int readFontScaleRaw() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            return SCALE_UNREADABLE;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs == null) {
+                return SCALE_UNREADABLE;
+            }
+            return prefs.getInt(PREF_FONT_SCALE_PERCENT, SCALE_ABSENT);
+        } catch (Exception e) {
+            Log.w(TAG, "font scale unreadable", e);
+            return SCALE_UNREADABLE;
+        }
+    }
+
+    /**
+     * Reads the stored font scale from a {@code Context}, for the one path that has no
+     * {@code SettingsManager}: {@code Eo1Application}, which installs the scale before any Activity exists.
+     * Falls back to the default — a scale that cannot be read is a scale that stays as designed, never a
+     * reason to change what a frame renders.
+     */
+    @SuppressWarnings("deprecation")
+    public static int readFontScalePercent(Context context) {
+        if (context == null) {
+            return FrameTypography.DEFAULT_PERCENT;
+        }
+        try {
+            SharedPreferences prefs = android.preference.PreferenceManager.getDefaultSharedPreferences(context);
+            if (prefs == null) {
+                return FrameTypography.DEFAULT_PERCENT;
+            }
+            int stored = prefs.getInt(PREF_FONT_SCALE_PERCENT, FrameTypography.INVALID);
+            return FrameTypography.isAllowed(stored) ? stored : FrameTypography.DEFAULT_PERCENT;
+        } catch (Exception e) {
+            return FrameTypography.DEFAULT_PERCENT;
+        }
+    }
+
+    /**
      * The per-device configuration token that the web {@code /config*} endpoints require in
      * addition to the trusted-network flag. Generated once (128-bit {@code SecureRandom}, 32
      * hex chars) and persisted in the default SharedPreferences; every call returns the same

@@ -123,6 +123,77 @@ public class SettingsManagerTest {
     }
 
     /**
+     * The font scale is per-device display state like the backlight step — never in
+     * {@code configuration.json}, never exported — and a frame that has never been scaled reports the
+     * default rather than 0, which would be "no text at all" if it were ever read as a multiplier.
+     */
+    @Test
+    public void fontScaleDefaultsToTheDesignSize() throws Exception {
+        SettingsManager sm = new SettingsManager(new FakeListener(tmp.newFolder("files")));
+        assertEquals(FrameTypography.DEFAULT_PERCENT, sm.fontScalePercent());
+        assertEquals("absent", sm.fontScaleStoreState());
+    }
+
+    @Test
+    public void fontScalePersistsAcrossARestoredManager() throws Exception {
+        FakeListener listener = new FakeListener(tmp.newFolder("files"));
+        SettingsManager sm = new SettingsManager(listener);
+        assertEquals(125, sm.setFontScalePercent(125));
+        assertEquals(125, sm.fontScalePercent());
+        assertEquals("value", sm.fontScaleStoreState());
+        // A fresh SettingsManager over the same prefs is what an Activity re-creation hands back, and the
+        // scale has to survive it — the operator set it from a browser, not in this Activity.
+        assertEquals(125, new SettingsManager(listener).fontScalePercent());
+        assertTrue("a scale saved with apply() is a scale a power-cycle drops",
+                listener.prefs().lastWriteWasCommit);
+    }
+
+    /**
+     * An out-of-range request changes nothing and says what is actually in effect. Clamping here would make
+     * a typo ("15" from a hand-edited request) into a frame rendering at four times its design size, and
+     * the operator would have no way to tell that the value they sent is not the value on the wall.
+     */
+    @Test
+    public void outOfRangeFontScaleIsRefusedNotStored() throws Exception {
+        FakeListener listener = new FakeListener(tmp.newFolder("files"));
+        SettingsManager sm = new SettingsManager(listener);
+        sm.setFontScalePercent(150);
+        assertEquals(250, sm.setFontScalePercent(250));
+        // Out of range: refused, and the previous value is what the frame will render.
+        assertEquals(FrameTypography.INVALID, FrameTypography.parsePercent("1500"));
+        assertEquals(250, sm.setFontScalePercent(1500));
+        assertEquals(250, sm.setFontScalePercent(FrameTypography.MAX_PERCENT + 1));
+        assertEquals(250, sm.setFontScalePercent(0));
+        assertEquals("a refused write leaves the store saying what it holds",
+                "value", sm.fontScaleStoreState());
+    }
+
+    /**
+     * A scale on disk that this build will not render — written by an {@code adb shell}, or by a build with
+     * different bounds — is reported as what it is and the frame draws at the default. Falling back silently
+     * to the default would make "nobody set a scale" and "the stored scale is unusable" one sentence.
+     */
+    @Test
+    public void unusableStoredFontScaleFallsBackAndSaysSo() throws Exception {
+        FakeListener listener = new FakeListener(tmp.newFolder("files"));
+        SettingsManager sm = new SettingsManager(listener);
+        listener.prefs().setIntForTest("font_scale_percent", 9000);
+        assertEquals(FrameTypography.DEFAULT_PERCENT, sm.fontScalePercent());
+        assertEquals("invalid", sm.fontScaleStoreState());
+    }
+
+    /** No preferences at all is a third answer, and it must not read as "at the default by choice". */
+    @Test
+    public void fontScaleReportsAnUnreadableStore() throws Exception {
+        FakeListener noPrefs = new FakeListener(tmp.newFolder("files")) {
+            @Override public SharedPreferences getDefaultSharedPreferences() { return null; }
+        };
+        SettingsManager sm = new SettingsManager(noPrefs);
+        assertEquals(FrameTypography.DEFAULT_PERCENT, sm.fontScalePercent());
+        assertEquals("unreadable", sm.fontScaleStoreState());
+    }
+
+    /**
      * A store that cannot answer must say so rather than agree with the tap: today it returns quietly,
      * and "written" and "never stored" then read identically on {@code /state}.
      */
@@ -457,6 +528,11 @@ public class SettingsManagerTest {
          * power-cycled or crashes moments after a tap never lets {@code apply()}'s queued write run.
          */
         boolean lastWriteWasCommit;
+
+        /** Seeds a value already on disk, bypassing the code under test — for a store edited out of band. */
+        void setIntForTest(String key, int value) {
+            values.put(key, value);
+        }
 
         @Override
         public Set<String> getStringSet(String key, Set<String> defValue) {

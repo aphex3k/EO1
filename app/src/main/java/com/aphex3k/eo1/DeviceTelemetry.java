@@ -33,6 +33,7 @@ public final class DeviceTelemetry {
         o.add("memory", memory(context));
         o.add("storage", storage(context.getFilesDir()));
         o.add("wifi", wifi(context));
+        o.add("display", display(context));
         long uptimeMs = SystemClock.elapsedRealtime();
         JsonObject up = new JsonObject();
         up.addProperty("uptimeMs", uptimeMs);
@@ -141,6 +142,59 @@ public final class DeviceTelemetry {
         if (availBytes >= 0L) {
             o.addProperty("availBytes", availBytes);
             o.addProperty("marginBytes", MediaCacheManager.SAFETY_MARGIN_BYTES);
+        }
+        return o;
+    }
+
+    /**
+     * What the platform says about the panel this app draws on: geometry and its own density claim.
+     *
+     * <p>{@code densityDpi} is the number that explains why one shared layout renders text at two sizes on
+     * two boards — an {@code sp} costs {@code density × fontScale} pixels, and both belong to the ROM. It is
+     * reported here rather than reasoned about in documentation because the fleet has two boards and only one
+     * of them has ever had this read out of it. This app's own answer to that difference is the
+     * {@code font} block of {@code /state}, which names the pixels per sp it installs and the pixels per sp
+     * it found on the way in.
+     *
+     * <p>Never written to: this is the resources object the app is displaying with, read on a web worker
+     * thread, exactly as {@link #memory(Context)} reads the heap.
+     */
+    public static JsonObject display(Context context) {
+        int widthPx = -1;
+        int heightPx = -1;
+        int densityDpi = -1;
+        float density = -1f;
+        try {
+            android.util.DisplayMetrics m = context.getResources().getDisplayMetrics();
+            if (m != null) {
+                widthPx = m.widthPixels;
+                heightPx = m.heightPixels;
+                densityDpi = m.densityDpi;
+                density = m.density;
+            }
+        } catch (Throwable ignored) {
+        }
+        return displayJson(widthPx, heightPx, densityDpi, density);
+    }
+
+    /**
+     * Pure half of {@link #display(Context)}: a negative is "the platform did not answer", and the key is
+     * then absent rather than {@code -1} or {@code 0}, for the same reason {@link #storageJson} states it —
+     * a zero is a real reading of something else.
+     */
+    static JsonObject displayJson(int widthPx, int heightPx, int densityDpi, float density) {
+        JsonObject o = new JsonObject();
+        if (widthPx > 0) {
+            o.addProperty("widthPx", widthPx);
+        }
+        if (heightPx > 0) {
+            o.addProperty("heightPx", heightPx);
+        }
+        if (densityDpi > 0) {
+            o.addProperty("densityDpi", densityDpi);
+        }
+        if (density > 0f) {
+            o.addProperty("density", density);
         }
         return o;
     }
