@@ -91,6 +91,58 @@ public class BrightnessManager {
      */
     private float lastLightValue = minLux.value;
 
+    /**
+     * What the last <em>written</em> triple said, in the quantised terms
+     * {@link BrightnessReportRule#shouldWrite} compares. Buckets rather than values, because the values
+     * wander: the measured 1..5 lux of a room with a lamp differs at every sample and changes nothing.
+     *
+     * <p>{@code Integer.MIN_VALUE} for both buckets means "no triple has ever been written", which the
+     * rule's own first clause answers before it looks at them; {@link #lastReportAtElapsedMs} is the
+     * authoritative version of that fact (0 == never) and these two are only its operands.
+     * {@link #lastReportedScreenOn} starts false because {@link #shouldTheScreenBeOn} starts true, so the
+     * first sample writes on the "never written" clause rather than on a phantom edge.
+     */
+    private int lastReportedLuxBucket = Integer.MIN_VALUE;
+    private int lastReportedLevelBucket = Integer.MIN_VALUE;
+    private boolean lastReportedScreenOn = false;
+
+    /**
+     * When the triple was last written, on {@code SystemClock.elapsedRealtime()}. 0 means never, which is
+     * what makes a frame that has said nothing about brightness since it started unable to stay silent.
+     *
+     * <p>Package-private rather than private for one reason: {@code BrightnessManagerTest} back-dates it to
+     * exercise the heartbeat, and a manager with a setter for its own reporting state would be a second
+     * product surface nobody calls. Same monotonic clock the rule's interval clause needs, for the same
+     * reason AGENTS.md's gate 4 gives: no time sync on these frames.
+     */
+    long lastReportAtElapsedMs = 0L;
+
+    /**
+     * The samples that produced no line of their own, since the last one that did.
+     *
+     * <p>Folded rather than dropped, so the gate above costs a reader no information about the interval it
+     * skipped: a suppressed window still reaches the log as one line naming its count and its min/max lux and
+     * level. Only duplicates are lost, which is the whole point.
+     *
+     * <p><b>These fields are main-thread-only, and that is an invariant, not an accident.</b> Every entry
+     * point that reaches the fold runs on the main thread: the sensor listener is registered without a
+     * {@code Handler} (so Android delivers it on the registering thread's looper, which is the main looper,
+     * because the registering constructor is reached from {@code MainActivity.onCreate});
+     * {@link #setShouldTheScreenBeOn} is reached from the quiet-hours timer only through
+     * {@code handler.post(applyScheduledScreenState)}, from the {@code SCREEN_ON}/{@code SCREEN_OFF}
+     * receiver's {@code onReceive} (registered without a handler, so the main looper), and from
+     * {@code toggleScreenOn}; and {@link #raiseMinimumBrightnessStep} is reached from {@code EventManager}
+     * key dispatch and from the web page's {@code brightness} action, which {@code MainActivity} hands to
+     * {@code runOnUiThread} along with every other web task. So there is no lock and no {@code volatile} here
+     * deliberately. If a future caller arrives off the main thread, the fix is to post it to the main looper
+     * — <em>not</em> to synchronise the fold, which would put the sensor path behind the UI thread that
+     * {@code MainActivity} already blocks on a wedged display path.
+     */
+    private int foldedCount = 0;
+    private long foldedOpenedEpochMs = 0L;
+    private float foldedMinLux = Float.MAX_VALUE, foldedMaxLux = -Float.MAX_VALUE;
+    private float foldedMinLevel = Float.MAX_VALUE, foldedMaxLevel = -Float.MAX_VALUE;
+
     private final SettingsManager store;
     private final SensorManager sensorManager;
     private final SensorEventListener lightSensorListener;
@@ -336,10 +388,135 @@ public class BrightnessManager {
         return cached >= MIN_STEP ? clampStep(cached) : this.minimumBrightnessStep;
     }
 
-    /** A sensor reading: remember it, and let the listener re-derive the level from it. */
+    /**
+     * A sensor reading: remember it, re-derive the level on <em>every</em> sample (the panel follows the room,
+     * which is what {@code BrightnessManagerTest}'s monotonicity sweep pins), and ask
+     * {@link BrightnessReportRule} whether this sample is worth a line.
+     *
+     * <p>The gate is here and nowhere else: it is the sensor path that floods — 71-97 % of
+     * {@code eo1-app.log}'s bytes on the three frames measured on 2026-11-15 — and an operator's press must
+     * never be rate-limited, because a press is the event the log exists to record.
+     *
+     * <p>Two shapes in here are load-bearing and both invite being "simplified" away.
+     *
+     * <p><b>The listener call is reached on every sample, gated by nothing.</b> Not by moving it into
+     * {@link #notifyBrightnessChanged()}: that method is also the event path, and gating it would gate the
+     * presses with it. {@code BrightnessManagerTest#everySensorSampleStillReachesThePanel} holds this, and
+     * nothing in the suite held it before — a gate placed above the level application would silently dim every
+     * EO1 with a green build.
+     *
+     * <p><b>One read of the monotonic clock</b>, into {@code nowElapsedMs}, used both as the interval operand
+     * and as the stamp stored for the next one. Two reads would let a write store a stamp from a later moment
+     * than the interval it was judged on, which shortens the next heartbeat by the gap between them.
+     */
     void onLightValue(float lightValue) {
         this.lastLightValue = lightValue;
-        notifyBrightnessChanged();
+
+        final long nowElapsedMs = android.os.SystemClock.elapsedRealtime();
+        final boolean lit = shouldTheScreenBeOn;
+        final float brightness = currentBrightness();
+        final int luxBucket = BrightnessReportRule.luxBucket(lightValue);
+        final int levelBucket = BrightnessReportRule.levelBucket(brightness);
+
+        if (BrightnessReportRule.shouldWrite(lastReportedLuxBucket, luxBucket,
+                lastReportedLevelBucket, levelBucket,
+                lastReportedScreenOn, lit,
+                lastReportAtElapsedMs, nowElapsedMs)) {
+            lastReportedLuxBucket = luxBucket;
+            lastReportedLevelBucket = levelBucket;
+            lastReportedScreenOn = lit;
+            lastReportAtElapsedMs = nowElapsedMs;
+            writeTripleAndFold(brightness);
+        } else {
+            // Suppressed: it gets no line of its own, so it goes into the one that stands in for it.
+            noteSample(lightValue, brightness);
+        }
+
+        final BrightnessManagerListener listener = brightnessListener.get();
+        if (listener != null) {
+            listener.brightnessChanged(brightness);
+        }
+    }
+
+    /**
+     * One line, then the triple. Ordered summary-then-current so a reader looking at a level line and
+     * wondering what happened since the last one finds the answer immediately above it rather than in
+     * whatever came before the window.
+     *
+     * <p>It does not go through {@link #notifyBrightnessChanged()} even though the three rows are the same,
+     * because that method is the event writer and the two paths owe different things to the fold: this one
+     * closes a window of samples, an event merely interrupts one.
+     */
+    private void writeTripleAndFold(float brightness) {
+        reportFoldedLine();
+        writeTripleRows(brightness);
+    }
+
+    /** The three rows, under the key names and in the float format the log has always carried. */
+    private void writeTripleRows(float brightness) {
+        report("Reported Light Value", String.valueOf(lastLightValue));
+        report("Min Brightness", String.valueOf(minBrightness));
+        report("Calculated Brightness Value", String.valueOf(brightness));
+    }
+
+    /**
+     * Adds a sample to the suppressed window, opening it (and stamping its start on the wall clock, which is
+     * a label here, never an interval) on the first one.
+     */
+    private void noteSample(float lux, float level) {
+        if (foldedCount == 0) {
+            foldedOpenedEpochMs = System.currentTimeMillis();
+        }
+        foldedCount++;
+        if (lux < foldedMinLux) {
+            foldedMinLux = lux;
+        }
+        if (lux > foldedMaxLux) {
+            foldedMaxLux = lux;
+        }
+        if (level < foldedMinLevel) {
+            foldedMinLevel = level;
+        }
+        if (level > foldedMaxLevel) {
+            foldedMaxLevel = level;
+        }
+    }
+
+    /** The window's line, and the window is gone either way — {@code ""} when nothing was suppressed. */
+    private String takeFoldedLine() {
+        String line = BrightnessReportRule.foldedLine(foldedCount, foldedOpenedEpochMs,
+                foldedMinLux, foldedMaxLux, foldedMinLevel, foldedMaxLevel);
+        clearFold();
+        return line;
+    }
+
+    private void reportFoldedLine() {
+        String line = takeFoldedLine();
+        if (!line.isEmpty()) {
+            report(BrightnessReportRule.FOLDED_KEY, line);
+        }
+    }
+
+    private void clearFold() {
+        foldedCount = 0;
+        foldedOpenedEpochMs = 0L;
+        foldedMinLux = Float.MAX_VALUE;
+        foldedMaxLux = -Float.MAX_VALUE;
+        foldedMinLevel = Float.MAX_VALUE;
+        foldedMaxLevel = -Float.MAX_VALUE;
+    }
+
+    /**
+     * States the rule's operands from a line that was just written, and closes the window. Called from the
+     * event path, which writes a triple the fold never contained — the sensor path sets the same four fields
+     * inline, because there the buckets are already in hand from the decision.
+     */
+    private void resetFoldAfterWrite(int luxBucket, int levelBucket, boolean lit) {
+        lastReportedLuxBucket = luxBucket;
+        lastReportedLevelBucket = levelBucket;
+        lastReportedScreenOn = lit;
+        lastReportAtElapsedMs = android.os.SystemClock.elapsedRealtime();
+        clearFold();
     }
 
     /**
@@ -353,6 +530,16 @@ public class BrightnessManager {
         }
     }
 
+    /**
+     * The <em>event</em> writer: a screen edge or an operator's press. Signature, key names, value formats
+     * and the unconditional {@code brightnessChanged} call are exactly what they were, because both callers
+     * depend on them; what is new is that an event also closes the fold window it lands inside.
+     *
+     * <p>A press mid-window both explains itself and says what the room was doing since the last line, which
+     * is the pair of facts an operator asking "it dimmed by itself" needs together. The gate never applies
+     * here — a press is not a sample and cannot be rate-limited — and {@link #lastReportAtElapsedMs} is
+     * re-stamped so the heartbeat measures from this line rather than from one it replaced.
+     */
     private void notifyBrightnessChanged() {
         BrightnessManagerListener listener = brightnessListener.get();
 
@@ -362,9 +549,13 @@ public class BrightnessManager {
 
         final float brightness = currentBrightness();
 
+        reportFoldedLine();
         listener.debugInformationProvided(new DebugInformation("Reported Light Value", String.valueOf(lastLightValue)));
         listener.debugInformationProvided(new DebugInformation("Min Brightness", String.valueOf(minBrightness)));
         listener.debugInformationProvided(new DebugInformation("Calculated Brightness Value", String.valueOf(brightness)));
+
+        resetFoldAfterWrite(BrightnessReportRule.luxBucket(lastLightValue),
+                BrightnessReportRule.levelBucket(brightness), shouldTheScreenBeOn);
 
         listener.brightnessChanged(brightness);
     }

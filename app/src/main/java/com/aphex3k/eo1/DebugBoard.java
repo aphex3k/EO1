@@ -64,6 +64,10 @@ public final class DebugBoard {
             // dimmed by itself" — and left undeclared it would be attributed to whatever photo happened to
             // be up and vanish on the next rotation, which is the row this frame most needs to keep.
             "brightness step",
+            // What the room was doing between the lines the sensor gate kept — BrightnessReportRule.FOLDED_KEY,
+            // spelled as a literal for the same reason as above. Frame-scoped because the samples it
+            // summarised were taken over an interval that crossed assets, not under the one now on the wall.
+            "brightness samples folded",
             // Network, broker, the frame's own watchdog, and the last physical key it handled. Input
             // state has nothing to do with an asset, and losing this row made a working frame look dead.
             "connection status", "mqtt", "watchdog", "vendorUpdater", "key",
