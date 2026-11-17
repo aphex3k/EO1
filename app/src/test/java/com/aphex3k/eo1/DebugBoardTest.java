@@ -210,6 +210,22 @@ public class DebugBoardTest {
         }
     }
 
+    /**
+     * The line the light-sensor gate writes in place of the samples it suppressed summarises an
+     * <em>interval</em>, and most of the samples in it were taken while something else was on the wall. A
+     * row attributed to the asset that happened to be up when the window closed would vanish on the next
+     * rotation and take the answer with it.
+     */
+    @Test
+    public void theFoldedBrightnessWindowIsScopedToTheFrame() {
+        String key = BrightnessReportRule.FOLDED_KEY;
+        DebugInformation row = new DebugInformation(key, "1");
+        assertNull(key, DebugBoard.subject(row, HERE));
+        assertEquals(key, "1",
+                DebugBoard.visible(rows(key, "1", DebugBoard.subject(row, HERE)),
+                        photo("d0or0000-0000-0000-0000-000000000004")).get(key));
+    }
+
     @Test
     public void aWriterThatNamedItsAssetIsBelievedOverThePanel() {
         assertEquals(GONE, DebugBoard.subject(new DebugInformation("Incompatible", "x", GONE), HERE));

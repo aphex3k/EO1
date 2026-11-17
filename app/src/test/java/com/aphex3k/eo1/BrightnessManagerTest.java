@@ -386,6 +386,164 @@ public class BrightnessManagerTest {
         assertFalse(brightnessManager.changedDurably());
     }
 
+    // ------------------------------------------------------- the durable-log flood
+    //
+    // On three live EO1 frames (release build 19, 2026-11-15) 71-97 % of files/eo1-app.log's bytes were the
+    // triple below, written once per light-sensor sample: 200 of 200 lines served by /log/file on one frame
+    // were sensor triples, and a 600-line window bought 36 minutes of history. The rows themselves are kept —
+    // they remain the only durable time series of the applied backlight — but the sensor path now asks
+    // BrightnessReportRule before writing them. These tests pin that the gate is on the writes and nowhere
+    // else, which is the distinction that keeps a frame lit.
+
+    /** Rows the manager asked for under {@code key}, in the order it asked. */
+    private static int countRowsNamed(MockBrightnessListener listener, String key) {
+        int found = 0;
+        for (DebugInformation row : listener.rows) {
+            if (key.equals(row.getKey())) {
+                found++;
+            }
+        }
+        return found;
+    }
+
+    /** The leading integer of a folded line — how many samples it stands in for. */
+    private static int foldedCountOf(String line) {
+        int space = line.indexOf(' ');
+        return space < 0 ? -1 : Integer.parseInt(line.substring(0, space));
+    }
+
+    /** The flood itself. Fails on the pre-gate code: 600 rows for 200 samples. */
+    @Test
+    public void theSensorPathDoesNotWriteThreeRowsPerSample() {
+        MockBrightnessListener listener = new MockBrightnessListener();
+        BrightnessManager brightnessManager = withStoredStep(listener, BrightnessManager.MIN_STEP);
+
+        for (int sample = 0; sample < 200; sample++) {
+            brightnessManager.onLightValue(3.0f);
+        }
+
+        assertEquals("one triple for the whole run, not one per sample", 3, listener.rows.size());
+        assertEquals(1, countRowsNamed(listener, "Calculated Brightness Value"));
+    }
+
+    /**
+     * The assertion every brightness rule in AGENTS.md depends on and nothing used to hold: suppressing the
+     * <em>line</em> must not suppress the <em>level</em>. A gate placed above the application rather than
+     * below it would leave a green suite and a permanently dim EO1, because every other test in this file
+     * reads the manager's own {@code currentBrightness()} rather than what the panel was handed.
+     */
+    @Test
+    public void everySensorSampleStillReachesThePanel() {
+        MockBrightnessListener listener = new MockBrightnessListener();
+        BrightnessManager brightnessManager = withStoredStep(listener, BrightnessManager.MIN_STEP);
+
+        for (int sample = 0; sample < 200; sample++) {
+            brightnessManager.onLightValue(3.0f);
+        }
+
+        assertEquals("the panel follows the room on every sample, gate or no gate",
+                200, listener.brightnessChangedCalls);
+    }
+
+    /** A press is never rate-limited: it writes its own row and a fresh triple, whatever the light did. */
+    @Test
+    public void aStepChangeWritesDespiteUnchangedLight() {
+        MockBrightnessListener listener = new MockBrightnessListener();
+        BrightnessManager brightnessManager = withStoredStep(listener, BrightnessManager.MIN_STEP);
+
+        for (int sample = 0; sample < 20; sample++) {
+            brightnessManager.onLightValue(3.0f);
+        }
+        int before = countRowsNamed(listener, "Calculated Brightness Value");
+
+        assertTrue(brightnessManager.raiseMinimumBrightnessStep("button"));
+
+        assertEquals("the press says who asked", 1, countRowsNamed(listener, "brightness step"));
+        assertTrue("and a fresh triple follows it",
+                countRowsNamed(listener, "Calculated Brightness Value") > before);
+    }
+
+    /** The other event path, which is an edge rather than a value change. */
+    @Test
+    public void aScreenEdgeWritesDespiteUnchangedLight() {
+        MockBrightnessListener listener = new MockBrightnessListener();
+        BrightnessManager brightnessManager = withStoredStep(listener, BrightnessManager.MIN_STEP);
+
+        for (int sample = 0; sample < 20; sample++) {
+            brightnessManager.onLightValue(3.0f);
+        }
+        int before = countRowsNamed(listener, "Calculated Brightness Value");
+
+        brightnessManager.toggleShouldTheScreenBeOn();
+
+        assertTrue("going dark is a line even though the level it reports is 0.0",
+                countRowsNamed(listener, "Calculated Brightness Value") > before);
+    }
+
+    /**
+     * What the gate costs a reader: nothing about the interval, only its duplicates. The samples that produced
+     * no line of their own surface as one folded line naming their count and their extremes, written by the
+     * event that closes the window.
+     */
+    @Test
+    public void suppressedSamplesSurfaceOneFoldedLine() {
+        MockBrightnessListener listener = new MockBrightnessListener();
+        BrightnessManager brightnessManager = withStoredStep(listener, BrightnessManager.MIN_STEP);
+
+        // All four are one decade of light and one bucket of level: 2/3/4/3 lux at the 0.3 floor.
+        for (float lux : new float[]{2.0f, 3.0f, 4.0f, 3.0f}) {
+            brightnessManager.onLightValue(lux);
+        }
+
+        brightnessManager.raiseMinimumBrightnessStep("button");
+
+        String folded = null;
+        int named = 0;
+        for (DebugInformation row : listener.rows) {
+            if (BrightnessReportRule.FOLDED_KEY.equals(row.getKey())) {
+                named++;
+                folded = row.getValue();
+            }
+        }
+        assertEquals("exactly one summary for the window", 1, named);
+        assertTrue("it names the three samples that got no line of their own: " + folded,
+                foldedCountOf(folded) >= 3);
+    }
+
+    /** A window holding nothing but the sample that wrote the line below it is not a folded window. */
+    @Test
+    public void theFoldedLineNeverAppearsWithoutSuppressedSamples() {
+        MockBrightnessListener listener = new MockBrightnessListener();
+        BrightnessManager brightnessManager = withStoredStep(listener, BrightnessManager.MIN_STEP);
+
+        brightnessManager.onLightValue(3.0f);
+
+        assertEquals("the first sample got its own triple, so there is nothing to summarise",
+                0, countRowsNamed(listener, BrightnessReportRule.FOLDED_KEY));
+    }
+
+    /**
+     * A steady room still speaks. Without this clause the gate would turn "nothing changed" into "nothing is
+     * happening", and a frame whose sensor had died would be indistinguishable from a frame in a dark, quiet
+     * house. Asserted as six rows rather than the spec sketch's seven: the heartbeat's own sample gets a
+     * triple, and nothing was suppressed to fold.
+     */
+    @Test
+    public void aQuietRoomStillReportsItsLevelEveryHeartbeat() {
+        MockBrightnessListener listener = new MockBrightnessListener();
+        BrightnessManager brightnessManager = withStoredStep(listener, BrightnessManager.MIN_STEP);
+
+        brightnessManager.onLightValue(3.0f);
+        assertEquals(3, listener.rows.size());
+
+        brightnessManager.lastReportAtElapsedMs -= BrightnessReportRule.HEARTBEAT_MS + 1;
+        brightnessManager.onLightValue(3.0f);
+
+        assertEquals("same lux, same bucket, and a line anyway", 6, listener.rows.size());
+        assertEquals(2, countRowsNamed(listener, "Calculated Brightness Value"));
+        assertEquals(0, countRowsNamed(listener, BrightnessReportRule.FOLDED_KEY));
+    }
+
     /** A store holding {@code storedStep} that says yes to every write. */
     private static SettingsManager persistingStoreAt(int storedStep) {
         SettingsManager store = mock(SettingsManager.class);

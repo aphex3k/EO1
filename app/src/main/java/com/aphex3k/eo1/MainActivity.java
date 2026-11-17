@@ -2013,6 +2013,9 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // is computed and no name could list it, through DebugInformation.ofFrame. The durable log
         // below is written unconditionally and unfiltered: it is a transcript of events, not a claim about
         // what is on the wall right now, and a verdict the board hides has to be readable somewhere.
+        // Unconditional per call — this method has never dropped a row and still does not; what decides how
+        // often a row is asked for is the producer, and BrightnessReportRule is the one producer that
+        // coalesces.
         final String subject = DebugBoard.subject(debugInformation, currentPanelAssetKey());
         final boolean videoScoped =
                 DebugBoard.videoScoped(debugInformation.getKey(), debugInformation.isVideoScoped());
