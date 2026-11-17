@@ -29,6 +29,17 @@ public final class Eo1Application extends MultiDexApplication {
         } catch (Throwable ignored) {
             // A handler that cannot install must not prevent the app from starting.
         }
+        try {
+            // Same reason MainActivity does this in its own attachBaseContext: a size in sp is resolved when
+            // a layout is inflated, so the frame's font scale has to be on the resources before anything
+            // reads them. Here that "anything" is a Toast or a dialog built off the application context,
+            // and on the frames this exists for, the number the platform would otherwise use is not the
+            // number the other boards use. MainActivity re-applies it on its own resources, which are not
+            // necessarily the same object.
+            FrameFontScale.apply(getResources(), SettingsManager.readFontScalePercent(this));
+        } catch (Throwable ignored) {
+            // Text at the ROM's own size beats not starting.
+        }
     }
 
     @Override

@@ -64,6 +64,32 @@ public class WebServerRoutingTest {
         assertEquals("configImport", WebServer.route("POST", "/config/import"));
     }
 
+    /**
+     * The font-scale write is its own endpoint under the same trusted-network + token gate as the device
+     * name, not a {@code /control} action: {@code /control} is reachable without the token, and a change
+     * that persists and outlives the request is exactly what that endpoint was narrowed away from.
+     */
+    @Test
+    public void fontScaleRoute() {
+        assertEquals("fontScale", WebServer.route("POST", "/fontscale"));
+        // route() classifies by path only; dispatch() answers 405 for the GET, as it does for /devicename.
+        assertEquals("fontScale", WebServer.route("GET", "/fontscale"));
+        assertEquals("unknown", WebServer.route("GET", "/font-scale"));
+    }
+
+    /** The write must be a POST to the gated endpoint with the same remembered token as /config. */
+    @Test
+    public void fontScaleJsUsesTheGatedEndpointAndSharedToken() {
+        String js = WebServer.fontScaleSectionJs();
+        assertTrue(js.contains("'/fontscale?token='"));
+        assertTrue(js.contains("method:'POST'"));
+        assertTrue("must fall back to the remembered token, not demand re-typing",
+                js.contains("eo1.cfg.token"));
+        assertTrue("the value travels in the body, not the query string", js.contains("body:v"));
+        assertTrue("a refused request has to be reported as the value now in effect, not the one sent",
+                js.contains("requestedPercent"));
+    }
+
     @Test
     public void updateRoute() {
         // route() classifies by path only; the POST-only gate lives in dispatch().

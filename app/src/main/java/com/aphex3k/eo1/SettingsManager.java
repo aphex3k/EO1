@@ -335,6 +335,182 @@ public class SettingsManager {
     }
 
     /**
+     * SharedPreferences key for the operator's font-scale multiplier for <em>this</em> frame, stored as a
+     * percentage (100 = as designed). Per-device display state, on the same footing as
+     * {@code min_brightness_step}: what needs correcting is what <em>this ROM</em> claims about its panel
+     * (see {@link FrameTypography}), so carrying the value into another frame through
+     * {@code /config/download} or {@code /config/import} would mis-set that one. Never part of
+     * {@code configuration.json}, never exported.
+     */
+    private static final String PREF_FONT_SCALE_PERCENT = "font_scale_percent";
+    /** Overlay line the scale is reported under, shared between the write path and the resume seed. */
+    static final String DEBUG_KEY_FONT_SCALE = "font scale";
+
+    /**
+     * The font scale in effect on this frame: {@link FrameTypography#isAllowed(int)} is always true of the
+     * result, because an out-of-range value in the preferences file — edited there by an {@code adb shell},
+     * or written by a build with different bounds — is not something to render, and a default is.
+     * {@link #fontScaleStoreState()} says which case this is.
+     */
+    public int fontScalePercent() {
+        return readFontScale().percent();
+    }
+
+    /**
+     * One of {@code "value"}, {@code "absent"}, {@code "invalid"}, {@code "unreadable"} — whether the store
+     * answered, said nobody had set a scale, answered something out of bounds, or would not say. Reported in
+     * {@code /state} beside the number, so a frame rendering at the default can be told apart from a frame
+     * whose scale was set and lost.
+     */
+    public String fontScaleStoreState() {
+        return readFontScale().word();
+    }
+
+    /**
+     * One read of this key, carrying both facts a caller can report: whether the store answered at all, and
+     * what it holds. Both in one object because one {@code int} cannot carry both — any sentinel inside the
+     * int range is a value a hand-edited preferences file can legitimately contain, and that is exactly how
+     * "nobody ever set a scale" and "the file holds {@code -1}" came to be the same answer. Presence is
+     * therefore decided by asking whether the key is there, and the unreadable answer is produced only by
+     * this class's own failure paths (no listener, no preferences, a read that threw), never by a number
+     * that came off the disk.
+     */
+    private static final class ScaleRead {
+        private final boolean readable;
+        private final boolean present;
+        private final int stored;
+
+        ScaleRead(boolean readable, boolean present, int stored) {
+            this.readable = readable;
+            this.present = present;
+            this.stored = stored;
+        }
+
+        static final ScaleRead UNREADABLE = new ScaleRead(false, false, 0);
+
+        String word() {
+            if (!readable) {
+                return "unreadable";
+            }
+            if (!present) {
+                return "absent";
+            }
+            return FrameTypography.isAllowed(stored) ? "value" : "invalid";
+        }
+
+        int percent() {
+            return readable && present && FrameTypography.isAllowed(stored)
+                    ? stored : FrameTypography.DEFAULT_PERCENT;
+        }
+    }
+
+    private ScaleRead readFontScale() {
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            Log.w(TAG, "font scale unreadable: settings store has no host activity");
+            return ScaleRead.UNREADABLE;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            return prefs == null ? ScaleRead.UNREADABLE : readFontScalePrefs(prefs);
+        } catch (Exception e) {
+            Log.w(TAG, "font scale unreadable", e);
+            return ScaleRead.UNREADABLE;
+        }
+    }
+
+    /**
+     * Stores {@code requested} as this frame's font scale.
+     *
+     * <p>Refuses an out-of-range request rather than clamping it: a caller that asked for 16x asked for
+     * something this frame will not do, and echoing back the value that was actually kept tells the operator
+     * so. Written with {@code commit()} for the reason given on {@link #setMinimumBrightnessStep(int)} —
+     * these frames are power-cycled moments after a change, and a scale that lived only in memory comes back
+     * at the default on the next boot, which is precisely the report "it reset itself" would become.
+     *
+     * @return the scale now in effect, whether or not the write happened.
+     */
+    public int setFontScalePercent(int requested) {
+        if (!FrameTypography.isAllowed(requested)) {
+            Log.w(TAG, "font scale rejected, out of range: " + requested + "% (allowed "
+                    + FrameTypography.MIN_PERCENT + ".." + FrameTypography.MAX_PERCENT + "%)");
+            return fontScalePercent();
+        }
+        SettingsManagerListener listener = this.listener.get();
+        if (listener == null) {
+            Log.e(TAG, "font scale NOT persisted: settings store has no host activity");
+            return FrameTypography.DEFAULT_PERCENT;
+        }
+        try {
+            SharedPreferences prefs = listener.getDefaultSharedPreferences();
+            if (prefs == null) {
+                Log.e(TAG, "font scale NOT persisted: no default shared preferences");
+                return FrameTypography.DEFAULT_PERCENT;
+            }
+            if (!prefs.edit().putInt(PREF_FONT_SCALE_PERCENT, requested).commit()) {
+                Log.e(TAG, "font scale NOT persisted: the preferences write failed");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "font scale NOT persisted", e);
+        }
+        // Re-read rather than echo the argument, so under a concurrent write from another surface the
+        // caller is told what the frame is actually going to render.
+        return fontScalePercent();
+    }
+
+    /**
+     * The store half of {@link #readFontScale()}, against a {@code SharedPreferences} someone else has
+     * already obtained. Separate because the static reader below has no listener either, and the two doors
+     * into the same key must not grow two answers for what is on disk.
+     *
+     * <p>Presence is decided by {@code contains()}, and nothing here encodes a failure in the value: a file
+     * holding {@code -1} or {@code -2} is a value this build will not render — not evidence that nobody set
+     * a scale, and not evidence that the store would not answer.
+     */
+    private static ScaleRead readFontScalePrefs(SharedPreferences prefs) {
+        if (!prefs.contains(PREF_FONT_SCALE_PERCENT)) {
+            return new ScaleRead(true, false, 0);
+        }
+        // The default is unreachable once contains() held; 0 is chosen because it is out of range, so even
+        // a store that answered the default would be reported as unusable rather than as a scale.
+        return new ScaleRead(true, true, prefs.getInt(PREF_FONT_SCALE_PERCENT, 0));
+    }
+
+    /**
+     * Reads the stored font scale from a {@code Context}, for the paths that have no
+     * {@code SettingsManager}: {@code Eo1Application}, which installs the scale before any Activity exists,
+     * and {@code MainActivity}'s first pass, which runs before the field is assigned. Falls back to the
+     * default — a scale that cannot be read is a scale that stays as designed, never a reason to change what
+     * a frame renders.
+     */
+    public static int readFontScalePercent(Context context) {
+        return readFontScaleStatic(context).percent();
+    }
+
+    /**
+     * Static sibling of {@link #fontScaleStoreState()}, for the same two callers. The number and the word
+     * that says where the number came from have to come from one reader: a board row printing a non-default
+     * scale beside {@code store: unreadable} is self-contradictory, because an unreadable store can only
+     * ever answer the default.
+     */
+    public static String fontScaleStoreState(Context context) {
+        return readFontScaleStatic(context).word();
+    }
+
+    @SuppressWarnings("deprecation")
+    private static ScaleRead readFontScaleStatic(Context context) {
+        if (context == null) {
+            return ScaleRead.UNREADABLE;
+        }
+        try {
+            SharedPreferences prefs = android.preference.PreferenceManager.getDefaultSharedPreferences(context);
+            return prefs == null ? ScaleRead.UNREADABLE : readFontScalePrefs(prefs);
+        } catch (Exception e) {
+            return ScaleRead.UNREADABLE;
+        }
+    }
+
+    /**
      * The per-device configuration token that the web {@code /config*} endpoints require in
      * addition to the trusted-network flag. Generated once (128-bit {@code SecureRandom}, 32
      * hex chars) and persisted in the default SharedPreferences; every call returns the same

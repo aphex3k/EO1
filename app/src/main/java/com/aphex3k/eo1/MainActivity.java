@@ -28,7 +28,9 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
+import android.util.TypedValue;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.view.animation.AlphaAnimation;
@@ -645,6 +647,26 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private volatile int lastKeyEventCode = 0;
     private volatile long lastKeyEventAtMs = 0L;
 
+    /**
+     * Installs this frame's font scale before anything inflates. {@code sp} sizes are resolved to pixels
+     * during inflation, so a scale applied after {@code setContentView} would be too late for every view in
+     * the layout — and "applied too late" here means the panel silently keeps the ROM's density, which is
+     * the exact difference between an EO1 and an EO2 this exists to remove. The same call is repeated in
+     * {@link #onConfigurationChanged}, because a real configuration change hands the platform's own
+     * {@code fontScale} back to us.
+     */
+    @Override
+    protected void attachBaseContext(Context newBase) {
+        super.attachBaseContext(newBase);
+        try {
+            FrameFontScale.apply(getResources(), SettingsManager.readFontScalePercent(newBase));
+        } catch (Throwable t) {
+            // A frame whose scale cannot be installed renders at its ROM's size. That is the pre-existing
+            // behaviour, and it is a worse failure mode than refusing to start.
+            Log.w(TAG, "font scale not installed", t);
+        }
+    }
+
     @SuppressLint({"ServiceCast", "WrongConstant"})
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -674,6 +696,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         tsVideoView = findViewById(R.id.tsVideoView);
         debugOverlay = findViewById(R.id.debugOverlay);
         progressIndicator = findViewById(R.id.progressIndicator);
+        // The declared sizes are read here, immediately after inflation and before anything can write a
+        // size: capturePanelType() divides by the scaledDensity that resolved them, so the divisor has to be
+        // the one the inflator used. Applying the scale is a later call — see below, where the store and the
+        // logger exist — because the row it writes says which of those two the number came from.
+        capturePanelType();
         // This window needs a focusable view of its own, or focus stays wherever an editor left it:
         // hardware keys are then routed to that editor's input connection and never reach
         // dispatchKeyEvent, which silently kills C, Space and the soft buttons.
@@ -758,6 +785,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // Only reachable if Eo1Application#onCreate itself failed.
             this.appLogger = new AppLogger(this);
         }
+        // The panel's text sizes are restated here rather than beside the view bindings, because the line
+        // this writes says where the value came from — and at the binding point neither `settingsManager`
+        // nor `appLogger` exists yet, so every launch reported "store: unreadable" next to a non-default
+        // scale (a contradiction: an unreadable store can only answer the default) and kept that row for the
+        // whole uptime, while /state's own font.store said "value" in the same document. Drawing has not
+        // started, and the Configuration was already installed in attachBaseContext, so nothing waits on
+        // this call to look right; it waits on this call to be *reportable*.
+        applyPanelFontScale();
         // Loaded before the update manager is acquired, not after. acquire() hands this Activity's
         // SettingsManager to a worker that survived the recreation, and getConfiguration() is a bare
         // field with no lazy read: any check already queued would otherwise see an empty
@@ -1060,6 +1095,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // recreate this activity — which means the shape MediaManager judges a clip's aspect against
         // would otherwise be the one this process booted with, forever.
         publishFrameShape();
+        // The same reason applies to text: a configuration push hands the platform's own
+        // Configuration.fontScale back, and a scale that quietly stopped being installed looks exactly
+        // like a scale that was never asked for. Restating it here is what keeps /state's appliedPxPerSp
+        // honest on a frame that has been turned since it booted.
+        applyPanelFontScale();
     }
 
     @Override
@@ -1507,6 +1547,101 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         layoutParams.screenBrightness = brightness;
         getWindow().setAttributes(layoutParams);
         lastAppliedBrightness = brightness;
+    }
+
+    /**
+     * Every text view currently on the kiosk panel, and the {@code sp} each one's layout declared. Parallel
+     * arrays, rebuilt whenever the layout is inflated — see {@link #capturePanelType()}.
+     */
+    private TextView[] panelTextViews = new TextView[0];
+    private float[] panelDesignSp = new float[0];
+    /** The debug board's declared line spacing in sp, or -1 when it could not be recovered. */
+    private float panelLineSpacingSp = -1f;
+
+    /**
+     * Reads back, from the views the platform just inflated, the {@code sp} each text size was written as.
+     *
+     * <p>Dividing the inflated pixel size by the {@code scaledDensity} in force at this instant recovers the
+     * declared number whatever the ROM's density and font size happen to be — and, importantly, whatever
+     * {@link FrameFontScale#apply} managed to install a moment earlier. The layout stays the single source of
+     * design sizes: no table of them is duplicated here, and a new text view added to
+     * {@code activity_main.xml} is scaled by this pass without anyone remembering to add it to a list. The
+     * list of paths is the shape this repository has already been burned by twice.
+     */
+    private void capturePanelType() {
+        float pxPerSp = FrameFontScale.appliedPxPerSp(getResources());
+        List<TextView> found = new ArrayList<>();
+        collectTextViews(rootView, found);
+        if (pxPerSp <= 0f) {
+            // No divisor, no declared size. Leaving the panel exactly as the ROM inflated it is the honest
+            // answer; inventing a divisor is the failure FrameTypography.fontScaleFor already refuses.
+            panelTextViews = new TextView[0];
+            panelDesignSp = new float[0];
+            panelLineSpacingSp = -1f;
+            return;
+        }
+        panelTextViews = found.toArray(new TextView[0]);
+        panelDesignSp = new float[panelTextViews.length];
+        for (int i = 0; i < panelTextViews.length; i++) {
+            panelDesignSp[i] = panelTextViews[i].getTextSize() / pxPerSp;
+        }
+        panelLineSpacingSp = debugOverlay != null ? debugOverlay.getLineSpacingExtra() / pxPerSp : -1f;
+    }
+
+    /**
+     * Puts the frame's font scale on the panel.
+     *
+     * <p>Two mechanisms, one number. {@link FrameFontScale#apply} sets {@code Configuration.fontScale} so
+     * every {@code sp} resolved afterwards — the options dialog when it next opens, toasts, framework
+     * widgets — comes out at the reference size; this pass then writes absolute pixels onto the views that
+     * are already inflated, which is what makes a change from the web page visible on the wall without
+     * restarting anything. The writes are absolute, derived from the captured design sizes and never from a
+     * view's current size, so applying the same scale twice cannot compound it — the property that a ratio
+     * pass over the tree would not have.
+     *
+     * <p>Runs on the UI thread from three seams: after inflation, after a configuration change (where the
+     * platform has handed back its own font scale), and after the operator changes the value.
+     */
+    private void applyPanelFontScale() {
+        int percent = settingsManager != null ? settingsManager.fontScalePercent()
+                : SettingsManager.readFontScalePercent(this);
+        String store = settingsManager != null ? settingsManager.fontScaleStoreState()
+                : SettingsManager.fontScaleStoreState(this);
+        FrameFontScale.apply(getResources(), percent);
+        for (int i = 0; i < panelTextViews.length; i++) {
+            panelTextViews[i].setTextSize(TypedValue.COMPLEX_UNIT_PX,
+                    FrameTypography.sizePx(panelDesignSp[i], percent));
+        }
+        if (debugOverlay != null && panelLineSpacingSp >= 0f) {
+            // The board's rows are spaced in sp in the layout, so line spacing is part of "all font sizes".
+            // The multiplier is read rather than assumed: setLineSpacing replaces both halves.
+            debugOverlay.setLineSpacing(FrameTypography.sizePx(panelLineSpacingSp, percent),
+                    debugOverlay.getLineSpacingMultiplier());
+        }
+        // The number the row quotes is the one the platform took, not the one the rule asked for, and the
+        // two are named together only when they disagree — which is the only case where the difference is
+        // information. A silent, always-consistent pair of numbers would be a claim; this is a measurement.
+        float target = FrameTypography.pxPerSp(percent);
+        float measured = FrameFontScale.appliedPxPerSp(getResources());
+        String verdict = Math.abs(measured - target) <= 1e-3f
+                ? "" : " (resources report " + measured + " px/sp instead)";
+        debugInformationProvided(new DebugInformation(SettingsManager.DEBUG_KEY_FONT_SCALE,
+                FrameTypography.describe(percent) + verdict + ", store: " + store));
+    }
+
+    private static void collectTextViews(View view, List<TextView> out) {
+        if (view == null) {
+            return;
+        }
+        if (view instanceof TextView) {
+            out.add((TextView) view);
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                collectTextViews(group.getChildAt(i), out);
+            }
+        }
     }
 
     /**
@@ -5344,6 +5479,56 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     }
 
     @Override
+    public int frameFontScalePercent() {
+        return settingsManager != null ? settingsManager.fontScalePercent()
+                : FrameTypography.DEFAULT_PERCENT;
+    }
+
+    /**
+     * Persists a new font scale on the caller's thread — this is a web worker, and the write is a
+     * {@code commit()} — and then restates the panel on the UI thread, where the views live. The returned
+     * value is read back out of the store rather than echoed from the argument, so what the page is told is
+     * what the frame is going to render, including a refusal.
+     */
+    @Override
+    public int setFrameFontScalePercent(int requested) {
+        int applied = settingsManager != null ? settingsManager.setFontScalePercent(requested)
+                : FrameTypography.DEFAULT_PERCENT;
+        runOnUiThread(this::applyPanelFontScale);
+        return applied;
+    }
+
+    @Override
+    public float frameFontScaleAppliedPxPerSp() {
+        return FrameFontScale.appliedPxPerSp(getResources());
+    }
+
+    /**
+     * The {@code font} block of {@code /state}: what the operator asked for, what the rule says that costs
+     * per {@code sp}, and what this frame's resources actually report. The last pair is the point — a scale
+     * that was set and never installed reads identical to a scale that was never asked for unless the
+     * applied number is printed beside the requested one, which is the same argument that puts
+     * {@code panelShape: "unmeasured"} in the video block.
+     */
+    private JsonObject fontBlockJson() {
+        JsonObject o = new JsonObject();
+        int percent = frameFontScalePercent();
+        o.addProperty("percent", percent);
+        o.addProperty("pxPerSp", FrameTypography.pxPerSp(percent));
+        o.addProperty("appliedPxPerSp", FrameFontScale.appliedPxPerSp(getResources()));
+        // What this frame's ROM would have used before this app normalised it, alongside the reference every
+        // frame is normalised *to*. Two frames whose numbers differ here differ in font size on the wall, and
+        // this is the one line that says so without a shell. Absent when the process never got to look.
+        float rom = FrameFontScale.romPxPerSp();
+        if (rom > 0f) {
+            o.addProperty("romPxPerSp", rom);
+        }
+        o.addProperty("referenceDensityDpi", FrameTypography.REFERENCE_DENSITY_DPI);
+        o.addProperty("store", settingsManager != null ? settingsManager.fontScaleStoreState() : "unreadable");
+        return o;
+    }
+
+    @Override
     public String buildStateJson() {
         JsonObject o = new JsonObject();
 
@@ -5552,6 +5737,7 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         o.add("watchdog", watchdogStateJson());
         o.add("crash", crashBlockJson());
         o.add("trust", trustBlockJson());
+        o.add("font", fontBlockJson());
         o.add("diagnostics", diagnosticsBlockJson());
 
         o.add("telemetry", DeviceTelemetry.snapshot(this));

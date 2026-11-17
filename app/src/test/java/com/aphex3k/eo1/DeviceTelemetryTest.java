@@ -54,4 +54,30 @@ public class DeviceTelemetryTest {
         assertEquals(0L, o.get("availBytes").getAsLong());
         assertTrue(o.has("marginBytes"));
     }
+
+    /**
+     * The panel facts are what an EO1 and an EO2 get compared on: same layout, same APK, and the only thing
+     * that differs is what each ROM reports. Reported as the ROM reports it, so two frames' {@code /state}
+     * documents answer the question without anyone opening a shell.
+     */
+    @Test
+    public void displayReportsGeometryAndDensity() {
+        JsonObject o = DeviceTelemetry.displayJson(1080, 1920, 240, 1.5f);
+        assertEquals(1080, o.get("widthPx").getAsInt());
+        assertEquals(1920, o.get("heightPx").getAsInt());
+        assertEquals(240, o.get("densityDpi").getAsInt());
+        assertEquals(1.5f, o.get("density").getAsFloat(), 0f);
+    }
+
+    /** Same rule as {@link #anUnreadableFilesystemIsAbsentFromStorage()}: no answer is an absent key. */
+    @Test
+    public void anUnreportedDisplayIsAbsentRatherThanZero() {
+        JsonObject o = DeviceTelemetry.displayJson(-1, -1, -1, -1f);
+        assertFalse(o.has("widthPx"));
+        assertFalse(o.has("heightPx"));
+        assertFalse(o.has("densityDpi"));
+        assertFalse(o.has("density"));
+        // A zero density would be a real claim about a panel that cannot be scaled by anything.
+        assertFalse(o.has("densityDpi"));
+    }
 }
