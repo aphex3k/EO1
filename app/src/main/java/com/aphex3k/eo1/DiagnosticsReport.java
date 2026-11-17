@@ -936,19 +936,16 @@ public final class DiagnosticsReport {
         int rotatedWant = LogWindow.rotatedShare(want, rotatedPresent);
 
         String now = tail(live, liveWant);
-        String old = tail(rotated, rotatedWant);
+        int liveShown = countLinesInText(now);
 
         // The remainder goes to the older half, never the reverse: the live half is the one that can
         // be short (a frame that just started), and a report must never trade recent evidence away to
-        // fill a quota.
-        int shortBy = liveWant - countLinesInText(now);
-        int rotatedAsked = rotatedWant;
-        if (rotatedPresent && shortBy > 0) {
-            rotatedAsked = rotatedWant + shortBy;
-            old = tail(rotated, rotatedAsked);
-        }
-
-        int liveShown = countLinesInText(now);
+        // fill a quota. Decided before the older file is opened, and it is opened exactly once — the
+        // first draft read it twice, the second time with a larger ask, which spent a second
+        // RandomAccessFile seek-and-read inside this section's 1500 ms budget for no added fact. The
+        // ask below is the one that gets used, so it is also the number Half is honest about.
+        int rotatedAsked = rotatedWant + Math.max(0, liveWant - liveShown);
+        String old = tail(rotated, rotatedAsked);
         int oldShown = countLinesInText(old);
 
         LogWindow.Half liveHalf =

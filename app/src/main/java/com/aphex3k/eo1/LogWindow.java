@@ -105,12 +105,19 @@ public final class LogWindow {
         }
 
         /**
-         * Fewer lines than asked means the whole file fitted: nothing older was left unread. The
-         * distinction matters to a reader because it is the difference between "both files are full and
-         * I showed you the top of one" and "this frame has 12 lines, total".
+         * The whole file was read: fewer lines than asked <b>and</b> the bytes handed back cover the
+         * file's length. The line count alone is not enough — {@code DiagnosticsReport.tail} stops its
+         * backwards scan at {@code MAX_SECTION_BYTES} (128 KiB), so a half whose lines are long can come
+         * back short because the byte ceiling was reached, not because the file ran out. Claiming
+         * "(whole file, 10 lines)" about the middle of a file would then be the exact false precision
+         * this class exists to remove, in the one case — a log of stack traces and wide rows — where a
+         * reader most needs to know how much was left behind.
+         *
+         * <p>When the bytes do not confirm it, {@link #diskPhrase()} falls through to the labelled
+         * estimate, which is the honest answer: an upper bound on what was read, not a count of the file.
          */
         public boolean wholeFileFitted() {
-            return requested > 0 && shown < requested;
+            return requested > 0 && shown < requested && shownBytes >= bytes;
         }
 
         /**
@@ -167,7 +174,8 @@ public final class LogWindow {
         StringBuilder sb = new StringBuilder(256);
         sb.append("[log window: ");
 
-        if (l.shown + r.shown == 0) {
+        int totalShown = l.shown + r.shown;
+        if (totalShown == 0) {
             // Say which files were looked at, because "nothing" from a reader who passed the wrong
             // path is a different problem from a frame that has never written a log line — and a
             // zero-byte file and an absent one are the same answer to {@code File.length()}, so the
@@ -182,15 +190,23 @@ public final class LogWindow {
         String last = lastStamp == null ? "" : lastStamp;
         if (first.isEmpty()) {
             sb.append("undated (no timestamped line in the shown text)");
-        } else if (first.equals(last)) {
+        } else if (totalShown == 1) {
+            // Decided by the line count, never by the stamps being equal. AppLogger stamps to the
+            // second and writes several rows per event — the brightness triple alone is three lines in
+            // one timestamp — so a window can hold a hundred lines that all carry the same stamp, and
+            // reading that as "one line" is the same species of error this class was written to stop:
+            // a true observation (both ends match) used to imply a false one about how much is between
+            // them. A burst of crash lines inside one second is not hypothetical either.
             sb.append(first).append(" (single line)");
+        } else if (first.equals(last)) {
+            sb.append(first).append(" (same second, ").append(totalShown).append(" lines)");
         } else {
             sb.append(first).append(" -> ").append(last);
         }
 
         boolean rotatedAbsent = r.requested == 0 && r.shown == 0 && r.bytes == 0L;
 
-        sb.append(" | shown ").append(l.shown + r.shown).append(" lines (")
+        sb.append(" | shown ").append(totalShown).append(" lines (")
           .append(l.shown).append(" newest half");
         if (rotatedAbsent) {
             // "There is no rotated half" is a fact about the files on disk. It is NOT a fact about how

@@ -185,6 +185,39 @@ public class LogWindowTest {
         assertFalse(line, line.contains(" -> "));
     }
 
+    /**
+     * The stamps agree because {@code AppLogger} resolves to the second, not because one line was
+     * shown: the brightness triple alone puts three rows inside one timestamp, and a crash burst can
+     * put thirty. The first version decided this case from the two stamps and called any window like
+     * it a single line — a true observation implying a false count, which is the defect class of this
+     * whole file.
+     */
+    @Test
+    public void aWindowWhoseEndsShareOneSecondCountsItsLinesInsteadOfGuessing() {
+        String line = LogWindow.coverageLine(
+                new LogWindow.Half(400, 12, 1_224L, 1_224), ABSENT,
+                "2026-11-15 16:21:10", "2026-11-15 16:21:10");
+        assertTrue(line, line.contains("(same second, 12 lines)"));
+        assertFalse("twelve lines are not one line", line.contains("(single line)"));
+    }
+
+    /**
+     * Fewer lines than asked does not alone prove the file was read whole: {@code tail} also stops at
+     * the section's byte ceiling. A half that hit the ceiling must fall through to the labelled
+     * estimate rather than claiming an exact whole-file count for a file it only partly read.
+     */
+    @Test
+    public void aHalfCutOffByTheByteCeilingIsNotClaimedAsTheWholeFile() {
+        LogWindow.Half ceiled = new LogWindow.Half(400, 300, 262_144L, 131_072);
+        assertFalse("300 lines of a 256 KiB file is a byte ceiling, not an exhausted file",
+                ceiled.wholeFileFitted());
+        String line = LogWindow.coverageLine(
+                ceiled, new LogWindow.Half(400, 400, 262_144L, 131_072),
+                "2026-11-15 09:00:00", "2026-11-15 16:21:10");
+        assertTrue(line, line.contains("of live ~"));
+        assertFalse(line, line.contains("of live (whole file"));
+    }
+
     @Test
     public void nothingOnDiskIsStillALine() {
         String line = LogWindow.coverageLine(ABSENT, ABSENT, "", "");
