@@ -36,8 +36,16 @@ public final class AppLogger {
     /** Ring buffer capacity (number of retained recent events). */
     public static final int CAPACITY = 500;
 
-    /** Rolling file size cap before rotation. */
-    private static final long MAX_FILE_BYTES = 256L * 1024L;
+    /**
+     * Rolling file size cap before rotation.
+     *
+     * <p>Package-private rather than {@code private} for one reason: {@code LogWindow} prints this number
+     * in the retention sentence of every diagnostics report, and a second literal there is a fact that
+     * can drift out of agreement with the thing it describes — the rotation would keep happening at the
+     * real cap while every report kept quoting the stale one, and no test could see it because the test
+     * pins the copy. Read-only to that caller; nothing may write it.
+     */
+    static final long MAX_FILE_BYTES = 256L * 1024L;
 
     private static final Charset UTF_8 = Charset.forName("UTF-8");
     private static final String FILE_NAME = "eo1-app.log";

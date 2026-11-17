@@ -80,7 +80,14 @@ public final class DiagnosticsReport {
     public static final long BUDGET_APP_LOG_MS = 1500L;
     public static final long BUDGET_STATE_MS = 5000L;
 
-    /** Lines of the rolling application log kept, read from both halves of the file. */
+    /**
+     * Lines of the rolling application log a report keeps — a <b>budget split across</b> the two
+     * halves {@code AppLogger} retains, {@code 200} newest and {@code 200} older, not 400 from the
+     * newest file and whatever is left over. See {@link #tailLog} for why the split is the whole
+     * difference between a 26-minute window and a two-hour one, and {@link LogWindow} for why the
+     * report now also states which of the two it printed. The number itself is unchanged at 400:
+     * widening it would widen the section, and the fix was never about how many lines.
+     */
     public static final int APP_LOG_LINES = 400;
 
     /** Stack frames per thread in the thread dump. Enough to see where a loop is parked. */
@@ -879,26 +886,116 @@ public final class DiagnosticsReport {
     }
 
     /**
-     * The newest {@code n} lines of {@code live}, falling back into {@code rotated} when the live
-     * file is shorter than asked. Both halves are needed because the earliest a self-reboot can
-     * follow a wedge is roughly fifty minutes, and the live file rolls at 256 KiB — well inside that
-     * on a frame that is logging failures.
+     * Up to {@code n} lines of the frame's log, <b>split across both halves</b> of what
+     * {@link AppLogger} keeps — {@link LogWindow#liveShare(int, boolean) half of them} from
+     * {@code live}, the rest from {@code rotated} — preceded by one
+     * {@link LogWindow#coverageLine(LogWindow.Half, LogWindow.Half, String, String) coverage line}
+     * naming the window those lines actually span.
+     *
+     * <p>Both halves are needed because the earliest a self-reboot can follow a wedge is roughly fifty
+     * minutes, and the live file rolls at 256 KiB — well inside that on a frame that is logging
+     * failures. Until this method split a budget it did not deliver on that: it read the rotated file
+     * only when the live one came back short, so a frame with a full live half — which is every frame
+     * that has been running long enough to be worth diagnosing — never opened
+     * {@code eo1-app.log.1} at all. Measured on hardware: report
+     * {@code report-1794788472918-000-manual-19.txt}, 400 dated lines, window
+     * {@code 15:55:38 -> 16:21:10} — 26 minutes, no {@code oldest half} marker — with three
+     * {@code watchdog: main thread ran nothing for 2 ticks in a row} lines from 09:18–09:24 sitting
+     * unread in the file next to it. The javadoc here used to describe the short-circuit as
+     * "falling back into {@code rotated} when the live file is shorter than asked", which was a
+     * correct description of the code and the wrong statement of the requirement.
+     *
+     * <p><b>Only the section's age grows, not its size</b> — the safety argument for the whole change,
+     * and the reason {@link #APP_LOG_LINES} stays at 400 and {@link #BUDGET_APP_LOG_MS} at 1500 ms.
+     * What is bounded is the <i>line</i> count: {@code liveShare + rotatedShare == n}, and the
+     * top-up below moves lines only from a half that had nothing more to give into a half that is
+     * short, so the number shown can never exceed {@code n}. At the 102 bytes-per-line a real frame's
+     * report measured, 400 lines is ~41 KiB against this section's 128 KiB cap. (Each half's read is
+     * separately ceiling-limited inside {@link #tail}, so a log whose lines averaged above roughly 650
+     * bytes could put the pair over that cap where a single half would merely have been truncated. No
+     * line on any frame this repo has read comes near that; the failure mode would be
+     * {@link BudgetedWriter} dropping the tail, which is what its head-keeping is for.)
      *
      * <p>Deliberately not {@link AppLogger#tailFile(int)}: that is {@code synchronized} on the same
      * monitor every {@code info()} call holds across an open, a write and a close, so a storage stall
      * would consume this section's budget on a lock rather than on the read, and it slurps the whole
-     * file line by line. This reads backwards from the end instead.
+     * file line by line. This reads backwards from the end instead — twice, each read O(requested)
+     * and each bounded at {@link #MAX_SECTION_BYTES}, on the abandonable daemon thread this section
+     * already runs on, with no {@code AppLogger} monitor taken anywhere. Two files is not three:
+     * there is no {@code listFiles()}, no retry, and no third generation, because
+     * {@code AppLogger.rotate()} deletes the previous {@code .1} before renaming onto it. Two halves
+     * is the whole history, and the coverage line says so rather than leaving a reader to find out.
      */
     public static String tailLog(File live, File rotated, int n) {
         int want = Math.max(0, n);
-        String now = want == 0 ? "" : tail(live, want);
-        int given = countLinesInText(now);
-        String old = given >= want ? "" : tail(rotated, want - given);
-        if (old.isEmpty()) {
-            return now.isEmpty() ? "(no log lines on disk)\n" : now;
+        if (want == 0) {
+            return "(no log lines requested)\n";
         }
-        return "[--- oldest half: " + (rotated == null ? "?" : rotated.getName()) + " ---]\n"
-                + old + now;
+        boolean rotatedPresent = rotated != null && rotated.isFile();
+        int liveWant = LogWindow.liveShare(want, rotatedPresent);
+        int rotatedWant = LogWindow.rotatedShare(want, rotatedPresent);
+
+        String now = tail(live, liveWant);
+        String old = tail(rotated, rotatedWant);
+
+        // The remainder goes to the older half, never the reverse: the live half is the one that can
+        // be short (a frame that just started), and a report must never trade recent evidence away to
+        // fill a quota.
+        int shortBy = liveWant - countLinesInText(now);
+        int rotatedAsked = rotatedWant;
+        if (rotatedPresent && shortBy > 0) {
+            rotatedAsked = rotatedWant + shortBy;
+            old = tail(rotated, rotatedAsked);
+        }
+
+        int liveShown = countLinesInText(now);
+        int oldShown = countLinesInText(old);
+
+        LogWindow.Half liveHalf =
+                new LogWindow.Half(liveWant, liveShown, lengthOf(live), byteLengthOf(now));
+        LogWindow.Half rotatedHalf = rotatedPresent
+                ? new LogWindow.Half(rotatedAsked, oldShown, lengthOf(rotated), byteLengthOf(old))
+                : new LogWindow.Half(0, 0, 0L, 0);
+
+        String shown = old + now;                       // oldest first, as before
+        // Exactly "both reads came back with nothing", which is not the same test as the files being
+        // absent: an empty-but-present log has a name and a length, and the coverage line says which
+        // of the two it is. (Not `shown.trim().isEmpty()` — trim() copies ~40 KiB to ask a question
+        // two emptiness tests answer, and it would also report a whitespace-only log as a frame that
+        // never wrote a line.)
+        if (now.isEmpty() && old.isEmpty()) {
+            return LogWindow.coverageLine(liveHalf, rotatedHalf, "", "")
+                    + "(no log lines on disk)\n";
+        }
+
+        StringBuilder sb = new StringBuilder(shown.length() + 256);
+        sb.append(LogWindow.coverageLine(liveHalf, rotatedHalf,
+                LogWindow.firstStamp(shown), LogWindow.lastStamp(shown)));
+        if (oldShown > 0) {
+            sb.append("[--- oldest half: ")
+              .append(rotated == null ? "?" : rotated.getName()).append(" ---]\n");
+        }
+        sb.append(old);
+        // Deliberately no matching marker for the newest half. The one that exists marks the jump
+        // backwards in time, and a reader who has just crossed it needs telling; the text after it runs
+        // to the present with no break, so a second header would be one more line to a section that
+        // reports its own line count — and the half it names is already named in the coverage line.
+        sb.append(now);
+        return sb.toString();
+    }
+
+    /** {@code File.length()} with nothing thrown at it: an absent file is 0 bytes, not an exception. */
+    private static long lengthOf(File f) {
+        return f == null ? 0L : f.length();
+    }
+
+    /**
+     * Bytes in a text this method already holds, for {@link LogWindow.Half}'s line estimate. A copy,
+     * of the same order as the buffer {@link #tail} just allocated for the same text, so it costs
+     * nothing the read did not already cost.
+     */
+    private static int byteLengthOf(String s) {
+        return s.getBytes(UTF_8).length;
     }
 
     /**

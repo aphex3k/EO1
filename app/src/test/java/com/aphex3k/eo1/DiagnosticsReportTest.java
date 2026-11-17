@@ -18,6 +18,7 @@ import java.io.OutputStreamWriter;
 import java.io.Writer;
 import java.nio.charset.Charset;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -319,19 +320,31 @@ public class DiagnosticsReportTest {
         assertTrue("a .tmp younger than the sweep window may be a write in flight", fresh.exists());
     }
 
+    /**
+     * Both halves present, oldest first, and the budget respected at both edges.
+     *
+     * <p>The shape of this test changed with {@code tailLog} and its purpose did not. It used to ask
+     * for 4 lines of a 3-line live file and a 2-line rotated one and assert {@code live-1} appeared;
+     * a request that the live half could satisfy in full is precisely the case the old code short
+     * circuited on, so under a split budget {@code live-1} is now outside the quota and cannot be in
+     * it. The line is longer by one on each file for the same reason: with 2 lines per half there is a
+     * boundary to bite on both sides rather than one.
+     */
     @Test
     public void theLogTailReadsBothHalvesOldestFirst() throws IOException {
         File rotated = temp.newFile("eo1-app.log.1");
         File live = temp.newFile("eo1-app.log");
-        write(rotated, "rotated-1\nrotated-2\n");
-        write(live, "live-1\nlive-2\nlive-3\n");
+        write(rotated, "rotated-1\nrotated-2\nrotated-3\n");
+        write(live, "live-1\nlive-2\nlive-3\nlive-4\n");
         String tail = DiagnosticsReport.tailLog(live, rotated, 4);
-        int r1 = tail.indexOf("rotated-2");
-        int l1 = tail.indexOf("live-1");
+        int r1 = tail.indexOf("rotated-3");
+        int l1 = tail.indexOf("live-3");
         assertTrue("both halves must be present", r1 >= 0 && l1 >= 0);
         assertTrue("and in order", r1 < l1);
         assertTrue(tail.contains("oldest half"));
-        assertFalse("one line past the request must not be dragged in", tail.contains("rotated-1"));
+        assertFalse("one line past the rotated share must not be dragged in",
+                tail.contains("rotated-1"));
+        assertFalse("nor one line past the live share", tail.contains("live-2"));
     }
 
     @Test
@@ -343,7 +356,11 @@ public class DiagnosticsReportTest {
         }
         write(live, sb.toString());
         String tail = DiagnosticsReport.tailLog(live, null, 10);
-        assertEquals("exactly the last ten lines", 10, tail.split("\n").length);
+        // Eleven physical lines: the ten asked for plus the one coverage line the section now opens
+        // with. The budget is still lines, not bytes — 500 lines of 210 bytes each, of which ten are
+        // returned.
+        assertEquals("exactly the last ten lines, under a single header line",
+                11, tail.split("\n").length);
         assertTrue(tail.contains("line 499"));
         assertFalse(tail.contains("line 489"));
     }
@@ -430,6 +447,218 @@ public class DiagnosticsReportTest {
         assertFalse("a foreign name must sort last, which parsed==false encodes", infos[0].parsed);
     }
 
+    // ------------------------------------------------------------------ the log window (part B)
+
+    /**
+     * The hardware-proven defect. Report {@code report-1794788472918-000-manual-19.txt} on frame
+     * 192.168.1.114 carried exactly {@code APP_LOG_LINES} lines, spanned 26&nbsp;minutes
+     * ({@code 15:55:38 -> 16:21:10}) and contained no {@code oldest half} marker: the live file filled
+     * the quota, so the {@code given >= want} test closed the rotated half and the three
+     * {@code watchdog: main thread ran nothing for 2 ticks in a row} lines from 09:18–09:24 were
+     * unreachable through every route the app has. Fails on the pre-split code.
+     */
+    @Test
+    public void aFullLiveHalfStillOpensTheRotatedHalf() throws IOException {
+        File rotated = temp.newFile("eo1-app.log.1");
+        File live = temp.newFile("eo1-app.log");
+        write(rotated, lines("rotated", 900));
+        write(live, lines("live", 900));
+
+        String tail = DiagnosticsReport.tailLog(live, rotated, DiagnosticsReport.APP_LOG_LINES);
+
+        assertTrue("the newest line the live half holds is the newest there is",
+                tail.contains("live-0899"));
+        assertTrue("and a line from inside the rotated half must be present even though the live "
+                        + "half alone could have filled the whole budget",
+                tail.contains("rotated-0800"));
+        assertFalse("nothing older than the rotated share may be dragged in",
+                tail.contains("rotated-0001"));
+        assertFalse("and the live share is a share, not the whole file",
+                tail.contains("live-0699"));
+        assertTrue("the marker is how a reader learns which half a line came from",
+                tail.contains("oldest half"));
+        assertTrue(tail.contains("newest half"));
+    }
+
+    @Test
+    public void theBudgetIsSplitAcrossTheTwoHalves() throws IOException {
+        File rotated = temp.newFile("eo1-app.log.1");
+        File live = temp.newFile("eo1-app.log");
+        write(rotated, lines("rotated", 900));
+        write(live, lines("live", 900));
+
+        int n = DiagnosticsReport.APP_LOG_LINES;
+        String tail = DiagnosticsReport.tailLog(live, rotated, n);
+        String expected = LogWindow.liveShare(n, true) + " newest half + "
+                + LogWindow.rotatedShare(n, true) + " oldest half";
+        assertTrue("the coverage line must state the split it used, computed from the constant: "
+                + tail, tail.contains(expected));
+    }
+
+    /**
+     * The byte-budget guarantee. {@code BudgetedWriter} keeps a section's head and drops its tail, so
+     * a widened line count here would silently delete the <b>newest</b> log lines from a report — the
+     * opposite of what the change is for. Only the section's age may grow, never its size.
+     */
+    @Test
+    public void theTotalLinesShownNeverExceedsTheBudget() throws IOException {
+        int[][] shapes = {{900, 900}, {10, 900}, {900, 10}, {3, 3}, {0, 900}, {900, 0}};
+        int n = DiagnosticsReport.APP_LOG_LINES;
+        for (int k = 0; k < shapes.length; k++) {
+            // Distinct names per shape: TemporaryFolder refuses a second newFile with the same name,
+            // and a stale file from the previous round would quietly make this a test of one shape.
+            File rotated = new File(temp.getRoot(), "shape" + k + "-old.log.1");
+            File live = new File(temp.getRoot(), "shape" + k + "-live.log");
+            write(rotated, lines("rotated", shapes[k][0]));
+            write(live, lines("live", shapes[k][1]));
+            int body = bodyLines(DiagnosticsReport.tailLog(live, rotated, n));
+            assertTrue("live " + shapes[k][1] + " / rotated " + shapes[k][0] + " showed " + body
+                    + " log lines against a budget of " + n, body <= n);
+        }
+    }
+
+    @Test
+    public void aShortLiveHalfGivesItsRemainderToTheOlderHalf() throws IOException {
+        File rotated = temp.newFile("eo1-app.log.1");
+        File live = temp.newFile("eo1-app.log");
+        write(rotated, lines("rotated", 900));
+        write(live, lines("live", 10));
+
+        int n = DiagnosticsReport.APP_LOG_LINES;
+        String tail = DiagnosticsReport.tailLog(live, rotated, n);
+
+        assertTrue("every line a short live half has must be shown", tail.contains("live-0000"));
+        assertTrue(tail.contains("live-0009"));
+        assertEquals("and the budget must be filled from the older half, not left short",
+                n, bodyLines(tail));
+        // Counted by the marker's own bracket form, not by the phrase: the coverage line above the body
+        // legitimately says "200 newest half + 200 oldest half" in prose, and a substring search for
+        // "oldest half" counts that as a second marker. The thing being pinned is one discontinuity in
+        // the body, which only the marker is.
+        assertTrue("one oldest-half marker, however many lines it carried — and one is not zero",
+                tail.indexOf("[--- oldest half:") >= 0
+                        && tail.indexOf("[--- oldest half:") == tail.lastIndexOf("[--- oldest half:"));
+        assertTrue("a half that ran out is stated as a fact, not estimated",
+                tail.contains("whole file, 10 lines"));
+    }
+
+    @Test
+    public void aFrameThatHasNeverRotatedSaysItsRecordIsOneHalf() throws IOException {
+        File live = temp.newFile("eo1-app.log");
+        write(live, lines("live", 30));
+        String tail = DiagnosticsReport.tailLog(live, null, DiagnosticsReport.APP_LOG_LINES);
+        assertTrue(tail, tail.contains("no rotated half on disk"));
+        assertFalse("no marker for a half that was never opened", tail.contains("oldest half"));
+        assertTrue("the whole budget went to the live file, so it must say what it holds — and it holds "
+                + "30 lines, which is fewer than were asked for, not a budget-sized record",
+                tail.contains("all 30 of its lines are shown"));
+    }
+
+    @Test
+    public void theTailNamesTheWindowItCovered() throws IOException {
+        File live = temp.newFile("eo1-app.log");
+        // 60 lines at 26-second spacing is a 26-minute window, which is the number the hardware
+        // produced and no report ever named.
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < 60; i++) {
+            sb.append(stampAt(i * 26L)).append(" I [EO1] msg ").append(i).append('\n');
+        }
+        write(live, sb.toString());
+
+        String tail = DiagnosticsReport.tailLog(live, null, 400);
+        String first = tail.substring(0, tail.indexOf('\n'));
+        assertTrue("the section must open with its own window: " + first,
+                first.startsWith("[log window: "));
+        assertTrue(first, first.contains("2026-11-15 00:00:00"));
+        assertTrue(first, first.contains("2026-11-15 00:25:34"));
+        assertTrue(first, first.contains(" -> "));
+    }
+
+    @Test
+    public void aWindowSpanningBothHalvesNamesBothEndpoints() throws IOException {
+        File rotated = temp.newFile("eo1-app.log.1");
+        File live = temp.newFile("eo1-app.log");
+        int n = DiagnosticsReport.APP_LOG_LINES;
+        // Rotated first (older), live second: stamps continue across the boundary, 400 lines each at
+        // one per second, so the shown window begins at the rotated share's first line.
+        write(rotated, stampedLines(0L, n));
+        write(live, stampedLines((long) n, n));
+
+        String tail = DiagnosticsReport.tailLog(live, rotated, n);
+        String first = tail.substring(0, tail.indexOf('\n'));
+        int liveShare = LogWindow.liveShare(n, true);
+        String earliest = stampAt((long) n - liveShare);
+        String latest = stampAt(2L * n - 1L);
+        assertTrue("the window statement cannot be merely the live half's span: " + first,
+                first.contains(earliest + " -> " + latest));
+        assertFalse("and it must not claim a line it did not read",
+                first.contains(stampAt(0L)));
+    }
+
+    @Test
+    public void anUndatedTailSaysItIsUndated() throws IOException {
+        File live = temp.newFile("eo1-app.log");
+        write(live, lines("plain", 20));
+        String tail = DiagnosticsReport.tailLog(live, null, 400);
+        assertTrue(tail, tail.contains("undated (no timestamped line in the shown text)"));
+    }
+
+    @Test
+    public void aStackContinuationDoesNotBecomeATimestamp() throws IOException {
+        // tail() cuts at a byte boundary chosen by counting newlines backwards, so a section almost
+        // always starts mid-trace. A stamp search that assumed line 1 was a stamp would either print
+        // garbage or call the whole window undated.
+        File live = temp.newFile("eo1-app.log");
+        StringBuilder sb = new StringBuilder();
+        sb.append(stampAt(0L)).append(" E [EO1] java.lang.RuntimeException: boom\n");
+        sb.append("\tat com.foo.Bar(Bar.java:41)\n");
+        sb.append("Caused by: java.io.IOException: disk\n");
+        sb.append("\tat com.foo.Baz(Baz.java:7)\n");
+        sb.append(stampAt(60L)).append(" I [EO1] recovered\n");
+        write(live, sb.toString());
+
+        String tail = DiagnosticsReport.tailLog(live, null, 400);
+        assertTrue(tail.contains("2026-11-15 00:00:00 -> 2026-11-15 00:01:00"));
+        assertFalse("a trace line is not a stamp", tail.contains("window: \tat"));
+
+        String trace = "\tat com.foo.Bar(Bar.java:41)\n";
+        assertEquals("", LogWindow.firstStamp(trace));
+        assertEquals("", LogWindow.lastStamp(trace));
+    }
+
+    @Test
+    public void theCoverageLineSurvivesAByteTruncatedSection() {
+        // The full path (collect() -> BudgetedWriter) needs the capture thread and a 128 KiB body to
+        // prove, which is a test that waits. What that path cannot lose is what this asserts instead:
+        // the sentence is a single physical line, and it is the first thing in the section, so
+        // keep-the-head/drop-the-tail can only ever cost it nothing.
+        String line = LogWindow.coverageLine(
+                new LogWindow.Half(200, 200, 83_148L, 20_400),
+                new LogWindow.Half(200, 200, 86_016L, 20_400),
+                "2026-11-15 15:55:38", "2026-11-15 16:21:10");
+        assertEquals("one line, ending in it", 1, occurrences(line, '\n'));
+        assertTrue(line.endsWith("]\n"));
+
+        File live = new File(temp.getRoot(), "never-written.log");
+        String tail = DiagnosticsReport.tailLog(live, null, 10);
+        assertEquals("index 0 of the section, before any marker or log line", 0,
+                tail.indexOf("[log window: "));
+        assertEquals("and the whole sentence is that first line", 1,
+                occurrences(tail.substring(0, tail.indexOf('\n') + 1), '\n'));
+    }
+
+    @Test
+    public void noLogFilesOnDiskStillNamesItsWindow() {
+        File missing = new File(temp.getRoot(), "absent.log");
+        File alsoMissing = new File(temp.getRoot(), "absent.log.1");
+        String tail = DiagnosticsReport.tailLog(missing, alsoMissing, 400);
+        assertTrue(tail, tail.contains("nothing on disk"));
+        assertTrue(tail, tail.startsWith("[log window: "));
+        assertTrue("the old sentinel text is kept for anyone parsing it",
+                tail.contains("(no log lines on disk)\n"));
+        assertEquals(2, occurrences(tail, '\n'));
+    }
+
     // ------------------------------------------------------------------ helpers
 
     private static String sectionTitles(String report) {
@@ -475,6 +704,66 @@ public class DiagnosticsReportTest {
             in.close();
         }
         return new String(all, 0, all.length, UTF_8);
+    }
+
+    /** {@code prefix-0000 … prefix-(count-1)}, one per line, zero-padded so no line is another's prefix. */
+    private static String lines(String prefix, int count) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            sb.append(prefix).append('-')
+              .append(String.format(Locale.US, "%04d", i)).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /** {@code count} lines in the exact shape {@code AppLogger} writes, one second apart. */
+    private static String stampedLines(long firstSecond, int count) {
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < count; i++) {
+            sb.append(stampAt(firstSecond + i)).append(" I [EO1] msg ").append(i).append('\n');
+        }
+        return sb.toString();
+    }
+
+    /**
+     * A stamp {@code seconds} after midnight on 2026-11-15, built by arithmetic rather than by
+     * {@code SimpleDateFormat}: the format is what {@code firstStamp} recognises, but the instant
+     * behind it must not depend on the test host's zone or on a DST boundary in the middle of the
+     * window a test is asserting on.
+     */
+    private static String stampAt(long seconds) {
+        return String.format(Locale.US, "2026-11-15 %02d:%02d:%02d",
+                seconds / 3600L, (seconds / 60L) % 60L, seconds % 60L);
+    }
+
+    /**
+     * Log lines in a {@code tailLog} result — the physical lines that came from a log file, with the
+     * coverage line, the two half markers and the two "nothing here" sentinels taken back out. This
+     * is the number the section's budget is about.
+     */
+    private static int bodyLines(String tail) {
+        int total = 0;
+        for (int i = 0; i < tail.length(); i++) {
+            if (tail.charAt(i) == '\n') {
+                total++;
+            }
+        }
+        total--;                                   // the coverage line, always present, always first
+        if (tail.contains("[--- oldest half:")) total--;
+        if (tail.contains("[--- newest half:")) total--;
+        if (tail.contains("(no log lines on disk)")) total--;
+        if (tail.contains("(no log lines requested)")) total--;
+        return Math.max(0, total);
+    }
+
+    private static int occurrences(String s, char c) {
+        int n = 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) == c) {
+                n++;
+            }
+        }
+        return n;
     }
 
     private static void write(File f, String s) throws IOException {
