@@ -696,11 +696,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         tsVideoView = findViewById(R.id.tsVideoView);
         debugOverlay = findViewById(R.id.debugOverlay);
         progressIndicator = findViewById(R.id.progressIndicator);
-        // Sizes are taken from the views the platform just inflated, before anything else can change them:
-        // see capturePanelType(). Applying immediately also means a frame whose resources push did not take
-        // still ends up at the reference pixel size, because this pass writes absolute pixels.
+        // The declared sizes are read here, immediately after inflation and before anything can write a
+        // size: capturePanelType() divides by the scaledDensity that resolved them, so the divisor has to be
+        // the one the inflator used. Applying the scale is a later call — see below, where the store and the
+        // logger exist — because the row it writes says which of those two the number came from.
         capturePanelType();
-        applyPanelFontScale();
         // This window needs a focusable view of its own, or focus stays wherever an editor left it:
         // hardware keys are then routed to that editor's input connection and never reach
         // dispatchKeyEvent, which silently kills C, Space and the soft buttons.
@@ -785,6 +785,14 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // Only reachable if Eo1Application#onCreate itself failed.
             this.appLogger = new AppLogger(this);
         }
+        // The panel's text sizes are restated here rather than beside the view bindings, because the line
+        // this writes says where the value came from — and at the binding point neither `settingsManager`
+        // nor `appLogger` exists yet, so every launch reported "store: unreadable" next to a non-default
+        // scale (a contradiction: an unreadable store can only answer the default) and kept that row for the
+        // whole uptime, while /state's own font.store said "value" in the same document. Drawing has not
+        // started, and the Configuration was already installed in attachBaseContext, so nothing waits on
+        // this call to look right; it waits on this call to be *reportable*.
+        applyPanelFontScale();
         // Loaded before the update manager is acquired, not after. acquire() hands this Activity's
         // SettingsManager to a worker that survived the recreation, and getConfiguration() is a bare
         // field with no lazy read: any check already queued would otherwise see an empty
@@ -1597,6 +1605,8 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
     private void applyPanelFontScale() {
         int percent = settingsManager != null ? settingsManager.fontScalePercent()
                 : SettingsManager.readFontScalePercent(this);
+        String store = settingsManager != null ? settingsManager.fontScaleStoreState()
+                : SettingsManager.fontScaleStoreState(this);
         FrameFontScale.apply(getResources(), percent);
         for (int i = 0; i < panelTextViews.length; i++) {
             panelTextViews[i].setTextSize(TypedValue.COMPLEX_UNIT_PX,
@@ -1608,9 +1618,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             debugOverlay.setLineSpacing(FrameTypography.sizePx(panelLineSpacingSp, percent),
                     debugOverlay.getLineSpacingMultiplier());
         }
+        // The number the row quotes is the one the platform took, not the one the rule asked for, and the
+        // two are named together only when they disagree — which is the only case where the difference is
+        // information. A silent, always-consistent pair of numbers would be a claim; this is a measurement.
+        float target = FrameTypography.pxPerSp(percent);
+        float measured = FrameFontScale.appliedPxPerSp(getResources());
+        String verdict = Math.abs(measured - target) <= 1e-3f
+                ? "" : " (resources report " + measured + " px/sp instead)";
         debugInformationProvided(new DebugInformation(SettingsManager.DEBUG_KEY_FONT_SCALE,
-                FrameTypography.describe(percent) + ", store: "
-                        + (settingsManager != null ? settingsManager.fontScaleStoreState() : "unreadable")));
+                FrameTypography.describe(percent) + verdict + ", store: " + store));
     }
 
     private static void collectTextViews(View view, List<TextView> out) {
@@ -5477,6 +5493,11 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
                 : FrameTypography.DEFAULT_PERCENT;
         runOnUiThread(this::applyPanelFontScale);
         return applied;
+    }
+
+    @Override
+    public float frameFontScaleAppliedPxPerSp() {
+        return FrameFontScale.appliedPxPerSp(getResources());
     }
 
     /**

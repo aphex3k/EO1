@@ -11,7 +11,7 @@ import android.util.DisplayMetrics;
  *
  * <p>{@link android.util.DisplayMetrics#scaledDensity} is what {@code sp} is multiplied by — the platform
  * computes it as {@code density × Configuration.fontScale}, and both of those come from the ROM. Overwriting
- * {@code fontScale} with {@link FrameTypography#fontScaleFor(int, int)} divides the ROM's density claim out
+ * {@code fontScale} with {@link FrameTypography#fontScaleFor(int, float)} divides the ROM's density claim out
  * of the app's own text, which is what makes one layout render at one size on every board. It is also why
  * the reach is automatic: the options dialog, the framework widgets inside it, the debug board and the toast
  * text all resolve through these resources, so nothing has to remember to ask.
@@ -27,10 +27,12 @@ import android.util.DisplayMetrics;
  *       the one it already holds — hand it the same instance and the diff is empty, which is also the
  *       condition under which it declines to recompute {@code scaledDensity}. Passing the live metrics
  *       object would additionally let the caller's edit outlive the call.</li>
- *   <li><b>{@code scaledDensity} is set here as well.</b> The platform recomputes it only when the
- *       configuration diff reports a font-scale change; setting it in the metrics copy we pass means the
- *       value is right under either behaviour. {@link FrameTypography} keeps the two formulas identical, so
- *       they cannot disagree.</li>
+ *   <li><b>{@code scaledDensity} is written as the rule's own target</b>, not as a recomputed product. The
+ *       platform refreshes that field only when the configuration diff reports a font-scale change, so
+ *       relying on the refresh leaves a stale value in exactly the case the caller cannot see (density
+ *       moved, fontScale did not). Writing the target directly means the installed number is
+ *       {@link FrameTypography#pxPerSp(int)} by construction — and {@link #apply} still reads it back before
+ *       reporting success, because a value written is not a value taken.</li>
  *   <li><b>{@code densityDpi} is never touched.</b> It selects which resource buckets the platform resolves
  *       ({@code values-w600dp} and friends) and what the platform believes about the panel; only the
  *       font-scale factor is ours to change.</li>
@@ -41,6 +43,14 @@ import android.util.DisplayMetrics;
  * {@link android.app.Activity#onConfigurationChanged}. {@code MainActivity} does.
  */
 public final class FrameFontScale {
+
+    /**
+     * How far a float read from the platform may sit from the rule's number and still be called installed.
+     * These are ratios of whole ints divided by 160 and 100, so the gap between "equal" and "different" is
+     * orders of magnitude wider than this; the tolerance exists only so a {@code float} that round-tripped
+     * through {@code DisplayMetrics} is not judged by bit equality.
+     */
+    private static final float TOLERANCE = 1e-3f;
 
     /**
      * What one {@code sp} cost on this frame's resources the first time this process looked at them — the
@@ -84,26 +94,30 @@ public final class FrameFontScale {
             // duplicate store of an unchanged number is not a race worth a lock across a resource read.
             romPxPerSp = current.scaledDensity;
         }
-        if (current.densityDpi < 1) {
-            return false;
-        }
-        float fontScale = FrameTypography.fontScaleFor(percent, current.densityDpi);
+        float target = FrameTypography.pxPerSp(percent);
+        float fontScale = FrameTypography.fontScaleFor(percent, current.density);
         if (fontScale <= 0f) {
             return false;
         }
         Configuration config = new Configuration(res.getConfiguration());
-        if (config.fontScale == fontScale) {
-            // Already what the rule asks for. Returning without writing keeps a re-apply on every
-            // configuration change from churning the resources, and from provoking the framework's
-            // font-scale handling on a value that has not moved.
-            return Math.abs(current.scaledDensity - current.density * fontScale) < 1e-4f;
+        // Both halves are checked, and the decision is made on the outcome rather than on one input.
+        // scaledDensity is what resolves an sp, so it is the number that has to be right; fontScale is what
+        // the platform multiplies by to recompute scaledDensity after its own updates, so if only that half
+        // is stale, a later density-only change would quietly undo this one. An early return keyed on
+        // fontScale alone was the first version of this method, and it left a frame whose density moved
+        // under an unchanged fontScale with a stale scaledDensity and no repair.
+        if (Math.abs(current.scaledDensity - target) <= TOLERANCE
+                && Math.abs(config.fontScale - fontScale) <= TOLERANCE) {
+            return true;
         }
         config.fontScale = fontScale;
         DisplayMetrics metrics = new DisplayMetrics();
         metrics.setTo(current);
-        metrics.scaledDensity = metrics.density * fontScale;
+        metrics.scaledDensity = target;
         res.updateConfiguration(config, metrics);
-        return true;
+        // Report what the platform took, not what was asked for: on a ROM that recomputes scaledDensity
+        // differently this is the only place the difference is caught, and /state prints the same read.
+        return Math.abs(appliedPxPerSp(res) - target) <= TOLERANCE;
     }
 
     /**

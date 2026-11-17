@@ -1141,6 +1141,11 @@ public class WebServer {
         o.addProperty("requestedPercent", requested);
         o.addProperty("percent", applied);
         o.addProperty("pxPerSp", FrameTypography.pxPerSp(applied));
+        // Deliberately no appliedPxPerSp here. The write lands on the UI thread asynchronously, so a
+        // measurement taken on this worker half a millisecond later describes the instant, not the change —
+        // it can read as the pre-write value on a frame that applied it fine. The page reloads after the
+        // message, and the reloaded section prints the measured number, which is the honest place for it;
+        // /state's font.appliedPxPerSp is the same read at any time.
         sendJson(os, 200, o);
     }
 
@@ -1559,6 +1564,20 @@ public class WebServer {
     }
 
     /**
+     * What one {@code sp} costs on this frame's resources, measured. A controller that cannot answer yields
+     * {@code -1}, which the page renders as the asked-for number rather than as a zero — a zero here would
+     * read as "no text at all".
+     */
+    private float fontScaleAppliedPxPerSp() {
+        try {
+            float px = controller.frameFontScaleAppliedPxPerSp();
+            return px > 0f ? px : -1f;
+        } catch (Throwable t) {
+            return -1f;
+        }
+    }
+
+    /**
      * The text-size section of the index page, offered only with trusted network on — the same gate as the
      * device name, because what it changes is one box.
      */
@@ -1573,16 +1592,25 @@ public class WebServer {
             return sb.toString();
         }
         int percent = fontScalePercent();
+        float asked = FrameTypography.pxPerSp(percent);
+        float measured = fontScaleAppliedPxPerSp();
         sb.append("<p>A multiplier on <b>every</b> text size this frame draws — the debug board, the "
-                + "now-playing banner, the options dialog. It applies immediately, with no restart. This is "
-                + "per-frame state, not part of the configuration document: what it corrects is what "
+                + "now-playing banner, the options dialog. The frame's own display updates immediately, with "
+                + "no restart; a settings dialog that is <em>open</em> across the change keeps the size it "
+                + "inflated with until its pages are next inflated, because those views already hold pixels. "
+                + "This is per-frame state, not part of the configuration document: what it corrects is what "
                 + "<i>this</i> frame's ROM reports about its own panel, so importing a configuration here "
                 + "cannot resize another frame's text.</p>");
+        // Measured first, and the asked-for number only beside it when they differ: one of these is what the
+        // panel is doing and the other is what the rule wanted, and a page that quotes only the second can
+        // describe a scale the platform never installed as though it were on the wall.
         sb.append("<p>One <code>sp</code> currently costs ")
-                .append(FrameTypography.pxPerSp(percent)).append(" px on this frame ")
-                .append("(the design size for every frame is ")
+                .append(measured > 0f ? measured : asked).append(" px on this frame")
+                .append(Math.abs(measured - asked) <= 1e-3f ? ""
+                        : " (the rule asks for " + asked + " — the frame did not take it)")
+                .append("; the design size for every frame is ")
                 .append(FrameTypography.pxPerSp(FrameTypography.DEFAULT_PERCENT))
-                .append(" px). Send a multiplier (<code>1.25</code>) or a percentage "
+                .append(" px. Send a multiplier (<code>1.25</code>) or a percentage "
                         + "(<code>125%</code>), from ")
                 .append(FrameTypography.MIN_PERCENT / 100f).append(" to ")
                 .append(FrameTypography.MAX_PERCENT / 100f).append(".</p>");

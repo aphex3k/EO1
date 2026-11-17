@@ -182,6 +182,30 @@ public class SettingsManagerTest {
         assertEquals("invalid", sm.fontScaleStoreState());
     }
 
+    /**
+     * The sentinels are in-band ints, so "the key is not there" has to be decided by asking whether it is
+     * there — not by what a defaulted read happens to return. A file hand-edited to hold -1 is an unusable
+     * value, and reading it as {@code absent} would tell an operator nobody ever set a scale on a frame that
+     * is in fact holding a value this build will not render.
+     */
+    @Test
+    public void aStoredSentinelIsNotConfusedWithAnAbsentKey() throws Exception {
+        FakeListener listener = new FakeListener(tmp.newFolder("files"));
+        SettingsManager sm = new SettingsManager(listener);
+        assertEquals("the key really is absent here", "absent", sm.fontScaleStoreState());
+        listener.prefs().setIntForTest("font_scale_percent", -1);
+        assertEquals(FrameTypography.DEFAULT_PERCENT, sm.fontScalePercent());
+        assertEquals("invalid", sm.fontScaleStoreState());
+        listener.prefs().setIntForTest("font_scale_percent", -2);
+        assertEquals("invalid", sm.fontScaleStoreState());
+        // A hand-edited preferences file can hold a string under an int's key. That is not "unreadable"
+        // in the sense of a store that will not answer, but it is out of range, so the frame renders the
+        // default either way; what must not happen is it reading as "nobody set a scale".
+        listener.prefs().setStringForTest("font_scale_percent", "1.5");
+        assertEquals(FrameTypography.DEFAULT_PERCENT, sm.fontScalePercent());
+        assertEquals("unreadable", sm.fontScaleStoreState());
+    }
+
     /** No preferences at all is a third answer, and it must not read as "at the default by choice". */
     @Test
     public void fontScaleReportsAnUnreadableStore() throws Exception {
@@ -531,6 +555,11 @@ public class SettingsManagerTest {
 
         /** Seeds a value already on disk, bypassing the code under test — for a store edited out of band. */
         void setIntForTest(String key, int value) {
+            values.put(key, value);
+        }
+
+        /** As above, for the case where the type under the key does not match the reader's expectation. */
+        void setStringForTest(String key, String value) {
             values.put(key, value);
         }
 

@@ -70,6 +70,15 @@ public interface WebController {
      */
     int setFrameFontScalePercent(int requested);
 
+    /**
+     * What one {@code sp} actually costs on this frame's own resources right now, in pixels — the measured
+     * counterpart of {@link #frameFontScalePercent()}, which is what was <em>asked for</em>. Reported so a
+     * scale the platform refused to install is visible from the browser instead of needing {@code /state}.
+     *
+     * @return the platform's {@code scaledDensity}, or {@code -1} when it would not say.
+     */
+    float frameFontScaleAppliedPxPerSp();
+
     /** Builds the full {@code /state} JSON document. */
     String buildStateJson();
 

@@ -60,9 +60,17 @@ public final class FrameTypography {
     private FrameTypography() {
     }
 
-    /** Pixels one {@code sp} must cost on this frame, for the operator's {@code percent}. */
+    /**
+     * Pixels one {@code sp} must cost on this frame, for the operator's {@code percent}.
+     *
+     * <p>One division, not two multiplications: {@code (240/160f) * (percent/100f)} rounds twice, and this
+     * number is printed to operators — on the debug board, in {@code /state}, and in the page's prose — so
+     * the two-step form renders 38 of the 376 legal values as {@code 1.6500001} or {@code 1.5749999}. The
+     * product stays inside int range (240 × 400), and at {@code percent == 100} both forms are exactly
+     * 1.5f, so the design point this was measured against does not move.
+     */
     public static float pxPerSp(int percent) {
-        return (REFERENCE_DENSITY_DPI / 160f) * (percent / 100f);
+        return (REFERENCE_DENSITY_DPI * percent) / 16000f;
     }
 
     /**
@@ -78,21 +86,27 @@ public final class FrameTypography {
     }
 
     /**
-     * The {@code Configuration.fontScale} that makes an {@code sp} cost {@link #pxPerSp(int)} on a device
-     * whose resources report {@code densityDpi} — i.e. the value that divides the ROM's density claim out
-     * of every text size this app resolves.
+     * The {@code Configuration.fontScale} that makes an {@code sp} cost {@link #pxPerSp(int)} on resources
+     * whose {@code density} is {@code density} — i.e. the value that divides the ROM's density claim out of
+     * every text size this app resolves.
      *
-     * @param densityDpi the device's reported density; anything below 1 means the platform did not answer,
-     *                   and the caller must then leave the configuration alone (see the return).
-     * @return the font scale to install, or {@code -1} when {@code densityDpi} is unusable. Returning a
-     *         number here would mean inventing a density, and an invented density is exactly the failure
-     *         this class exists to avoid.
+     * <p>The parameter is {@code DisplayMetrics.density} and not {@code densityDpi} on purpose: {@code sp}
+     * is resolved as {@code value × metrics.density × fontScale}, so the divisor that guarantees the product
+     * lands on {@link #pxPerSp(int)} has to be the same number the platform multiplies by. On this platform
+     * the two agree ({@code density == densityDpi/160}, set by {@code DisplayMetrics.updateDensity()}), and
+     * {@link FrameFontScale} re-reads {@code scaledDensity} afterwards rather than trusting either.
+     *
+     * @param density the device's reported density; zero, negative or {@code NaN} means the platform did not
+     *                answer, and the caller must then leave the configuration alone (see the return).
+     * @return the font scale to install, or {@code -1} when {@code density} is unusable. Returning a number
+     *         here would mean inventing a density, and an invented density is exactly the failure this class
+     *         exists to avoid.
      */
-    public static float fontScaleFor(int percent, int densityDpi) {
-        if (densityDpi < 1) {
+    public static float fontScaleFor(int percent, float density) {
+        if (!(density > 0f) || Float.isNaN(density)) {
             return -1f;
         }
-        return pxPerSp(percent) / (densityDpi / 160f);
+        return pxPerSp(percent) / density;
     }
 
     /** Whether {@code percent} is a value the operator may put on a frame. */
@@ -145,7 +159,14 @@ public final class FrameTypography {
         if (!Float.isFinite(value) || value <= 0f) {
             return INVALID;
         }
-        int percent = percentForm ? Math.round(value) : Math.round(value * 100f);
+        // The bounds are tested on the value the operator sent, before rounding it into an int. Testing only
+        // the rounded result would accept 0.249 and 4.004 as 25 and 400 — which is the silent clamping this
+        // method's whole contract says it does not do.
+        float asPercent = percentForm ? value : value * 100f;
+        if (asPercent < MIN_PERCENT || asPercent > MAX_PERCENT) {
+            return INVALID;
+        }
+        int percent = Math.round(asPercent);
         return isAllowed(percent) ? percent : INVALID;
     }
 

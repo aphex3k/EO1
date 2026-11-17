@@ -19,11 +19,18 @@ import org.junit.Test;
  */
 public class FrameTypographyTest {
 
+    /** The divisor is {@code DisplayMetrics.density}, so a dpi has to be converted like the platform does. */
+    private static float fontScaleAtDpi(int percent, int densityDpi) {
+        return FrameTypography.fontScaleFor(percent, densityDpi / 160f);
+    }
+
     /** An EO2 at its measured density, with the multiplier at 1.0, must be left exactly as it renders. */
     @Test
     public void theReferenceDensityIsLeftAloneAtMultiplierOne() {
-        assertEquals(1.0f, FrameTypography.fontScaleFor(FrameTypography.DEFAULT_PERCENT, 240), 1e-6f);
-        assertEquals(1.5f, FrameTypography.pxPerSp(FrameTypography.DEFAULT_PERCENT), 1e-6f);
+        assertEquals(1.0f, fontScaleAtDpi(FrameTypography.DEFAULT_PERCENT, 240), 1e-6f);
+        // Exactly, not approximately: this value is printed to operators and quoted in the commit that
+        // measured the reference frame, so a rounding tail here would be a tail in every report.
+        assertEquals(1.5f, FrameTypography.pxPerSp(FrameTypography.DEFAULT_PERCENT), 0f);
     }
 
     /**
@@ -33,37 +40,66 @@ public class FrameTypographyTest {
     @Test
     public void pxPerSpAgreesAcrossDensities() {
         for (int densityDpi : new int[]{120, 160, 213, 240, 320, 480}) {
-            float fontScale = FrameTypography.fontScaleFor(FrameTypography.DEFAULT_PERCENT, densityDpi);
-            float pxPerSpOnThisDevice = (densityDpi / 160f) * fontScale;
+            float pxPerSpOnThisDevice = (densityDpi / 160f) * fontScaleAtDpi(
+                    FrameTypography.DEFAULT_PERCENT, densityDpi);
             assertEquals("density " + densityDpi + " must land on the reference",
                     FrameTypography.pxPerSp(FrameTypography.DEFAULT_PERCENT), pxPerSpOnThisDevice, 1e-4f);
         }
     }
 
-    /** A frame at half the reference density gets double the font scale — the EO1 case, numerically. */
+    /** A frame at two thirds of the reference density gets 1.5x the font scale — the EO1 case, numerically. */
     @Test
     public void aLowerDensityFrameScalesUp() {
-        assertEquals(1.5f, FrameTypography.fontScaleFor(FrameTypography.DEFAULT_PERCENT, 160), 1e-6f);
-        // And the banner really is the same pixels on both boards.
-        assertEquals(FrameTypography.sizePx(34f, FrameTypography.DEFAULT_PERCENT),
-                Math.round(34f * (160 / 160f) * FrameTypography.fontScaleFor(100, 160)));
+        assertEquals(1.5f, fontScaleAtDpi(FrameTypography.DEFAULT_PERCENT, 160), 1e-6f);
+        // And the banner really is the same pixels on both boards: 34sp resolves to this on a 160dpi frame
+        // and to the same on a 240dpi one, which is the sentence the whole class exists to make true.
         assertEquals(51, FrameTypography.sizePx(34f, FrameTypography.DEFAULT_PERCENT));
+        assertEquals(51, Math.round(34f * 1.0f * fontScaleAtDpi(100, 160)));
+        assertEquals(51, Math.round(34f * 1.5f * fontScaleAtDpi(100, 240)));
     }
 
     /** The multiplier rides on top of the density correction rather than replacing it. */
     @Test
     public void multiplierComposesWithDensityCorrection() {
-        assertEquals(2.25f, FrameTypography.fontScaleFor(150, 160), 1e-6f);
-        assertEquals(1.5f * 1.5f, FrameTypography.pxPerSp(150), 1e-6f);
+        assertEquals(2.25f, fontScaleAtDpi(150, 160), 1e-6f);
+        assertEquals(2.25f, FrameTypography.pxPerSp(150), 0f);
     }
 
-    /** Sizes come out as whole pixels, so two boards cannot differ by a fraction of one. */
+    /**
+     * Sizes come out as whole pixels, so two boards cannot differ by a fraction of one. Asserted against
+     * literals rather than against another call to the same function — a test that compares a pure function
+     * to itself cannot fail, which is the trap this file's own history warns about.
+     */
     @Test
     public void sizesAreWholePixels() {
-        int px = FrameTypography.sizePx(20f, 33);
-        assertEquals(px, FrameTypography.sizePx(20f, 33));
-        assertTrue(px > 0);
+        // 20sp at x1.0 on the reference density: 30 px exactly.
         assertEquals(30, FrameTypography.sizePx(20f, 100));
+        // 20sp at x0.33 → 0.495 px/sp → 9.9 px, rounded rather than truncated or left fractional.
+        assertEquals(10, FrameTypography.sizePx(20f, 33));
+        // 24sp at x1.1 → 1.65 px/sp → 39.6 px.
+        assertEquals(40, FrameTypography.sizePx(24f, 110));
+        // A recovered design size that carries float noise from the division still lands on the same pixel.
+        assertEquals(FrameTypography.sizePx(34f, 100),
+                FrameTypography.sizePx((51f / 1.5f) + 0.000001f, 100));
+    }
+
+    /**
+     * The number printed to operators is the number the rule produced, not a float's rounding tail. The
+     * first version did two float operations, which rendered 38 of the 376 legal percents as
+     * {@code 1.6500001}-style artifacts on the debug board, in {@code /state} and in the page's prose —
+     * including for {@code 1.1}, the most natural thing to type after {@code 1.0}.
+     */
+    @Test
+    public void theReportedNumberIsNotAFloatArtifact() {
+        for (int percent = FrameTypography.MIN_PERCENT; percent <= FrameTypography.MAX_PERCENT; percent++) {
+            String printed = String.valueOf(FrameTypography.pxPerSp(percent));
+            assertTrue(percent + "% renders as " + printed,
+                    printed.matches("0\\.\\d{1,3}|[1-9]\\.\\d{1,3}|[1-9]"));
+        }
+        assertEquals("1.5", String.valueOf(FrameTypography.pxPerSp(100)));
+        assertEquals("1.65", String.valueOf(FrameTypography.pxPerSp(110)));
+        assertTrue(FrameTypography.describe(110), FrameTypography.describe(110).contains("1.65 px/sp"));
+        assertFalse(FrameTypography.describe(110), FrameTypography.describe(110).contains("1.6500001"));
     }
 
     /**
@@ -73,8 +109,9 @@ public class FrameTypographyTest {
      */
     @Test
     public void anUnreportedDensityIsRefusedNotGuessed() {
-        assertEquals(-1f, FrameTypography.fontScaleFor(100, 0), 0f);
-        assertEquals(-1f, FrameTypography.fontScaleFor(100, -1), 0f);
+        assertEquals(-1f, FrameTypography.fontScaleFor(100, 0f), 0f);
+        assertEquals(-1f, FrameTypography.fontScaleFor(100, -1f), 0f);
+        assertEquals(-1f, FrameTypography.fontScaleFor(100, Float.NaN), 0f);
     }
 
     @Test
@@ -133,6 +170,23 @@ public class FrameTypographyTest {
         assertEquals("out of range is refused, not clamped", FrameTypography.INVALID,
                 FrameTypography.parsePercent("5"));
         assertEquals(FrameTypography.INVALID, FrameTypography.parsePercent("0.2"));
+    }
+
+    /**
+     * The bounds are on the value sent, not on the int it rounds to. Testing only the rounded result let
+     * {@code 0.249} and {@code 4.004} in as exactly 25 and 400, which is the silent clamping the parser's
+     * own contract — and this file's documentation, and the page's prose — says never happens.
+     */
+    @Test
+    public void justPastABoundIsRefusedRatherThanRoundedIntoRange() {
+        assertEquals(FrameTypography.INVALID, FrameTypography.parsePercent("0.249"));
+        assertEquals(FrameTypography.INVALID, FrameTypography.parsePercent("4.004"));
+        assertEquals(FrameTypography.INVALID, FrameTypography.parsePercent("24%"));
+        assertEquals(FrameTypography.INVALID, FrameTypography.parsePercent("401%"));
+        // The bounds themselves are inclusive, and a value that lands on one is accepted exactly.
+        assertEquals(FrameTypography.MIN_PERCENT, FrameTypography.parsePercent("0.25"));
+        assertEquals(FrameTypography.MAX_PERCENT, FrameTypography.parsePercent("4"));
+        assertEquals(FrameTypography.MAX_PERCENT, FrameTypography.parsePercent("400%"));
     }
 
     /** The line an operator reads on the board and in {@code /state}: asked-for and cost, together. */
