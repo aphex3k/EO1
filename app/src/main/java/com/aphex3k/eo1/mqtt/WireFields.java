@@ -26,13 +26,25 @@ final class WireFields {
      * Iterating the entry set rather than calling {@code get(name)} is the whole point.
      */
     static String text(JsonObject object, String name) {
+        JsonElement value = member(object, name);
+        if (value == null || value.isJsonNull() || !value.isJsonPrimitive()) {
+            return null;
+        }
+        return value.getAsString();
+    }
+
+    /**
+     * The same lookup for a nested document rather than a scalar, so a diagnostic that walks a tree by
+     * hand and a deserializer that folds case cannot disagree about which spelling the bridge used.
+     * {@code MqttManager.reportBlankBanner} needs {@code currentTrack} as an element, and an exact
+     * {@code get("currentTrack")} there reported "no track in the document" for a coordinator that wrote
+     * {@code CurrentTrack} — while {@link Payload} was routing that same document normally. Two
+     * mechanisms answering one question, which is how a key casing drift ends up half-reported.
+     */
+    static JsonElement member(JsonObject object, String name) {
         for (Map.Entry<String, JsonElement> entry : object.entrySet()) {
             if (entry.getKey().equalsIgnoreCase(name)) {
-                JsonElement value = entry.getValue();
-                if (value == null || value.isJsonNull() || !value.isJsonPrimitive()) {
-                    return null;
-                }
-                return value.getAsString();
+                return entry.getValue();
             }
         }
         return null;

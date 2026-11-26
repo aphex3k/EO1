@@ -458,7 +458,10 @@ public class MqttManager implements MqttCallbackExtended {
                 return;
             }
             JsonObject stateObject = root.getAsJsonObject();
-            JsonElement track = stateObject.get("currentTrack");
+            // Folded, like every other key in this package: Payload routes a CurrentTrack document
+            // perfectly well, and an exact get() here would answer "the document named no track" for a
+            // state that did — the diagnostic disagreeing with the mapping it exists to explain.
+            JsonElement track = WireFields.member(stateObject, "currentTrack");
             if (track == null || !track.isJsonObject() || track.getAsJsonObject().entrySet().isEmpty()) {
                 // A track object the coordinator sent empty names no track at all: there was
                 // nothing here for any mapping to read, so this is a state change, not a

@@ -184,7 +184,9 @@ wrap from the top back down to 0.3 is intentional — it is how a frame comes ba
 
 The options dialog's second tab is real, and is named in no other document. Pointing it at a broker
 makes the frame subscribe to `sonos/+` and paint a now-playing banner — track title, artist, group
-name — over the current picture for the track's duration, then fade it. It is a display overlay, not
+name, one row each — over the current picture for the track's duration, then fade it. A state that
+yields nothing readable draws nothing rather than an empty box, and a state that says nothing about the
+track leaves the card already up alone. It is a display overlay, not
 a control plane: no MQTT message rotates, installs, reconfigures or wakes anything, and nothing
 outside the banner reads the payload. It is inherited from a Sonos experiment the upstream project
 began, and it stays completely inert until you name a broker.
