@@ -73,32 +73,41 @@
         app:trackThickness="12dp"
         tools:ignore="Deprecated" />
 
-    <!-- Sonos Banner View -->
-    <RelativeLayout
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:layout_alignParentBottom="true"
-        android:layout_centerHorizontal="true"
-        android:padding="16dp"
-        android:elevation="8dp"
-        >
+    <!-- Sonos Banner View: one box, three stacked rows, hidden by visibility alone.
 
+         Every row is maxLines="1" so the card's height cannot change between tracks, and wrap_content
+         under a wrap_content box so the panel edge is what bounds it — a title too long for the panel
+         ellipsizes instead of deciding the box's width.
+
+         Two shapes here used to make that impossible, and both are gone on purpose. The anonymous outer
+         RelativeLayout contributed 32dp of width and nothing else (its elevation was a no-op below API
+         21); its margin is the same 16dp of offset. And the three labels used to divide one horizontal
+         row, where measureHorizontal caps the row at the available width and measures everything after
+         the cap against what is left — so a long title stretched the box to nearly the panel width and
+         collapsed the group label to zero width at the same time. The Java had been writing that label
+         all along; there was simply no room for it.
+
+         android:visibility rather than android:alpha="0.0" is the hide mechanism. With alpha the box was
+         laid out, empty and transparent, at bottom-centre from the first inflate, and the fade's
+         fillAfter transform stayed attached over whatever setAlpha the next show asked for. alpha is
+         now only ever non-1 while a fade is actually running. -->
     <RelativeLayout
         android:id="@+id/sonosBannerView"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_alignParentBottom="true"
+        android:layout_centerHorizontal="true"
+        android:layout_margin="16dp"
         android:background="@drawable/sonos_banner_bg"
         android:padding="16dp"
-        android:alpha="0.0"
-        tools:alpha="1.0"
+        android:visibility="gone"
+        tools:visibility="visible"
         >
 
         <LinearLayout
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:id="@+id/linearlayout1"
+            android:orientation="vertical"
         >
             <TextView
                 android:id="@+id/songTitleLabel"
@@ -110,31 +119,26 @@
                 android:textSize="34sp"
                 android:textStyle="bold"
                 tools:text="A Nice Tree" />
-            <View
-                android:layout_width="50dp"
-                android:layout_height="1dp"/>
+            <TextView
+                android:id="@+id/songArtistLabel"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@android:color/white"
+                android:textSize="24sp"
+                tools:text="Rob Boss" />
             <TextView
                 android:id="@+id/deviceLabel"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:ellipsize="end"
-                android:maxLines="2"
+                android:maxLines="1"
                 android:textColor="@android:color/white"
                 android:textSize="20sp"
-                tools:text="Kitchen +1"
+                tools:text="Kitchen + 3"
             />
         </LinearLayout>
-        <TextView
-            android:id="@+id/songArtistLabel"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_below="@id/linearlayout1"
-            android:ellipsize="end"
-            android:maxLines="1"
-            android:textColor="@android:color/white"
-            android:textSize="24sp"
-            tools:text="Rob Boss" />
-        </RelativeLayout>
     </RelativeLayout>
 
 </RelativeLayout>

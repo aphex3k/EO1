@@ -209,6 +209,56 @@ public class MqttPoisonMessageTest {
         assertTrue("a document this app can read must not be reported: " + reports, reports.isEmpty());
     }
 
+    /**
+     * The dispatch table, driven rather than asserted about. {@code MqttManager} routes on
+     * {@code transportState} membership in two arrays, and until now these fixtures exercised two of the
+     * six strings in them — which is how {@code GROUP_PLAYING} sat as the literal {@code "PLAYING"} for
+     * the life of the feature, making {@code PLAY_STATES} a two-element array holding one value and
+     * leaving a group coordinator unable to draw a banner at all.
+     */
+    @Test
+    public void everyPublishedStateReachesTheCallbackTheBannerNeeds() throws Exception {
+        String[] started = {MqttManager.PLAYING, MqttManager.GROUP_PLAYING};
+        String[] stopped = {MqttManager.STOPPED, MqttManager.PAUSED_PLAYBACK,
+                MqttManager.GROUP_STOPPED, MqttManager.GROUP_PAUSED};
+
+        for (String state : started) {
+            List<String> reports = new ArrayList<String>();
+            Recorder r = new Recorder();
+            deliver(manager(r, reports), "{\"transportState\":\"" + state + "\","
+                    + "\"currentTrack\":{\"Title\":\"A Title\"}}");
+            assertEquals(state + " is a claim about a playing track", 1, r.started.size());
+            assertEquals(state + " is not also a stop", 0, r.stopped.size());
+        }
+        for (String state : stopped) {
+            List<String> reports = new ArrayList<String>();
+            Recorder r = new Recorder();
+            deliver(manager(r, reports), "{\"transportState\":\"" + state + "\","
+                    + "\"currentTrack\":{\"Title\":\"A Title\"}}");
+            assertEquals(state + " ends the card", 1, r.stopped.size());
+            assertEquals(state + " must not draw", 0, r.started.size());
+        }
+    }
+
+    /**
+     * A state key this app cannot read is worse than a bad value, because nothing downstream notices:
+     * the document parses, no set contains {@code null}, and the feature goes quiet with no error line
+     * anywhere. {@code Payload}'s routing keys now carry an {@code alternate} spelling for exactly that
+     * reason, so this asserts a callback rather than asserting silence.
+     */
+    @Test
+    public void aCapitalisedStateKeyStillRoutes() throws Exception {
+        List<String> reports = new ArrayList<String>();
+        Recorder r = new Recorder();
+        deliver(manager(r, reports), "{\"TransportState\":\"PLAYING\","
+                + "\"GroupName\":\"Kitchen Speaker + 3\",\"CurrentTrack\":{\"Title\":\"A Title\"}}");
+        assertEquals("a differently-spelled key is not a different feature", 1, r.started.size());
+        assertNotNull(r.last);
+        assertEquals("Kitchen Speaker + 3", r.last.groupName);
+        assertNotNull("and the track beside it", r.last.currentTrack);
+        assertEquals("A Title", r.last.currentTrack.title);
+    }
+
     /** Case folding is tolerance, not one spelling replacing another. */
     @Test
     public void theUppercaseSpellingStillMapsToo() throws Exception {

@@ -33,7 +33,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
-import android.view.animation.AlphaAnimation;
 import android.webkit.DownloadListener;
 import android.webkit.JsPromptResult;
 import android.webkit.JsResult;
@@ -58,6 +57,7 @@ import com.aphex3k.media.MediaAsset;
 import com.aphex3k.media.MediaType;
 import com.aphex3k.media.web.WebsiteBackend;
 import com.aphex3k.eo1.mqtt.MqttManager;
+import com.aphex3k.eo1.mqtt.NowPlaying;
 import com.aphex3k.eo1.mqtt.Payload;
 import com.aphex3k.eo1.mqtt.PlaybackListener;
 import com.aphex3k.update.ApkUploadResult;
@@ -447,8 +447,21 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         }
     };
     private Handler bannerHandler = new Handler(Looper.getMainLooper());
-    private Runnable bannerFadeRunnable;
-    private String currentTrackId = null;
+    /** The one expiry timer the banner owns. Removed by identity, never by {@code removeCallbacksAndMessages}. */
+    @Nullable private Runnable bannerFadeRunnable;
+    /**
+     * The {@link NowPlaying#identity()} of the card on the wall, or {@code null} when none is.
+     *
+     * <p>This is what decides whether a state message <em>re-arms</em> the banner's timer, which is a
+     * different question from the one the {@code currentTrackId} it replaces answered — whether to fade
+     * — and answering it with display text is what let a coordinator that republishes the same state
+     * keep a card up forever. Cleared by {@link #hideNowPlaying(boolean)} along with
+     * {@link #bannerContent}: a retained identity would make the next identical announcement look
+     * already drawn, and nothing would arm a timer or write the rows.
+     */
+    @Nullable private String bannerIdentity;
+    /** The three rows' text, so a re-publish that changed nothing re-lays out nothing. */
+    @Nullable private String bannerContent;
     private Runnable videoWatchdogRunnable;
     private String videoWatchdogAssetId = "";
     /**
@@ -919,85 +932,23 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
 
                     @Override
                     public void onPlaybackStarted(Payload payload) {
-                        runOnUiThread(() -> {
-                            // A transportState of PLAYING with no track is a payload this coordinator can
-                            // legitimately send, and onPlaybackStopped below already says so. Without the same
-                            // test here the read throws on the UI thread, which reaches CrashReporter and
-                            // System.exit(2) — so a broker message could reboot a frame, which AGENTS.md says
-                            // this feature may never do.
-                            if (payload == null || payload.currentTrack == null) {
-                                return;
-                            }
-                            var duration = payload.currentTrack.duration;
-                            var title = payload.currentTrack.title;
-                            var artist = payload.currentTrack.artist;
-                            var groupName = payload.groupName;
-                            var trackId = groupName + "_" + title + "_" + artist + "_" + duration; // crude unique id
-
-                            var titleView = (TextView) findViewById(R.id.songTitleLabel);
-                            var artistView = (TextView) findViewById(R.id.songArtistLabel);
-                            var deviceLabel = (TextView) findViewById(R.id.deviceLabel);
-                            var bannerView = (RelativeLayout) findViewById(R.id.sonosBannerView);
-
-                            titleView.setText(title);
-                            artistView.setText(artist);
-                            deviceLabel.setText(groupName);
-                            bannerView.setVisibility(View.VISIBLE);
-                            bannerView.setAlpha(1f);
-
-                            // Cancel previous timer if track changed
-                            if (bannerFadeRunnable != null) {
-                                bannerHandler.removeCallbacks(bannerFadeRunnable);
-                            }
-                            currentTrackId = trackId;
-
-                            // Parse duration string (e.g., "03:45")
-                            long durationMs = 120 * 1000L;
-                            if (duration != null && duration.matches("\\d{1,2}:\\d{2}:\\d{2}")) {
-                                String[] parts = duration.split(":");
-                                int hours = Integer.parseInt(parts[0]);
-                                int min = Integer.parseInt(parts[1]);
-                                int sec = Integer.parseInt(parts[2]);
-                                durationMs = (hours * 360L + min * 60L + sec) * 1000L;
-                            }
-                            if (durationMs > 0) {
-                                bannerFadeRunnable = () -> {
-                                    // Only fade if the same track is still displayed
-                                    if (currentTrackId != null && currentTrackId.equals(trackId)) {
-                                        AlphaAnimation fadeOut = new AlphaAnimation(1f, 0f);
-                                        fadeOut.setDuration(1000);
-                                        fadeOut.setFillAfter(true);
-                                        bannerView.startAnimation(fadeOut);
-                                        bannerView.setVisibility(View.GONE);
-                                    }
-                                };
-                                bannerHandler.postDelayed(bannerFadeRunnable, durationMs);
-                            }
-                        });
+                        // Nothing is dereferenced on the Paho thread, which is the contract every callback
+                        // in this listener has to keep: a throw that escapes messageArrived closes Paho's
+                        // socket without a DISCONNECT, and AGENTS.md says a decorative feature may never
+                        // be able to reboot a frame. The payload crosses into the UI thread as the object
+                        // it arrived as, and NowPlaying.decide answers for null and for a missing track.
+                        runOnUiThread(() -> applyNowPlaying(payload));
                     }
 
                     @Override
                     public void onPlaybackStopped(Payload payload) {
-                        runOnUiThread(() -> {
-                            if (payload == null || payload.currentTrack == null) {
-                                return;
-                            }
-                            var duration = payload.currentTrack.duration;
-                            var title = payload.currentTrack.title;
-                            var artist = payload.currentTrack.artist;
-                            var groupName = payload.groupName;
-                            var trackId = groupName + "_" + title + "_" + artist + "_" + duration; // crude unique id
-
-                            // Cancel previous timer if track changed
-                            // trackId.equals(), not the other way round: currentTrackId is null until the first
-                            // PLAYING banner, and a coordinator that sends a STOP before anything has ever
-                            // played threw here on the UI thread — the same System.exit(2) path the guard above
-                            // closes. trackId is a concatenation, so it is never null.
-                            if (bannerFadeRunnable != null && trackId.equals(currentTrackId)) {
-                                bannerHandler.removeCallbacks(bannerFadeRunnable);
-                                bannerHandler.post(bannerFadeRunnable);
-                            }
-                        });
+                        // Always a hide, whatever the document contains. A stop is not a claim about a
+                        // track, it is the end of one — and the code this replaces tested both
+                        // {@code payload.currentTrack != null} and an equality between a stop's display
+                        // strings and a play's, so the common case (a stop naming no track, or naming one
+                        // whose length has since moved) hid nothing and left the last song's name on the
+                        // wall until a human power-cycled the frame.
+                        runOnUiThread(() -> hideNowPlaying(true));
                     }
 
                     // `this` for the TLS context: an ssl:// broker builds its own, and must make the
@@ -1023,6 +974,156 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             Log.i("MQTT", message);
         }
         debugInformationProvided(new DebugInformation("mqtt", message));
+    }
+
+    /** How long the card takes to fade out. Cosmetic — the hide itself is a visibility change. */
+    private static final long BANNER_FADE_MS = 1000L;
+
+    /**
+     * Applies one coordinator state to the now-playing banner.
+     *
+     * <p>Every decision behind it lives in {@link NowPlaying}, which is android-free and JVM-tested for
+     * the usual reason in this file: the caller used to be an anonymous listener inside an
+     * {@code Activity} behind a live broker, and while it stayed there nothing in the suite could ask
+     * what the app draws for a track it cannot read. This method is allowed to know only which of the
+     * three actions it was handed. Runs on the UI thread, from the listener or from a lifecycle path.
+     */
+    private void applyNowPlaying(@Nullable Payload payload) {
+        NowPlaying.Decision decision = NowPlaying.decide(payload, bannerIdentity);
+        switch (decision.action()) {
+            case SHOW: {
+                NowPlaying card = decision.card();
+                // The rows and the timer answer two different questions, and conflating them is how this
+                // banner both stuck and skipped. Text that has not arrived yet for the track already shown
+                // still belongs on the wall, so a content change writes without re-arming; an announcement
+                // that is not the one already up re-arms, because the dwell is measured from when the frame
+                // learned about the track, not from when its metadata filled in.
+                String content = card.title() + "\n" + card.artist() + "\n" + card.room();
+                boolean sameAnnouncement = card.identity() != null
+                        && card.identity().equals(bannerIdentity);
+                if (!content.equals(bannerContent)) {
+                    setBannerRow(R.id.songTitleLabel, card.title());
+                    setBannerRow(R.id.songArtistLabel, card.artist());
+                    setBannerRow(R.id.deviceLabel, card.room());
+                    bannerContent = content;
+                }
+                if (!sameAnnouncement) {
+                    bannerIdentity = card.identity();
+                    armBannerFade(card.dwellMs());
+                    String missing = card.missingRows();
+                    if (!missing.isEmpty()) {
+                        // The complement of MqttManager.reportBlankBanner, which cannot see this case: a
+                        // card with something in it and something missing is not a mapping failure that
+                        // class can name, and from a wall it is only half a sentence. On an identity
+                        // change only, so a coordinator that publishes every second cannot fill
+                        // files/eo1-app.log with one repeated line.
+                        reportMqttEvent("now-playing banner drawn with no " + missing, false);
+                    }
+                }
+                showBanner();
+                break;
+            }
+            case CLEAR:
+                hideNowPlaying(true);
+                break;
+            case KEEP:
+            default:
+                // Says nothing about a track, so changes nothing that is already right.
+                break;
+        }
+    }
+
+    /** Puts the card up. Idempotent, and cheap when it is already up: a coordinator publishes state
+     * continuously, so this runs many times a second on some bridges and must not allocate an animator
+     * per publish. */
+    private void showBanner() {
+        View banner = findViewById(R.id.sonosBannerView);
+        if (banner == null) {
+            return;
+        }
+        if (banner.getVisibility() == View.VISIBLE && banner.getAlpha() == 1f) {
+            // Already exactly as shown. The two conditions together are the statement "this card is on
+            // the wall and nothing is holding it transparent", which is the pair the alpha-0 transform
+            // used to defeat — so a lingering transform can never be mistaken for "already up".
+            return;
+        }
+        // Cancel first, and clearAnimation with it. The fade this feature used was an AlphaAnimation with
+        // setFillAfter(true), and nothing in this repository has ever called clearAnimation — so the
+        // alpha-0 transform from the last track's fade stayed attached to the view and sat on top of the
+        // next setAlpha(1f). That is a banner with the right text which is not on screen, which is most of
+        // why this one was reported as not updating.
+        banner.animate().cancel();
+        banner.clearAnimation();
+        banner.setAlpha(1f);
+        banner.setVisibility(View.VISIBLE);
+    }
+
+    /**
+     * Takes the card down and forgets that it was ever up.
+     *
+     * <p>Both remembered facts are cleared, not just the timer. A retained identity would make the next
+     * identical announcement look already drawn, so nothing would arm a timer or write the rows, and a
+     * card that never hides again is the defect this pass set out to fix.
+     */
+    private void hideNowPlaying(boolean fade) {
+        if (bannerFadeRunnable != null) {
+            // By identity, never removeCallbacksAndMessages(null): bannerHandler wraps the main looper, so
+            // the bulk form would cancel every pending callback in the app on the strength of a banner.
+            bannerHandler.removeCallbacks(bannerFadeRunnable);
+            bannerFadeRunnable = null;
+        }
+        bannerIdentity = null;
+        bannerContent = null;
+        View banner = findViewById(R.id.sonosBannerView);
+        if (banner == null) {
+            return;
+        }
+        banner.animate().cancel();
+        banner.clearAnimation();
+        if (!fade || banner.getVisibility() != View.VISIBLE) {
+            banner.setAlpha(1f);
+            banner.setVisibility(View.GONE);
+            return;
+        }
+        // An end action rather than an Animation, because it commits its final value instead of holding the
+        // view at alpha 0 by reference — and because the fade as written could never be seen:
+        // startAnimation() followed by setVisibility(GONE) in the same frame draws no intermediate frame,
+        // so "then fade it" has been an instant hide since this feature existed.
+        banner.animate().alpha(0f).setDuration(BANNER_FADE_MS).withEndAction(() -> {
+            banner.setVisibility(View.GONE);
+            banner.setAlpha(1f);
+        }).start();
+    }
+
+    /**
+     * Schedules the one expiry of the card on the wall.
+     *
+     * <p>{@code dwellMs} is positive by construction — see {@code NowPlaying.dwellMs}, which exists in
+     * part because the value this replaces could be 0 and then skipped scheduling entirely, leaving a
+     * banner no timer could ever dismiss.
+     */
+    private void armBannerFade(long dwellMs) {
+        if (bannerFadeRunnable != null) {
+            bannerHandler.removeCallbacks(bannerFadeRunnable);
+        }
+        bannerFadeRunnable = () -> hideNowPlaying(true);
+        bannerHandler.postDelayed(bannerFadeRunnable, dwellMs);
+    }
+
+    /**
+     * One row of the card: its text, and whether it exists at all.
+     *
+     * <p>An empty row is {@code GONE} rather than blank. The card is a vertical stack, so a {@code ""}
+     * left VISIBLE would hold its line height and draw the gap of a missing artist — the same silhouette
+     * as the empty dark box {@link NowPlaying} exists not to draw, arrived at from the other side.
+     */
+    private void setBannerRow(int viewId, String text) {
+        TextView view = (TextView) findViewById(viewId);
+        if (view == null) {
+            return;
+        }
+        view.setText(text);
+        view.setVisibility(text.isEmpty() ? View.GONE : View.VISIBLE);
     }
 
     /**
@@ -1260,6 +1361,15 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
             // not the same sentence in /state.
             mqttHeldForPanel = true;
             retireMqttManager();
+            // And the card goes with the link that fed it. MQTT is closed deliberately in the dark, so
+            // anything still on the wall was learned before the panel went off, and a frame waking to
+            // yesterday's track is a truer description of this feature's old behaviour than of the music.
+            // No fade: the panel is not drawing, and a second of animation nobody can see would only put a
+            // pending end action in front of the wake. Posted rather than inline because this path is
+            // reached from the schedule as well as from a receiver, and the other statements in it are not
+            // view work — a banner hide is the first one, and it should not inherit a question about which
+            // thread the scheduler fired on.
+            runOnUiThread(() -> hideNowPlaying(false));
         }
     }
 
@@ -1515,6 +1625,12 @@ public class MainActivity extends AppCompatActivity implements BrightnessManager
         // dimly and claimed nowhere is precisely the state that reads as a frame dimming itself, so
         // the outgoing instance lets go of its lock here — the new one asserts its own in onCreate.
         releaseDisplayHold();
+        // This instance's window is going away, and the fade timer was armed against this instance's
+        // banner view. Left running, it would hide a view in a dead tree while the Activity replacing it
+        // shows a card of its own with nothing behind it — this app recreates its Activity on relaunch, on
+        // a watchdog self-restart and on a panel change, so "left running" is the normal case, not a
+        // corner. hideNowPlaying() removes the callback and forgets the identity with it.
+        hideNowPlaying(false);
         if (webView != null) {
             WebView view = webView;
             webView = null;
